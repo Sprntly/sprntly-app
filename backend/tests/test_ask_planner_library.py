@@ -520,3 +520,28 @@ def test_the_two_confidences_are_logged_separately():
 
     assert row["action_confidence"] == 0.9
     assert row["confidence"] == 0.1
+
+
+# ── the two report pipelines are told apart by WHOSE feedback ────────────────
+
+def test_a_pipeline_turn_logs_web_as_pipeline_not_false():
+    """`apply_gates` zeroes `web_search` for pipeline exclusivity, so a bare
+    `false` in the log sat next to a public-feedback answer that opens "I
+    searched the public web" — reading as the executor ignoring the plan. It is
+    the plan saying "no SECOND search"; the log now says which."""
+    plan = ap.apply_gates(
+        _plan_out(pipeline_id="public-feedback-report", confidence=0.9,
+                  web_search=True),
+        enterprise_id=COMPANY, connected=[], templates=[],
+    )
+
+    assert plan.web_search is False          # the gate still holds
+    assert plan.as_log_dict()["web"] == "pipeline"
+
+
+def test_a_turn_with_no_pipeline_still_logs_a_real_boolean():
+    plan = ap.apply_gates(
+        _plan_out(web_search=True), enterprise_id=COMPANY, connected=[], templates=[],
+    )
+
+    assert plan.as_log_dict()["web"] is True

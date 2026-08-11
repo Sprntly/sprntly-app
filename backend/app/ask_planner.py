@@ -517,12 +517,32 @@ is the normal, correct outcome for most questions.
 - competitive-intelligence-review: a competitive review or scan of named or known
   rivals, researched live on the public web. Requires BOTH a competitor subject
   and a report intent — this kicks off a multi-minute sweep.
-- public-feedback-report: what people are saying about us in PUBLIC — app stores,
-  Reddit, review sites, social media.
+- public-feedback-report: what STRANGERS are saying about us in PUBLIC — app
+  stores, Reddit, review sites, social media. People who are not necessarily
+  customers, on the open internet.
 - company-research: deep research on OUR OWN company, product, pricing or
   positioning, on the public web.
-- voice-of-customer-report: themes and complaints drawn from our own customer
-  calls and conversations.
+- voice-of-customer-report: themes and complaints from OUR OWN CUSTOMERS, drawn
+  from the calls, meetings and conversations this workspace has synced.
+
+VOICE-OF-CUSTOMER vs PUBLIC-FEEDBACK is the single most confusable pair here,
+and one test settles it: WHOSE words are being asked for.
+
+  * "our customers", "customer feedback", "what are customers saying", "what do
+    users complain about", "feedback from our accounts" — these are OUR
+    customers, and they live in OUR calls. voice-of-customer-report.
+  * "what are people saying about us online", "our reviews", "app store",
+    "Reddit", "social" — strangers, on the open web. public-feedback-report.
+
+An unqualified request for "a report on customer feedback" is the FIRST kind.
+Reported: "give me a report on customers feedback" correctly chose
+voice-of-customer-report, and the same question with "now" appended flipped to
+public-feedback-report — which then searched app stores for a B2B product nobody
+reviews there and honestly reported finding nothing. Filler words ("now",
+"please", "quickly") carry no information about whose feedback is wanted; ignore
+them.
+
+Only send it to the public web when the message ASKS for the public web.
 
 When a pipeline is chosen it owns the answer. Do not also request sources or a
 web search — the pipeline does its own gathering.
@@ -873,7 +893,14 @@ class Plan:
             # from a build that named none.
             "template": self.artifact_template_name or self.artifact_template_id,
             "template_query": self.template_query,
-            "web": self.web_search,
+            # "pipeline" rather than false when a pipeline owns the turn, because
+            # `apply_gates` zeroes `web_search` for pipeline exclusivity — the
+            # pipeline runs its OWN sweep. Logging a bare `false` there was
+            # honest and misread exactly as you would expect: a
+            # public-feedback-report answer opening "I searched the public web"
+            # next to a plan line saying `web: false` looks like the executor
+            # ignoring the plan, when it is the plan saying "no SECOND search".
+            "web": "pipeline" if self.pipeline_id else self.web_search,
             "constraints": self.constraints,
             "in_scope": self.in_scope,
             "confidence": round(
