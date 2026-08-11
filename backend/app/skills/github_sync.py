@@ -217,3 +217,91 @@ async def sync_all_sources() -> list[SyncResult]:
             len(results), changed, sum(r.imported for r in results),
         )
     return results
+
+
+# ── push-triggered sync ──────────────────────────────────────────────────────
+#
+# The sweep bounds staleness at half an hour; a push webhook removes most of it.
+# When GitHub tells us a branch moved, any synced folder ON that branch can be
+# re-read immediately — same sync_source, same tenant rule (every write keyed on
+# the source row, the installation id used only to SELECT candidate rows, and it
+# comes from a signature-verified webhook payload rather than anything a user
+# typed). A folder on a different branch is left to the sweep: its head did not
+# move, so an immediate re-read would spend a rate-limited API call to learn
+# nothing.
+
+
+def sources_for_push(
+    *,
+    installation_id: int,
+    repo_full_name: str,
+    pushed_branch: str,
+    default_branch: str,
+) -> list[dict]:
+    """The active sources a push event makes stale — the ones to sync NOW.
+
+    A source matches when it lives in the pushed repo AND tracks the pushed
+    branch. `ref` empty means "the repo's default branch" (stored untouched at
+    import time precisely so a default-branch rename keeps syncing — see the
+    migration), so an empty-ref source matches when the push landed on whatever
+    GitHub currently calls the default branch. Repo names compare
+    case-insensitively (GitHub treats full names that way); branch names
+    compare exactly (git refs are case-sensitive).
+    """
+    if not (installation_id and repo_full_name and pushed_branch):
+        return []
+    try:
+        candidates = db.list_active_skill_sources_for_installation(int(installation_id))
+    except Exception:  # noqa: BLE001 — a DB blip costs this push; the sweep still runs
+        logger.warning("skills.sync could not list sources for push", exc_info=True)
+        return []
+
+    repo_key = repo_full_name.strip().casefold()
+    matched: list[dict] = []
+    for source in candidates or []:
+        if str(source.get("repo") or "").strip().casefold() != repo_key:
+            continue
+        ref = str(source.get("ref") or "").strip()
+        effective_branch = ref or str(default_branch or "").strip()
+        if effective_branch and effective_branch == pushed_branch:
+            matched.append(source)
+    return matched
+
+
+async def sync_sources_for_push(
+    *,
+    installation_id: int,
+    repo_full_name: str,
+    pushed_branch: str,
+    default_branch: str,
+) -> list[SyncResult]:
+    """Sync every folder a push made stale. Sequential, like the sweep, and for
+    the same reason — the work draws on one installation's rate budget.
+
+    Never raises: this runs as a fire-and-forget task behind the webhook
+    response, where an exception would be an unhandled-task log and nothing
+    else. The sweep remains the backstop for anything this misses (a delivery
+    GitHub dropped, a push that raced a deploy) — this path only shortens the
+    wait, it does not replace the timer.
+    """
+    results: list[SyncResult] = []
+    for source in sources_for_push(
+        installation_id=installation_id,
+        repo_full_name=repo_full_name,
+        pushed_branch=pushed_branch,
+        default_branch=default_branch,
+    ):
+        try:
+            results.append(await sync_source(source))
+        except Exception:  # noqa: BLE001 — belt and braces; sync_source swallows its own
+            logger.exception(
+                "skills.sync push-triggered failure for source %s", source.get("id")
+            )
+    if results:
+        logger.info(
+            "skills_sync_push sources=%s imported=%s replaced=%s",
+            len(results),
+            sum(r.imported for r in results),
+            sum(r.replaced for r in results),
+        )
+    return results

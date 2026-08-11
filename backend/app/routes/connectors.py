@@ -166,6 +166,48 @@ def _prewarm_codebase_map_on_push(installation_id: int, repo: str, ref: str | No
         )
 
 
+# Strong refs to in-flight push-triggered skill syncs. asyncio holds only a weak
+# reference to a bare create_task result, so without this a sync could be
+# garbage-collected mid-run and a pushed skill would silently wait for the
+# half-hourly sweep instead (same pattern as `_context_tasks` below).
+_skill_sync_tasks: set[asyncio.Task] = set()
+
+
+def _sync_skill_folders_on_push(
+    installation_id: int, repo_full_name: str, pushed_branch: str, default_branch: str
+) -> None:
+    """Best-effort: fire the SAME folder sync the half-hourly sweep runs, now,
+    for any synced skill folder living on the branch this push just moved — so
+    a skill file added to the repo is in the library seconds later instead of
+    at the next tick. Matching, tenancy and per-source failure isolation all
+    live in skills.github_sync; GitHub delivers webhooks after the ref has
+    moved, so the sync's own head-SHA resolve sees the new commit.
+
+    Scheduled as a background task behind the webhook response — GitHub times
+    deliveries out at 10s, and a tree walk plus a file read per skill does not
+    belong inside that budget. NEVER blocks or raises into the webhook flow;
+    with no running loop (direct unit calls) it skips, exactly like a delivery
+    that never arrived — the sweep is the backstop either way."""
+    try:
+        from app.skills.github_sync import sync_sources_for_push
+
+        task = asyncio.get_running_loop().create_task(
+            sync_sources_for_push(
+                installation_id=int(installation_id),
+                repo_full_name=repo_full_name,
+                pushed_branch=pushed_branch,
+                default_branch=default_branch,
+            )
+        )
+        _skill_sync_tasks.add(task)
+        task.add_done_callback(_skill_sync_tasks.discard)
+    except Exception:  # noqa: BLE001 — the push sync must never break the webhook.
+        logger.warning(
+            "skill-folder push sync skipped for installation %s repo %s",
+            installation_id, repo_full_name, exc_info=True,
+        )
+
+
 def _public_connection(row: dict) -> dict:
     config = {}
     if row.get("config_json"):
@@ -4619,7 +4661,14 @@ def _handle_push_event(payload: dict) -> None:
     — so we additionally fire a best-effort, bounded, coalesced background pre-warm
     of the new sha so the NEXT /locate is hot instead of paying the cold
     rebuild inline. No explicit cache deletion is needed: commit_sha keying already
-    makes the old map unreachable, so the warm is purely a latency optimization."""
+    makes the old map unreachable, so the warm is purely a latency optimization.
+
+    And a push may have added or edited files in a SYNCED SKILL FOLDER
+    (skill_sources) — the half-hourly sweep would pick that up eventually, but
+    the webhook knows NOW, so the same sync the sweep runs is fired immediately
+    for any source tracking the pushed branch. The sweep stays as the backstop
+    for dropped deliveries; this only shortens the wait from "within 30 minutes"
+    to "within seconds of the push"."""
     repo = payload.get("repository") or {}
     repo_full_name = str(repo.get("full_name") or "").strip()
     if not repo_full_name:
@@ -4640,6 +4689,15 @@ def _handle_push_event(payload: dict) -> None:
     is_default_push = bool(default_branch) and pushed_ref == f"refs/heads/{default_branch}"
     if install_id and is_default_push:
         _prewarm_codebase_map_on_push(int(install_id), repo_full_name, None)
+
+    # Skill folders on the pushed branch. NOT gated on is_default_push — a
+    # source may track any branch — but gated on a branch push at all: a tag
+    # push moves no branch head, so no folder became stale.
+    pushed_branch = pushed_ref.removeprefix("refs/heads/") if pushed_ref.startswith("refs/heads/") else ""
+    if install_id and pushed_branch:
+        _sync_skill_folders_on_push(
+            int(install_id), repo_full_name, pushed_branch, default_branch
+        )
 
 
 def _handle_pull_request_event(payload: dict) -> None:
