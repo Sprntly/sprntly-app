@@ -19,10 +19,12 @@ Covers:
   - observability: create/post logs carry only ids, never turn content
     (AC10)
 
-`fake_group_llm` patches `app.routes.projects.call_md` directly (NOT the
-`fake_llm` fixture in conftest, which only patches `call_json` — the group
-agent reply path uses `call_md`, matching `app.agents.marketing`'s plain
-single-shot reply pattern).
+`fake_group_llm` patches `app.routes.projects.run_tool_loop` directly (NOT
+the `fake_llm` fixture in conftest, which only patches `call_json` — the
+group agent reply path uses `run_tool_loop`, AD-P15's tool-on-the-reply-call
+wiring for `delegate_task`). The fake returns plain reply text and does NOT
+invoke `dispatch(...)`, simulating a no-tool-call turn — none of these
+tests exercise delegation.
 """
 from __future__ import annotations
 
@@ -43,15 +45,18 @@ def _create_project(ctx, *, name: str = "Group chat project") -> dict:
 @pytest.fixture
 def fake_group_llm(isolated_settings, monkeypatch):
     """Patches the ONE call site the group-agent reply path uses
-    (`app.routes.projects.call_md`) so no test ever hits Anthropic.
-    `state["calls"]` is the no-LLM-for-human-turns assertion point."""
+    (`app.routes.projects.run_tool_loop`) so no test ever hits Anthropic.
+    `state["calls"]` is the no-LLM-for-human-turns assertion point. The fake
+    does NOT invoke `dispatch(...)` — every test in this file simulates a
+    no-tool-call turn (delegation itself is covered in
+    `test_project_delegation.py`)."""
     state: dict = {
         "calls": [],
         "reply": "On it — I'll take a look and report back.",
         "raise_error": False,
     }
 
-    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):
+    def _fake_run_tool_loop(*, system, user, tools, dispatch, model, meta_out=None, **kwargs):
         state["calls"].append({"system": system, "user": user, "model": model})
         if state["raise_error"]:
             raise RuntimeError("simulated LLM failure")
@@ -69,7 +74,7 @@ def fake_group_llm(isolated_settings, monkeypatch):
 
     import app.routes.projects as projects_route
 
-    monkeypatch.setattr(projects_route, "call_md", _fake_call_md)
+    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
     return state
 
 

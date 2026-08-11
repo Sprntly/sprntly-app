@@ -202,6 +202,28 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "real-DB proof, run locally against the dev rig when touching this "
         "migration or `db/project_delegations.py`."
     ),
+    ("test_project_delegation.py", "RUN_DELEGATE_TASK_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the "
+        "delegate_task tool: proves the REAL model actually calls the tool "
+        "on a hand-off phrase, the REAL brief LLM call, and that an "
+        "unresolvable assignee produces no DM/no delegation row — a stubbed "
+        "model can prove the handler's contract but not that the tool "
+        "actually gets invoked end to end. Deterministic backstop: the rest "
+        "of this file drives `handle_delegate_task` directly against "
+        "FakeSupabaseClient with `call_md` stubbed and covers the "
+        "tool-description/brief-prompt properties, the authz/IDOR "
+        "mutation-proof (AC3, RED->GREEN), the never-writes-a-user-turn "
+        "invariant, fail-closed resolution/brief, and the cost/log-content "
+        "assertions in the fast lane; this suite is the real-LLM proof, run "
+        "locally against the dev rig when touching this tool or "
+        "`app/project_delegation.py`."
+    ),
+    ("test_project_delegation.py", "ANTHROPIC_API_KEY"): (
+        "Same three live tests as RUN_DELEGATE_TASK_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
 }
 
 

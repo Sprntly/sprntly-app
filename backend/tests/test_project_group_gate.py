@@ -64,14 +64,17 @@ def _create_project(ctx, *, name: str = "Interjection gate project") -> dict:
 
 def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") -> list[dict]:
     """Stub BOTH downstream calls a successful `_respond_as_group_agent`
-    makes (the reply itself, `app.routes.projects.call_md`, and the
+    makes (the reply itself, `app.routes.projects.run_tool_loop`, and the
     memory-promotion classifier it fires afterwards,
     `app.project_memory.call_json`) so a test that lets the gate say
     `respond=true` doesn't also reach Anthropic for those two unrelated
-    surfaces. Returns the list of reply calls made."""
+    surfaces. The fake reply does NOT invoke `dispatch(...)` — none of
+    these tests exercise delegation. Returns the list of reply calls made."""
     calls: list[dict] = []
 
-    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):  # noqa: ARG001
+    def _fake_run_tool_loop(  # noqa: ARG001
+        *, system, user, tools, dispatch, model, meta_out=None, **kwargs
+    ):
         calls.append({"system": system, "user": user, "model": model})
         if meta_out is not None:
             meta_out.update(
@@ -85,7 +88,7 @@ def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") ->
             )
         return reply
 
-    monkeypatch.setattr(projects_route, "call_md", _fake_call_md)
+    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
     monkeypatch.setattr(
         project_memory, "call_json",
         lambda **kw: {"should_promote": False, "insight": ""},  # noqa: ARG005

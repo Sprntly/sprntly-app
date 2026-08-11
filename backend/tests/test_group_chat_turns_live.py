@@ -9,7 +9,7 @@ cannot: the `uq_one_group_chat_per_project` partial unique index, the
 `project_chat_members` roster seed, and the membership gate actually
 round-trip through real Postgres via the real supabase-py client.
 
-The `@Sprntly`-triggered LLM call is STUBBED here too (`app.routes.projects.call_md`
+The `@Sprntly`-triggered LLM call is STUBBED here too (`app.routes.projects.run_tool_loop`
 monkeypatched) — the group turn/DB wiring is what this round-trip proves;
 the memory-synthesis and smart-interjection surfaces are where the build
 spec calls for a real-LLM live run (a later phase, not this surface).
@@ -227,10 +227,11 @@ def non_member_client(fixture_ids):
 def stub_group_llm(monkeypatch):
     """Stub the ONE LLM call site the mention-reply path uses — see module
     docstring for why this live test still stubs it (cost avoidance; not
-    one of the build spec's real-LLM-gated tickets)."""
+    one of the build spec's real-LLM-gated tickets). Does NOT invoke
+    `dispatch(...)` — this round-trip simulates a no-tool-call turn."""
     calls: list[dict] = []
 
-    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):
+    def _fake_run_tool_loop(*, system, user, tools, dispatch, model, meta_out=None, **kwargs):
         calls.append({"system": system, "user": user, "model": model})
         if meta_out is not None:
             meta_out.update(
@@ -246,7 +247,7 @@ def stub_group_llm(monkeypatch):
 
     import app.routes.projects as projects_route
 
-    monkeypatch.setattr(projects_route, "call_md", _fake_call_md)
+    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
     return calls
 
 

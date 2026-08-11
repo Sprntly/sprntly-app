@@ -1568,6 +1568,25 @@ CREATE TABLE project_memory_summary (
     generated_at TEXT NOT NULL DEFAULT (datetime('now')),
     stale        INTEGER NOT NULL DEFAULT 0
 );
+
+-- Mirrors 20260811120300_project_delegations.sql. No FK on
+-- assigner/assignee user_id — same reasoning as project_members above,
+-- these are auth.users ids the fake DB never seeds a row for.
+CREATE TABLE project_delegations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id                INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    assigner_user_id          TEXT NOT NULL,
+    assignee_user_id          TEXT NOT NULL,
+    task_summary              TEXT NOT NULL,
+    source_conversation_id    INTEGER REFERENCES conversations (id),
+    source_turn_id            INTEGER,
+    delivered_conversation_id INTEGER REFERENCES conversations (id),
+    delivered_turn_id         INTEGER,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id, created_at);
+CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
+CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
 """
 
 

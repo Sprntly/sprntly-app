@@ -37,8 +37,9 @@ from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
 from app.deps.ownership import require_owned_evidence, require_owned_prd
-from app.llm import DEFAULT_MODEL, call_md
+from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
+from app import project_delegation
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
@@ -73,7 +74,26 @@ Rules:
 - Keep it conversational and short — a few sentences, not a document.
 - If the ask is unclear or out of scope, say so plainly rather than
   guessing.
+- You have a delegate_task tool: when someone asks you to hand a specific
+  task to a teammate, call it (pick the assignee from the roster below).
+  Do not call it for a plain question, an FYI, or human-to-human chatter.
 """
+
+
+def _group_system_with_roster(roster: list[dict]) -> str:
+    """`_GROUP_AGENT_SYSTEM_PROMPT` + a live `PROJECT ROSTER:` block (AD-P18
+    model-arbitration seam) — first-name + job_role per member, no PII
+    beyond that. Lets the model resolve a free-text assignee ("the
+    designer") to a specific teammate before calling `delegate_task`, at
+    zero extra LLM-call cost (the roster rides on this same reply call)."""
+    lines = []
+    for m in roster:
+        name = m.get("name") or "(unnamed)"
+        first = name.split()[0] if name != "(unnamed)" else name
+        role = m.get("job_role") or "no role set"
+        lines.append(f"- {first} — {role}")
+    roster_block = "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
+    return f"{_GROUP_AGENT_SYSTEM_PROMPT}\n{roster_block}"
 
 router = APIRouter(prefix="/v1/projects", tags=["projects"])
 
@@ -546,15 +566,17 @@ def post_group_turn_route(
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
     if _MENTION_RE.search(payload.content):
-        _respond_as_group_agent(project_id, conversation["id"])
+        _respond_as_group_agent(project_id, conversation["id"], ctx)
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
         if should_respond(project_id, conversation["id"], recent, payload.content):
-            _respond_as_group_agent(project_id, conversation["id"])
+            _respond_as_group_agent(project_id, conversation["id"], ctx)
     return turn
 
 
-def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
+def _respond_as_group_agent(
+    project_id: int, conversation_id: int, ctx: WorkspaceContext
+) -> None:
     """Called on an `@Sprntly` mention OR a `should_respond=True`
     smart-interjection decision (`post_group_turn_route` decides which;
     this function's own body is unchanged either way): assemble recent
@@ -567,6 +589,12 @@ def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
     cost-summary log line — never emitted for a human-to-human turn,
     because none is made for one).
 
+    The reply call is a `run_tool_loop` (AD-P15) carrying the
+    `delegate_task` tool — zero new LLM calls: delegation piggybacks on
+    this same reply. `ctx` is threaded in only to derive
+    `dataset`/`company_id` for `project_delegation.handle_delegate_task`'s
+    artifact fold-in; reply/promotion behavior is otherwise unchanged.
+
     After a reply is actually produced, runs the best-effort memory-
     promotion classifier (`maybe_promote_turn`) over the same clamped
     transcript — reusing it rather than re-querying. `maybe_promote_turn`
@@ -577,10 +605,34 @@ def _respond_as_group_agent(project_id: int, conversation_id: int) -> None:
     try:
         recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
         transcript = render_group_transcript(recent)
+        # The human who addressed Sprntly — the most recent turn with an
+        # author_user_id (an agent turn has none). Used as the delegation
+        # assigner if the model calls delegate_task on this reply.
+        trigger = next((t for t in reversed(recent) if t.get("author_user_id")), None)
+        assigner_user_id = trigger["author_user_id"] if trigger else None
+        source_turn_id = trigger["id"] if trigger else None
+        roster = projects_db.list_members(project_id)
         meta: dict = {}
-        reply = call_md(
-            system=_GROUP_AGENT_SYSTEM_PROMPT,
+
+        def _dispatch(name: str, tool_input: dict) -> str:
+            if name == "delegate_task":
+                return project_delegation.handle_delegate_task(
+                    project_id=project_id,
+                    assigner_user_id=assigner_user_id,
+                    source_conversation_id=conversation_id,
+                    source_turn_id=source_turn_id,
+                    roster=roster,
+                    dataset=_dataset_for(ctx),
+                    company_id=ctx.company_id,
+                    tool_input=tool_input,
+                )
+            return f"(unknown tool: {name})"
+
+        reply = run_tool_loop(
+            system=_group_system_with_roster(roster),
             user=transcript,
+            tools=[project_delegation.DELEGATE_TASK_TOOL],
+            dispatch=_dispatch,
             model=DEFAULT_MODEL,
             meta_out=meta,
         )

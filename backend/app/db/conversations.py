@@ -568,3 +568,35 @@ def create_individual_project_chat(project_id: int, user_id: str) -> dict[str, A
         .data[0]
     )
     return row
+
+
+@retry_on_disconnect
+def post_individual_turn(conversation_id: int, role: str, content: str) -> dict[str, Any]:
+    """Write a turn into an individual project conversation and touch
+    updated_at. The cross-user brief is always role='assistant',
+    author_user_id=NULL — the agent never writes a 'user' turn as a person.
+
+    Mirrors `post_group_turn` one level down (individual rather than
+    group), minus the author_user_id parameter: an individual project
+    conversation is single-owner (the assignee), so there is no second
+    human author to attribute a turn to — every row this helper writes is
+    the agent's, delivered cross-user (build spec AD-P16/AD-P19). Returns
+    the inserted turn row (incl. `id`) so the caller captures
+    `delivered_turn_id`."""
+    client = require_client()
+    resp = (
+        client.table("conversation_turns")
+        .insert(
+            {
+                "conversation_id": conversation_id,
+                "role": role,
+                "content": content,
+                "author_user_id": None,
+            }
+        )
+        .execute()
+    )
+    client.table("conversations").update({"updated_at": utc_now()}).eq(
+        "id", conversation_id
+    ).execute()
+    return resp.data[0]
