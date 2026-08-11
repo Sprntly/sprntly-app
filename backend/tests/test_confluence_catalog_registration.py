@@ -516,10 +516,12 @@ def test_a_page_moved_to_another_space_follows_the_move(
     db.table("companies").insert(
         {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
     ).execute()
+    calls: list = []
     monkeypatch.setattr(
         document_catalog, "llm_call",
-        lambda **k: type("R", (), {"output": {"summary": "A summary.",
-                                              "topics": ["t"]}})(),
+        lambda **k: calls.append(k) or type(
+            "R", (), {"output": {"summary": "A summary.", "topics": ["t"]}}
+        )(),
     )
     monkeypatch.setattr(document_catalog, "embed_texts",
                         lambda texts, **k: [[0.1] * 1536])
@@ -528,10 +530,25 @@ def test_a_page_moved_to_another_space_follows_the_move(
     assert db.table("document_catalog").select("*").execute().data[0][
         "container_id"
     ] == "s1"
+    assert len(calls) == 1
 
-    # The SAME page, same body, now walked as part of a different space.
+    # The SAME page (same id, same company, byte-identical body — a move
+    # changes none of them), now walked as part of a different space. The
+    # space is the ONLY thing that differs between the two calls.
     moved_to = {"id": "s2", "key": "PROD", "name": "Product"}
     confluence._to_record(_Ctx(), moved_to, "page", _page("Body."))
+
+    # PROVE THE PATH, don't assume it. Everything below is only meaningful if
+    # this second registration took the unchanged-content SHORT-CIRCUIT — that
+    # is the path the repair lives on. Had the body differed by so much as a
+    # character it would have taken the full upsert instead, which writes the
+    # container unconditionally, and the test would be re-pinning "the
+    # argument I passed is the argument I got back" while looking identical.
+    # A model call is the observable that tells the two paths apart.
+    assert len(calls) == 1, (
+        "the move re-summarised, so this took the full upsert path and is no "
+        "longer testing the repair — check the fixture's body is unchanged"
+    )
 
     rows = db.table("document_catalog").select("*").execute().data
     assert len(rows) == 1, "the move created a second row"
