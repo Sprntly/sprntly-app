@@ -447,11 +447,24 @@ export function prdGroundingDocs(
 // the backend call INSIDE its async block (network AFTER the optimistic render).
 type LocalPrdSource =
   // "convert this document to a PRD" — POST /v1/prd/import happens in-panel.
-  | { kind: "importDoc"; file: File; company: string; openTickets?: boolean }
+  // `artifactTemplateId` (both kinds) = the uploaded FORMAT the user named
+  // ("…using our Acme format"), resolved to an id by the backend planner and
+  // carried on the intent envelope. Undefined — the normal case — means the
+  // company's active format. It rides the SOURCE rather than being read at the
+  // call site because the network call happens inside `openPrdInTab`'s async
+  // block, one commit after the decision was made.
+  | {
+      kind: "importDoc"; file: File; company: string; openTickets?: boolean
+      artifactTemplateId?: string | null
+    }
   // "generate a PRD for <task>" — POST /v1/prd/generate happens in-panel.
   // `sourceDocs` = documents attached earlier in the thread (extracted text);
   // the backend grounds the PRD on them alongside the task/KG evidence.
-  | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
+  | {
+      kind: "generateTask"; task: string
+      sourceDocs?: { name: string; content: string }[]
+      artifactTemplateId?: string | null
+    }
 type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
   source: PrdTabRequest["source"] | LocalPrdSource
   /** Generate IN THIS TAB: pin the target to an existing chat tab so the PRD
@@ -2300,8 +2313,14 @@ export function ChatScreen() {
               // has no id yet and binds a moment later (bindConvToPrd below).
               const knownConvId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
               const start = source.kind === "importDoc"
-                ? await prdApi.importDoc(source.file, source.company, knownConvId)
-                : await prdApi.generateFromTask(source.task, false, source.sourceDocs, knownConvId)
+                ? await prdApi.importDoc(
+                    source.file, source.company, knownConvId,
+                    source.artifactTemplateId,
+                  )
+                : await prdApi.generateFromTask(
+                    source.task, false, source.sourceDocs, knownConvId,
+                    source.artifactTemplateId,
+                  )
               // Not bound at creation? Bind now, from THIS promise chain rather
               // than a React effect — the chain outlives the screen, so leaving
               // the page mid-generation no longer orphans the chat from its PRD.
@@ -3601,6 +3620,12 @@ export function ChatScreen() {
     tabId: string,
     task: string,
     seed: { turnId: string; title: string; query: string } | null,
+    /** The uploaded TICKET format the user named, off the intent envelope.
+     *  Undefined — the normal case, and every RE-RUN — means the company's
+     *  active ticket format. A re-run deliberately does not carry it: the
+     *  original envelope is long gone by then, and inventing one would be a
+     *  guess about what was asked for rather than a record of it. */
+    artifactTemplateId?: string | null,
   ) => {
     setTabs((prev) => prev.map((t) => t.id === tabId
       ? { ...t, ticketSetRunning: true, ticketSetStatus: "generating", ticketSetTask: task }
@@ -3626,7 +3651,9 @@ export function ChatScreen() {
       // out over the "generate a PRD first" empty state for the length of one
       // conversation create. Never yank the panel out from under another tab.
       if (activeTabIdRef.current === tabId) openContentPanel("tickets")
-      const result = await runTicketSetGeneration(task, convId ?? null, setContent)
+      const result = await runTicketSetGeneration(
+        task, convId ?? null, setContent, artifactTemplateId,
+      )
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === tabId
           ? { ...t, ticketSetRunning: false, ticketSetId: result.set.id, ticketSetStatus: "ready" }
@@ -3651,7 +3678,12 @@ export function ChatScreen() {
    *  Optimistic-first, the same rule the PRD command flows follow: the ack turn
    *  renders on THIS commit and every network call happens after it, so the
    *  composer never clears into a void. */
-  const ticketSetCommandFlow = useCallback((seedQuery: string, task: string) => {
+  const ticketSetCommandFlow = useCallback((
+    seedQuery: string,
+    task: string,
+    /** The uploaded TICKET format the user named, off the intent envelope. */
+    artifactTemplateId?: string | null,
+  ) => {
     const inTab = reusableActiveTab()
     const turnId =
       typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
@@ -3686,7 +3718,7 @@ export function ChatScreen() {
       turnId,
       title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
       query: seedQuery,
-    })
+    }, artifactTemplateId)
   }, [
     reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
     startTicketSetRun,
@@ -3725,7 +3757,11 @@ export function ChatScreen() {
     void loadTicketSet(tab.ticketSetId, setContent)
   }, [content.ticketSet, setContent, openContentPanel, showToast, startTicketSetRun])
 
-  const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
+  const prdCommandFlow = useCallback((
+    seedQuery?: string,
+    taskOverride?: string | null,
+    artifactTemplateId?: string | null,
+  ) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
     // seeded from THIS conversation — the user's turns in the active tab — so the
@@ -3765,6 +3801,7 @@ export function ChatScreen() {
         kind: "generateTask",
         task: effectiveTask,
         ...(sourceDocs.length ? { sourceDocs } : {}),
+        ...(artifactTemplateId ? { artifactTemplateId } : {}),
       },
     }
     const tabId = openPrdInTab(req)
@@ -3785,13 +3822,27 @@ export function ChatScreen() {
   // spinner on THIS commit and runs importDoc inside its async block (network
   // AFTER the render). The placeholder title is the file name until the backend's
   // real title lands.
-  const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+  const importPrdCommandFlow = useCallback((
+    file: File,
+    opts: {
+      openTickets: boolean; seedQuery?: string
+      /** The uploaded format the user named. Easy to miss on THIS path and the
+       *  most important one to get right: attaching a file to "create a PRD
+       *  using our Acme format" dispatches an import, so a format dropped here
+       *  is a document silently written in a different one. */
+      artifactTemplateId?: string | null
+    },
+  ) => {
     const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: file.name,
       seedQuery: opts.seedQuery,
       ...(inTab ? { inTabId: inTab.id } : {}),
-      source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
+      source: {
+        kind: "importDoc", file, company: activeCompany,
+        openTickets: opts.openTickets,
+        ...(opts.artifactTemplateId ? { artifactTemplateId: opts.artifactTemplateId } : {}),
+      },
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
@@ -4186,7 +4237,10 @@ export function ChatScreen() {
           if (envelope.intent === "generate_tickets") {
             if (docFile) {
               setAttachments([])
-              importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+              importPrdCommandFlow(docFile, {
+                openTickets: true, seedQuery: trimmed,
+                artifactTemplateId: envelope.artifact_template_id,
+              })
               settlePendingSend()
               return
             }
@@ -4200,7 +4254,10 @@ export function ChatScreen() {
             // scope patch, the generating flag and the panel open; this branch
             // only decides that a set is what the user asked for.
             if (ticketSetInFlightGuard()) return
-            ticketSetCommandFlow(trimmed, envelope.task?.trim() || trimmed)
+            ticketSetCommandFlow(
+              trimmed, envelope.task?.trim() || trimmed,
+              envelope.artifact_template_id,
+            )
             settlePendingSend()
             return
           } else if (envelope.intent === "edit_prd") {
@@ -4229,11 +4286,14 @@ export function ChatScreen() {
           } else if (envelope.intent === "generate_prd") {
             if (docFile) {
               setAttachments([])
-              importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+              importPrdCommandFlow(docFile, {
+                openTickets: false, seedQuery: trimmed,
+                artifactTemplateId: envelope.artifact_template_id,
+              })
               settlePendingSend()
               return
             }
-            prdCommandFlow(trimmed, envelope.task)
+            prdCommandFlow(trimmed, envelope.task, envelope.artifact_template_id)
             settlePendingSend()
             return
           }

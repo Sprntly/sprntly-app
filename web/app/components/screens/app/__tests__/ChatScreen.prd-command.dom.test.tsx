@@ -243,7 +243,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -278,7 +278,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("let's get a PRD going for the checkout revamp")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, NO_CONV_ID, undefined)
     expect(runAskGeneration).not.toHaveBeenCalled()
     // The extra round trip is gone, not merely unused.
     expect(classifyCommand).not.toHaveBeenCalled()
@@ -323,7 +323,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // The generate POST is in flight (called with the parsed task) but NOT
     // resolved…
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
     // …yet the user's command, the acknowledgment, and the generating PRD card
     // are already on screen.
     expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
@@ -356,7 +356,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     // keeps the PRD about what was discussed instead of the workspace at large.
     expect(generateFromTask).toHaveBeenCalledWith(
       "our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID,
-    )
+     undefined,)
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
@@ -543,6 +543,6 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined)
   })
 })

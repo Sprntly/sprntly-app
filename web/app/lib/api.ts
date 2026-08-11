@@ -932,9 +932,20 @@ export type ChatIntentEnvelope = {
   artifact_type: OpenArtifactKind | null
   /** open_artifact: the subject the user named the document by. */
   artifact_query: string | null
+  /** generate_prd / generate_tickets: the uploaded FORMAT the user asked this
+   *  document to be written in ("…using our Acme format"). Null — the normal
+   *  case — means the company's active format, which the backend resolves on
+   *  its own. Forward it to the executor: dropping it silently generates in a
+   *  different format than the one that was asked for. */
+  artifact_template_id: string | null
+  /** That format's display name, so the surface can say WHICH format it is
+   *  writing in. Never send this back — it is for the user, not the executor. */
+  artifact_template_name: string | null
   reason: string
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
-   *  | "no_artifact_query" */
+   *  | "no_artifact_query" | "template_not_found" — the last meaning the user
+   *  named a format we could not find, so the build was deliberately downgraded
+   *  to an answer that asks which one they meant. */
   source: string
   prd_id: number | null
   prd_title: string | null
@@ -2732,6 +2743,11 @@ export const prdApi = {
      *  new PRD immediately, so navigating away mid-generation can't leave the
      *  chat orphaned (reopened from history with no PRD and no View PRD button). */
     conversationId?: number | null,
+    /** The uploaded format the user asked for (`ChatIntentEnvelope
+     *  .artifact_template_id`). Omitted means the company's active format. The
+     *  backend 404s an id that isn't this company's and 409s one that can't
+     *  write a PRD, so a bad id surfaces instead of quietly changing shape. */
+    artifactTemplateId?: string | null,
   ) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
       task,
@@ -2740,6 +2756,7 @@ export const prdApi = {
       // PRD on them (they used to be silently forgotten by this command).
       ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
       ...(conversationId != null ? { conversation_id: conversationId } : {}),
+      ...(artifactTemplateId ? { artifact_template_id: artifactTemplateId } : {}),
     }),
   /** Clarify-first sufficiency gate (runs on EVERY chat-PRD command before
    *  generation): does the task + attached documents carry the ingredients a
@@ -2783,13 +2800,23 @@ export const prdApi = {
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
    *  slug the PRD belongs to. */
-  importDoc: (file: File, dataset: string, conversationId?: number | null) => {
+  importDoc: (
+    file: File,
+    dataset: string,
+    conversationId?: number | null,
+    /** The uploaded format to re-lay-out into, when the user named one. This
+     *  path needs it as much as generateFromTask does and is easy to miss:
+     *  attaching a file to "create a PRD using our Acme format" dispatches an
+     *  IMPORT, not a generate, so a format dropped here is a format ignored. */
+    artifactTemplateId?: string | null,
+  ) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("dataset", dataset)
     // See generateFromTask: binds the commanding chat to the PRD server-side so
     // leaving the page mid-import can't orphan it.
     if (conversationId != null) form.append("conversation_id", String(conversationId))
+    if (artifactTemplateId) form.append("artifact_template_id", artifactTemplateId)
     return api.post<PrdStartResponse>("/v1/prd/import", form)
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
@@ -3870,10 +3897,17 @@ export const storiesApi = {
    *  Callers should go through `lib/runTicketSetGeneration.ts` rather than
    *  calling this directly — it owns the kick-off/poll/publish arc, and one
    *  owner is what keeps the panel from starting a second run of its own. */
-  generateFromInsight: (insight: string, conversationId?: number | null) =>
+  generateFromInsight: (
+    insight: string,
+    conversationId?: number | null,
+    /** The uploaded TICKET format the user named ("…using our Acme ticket
+     *  format"). Omitted means the company's active ticket format. */
+    artifactTemplateId?: string | null,
+  ) =>
     api.post<StoryGenerateStart>("/v1/stories/generate", {
       insight,
       ...(conversationId != null ? { conversation_id: conversationId } : {}),
+      ...(artifactTemplateId ? { artifact_template_id: artifactTemplateId } : {}),
     }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */
   getJob: (jobId: number) =>

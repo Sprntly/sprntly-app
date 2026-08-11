@@ -199,6 +199,15 @@ keep house rigor inside their form, and use its conflict-resolution ladder for \
 a section with no grounded material (render it with `[NEED: …]` and an owner; \
 never delete it, never invent content for it).
 
+WRITE THEIR SECTIONS AND ONLY THEIR SECTIONS. The skeleton above is the whole \
+document: fill every slot it has, and add nothing it does not have. A Sprntly \
+section that is missing from it is missing DELIBERATELY — their format has no \
+home for it, and the compile already recorded that — so appending it at the end, \
+inserting it between their sections, or smuggling it in as an extra row or a \
+trailing paragraph inside one of theirs all produce the same failure: a document \
+that is not the format the team uploaded. An empty slot of theirs is right; a \
+full section of ours that they never asked for is wrong.
+
 Four things the template CANNOT change, because downstream work depends on \
 them: the hard cap of 3 evidence items (a format whose research section expects \
 eight still gets three); evidence provenance — every claim reported from the \
@@ -587,6 +596,7 @@ def _build_context(
     insight_override: dict | None = None,
     import_source_md: str | None = None,
     extra_source_md: str | None = None,
+    artifact_template_id: str | None = None,
 ) -> dict:
     """Resolve everything a generation call needs, exactly once.
 
@@ -605,6 +615,11 @@ def _build_context(
     that text — the model faithfully re-lays-it-out into the template — so we
     skip KG/corpus grounding entirely (trail=None, empty kg_refs). This pairs
     with an `insight_override` carrying the uploaded title.
+
+    `artifact_template_id` names the uploaded format this generation must write
+    into, overriding the company's active one — the format the user asked for by
+    name, or the one an existing PRD is already written in. None means "whatever
+    is active", which is every path that has not been given one.
     """
     brief = get_brief_by_id(brief_id)
     if not brief:
@@ -670,7 +685,9 @@ def _build_context(
     # in-flight generation immune to someone activating a different format
     # mid-run. The PRD finishes in the format it started in; that is free, and
     # deliberately not worth a lock.
-    template, artifact_template_id = resolve_prd_template(company_id)
+    template, resolved_template_id = resolve_prd_template(
+        company_id, artifact_template_id
+    )
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
     # ("what good looks like"). Additive context ONLY: folded into the prompt so
@@ -692,10 +709,12 @@ def _build_context(
         "evidence": evidence,
         "trail": trail,
         "template": template,
-        # The uploaded format this run is writing into, or None for the
-        # built-in. Threaded so _finalize_part_a can stamp it on the row and so
+        # The format this run is ACTUALLY writing into, or None for the built-in
+        # — the resolver's answer, never the caller's request, so a requested
+        # format that could not be used is stamped as what actually served.
+        # Threaded so _finalize_part_a can stamp it on the row and so
         # _call_part_a can tell whether to append the custom-format addendum.
-        "artifact_template_id": artifact_template_id,
+        "artifact_template_id": resolved_template_id,
         "exemplars": exemplars,
         "insight": insight,
         "title": title,
@@ -714,9 +733,38 @@ def _load_part_a_template() -> str:
     return get_skill(_SKILL).templates["prd-template.html"]
 
 
-def resolve_prd_template(company_id: str | None) -> tuple[str, str | None]:
+def resolve_prd_template(
+    company_id: str | None, override_id: str | None = None
+) -> tuple[str, str | None]:
     """The Part A skeleton this company's PRDs are written into, and the id of
     the uploaded format it came from (None for the built-in).
+
+    THREE SOURCES, IN THIS ORDER, and the order is the whole feature:
+
+      1. `override_id` — a format this generation was told to use. Either the
+         one the user NAMED in chat ("write it up in our Acme format", resolved
+         by the Ask planner) or the one an existing PRD was already written in
+         (`prds.artifact_template_id`) when it is being re-rendered. An explicit
+         instruction outranks whatever happens to be active.
+      2. The company's ACTIVE format — what every unspecified request gets, and
+         what this function did exclusively before the override existed.
+      3. The built-in.
+
+    WHY AN OVERRIDE EXISTS AT ALL. Activation is a company-wide setting, and a
+    PRD is one document: a team with three PRD formats had no way to say "this
+    one, this time" short of activating a different format for everybody and
+    then switching it back. Worse, an already-generated PRD had no way to be
+    re-rendered in the format it was actually written in — a later activation
+    silently reshaped it.
+
+    A FAILED OVERRIDE FALLS BACK TO THE ACTIVE FORMAT, and only because the
+    caller has already been told: the routes validate an override before
+    scheduling (a foreign id is a 404, an unusable one a 409), so reaching this
+    function with a bad id means the row changed underneath a generation that
+    was already running. Substituting is the right degradation THERE — the
+    alternative is a failed PRD — but it is logged at WARNING precisely because
+    silently writing a document in a format nobody asked for is the failure this
+    whole feature exists to end.
 
     Shaped like `skills/resolver.py::resolve_skill`: **built-in first for the
     common case**, a DB read only when there is a company to read for, and
@@ -749,14 +797,53 @@ def resolve_prd_template(company_id: str | None) -> tuple[str, str | None]:
     builtin = _load_part_a_template()
     if not company_id:
         return builtin, None
-    try:
-        row = get_active_template(company_id, "prd")
-    except Exception:  # noqa: BLE001 — any DB failure degrades to the built-in
-        logger.warning(
-            "active PRD format lookup failed for company=%s; using the built-in",
-            company_id, exc_info=True,
-        )
-        return builtin, None
+
+    row = None
+    if override_id:
+        try:
+            from app.db.artifact_templates import get_template_by_id
+
+            candidate = get_template_by_id(company_id, override_id)
+        except Exception:  # noqa: BLE001 — degrade to the active format below
+            candidate = None
+            logger.warning(
+                "requested PRD format lookup failed company=%s id=%s; "
+                "falling back to the active format",
+                company_id, override_id, exc_info=True,
+            )
+        # Company-filtered by `get_template_by_id`, so a foreign id is already
+        # a miss here. The TYPE check is this layer's own: writing a PRD into a
+        # ticket skeleton produces a document in the wrong shape.
+        if candidate and candidate.get("artifact_type") != "prd":
+            logger.warning(
+                "requested format %s is a %s format, not a PRD one; "
+                "falling back to the active format",
+                override_id, candidate.get("artifact_type"),
+            )
+            candidate = None
+        if candidate and not (candidate.get("compiled") or "").strip():
+            logger.warning(
+                "requested PRD format %s has no compiled skeleton; "
+                "falling back to the active format", override_id,
+            )
+            candidate = None
+        if candidate is None:
+            logger.warning(
+                "PRD format %s was requested for company=%s and could not be "
+                "used — this PRD is NOT in the format that was asked for",
+                override_id, company_id,
+            )
+        row = candidate
+
+    if row is None:
+        try:
+            row = get_active_template(company_id, "prd")
+        except Exception:  # noqa: BLE001 — any DB failure degrades to the built-in
+            logger.warning(
+                "active PRD format lookup failed for company=%s; using the built-in",
+                company_id, exc_info=True,
+            )
+            return builtin, None
     if not row:
         return builtin, None
     compiled = (row.get("compiled") or "").strip()
@@ -768,9 +855,15 @@ def resolve_prd_template(company_id: str | None) -> tuple[str, str | None]:
             company_id,
         )
         return builtin, None
+    # NAMES THE FORMAT, and that is not decoration. The previous version of this
+    # line said only that "the company's own format" served, which cannot answer
+    # the one question anybody asks of it — WHICH format — and left a run that
+    # honoured an override indistinguishable from one that ignored it.
     logger.info(
-        "PRD generating in the company's own format company=%s compile_status=%s",
-        company_id, row.get("compile_status"),
+        "PRD generating in format id=%s name=%r requested=%s company=%s "
+        "compile_status=%s",
+        row.get("id"), row.get("name"), override_id or "-", company_id,
+        row.get("compile_status"),
     )
     return row["compiled"], row.get("id")
 
@@ -1070,6 +1163,7 @@ async def _generate_human_prd(
     insight_override: dict | None = None, author: str | None = None,
     import_source_md: str | None = None, on_delta=None,
     extra_source_md: str | None = None,
+    artifact_template_id: str | None = None,
 ) -> dict:
     """Build context, generate the human PRD (Part A only), persist + log.
 
@@ -1087,7 +1181,7 @@ async def _generate_human_prd(
     """
     ctx = await asyncio.to_thread(
         _build_context, brief_id, insight_index, insight_override, import_source_md,
-        extra_source_md,
+        extra_source_md, artifact_template_id,
     )
     result_a = await asyncio.to_thread(
         _call_part_a, ctx, author, background, on_delta=on_delta
@@ -1174,6 +1268,7 @@ async def generate_prd_and_warm(
     company_id: str | None = None, user_id: str | None = None,
     prd_title: str | None = None,
     extra_source_md: str | None = None,
+    artifact_template_id: str | None = None,
 ) -> None:
     """Generate the human PRD, extract its input questions, THEN pre-warm the
     Implementation Spec (Part B).
@@ -1211,6 +1306,7 @@ async def generate_prd_and_warm(
         ctx = await generate_prd(
             prd_id, brief_id, insight_index, background, insight_override, author,
             import_source_md, on_delta=sink, extra_source_md=extra_source_md,
+            artifact_template_id=artifact_template_id,
         )
     finally:
         token_stream.close(channel, kind="done" if ctx is not None else "error")
@@ -1240,6 +1336,7 @@ async def generate_prd(
     insight_override: dict | None = None, author: str | None = None,
     import_source_md: str | None = None, on_delta=None,
     extra_source_md: str | None = None,
+    artifact_template_id: str | None = None,
 ) -> dict | None:
     """Run the human-PRD generation; update DB with result.
 
@@ -1270,6 +1367,7 @@ async def generate_prd(
         ctx = await _generate_human_prd(
             prd_id, brief_id, insight_index, background, insight_override, author,
             import_source_md, on_delta=on_delta, extra_source_md=extra_source_md,
+            artifact_template_id=artifact_template_id,
         )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
         return ctx

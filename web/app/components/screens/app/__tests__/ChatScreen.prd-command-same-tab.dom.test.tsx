@@ -304,7 +304,11 @@ describe("ChatScreen — same-tab PRD generation", () => {
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(2))
     // Its own NEW tab, so there is no conversation row to bind yet — and no
     // thread behind it either, so nothing to ground on but the topic itself.
-    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, CONVERSATION_DOC, NO_CONV_ID)
+    // Trailing `undefined` is the uploaded FORMAT the user asked for — none
+    // here, which means the company's active format, exactly as before.
+    expect(generateFromTask).toHaveBeenLastCalledWith(
+      "password reset flows", false, CONVERSATION_DOC, NO_CONV_ID, undefined,
+    )
     await waitFor(() => expect(chatTabCount()).toBe(2))
   })
 
@@ -346,7 +350,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
     await typeAndSendInThread("spec this out")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     // Seeded from THIS tab's conversation — and generated right here.
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID, undefined)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -359,7 +363,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     await typeAndSendInThread("let's get a PRD going for the checkout revamp")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, CONVERSATION_DOC, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, CONVERSATION_DOC, BOUND_CONV_ID, undefined)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -371,7 +375,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("generate a PRD from this document")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID, undefined))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
@@ -386,7 +390,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("convert this PRD into tickets")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID, undefined))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")

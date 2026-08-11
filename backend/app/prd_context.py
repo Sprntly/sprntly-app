@@ -64,6 +64,61 @@ def _prd_section(prd: dict, rendered: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_section(enterprise_id: str, prd: dict) -> str | None:
+    """WHICH uploaded format wrote this PRD — read from the stamp the generation
+    left on the row (`prds.artifact_template_id`), never inferred.
+
+    This exists because inference produced a confidently wrong answer. Asked
+    "what template did this PRD use?", the assistant had nothing authoritative
+    in front of it, so it compared the document's section headings against the
+    company's CONFLUENCE page templates and reported that the PRD used none of
+    them and was "a custom structure" — a coherent paragraph about entirely the
+    wrong kind of template, for a PRD that had in fact been written in one of
+    the company's own uploaded formats.
+
+    THE STAMP IS A HISTORICAL FACT AND OUTRANKS WHAT IS ACTIVE NOW. A PRD
+    written in the format that was active in March is still a March-format PRD
+    after someone activates a different one in June, and this section says so
+    explicitly — otherwise a model holding both this and the workspace's format
+    library will helpfully "correct" the stamp to whichever format is currently
+    active, which is exactly the reasoning that must not happen here.
+
+    Absent stamp → the built-in format, which is what NULL has always meant on
+    that column (`db.prds.set_prd_artifact_template` writes nothing for it).
+    Stated rather than omitted: "no custom format" is the answer to the
+    question, and a missing section would send the model looking for one."""
+    template_id = (prd.get("artifact_template_id") or "").strip()
+    if not template_id:
+        return (
+            "## The format this PRD was written in\n"
+            "Sprntly's built-in PRD format — this document was not written in "
+            "one of the company's own uploaded formats."
+        )
+    from app.db.artifact_templates import get_template_by_id
+
+    row = get_template_by_id(enterprise_id, template_id)
+    if not row:
+        # Stamped, but the format has since been deleted. Saying so beats both
+        # silence and a guess: the shape of the document is still that format's.
+        return (
+            "## The format this PRD was written in\n"
+            "One of the company's own uploaded formats, which has since been "
+            "deleted from their library."
+        )
+    name = " ".join((row.get("name") or "").split()) or "(untitled)"
+    line = f"“{name}”, one of the company's own uploaded PRD formats."
+    if not row.get("is_active"):
+        # The single most useful clause in this section: it is the difference
+        # between "this document is in the format you expect" and "your active
+        # format changed after this was written".
+        line += (
+            " It is NOT the company's currently active PRD format — this PRD "
+            "was written in it, and later PRDs use whichever format is active "
+            "now. That is not an error and does not need correcting."
+        )
+    return f"## The format this PRD was written in\n{line}"
+
+
 def _insight_section(prd: dict) -> str | None:
     """The brief insight this PRD was generated from. Themed PRDs
     (ideation/chat/upload) anchor to the brief with a SENTINEL insight_index —
@@ -171,6 +226,7 @@ def build_prd_context(enterprise_id: str | None, prd_id: int | None) -> str:
         rendered = get_prd_rendered(prd_id) or prd
         sections: list[str] = [_HEADER, _prd_section(prd, rendered)]
         for build in (
+            lambda: _format_section(enterprise_id, prd),
             lambda: _insight_section(prd),
             lambda: _evidence_section(prd),
             lambda: _tickets_section(enterprise_id, prd_id),

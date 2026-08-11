@@ -60,6 +60,12 @@ function isTransportFailure(e: unknown): boolean {
  * is NOT the "standalone" signal: `ticketSetStandalone` is written false here
  * because a run started from a live chat always has one, whatever the id is.
  *
+ * `artifactTemplateId` is the uploaded TICKET format the user named, resolved
+ * by the backend planner and carried on the intent envelope. Undefined — the
+ * normal case — means the company's active ticket format. Forwarding it is what
+ * makes "break this into tickets using our Acme format" honour the ask instead
+ * of rendering in whichever format happens to be active.
+ *
  * Resolves with the terminal outcome; it never throws. Callers that want to
  * toast a failure read `kind` — the raw backend message is deliberately not
  * returned, because nothing that came off the wire should reach the screen.
@@ -68,6 +74,7 @@ export async function runTicketSetGeneration(
   task: string,
   conversationId: number | null,
   setContent: SetContent,
+  artifactTemplateId?: string | null,
 ): Promise<TicketSetGenResult> {
   // The panel must show a working state from the first frame, before the
   // create call has even answered — and the scope patch has to land WITH it,
@@ -102,7 +109,9 @@ export async function runTicketSetGeneration(
 
   let start: { job_id: number; ticket_set_id?: number }
   try {
-    start = await storiesApi.generateFromInsight(task, conversationId)
+    start = await storiesApi.generateFromInsight(
+      task, conversationId, artifactTemplateId,
+    )
   } catch (e) {
     // Nothing was created, so there is no row to point the error at. A 404 here
     // is the backend refusing an unknown/foreign conversation id, which is a

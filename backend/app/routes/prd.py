@@ -274,12 +274,58 @@ _CHAT_TASK_INSIGHT_INDEX = 0
 _CHAT_TASK_TITLE_MAX = 90
 
 
-def _chat_task_theme_id(task: str) -> str:
+def _chat_task_theme_id(task: str, artifact_template_id: str | None = None) -> str:
     """Deterministic dedup key for a chat task ('chat:<sha1[:16]>' of the
     whitespace-collapsed, lowercased text). Same precedent as ideation's
-    'manual:%' synthetic theme ids — never resolves in the KG."""
+    'manual:%' synthetic theme ids — never resolves in the KG.
+
+    THE FORMAT IS PART OF THE KEY, when one was asked for. Without this, asking
+    for the same PRD in a different format returns the FIRST one unchanged
+    (find-or-create matches on the task text alone) — so "regenerate this in our
+    Acme format" would hand back the document in the old format and report
+    success, which is the exact silent-substitution failure the rest of this
+    feature exists to prevent. Same task in a different format is a different
+    document.
+
+    The no-format key is byte-identical to what this function has always
+    returned, deliberately: every chat PRD ever generated is keyed on it, and
+    changing it would make find-or-create miss on all of them and quietly
+    regenerate duplicates of documents that already exist."""
     norm = " ".join(task.lower().split())
+    if artifact_template_id:
+        norm = f"{norm}|tpl:{artifact_template_id}"
     return "chat:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _requested_template_id(
+    company_id: str, template_id: str | None, artifact_type: str = "prd"
+) -> str | None:
+    """Validate a format the caller asked for, or None when they asked for none.
+
+    Refused HERE, at the route, rather than at generation time — see
+    `artifact_templates.store.require_usable_template` for why that placement is
+    the whole point: once a generation is running, its only options are to
+    substitute a different format silently or to fail the document, and the user
+    is no longer in a position to pick.
+
+    404 for a missing-or-foreign id (indistinguishable, like every other
+    ownership check here); 409 for a format that exists but cannot write this
+    kind of document, or has never compiled cleanly."""
+    if not template_id or not template_id.strip():
+        return None
+    from app.artifact_templates.store import (
+        TemplateNotFound,
+        TemplateStoreError,
+        require_usable_template,
+    )
+
+    try:
+        row = require_usable_template(company_id, template_id.strip(), artifact_type)
+    except TemplateNotFound as exc:
+        raise HTTPException(404, str(exc))
+    except TemplateStoreError as exc:
+        raise HTTPException(409, str(exc))
+    return row["id"]
 
 
 def _chat_task_title(task: str) -> str:
@@ -311,6 +357,11 @@ class TaskGenerateIn(BaseModel):
     # the PRD server-side so navigating away mid-generation can't orphan the
     # chat from its document. Optional — older clients omit it.
     conversation_id: int | None = None
+    # The uploaded format this PRD must be written into, when the user named one
+    # ("generate a PRD using our Acme format" — the Ask planner resolves the name
+    # to an id). Omitted means the company's ACTIVE format, which is what every
+    # request got before this existed and what most still get.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
 
 
 def _render_source_docs(docs: list[TaskSourceDoc]) -> str:
@@ -351,7 +402,12 @@ async def generate_from_task(
     brief_id = brief["id"] if brief else ensure_uploads_brief(slug)
 
     task_text = body.task.strip()
-    theme_id = _chat_task_theme_id(task_text)
+    # Validated BEFORE anything is created: a format the caller cannot use must
+    # be a refusal they can act on, not a PRD quietly written in another one.
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id
+    )
+    theme_id = _chat_task_theme_id(task_text, template_id)
     title = _chat_task_title(task_text)
 
     if not body.force:
@@ -418,6 +474,7 @@ async def generate_from_task(
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
             extra_source_md=extra_source_md,
+            artifact_template_id=template_id,
         )
     )
     _inflight_tasks.add(task)
@@ -531,6 +588,17 @@ async def import_prd(
     # never orphan the chat from the document it produced. Optional: other
     # callers (and older clients) simply omit it.
     conversation_id: int | None = Form(None),
+    # The uploaded format this import must be re-laid-out into, when the user
+    # named one ("import this as a PRD using our Acme format"). A FORM field
+    # rather than JSON because this endpoint is multipart — the file is the
+    # body. Omitted means the company's active format, as before.
+    #
+    # This path needs it as much as generate-from-task does, and is easy to
+    # miss: attaching a document to a chat message dispatches an IMPORT, not a
+    # generate, so "create a PRD using Template 1" with a file attached lands
+    # here. That is exactly how the requested format was first observed being
+    # ignored.
+    artifact_template_id: str | None = Form(None),
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
@@ -547,6 +615,10 @@ async def import_prd(
     """
     # Tenant gate: the dataset (company slug) must belong to the caller (404).
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+
+    # Before the file is even read: a refusal the caller can act on beats a
+    # 25 MB upload that produces a document in the wrong format.
+    template_id = _requested_template_id(company.company_id, artifact_template_id)
 
     data = await file.read()
     if not data:
@@ -598,6 +670,7 @@ async def import_prd(
             import_source_md=extracted,
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
+            artifact_template_id=template_id,
         )
     )
     _inflight_tasks.add(task)

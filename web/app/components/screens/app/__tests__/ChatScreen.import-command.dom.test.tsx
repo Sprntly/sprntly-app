@@ -272,7 +272,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     await typeAndSend("Convert this PRD into tickets")
 
     // Uploaded the ORIGINAL file to the import endpoint for the active company…
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     // …polled the already-kicked-off import to ready (third arg = live-preview
     // onPartial callback)…
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
@@ -294,7 +294,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
       const file = await attachDoc(name)
       await typeAndSend("convert this PRD into tickets")
 
-      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
       await waitFor(() => expect(panelTab()).toBe("tickets"))
       expect(runAskGeneration).not.toHaveBeenCalled()
     },
@@ -307,7 +307,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
 
     // Ordering matters: the phrasing matches BOTH command regexes, but the user
     // asked for tickets — it must import + open tickets, not run the brief flow.
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     expect(briefCurrent).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -318,7 +318,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     const file = await attachDoc()
     await typeAndSend("generate a PRD from this")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
     // The panel stays on the PRD tab — the user asked for a PRD, not tickets —
     // and no ticket generation is kicked off.
@@ -432,7 +432,7 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("Import this document as a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     // It must never go to the ask agent — that path answers "no document was
     // attached" because the ask payload is text-only.
@@ -446,7 +446,7 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("convert this document to a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -775,7 +775,7 @@ describe.skip("ChatScreen — deictic PRD phrasings beside an open PRD tab", () 
 
     await typeAndSendInTab("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID))
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 

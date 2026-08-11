@@ -30,11 +30,14 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
     """Same keys, same types. This is a swap of what is behind the endpoint,
     not a new contract."""
     envelope = ci._plan_to_envelope(
-        _plan("generate_prd", task="Build checkout v2", confidence=0.9, reason="asked for a spec"),
+        _plan("generate_prd", task="Build checkout v2", action_confidence=0.9,
+              confidence=0.0, reason="asked for a spec"),
         prd_id=None,
     )
     assert envelope == {
         "intent": "generate_prd",
+        # The ACTION's confidence, not the pipeline's — `confidence=0.0` above
+        # is the pipeline pick ("there isn't one") and must not appear here.
         "confidence": 0.9,
         "task": "Build checkout v2",
         "instruction": None,
@@ -42,9 +45,63 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # are None on the ones they do not belong to.
         "artifact_type": None,
         "artifact_query": None,
+        # Likewise the requested FORMAT: present on every verdict, None when the
+        # message named none — which is the normal case and means the executor
+        # resolves the company's active format exactly as it always has.
+        "artifact_template_id": None,
+        "artifact_template_name": None,
         "reason": "asked for a spec",
         "source": "planner",
     }
+
+
+def test_a_named_format_rides_the_envelope_to_the_client():
+    """The client is the only thing that can forward it: the executor endpoints
+    are called from the browser, so a format dropped here is a document written
+    in the wrong one with nothing on screen to say so."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "generate_prd", task="Build checkout v2", confidence=0.9,
+            artifact_template_id="tpl-1", artifact_template_name="Acme PRD v2",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "generate_prd"
+    assert envelope["artifact_template_id"] == "tpl-1"
+    assert envelope["artifact_template_name"] == "Acme PRD v2"
+
+
+def test_a_format_we_could_not_find_stops_the_build_and_asks():
+    """Owner's decision (2026-08-10): building in the ACTIVE format instead is
+    the silent substitution this feature exists to end. The downgrade to
+    `answer` is what turns it into a question, and the planner has already
+    forced the library onto the plan so the answer can list what they do have."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "generate_prd", task="Build checkout v2", confidence=0.95,
+            template_query="the Contoso format",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "template_not_found"
+
+
+def test_the_format_reason_wins_over_a_low_confidence_downgrade():
+    """Both land on `answer`; only one of them tells the user something they can
+    act on."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "generate_prd", task="Build checkout v2", confidence=0.1,
+            template_query="the Contoso format",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "template_not_found"
 
 
 @pytest.mark.parametrize(
@@ -84,12 +141,28 @@ def test_an_action_outside_the_client_vocabulary_falls_back():
 
 def test_a_low_confidence_action_is_downgraded():
     """Acting on a 0.2-confidence `generate_prd` is disruptive in a way a
-    0.2-confidence answer is not. Same floor, same value as before."""
+    0.2-confidence answer is not. Same floor, same value as before — but read
+    off `action_confidence`, which is the number about the ACTION."""
     envelope = ci._plan_to_envelope(
-        _plan("generate_prd", task="x", confidence=0.2), prd_id=None
+        _plan("generate_prd", task="x", action_confidence=0.2), prd_id=None
     )
     assert envelope["intent"] == "answer"
     assert envelope["source"] == "low_confidence"
+
+
+def test_the_pipelines_confidence_can_never_downgrade_an_action():
+    """THE LIVE BUG. `confidence` sits under `pipeline_id` and answers "how sure
+    are you about this PIPELINE" — and most messages need none, so it is low by
+    design. Reading it as the action's conviction turned "generate prd for me
+    and please use the template 1 template" into a plain answer at 0.5, with a
+    `reason` field saying the model knew exactly what was being asked for."""
+    envelope = ci._plan_to_envelope(
+        _plan("generate_prd", task="x", action_confidence=1.0, confidence=0.0),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "generate_prd"
+    assert envelope["source"] == "planner"
 
 
 def test_the_floor_does_not_downgrade_a_plain_answer():

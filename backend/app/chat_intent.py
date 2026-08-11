@@ -506,7 +506,14 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
 
     envelope = {
         "intent": intent,
-        "confidence": plan.confidence,
+        # THE ACTION'S confidence, not the pipeline's. `plan.confidence` sits
+        # under `pipeline_id` in the planner's schema and answers "how sure are
+        # you about this PIPELINE" — for which the normal answer is "there isn't
+        # one". Reading it here vetoed real commands with a number that was
+        # never about them: "generate prd for me and please use the template 1
+        # template" arrived as generate_prd at pipeline-confidence 0.5 and was
+        # downgraded to a plain answer, repeatedly, including one plan at 0.0.
+        "confidence": plan.action_confidence,
         "task": plan.task or None,
         "instruction": plan.instruction or None,
         "artifact_type": (
@@ -514,11 +521,37 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
             if plan.artifact_type in NAMEABLE_ARTIFACT_TYPES else None
         ),
         "artifact_query": plan.artifact_query,
+        # The uploaded format this build must be written into, when the user
+        # named one. The client forwards the id to the executor; the NAME is for
+        # the client to say which format it is using, so an honoured request is
+        # visible to the person who made it rather than something they have to
+        # take on trust.
+        "artifact_template_id": plan.artifact_template_id,
+        "artifact_template_name": plan.artifact_template_name,
         "reason": plan.reason or "",
         "source": "planner",
     }
-    if intent != "answer" and plan.confidence < _ACTION_CONFIDENCE_FLOOR:
+    # A FORMAT WE COULD NOT FIND STOPS THE BUILD (owner's decision, 2026-08-10).
+    # `template_query` is only ever set when the user named a format and nothing
+    # in their library matched it, and the alternative — building in the ACTIVE
+    # format instead — is the silent substitution this whole feature exists to
+    # end: they asked for one format, got another, and nothing on screen says so.
+    #
+    # Downgrading to `answer` is what turns it into a question, and it costs
+    # nothing else: the planner has already forced `include_library` on this
+    # plan, so the answer that runs has the company's real format list in front
+    # of it and can ask WHICH ONE by name instead of apologising in the abstract.
+    #
+    # ORDERED AFTER the confidence floor on purpose. Both read the ORIGINAL
+    # `intent` rather than the envelope (the floor check always has), so the
+    # later of the two wins the `source` when both apply — and when a build both
+    # named an unknown format and scored low, the format is the reason the user
+    # can act on. Everything below reads `envelope["intent"]` and so cannot
+    # overwrite it once this has landed on `answer`.
+    if intent != "answer" and plan.action_confidence < _ACTION_CONFIDENCE_FLOOR:
         envelope.update(intent="answer", source="low_confidence")
+    if intent != "answer" and plan.template_query:
+        envelope.update(intent="answer", source="template_not_found")
     if envelope["intent"] in _NEEDS_PRD and not prd_id:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
