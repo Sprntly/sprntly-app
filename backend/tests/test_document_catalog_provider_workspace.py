@@ -47,10 +47,17 @@ def catalog(isolated_settings, monkeypatch):
     """A real `register_document` upsert against the fake Supabase, with the
     summariser and embedder stubbed — the isolation the other catalog-writer
     suites use."""
-    monkeypatch.setattr(
-        document_catalog, "llm_call",
-        lambda **kw: type("R", (), {"output": {"summary": "s", "topics": ["t"]}})(),
-    )
+    # Counted, because the summariser is the OBSERVABLE that distinguishes
+    # the content-hash short-circuit from a full re-registration. Without it a
+    # test whose fixture accidentally changes the document takes the full
+    # upsert path, still passes, and silently stops testing the fill.
+    calls: list = []
+
+    def _fake_llm(**kw):
+        calls.append(kw)
+        return type("R", (), {"output": {"summary": "s", "topics": ["t"]}})()
+
+    monkeypatch.setattr(document_catalog, "llm_call", _fake_llm)
     monkeypatch.setattr(
         document_catalog, "embed_texts",
         lambda texts, **k: [[0.1] * 1536 for _ in texts],
@@ -60,7 +67,7 @@ def catalog(isolated_settings, monkeypatch):
     db.table("companies").insert(
         {"id": cid, "slug": f"slug-{cid}", "display_name": "C"}
     ).execute()
-    return {"db": db, "cid": cid}
+    return {"db": db, "cid": cid, "summary_calls": calls}
 
 
 def _doc(channel_id="C1", channel_name="product-feedback", text="## #x\n\nbody\n"):
@@ -438,11 +445,22 @@ def test_an_unchanged_document_still_gains_a_missing_workspace_id(catalog):
     company = catalog["cid"]
     slack_extract.register_slack_catalog(company, [_doc(text="same")], team_id=None)
     assert _row(catalog)["provider_workspace_id"] is None
+    assert len(catalog["summary_calls"]) == 1
 
     slack_extract.register_slack_catalog(
         company, [_doc(text="same")], team_id=_TEAM_ID,
     )
 
+    # PATH PROOF. Without this the test passes whether or not the fixture
+    # actually re-registers an UNCHANGED document: change the second body and
+    # it silently takes the full upsert path, which writes the column anyway,
+    # and this stops covering the short-circuit entirely. The summariser is
+    # the observable that tells the two paths apart.
+    assert len(catalog["summary_calls"]) == 1, (
+        "a second summarisation ran, so this took the FULL registration path "
+        "— the fixture is no longer re-registering an unchanged document. "
+        "Check that both _doc() bodies are identical."
+    )
     assert _row(catalog)["provider_workspace_id"] == _TEAM_ID, (
         "the content-hash no-op path skipped the fill, so this column can "
         "never converge without a backfill"
@@ -464,6 +482,12 @@ def test_the_no_op_fill_never_overwrites_a_different_workspace_id(catalog):
 
     slack_extract.register_slack_catalog(
         company, [_doc(text="same")], team_id="T_DIFFERENT",
+    )
+    # PATH PROOF, same reasoning as the convergence test above.
+    assert len(catalog["summary_calls"]) == 1, (
+        "a second summarisation ran, so this took the FULL registration path "
+        "— the fixture is no longer re-registering an unchanged document. "
+        "Check that both _doc() bodies are identical."
     )
     assert _row(catalog)["provider_workspace_id"] == "T_ORIGINAL"
 
