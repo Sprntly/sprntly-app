@@ -5237,6 +5237,16 @@ export type GroupTurn = {
   open_candidates?: OpenArtifactCandidate[]
 }
 
+/** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
+ *  minted `report` artifact ref (item-14 substrate, build spec §2). Always
+ *  `artifact_type: "report"` in v1 — a saved chat output is captured as a
+ *  report (`backend/app/project_artifact_capture.py`). */
+export type SavedChatArtifact = {
+  artifact_type: "report"
+  artifact_id: number
+  project_id: number
+}
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -5271,6 +5281,23 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(String(id))}/artifacts`,
       { artifact_type: artifactType, artifact_id: artifactId },
     ),
+  /** Save a chat output as a first-class project artifact
+   *  (`POST /v1/projects/{id}/artifacts/from-chat`, item-14 substrate).
+   *  `content` is required (whitespace-only throws `ApiError` `.status` 400);
+   *  `title` is optional — server-derived when omitted (explicit title, else
+   *  the content's first non-empty line, else "Saved from chat").
+   *  `sourceConversationId` stays optional in v1 (not yet wired by any
+   *  caller). Throws `ApiError` `.status` 502 when the save itself fails,
+   *  403/404 for the membership gate (AD-P11). */
+  saveChatArtifact: (
+    id: number | string,
+    payload: { content: string; title?: string; sourceConversationId?: number },
+  ) =>
+    api.post<SavedChatArtifact>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts/from-chat`, {
+      content: payload.content,
+      title: payload.title,
+      source_conversation_id: payload.sourceConversationId,
+    }),
   /** Project detail: members (incl. the virtual agent member) + group-chat
    *  id. Throws `ApiError` with `.status` 403 (same-tenant non-member) or
    *  404 (foreign-tenant/absent) — callers must handle both without

@@ -739,3 +739,234 @@ def test_project_created_log_carries_only_identifiers(isolated_settings, monkeyp
     project_id = r.json()["id"]
     lines = [rec.getMessage() for rec in caplog.records]
     assert any(f"project_created project_id={project_id}" == line for line in lines)
+
+
+# ── Save a chat output as a project artifact (item-14 substrate) ──────────
+# POST /v1/projects/{id}/artifacts/from-chat — mirrors the fixture style
+# above: `_seed_foreign_project`/`seed_same_tenant_non_member` prove the
+# AD-P11 membership gate; the fake `reports` table (conftest schema) proves
+# the write.
+
+
+def _report_rows(company_id: str) -> list[dict]:
+    from app.db.client import require_client
+
+    return (
+        require_client()
+        .table("reports")
+        .select("*")
+        .eq("company_id", company_id)
+        .execute()
+        .data
+    )
+
+
+def _artifact_refs(project_id: int) -> list[dict]:
+    from app.db.client import require_client
+
+    return (
+        require_client()
+        .table("project_artifacts")
+        .select("*")
+        .eq("project_id", project_id)
+        .execute()
+        .data
+    )
+
+
+def test_from_chat_creates_report_and_ref(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Saved-chat project"}).json()
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat",
+        json={"content": "## Prioritization\n\n- Ship A first"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["artifact_type"] == "report"
+    assert body["project_id"] == project["id"]
+    report_id = body["artifact_id"]
+
+    ws_id = _default_workspace_id(ctx.company_id)
+    reports = _report_rows(ctx.company_id)
+    assert len(reports) == 1
+    assert reports[0]["id"] == report_id
+    assert reports[0]["skill"] == "saved-chat"
+    assert reports[0]["company_id"] == ctx.company_id
+    assert reports[0]["workspace_id"] == ws_id
+    assert reports[0]["ask_id"] is None
+    assert reports[0]["html"].startswith("<!doctype html")
+
+    refs = _artifact_refs(project["id"])
+    assert [(ref["artifact_type"], ref["artifact_id"]) for ref in refs] == [("report", report_id)]
+
+
+# `list_artifacts_for_company` (the reader `GET .../artifacts` reuses)
+# unconditionally selects from `prototypes` too — a table intentionally NOT
+# in the shared base fake schema (see test_project_artifacts_fanout.py's
+# docstring). Only the ONE test below reads that endpoint, so it gets its
+# own minimal copy of the same DDL rather than pulling in the sibling
+# fixture module.
+_PROTOTYPE_DDL = """
+CREATE TABLE IF NOT EXISTS prototypes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id       INTEGER,
+    workspace_id TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'generating',
+    variant      TEXT NOT NULL DEFAULT 'v1'
+);
+"""
+
+
+def test_saved_report_appears_in_project_artifacts(isolated_settings, monkeypatch):
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().executescript(_PROTOTYPE_DDL)
+
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Listed project"}).json()
+
+    ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat",
+        json={"content": "First saved chat output"},
+    )
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/artifacts")
+    assert r.status_code == 200
+    items = r.json()["artifacts"]
+    reports = [item for item in items if item["type"] == "report"]
+    assert len(reports) == 1
+    assert reports[0]["title"] == "First saved chat output"
+    assert reports[0]["skill"] == "saved-chat"
+
+
+def test_two_saves_distinct_reports(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Two saves"}).json()
+
+    r1 = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat", json={"content": "First output"}
+    )
+    r2 = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat", json={"content": "Second output"}
+    )
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json()["artifact_id"] != r2.json()["artifact_id"]
+
+    refs = _artifact_refs(project["id"])
+    assert len(refs) == 2
+    assert len(_report_rows(ctx.company_id)) == 2
+
+
+def test_from_chat_non_member_403(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Gated save"}).json()
+    _, non_member_headers = seed_same_tenant_non_member(ctx)
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat",
+        json={"content": "Body"},
+        headers=non_member_headers,
+    )
+    assert r.status_code == 403
+    assert _report_rows(ctx.company_id) == []
+    assert _artifact_refs(project["id"]) == []
+
+
+def test_from_chat_foreign_tenant_404(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    foreign = _seed_foreign_project()
+
+    r = ctx.client.post(
+        f"/v1/projects/{foreign['id']}/artifacts/from-chat", json={"content": "Body"}
+    )
+    assert r.status_code == 404
+    assert _report_rows(ctx.company_id) == []
+    assert _artifact_refs(foreign["id"]) == []
+
+
+def test_from_chat_empty_content_400(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Empty save"}).json()
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat", json={"content": "   \n  "}
+    )
+    assert r.status_code == 400
+    assert _report_rows(ctx.company_id) == []
+    assert _artifact_refs(project["id"]) == []
+
+
+def test_from_chat_save_returns_none_502(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "502 save"}).json()
+
+    import app.db as db
+
+    monkeypatch.setattr(db, "save_report", lambda *a, **k: None)
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat", json={"content": "Body"}
+    )
+    assert r.status_code == 502
+    assert _artifact_refs(project["id"]) == []
+
+
+def test_from_chat_db_error_propagates_500(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "500 save"}).json()
+
+    import app.db as db
+
+    def boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(db, "save_report", boom)
+
+    import app.main as main_mod
+    from fastapi.testclient import TestClient
+
+    raising_client = TestClient(main_mod.app, headers=ctx.headers, raise_server_exceptions=False)
+    r = raising_client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat", json={"content": "Body"}
+    )
+    assert r.status_code == 500
+    assert _artifact_refs(project["id"]) == []
+
+
+def test_from_chat_client_cannot_supply_report_id(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "No client id"}).json()
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/artifacts/from-chat",
+        json={"content": "Body", "artifact_id": 999999, "report_id": 999999},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The extra fields are silently ignored (Pydantic drops unknown fields by
+    # default) — the artifact id comes only from the fresh save, never 999999.
+    assert body["artifact_id"] != 999999
+    reports = _report_rows(ctx.company_id)
+    assert len(reports) == 1
+    assert reports[0]["id"] == body["artifact_id"]
+
+
+def test_from_chat_emits_saved_log_line(isolated_settings, monkeypatch, caplog):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Logged save"}).json()
+
+    with caplog.at_level(logging.INFO, logger="app.routes.projects"):
+        r = ctx.client.post(
+            f"/v1/projects/{project['id']}/artifacts/from-chat",
+            json={"content": "Some secret-looking content that must not leak"},
+        )
+    assert r.status_code == 200
+    report_id = r.json()["artifact_id"]
+
+    lines = [rec.getMessage() for rec in caplog.records]
+    expected = f"project_chat_artifact_saved project_id={project['id']} report_id={report_id}"
+    assert any(line == expected for line in lines)
+    # No content, PII or secret in any log line this call produced.
+    assert not any("secret-looking" in line for line in lines)

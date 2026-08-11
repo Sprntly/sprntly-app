@@ -39,6 +39,7 @@ from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_proj
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
+from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
@@ -113,6 +114,12 @@ class UpdateMemoryEntryRequest(BaseModel):
 class AddArtifactRequest(BaseModel):
     artifact_type: Literal["prd", "evidence", "prototype", "report", "ticket_set"]
     artifact_id: int = Field(..., ge=1)
+
+
+class SaveChatArtifactRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+    title: str | None = None
+    source_conversation_id: int | None = None
 
 
 class PostGroupTurnRequest(BaseModel):
@@ -321,6 +328,47 @@ def add_project_artifact(
         project_id, payload.artifact_type, payload.artifact_id,
     )
     return ref
+
+
+@router.post("/{project_id}/artifacts/from-chat")
+def save_chat_artifact(
+    project_id: int,
+    payload: SaveChatArtifactRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Promote a chat output into a listed `report` artifact (item-14
+    substrate, build spec §2). Membership-gated (AD-P11) same as every
+    other artifact route. The report is minted under `ctx.company_id` —
+    there is no client-supplied artifact id to validate — so the project
+    and the fresh report are same-company by construction (AD-P12); the
+    `add_project_artifact` ownership re-check that pre-existing artifacts
+    need does not apply here.
+
+    A blank/whitespace-only `content` never reaches the writer (400,
+    nothing written). A `None` return from the writer (insert yielded no
+    row) is an explicit 502 with no ref written; a raised DB error is left
+    to propagate (500) — this is a user-initiated save, not the best-effort
+    `report_capture` path, so neither failure is swallowed."""
+    _require_project_member(project_id, ctx)
+    if not payload.content.strip():
+        raise HTTPException(400, "Nothing to save")
+
+    report_id = save_chat_output_as_report(
+        content=payload.content,
+        company_id=ctx.company_id,
+        title=payload.title,
+        workspace_id=ctx.workspace_id,
+        conversation_id=payload.source_conversation_id,
+    )
+    if report_id is None:
+        raise HTTPException(502, "Could not save chat output as an artifact")
+
+    ref = projects_db.add_artifact(project_id, "report", report_id)
+    logger.info(
+        "project_chat_artifact_saved project_id=%s report_id=%s",
+        project_id, report_id,
+    )
+    return {"artifact_type": "report", "artifact_id": report_id, **ref}
 
 
 @router.get("/{project_id}/memory/summary")
