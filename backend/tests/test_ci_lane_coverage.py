@@ -191,6 +191,17 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_project_delegations.py", "RUN_PROJECT_DELEGATIONS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "project_delegations migration's FK cascade/set-null behaviour, its "
+        "three named indexes, and its RLS policy — the fake Supabase client "
+        "has no SQL engine behind it and cannot enforce any of those. This is "
+        "a schema-only ticket (no route code shipped alongside it), so there "
+        "is no deterministic unit coverage to stand in; the migration file "
+        "and helper module are reviewed in the PR, and this suite is the "
+        "real-DB proof, run locally against the dev rig when touching this "
+        "migration or `db/project_delegations.py`."
+    ),
 }
 
 
