@@ -463,10 +463,12 @@ def test_a_writer_with_no_container_never_blanks_a_stored_one(
     db.table("companies").insert(
         {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
     ).execute()
+    calls: list = []
     monkeypatch.setattr(
         document_catalog, "llm_call",
-        lambda **k: type("R", (), {"output": {"summary": "A summary.",
-                                              "topics": ["t"]}})(),
+        lambda **k: calls.append(k) or type(
+            "R", (), {"output": {"summary": "A summary.", "topics": ["t"]}}
+        )(),
     )
     monkeypatch.setattr(document_catalog, "embed_texts",
                         lambda texts, **k: [[0.1] * 1536])
@@ -475,6 +477,7 @@ def test_a_writer_with_no_container_never_blanks_a_stored_one(
     assert db.table("document_catalog").select("*").execute().data[0][
         "container_id"
     ] == "s1"
+    assert len(calls) == 1
 
     # A CHANGED body, re-registered by a writer that declares no container —
     # the full upsert path, not the short-circuit.
@@ -485,6 +488,19 @@ def test_a_writer_with_no_container_never_blanks_a_stored_one(
         title="Search ranking spec",
         content_hash="a-different-hash",
         get_text=lambda: "New body.",
+    )
+
+    # PROVE THE PATH, because the claim above is only about the UPSERT branch.
+    # Take the short-circuit instead — which is one fixture edit away, since
+    # all it needs is a matching content_hash — and this test passes for the
+    # wrong reason: that branch calls `_set_container` only when a container
+    # was PASSED, so a container-less caller leaves the row alone and the
+    # assertion below holds without the upsert's omit-the-column behaviour
+    # ever being exercised. A re-summarisation is what marks the upsert.
+    assert len(calls) == 2, (
+        "the re-registration did not re-summarise, so it took the "
+        "short-circuit and this is no longer testing the upsert's handling "
+        "of an absent container — check the fixture's content_hash differs"
     )
 
     assert db.table("document_catalog").select("*").execute().data[0][

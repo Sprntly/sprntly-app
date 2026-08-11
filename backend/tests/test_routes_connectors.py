@@ -669,6 +669,30 @@ def test_a_short_folder_walk_cannot_widen_the_deletion(google_env, monkeypatch):
     )
 
     assert r.status_code == 200, r.text
+
+    # PROVE THE SCENARIO WAS BUILT. Everything below is only meaningful if the
+    # stored expansion really did shrink — that IS the partial walk. If the
+    # fake sync stopped persisting `folder_contents`, the config would keep
+    # its full three-file expansion, nothing would look removed under ANY
+    # implementation, and this test would pass while asserting nothing. It
+    # would also stop killing the reconcile-against-the-walk mutation, and
+    # nothing would report that it had gone quiet.
+    import json as _json
+
+    from app import db as _db
+
+    cfg = _json.loads(
+        _db.get_connection(
+            ctx.company_id, google_oauth.GOOGLE_DRIVE_PROVIDER
+        )["config_json"]
+    )
+    assert [n["id"] for n in cfg["folder_contents"]["folder0001"]] == [
+        "file0001"
+    ], (
+        "the stored expansion did not shrink, so no partial walk happened — "
+        "this test is not exercising what its name claims"
+    )
+
     assert _drive_catalogued(ctx.company_id) == {
         "file0001", "file0002", "file0003"
     }, (
