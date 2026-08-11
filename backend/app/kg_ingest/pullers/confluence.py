@@ -265,6 +265,14 @@ def _to_record(
             external_id=str(page_id),
             title=title,
             source_name=space.get("name") or space.get("key") or "",
+            # The SPACE ID, and specifically not the key or the name. This is
+            # what makes a deselected space's pages removable from the
+            # catalog: the selection stored by POST /connectors/confluence/
+            # spaces is a list of space IDS, so a stored id joins to it
+            # directly. `source_name` above is the display name and joins to
+            # nothing; the key is renameable and so is the site URL the key
+            # could be parsed back out of. Only the id survives a rename.
+            container_id=str(space.get("id") or "") or None,
             url=url,
             doc_date=version.get("createdAt") or item.get("createdAt"),
             # Over the FULL body, and this is the part that must not regress

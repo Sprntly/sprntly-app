@@ -91,8 +91,10 @@ from app.connectors import (
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     _refresh_credentials,
+    load_config as _drive_load_config,
     merge_config as _drive_merge_config,
     normalize_picked_files,
+    reachable_file_ids,
     sync_google_drive,
 )
 from app.connectors.tokens import (
@@ -848,6 +850,53 @@ def _seed_corpus_after_sync(company_id: str, dataset: str | None) -> None:
     kickoff_corpus_seed(company_id, slug)
 
 
+def _drive_removed_file_ids(
+    previous_config: dict, incoming_ids: list[str | None]
+) -> list[str]:
+    """Which Drive file ids a re-pick took OUT of reach, as a user action.
+
+    POST /connectors/google-drive/files REPLACES the picked-file list
+    wholesale, so "previously reachable, no longer reachable" is a difference
+    between two stored/posted SELECTIONS and nothing else. It is computed from
+    `config["files"]` and `config["folder_contents"]` — both already in our
+    database — and never from a Drive enumeration, which is the whole safety
+    property: a sync that returned three of a folder's ten files must not be
+    able to say the other seven were removed. See `reachable_file_ids`.
+
+    An EMPTY incoming list is a real removal here and is treated as one,
+    unlike Slack's channel selection where empty means "no explicit selection,
+    fall back to everything". Drive has no such fallback: `sync_google_drive`
+    with no picked files is an explicit no-op, so clearing the Picker really
+    does disconnect every document.
+
+    THE ONE CASE THIS OVER-REMOVES, stated rather than hidden: a file that
+    lives in two folders, where the user removes one of them and adds a
+    NEW folder containing the same file in the same save. The new folder has
+    no stored expansion yet, so the file is not counted as retained and its
+    row is dropped; the next sync re-registers it only once the file itself
+    changes, because Drive re-fetches on `modifiedTime`. The alternative —
+    consulting the walk the sync is about to do — is the partial-enumeration
+    hazard, and it fails in the direction that loses data on a transient
+    error instead of on a rare deliberate reshuffle."""
+    folder_contents = previous_config.get("folder_contents") or {}
+    previous_ids = [
+        str((f or {}).get("id") or "").strip()
+        for f in (previous_config.get("files") or [])
+        if isinstance(f, dict)
+    ]
+    kept = {str(i or "").strip() for i in incoming_ids if str(i or "").strip()}
+    removed_picks = [pid for pid in previous_ids if pid and pid not in kept]
+    if not removed_picks:
+        return []
+    # A file reachable from something the user KEPT stays, however it was also
+    # reachable before — the subtraction is what makes moving a file between
+    # two picked folders a no-op rather than a deletion.
+    return sorted(
+        reachable_file_ids(removed_picks, folder_contents)
+        - reachable_file_ids(kept, folder_contents)
+    )
+
+
 class GoogleDrivePickedFile(BaseModel):
     id: str
     name: str | None = None
@@ -886,6 +935,12 @@ def google_drive_save_files(
         raise HTTPException(404, "Google Drive is not connected")
 
     picked = [f.model_dump() for f in body.files]
+    # Worked out BEFORE the sync, from the selection stored right now against
+    # the one the user just posted — see _drive_removed_file_ids. Computing it
+    # after would mean subtracting a set the sync had already rewritten.
+    removed_file_ids = _drive_removed_file_ids(
+        _drive_load_config(row), [f.get("id") for f in picked]
+    )
     try:
         # Validate the ids up front (422 on a bad id) before kicking sync.
         normalize_picked_files(picked)
@@ -896,6 +951,26 @@ def google_drive_save_files(
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
+
+    # Only once the save actually happened. The ids were frozen above, so the
+    # sync decides WHETHER this cleanup runs, never WHAT it removes — a
+    # sync that half-failed cannot widen it. Running it before the sync would
+    # drop rows for a save that then 400s on a malformed id, leaving the
+    # user's unchanged selection missing documents.
+    if removed_file_ids:
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents(
+                company.company_id,
+                document_catalog.PROVIDER_GOOGLE_DRIVE,
+                removed_file_ids,
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "drive un-pick: catalog deregistration failed for company=%s",
+                company.company_id,
+            )
 
     _auto_enable_drive_input_source(company.company_id, dataset)
     _seed_corpus_after_sync(company.company_id, dataset)
@@ -2155,6 +2230,15 @@ def confluence_save_sync_spaces(
     row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
     if not row:
         raise HTTPException(404, "Confluence is not connected")
+    try:
+        previous_config = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        previous_config = {}
+    previous_ids = [
+        str(i) for i in (
+            previous_config.get(confluence_oauth.CONFIG_SYNC_SPACE_IDS) or []
+        ) if i
+    ]
     # Dedupe preserving order — the puller walks the selection in order.
     ids = list(dict.fromkeys(s.id for s in body.spaces))
     keys = {
@@ -2174,6 +2258,46 @@ def confluence_save_sync_spaces(
         config = json.loads((updated or {}).get("config_json") or "{}")
     except (TypeError, ValueError):
         config = {}
+
+    # Drop a deselected space's pages from the document catalog.
+    #
+    # The puller catalogues EVERY page it walks, and nothing removed one, so a
+    # space the admin unticked stayed catalogued forever: still offered to the
+    # model as a document this workspace has, still rankable, still eligible
+    # to be asserted as the subject of a question — after which the body fetch
+    # fails and the user is told the contents could not be loaded, which reads
+    # as a glitch rather than as "that space is not connected any more".
+    #
+    # Keyed on the space ID, which is why `container_id` exists: the rows are
+    # keyed on PAGE ids, and nothing stored on them joined to a space until
+    # now (`source_name` is the display name; the key can be parsed out of
+    # `url` but does not survive a rename). Pages catalogued before that
+    # column existed carry NULL and are skipped until the next pull stamps
+    # them — under-cleaning, never mis-deleting.
+    #
+    # `if ids else []` mirrors the Slack channel selection exactly, and is the
+    # edge that matters most here: an EMPTY selection means "every readable
+    # space" (see this route's docstring), so clearing the picker WIDENS what
+    # is synced. Diffing against it would read a widening as the removal of
+    # every space the admin had listed and delete the whole catalog.
+    removed_space_ids = (
+        [sid for sid in previous_ids if sid not in set(ids)] if ids else []
+    )
+    if removed_space_ids:
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents_in_containers(
+                company.company_id,
+                document_catalog.PROVIDER_CONFLUENCE,
+                removed_space_ids,
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "confluence un-sync: catalog deregistration failed for "
+                "company=%s", company.company_id,
+            )
+
     # Pull the new selection now rather than waiting for the 6-hourly sweep —
     # the user just told us what they want ingested.
     kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)

@@ -364,7 +364,7 @@ def _summary_embedding(
 def _existing(company_id: str, provider: str, external_id: str) -> Optional[dict]:
     r = (
         require_client().table(_TABLE)
-        .select("id,content_hash,summary,provider_workspace_id")
+        .select("id,content_hash,summary,provider_workspace_id,container_id")
         .eq("company_id", company_id)
         .eq("provider", provider)
         .eq("external_id", external_id)
@@ -373,6 +373,34 @@ def _existing(company_id: str, provider: str, external_id: str) -> Optional[dict
     )
     rows = r.data or []
     return rows[0] if rows else None
+
+
+def _set_container(company_id: str, document_id: str, container_id: str) -> None:
+    """Stamp `container_id` on an already-registered row, and touch NOTHING
+    else — not `updated_at`, not the summary.
+
+    Deliberately not folded into the main upsert: it is called from the
+    unchanged-content short-circuit, whose entire contract is that a document
+    which has not changed pays no re-summarisation and no re-embed. Leaving
+    `updated_at` alone matters for the same reason — a repair is not an edit,
+    and anything reading recency to judge freshness would be misled by one.
+
+    Best-effort: a row missing its container ranks exactly as it does today
+    and is merely skipped by the deselection cleanup until the next pull, so a
+    failure here must never break the ingest that called it."""
+    try:
+        (
+            require_client().table(_TABLE)
+            .update({"container_id": container_id})
+            .eq("company_id", company_id)
+            .eq("id", document_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning(
+            "document catalog: could not stamp container %s on %s",
+            container_id, document_id, exc_info=True,
+        )
 
 
 def _enrich(
@@ -441,6 +469,7 @@ def register_document(
     content_hash: str,
     source_name: str = "",
     description: str = "",
+    container_id: Optional[str] = None,
     url: Optional[str] = None,
     doc_date: Optional[str] = None,
     workspace_id: Optional[str] = None,
@@ -483,6 +512,24 @@ def register_document(
     it will not use — and it must be the untruncated text, because the summary
     and the content hash are both taken from it.
 
+    `container_id` is the PROVIDER-SIDE CONTAINER this document belongs to —
+    the Confluence space id today. It exists so a container the user
+    DESELECTS can have its documents dropped from the catalog by a join on
+    stored, stable data, which is otherwise impossible for Confluence: the
+    row's `external_id` is a page id, the selection is a list of space ids,
+    and `source_name` holds the space's DISPLAY NAME, which joins to neither.
+    (The remaining route — parsing `/spaces/<KEY>/` out of `url` — is
+    rename-fragile and deliberately not used.)
+
+    It is REPAIRED on the unchanged-content short-circuit below, and that is
+    load-bearing rather than tidiness: without it, every row registered before
+    this column existed would keep a NULL container forever, because a quiet
+    document never re-registers. With it, the Confluence pull — which walks
+    and catalogues every page, not only recent ones — fills them in within one
+    sweep, so the deselection cleanup starts working without a data migration.
+    Passing None leaves whatever is stored alone, so a writer that has no
+    container to declare never blanks one set by another.
+
     `background=True` runs summarisation + embedding on a daemon thread and
     returns as soon as the ROW is written. Used by the upload path, where
     files are stored sequentially inside the request coroutine and a
@@ -499,6 +546,8 @@ def register_document(
         raise ValueError("company_id is required to register a document")
     if conversation_id is not None and not user_id:
         raise ValueError("a conversation-scoped document requires user_id")
+
+    container = (container_id or "").strip() or None
 
     existing = _existing(company_id, provider, external_id)
     if (
@@ -537,6 +586,14 @@ def register_document(
                     "document catalog: could not fill provider_workspace_id "
                     "for %s/%s", provider, external_id, exc_info=True,
                 )
+        # Unchanged content — no re-summarisation, no re-embed, no row rewrite.
+        # The ONE thing still worth a write is a container that is missing or
+        # has moved, because the deselection cleanup joins on it and a document
+        # that never changes would otherwise never acquire one. Kept off the
+        # common path by the inequality test: a row already carrying the right
+        # container costs the same nothing it costs today.
+        if container and existing.get("container_id") != container:
+            _set_container(company_id, existing["id"], container)
         return existing["id"]
 
     now = utc_now()
@@ -559,6 +616,11 @@ def register_document(
         "embedding": None,
         "updated_at": now,
     }
+    # Only when the writer declared one — an absent key leaves the stored
+    # value untouched on the upsert's conflict branch, so a provider that
+    # knows no container cannot blank one another writer set.
+    if container:
+        row["container_id"] = container
     if workspace_id:
         row["workspace_id"] = workspace_id
     # OMITTED, not set to None, when the caller does not know it — same idiom
@@ -706,6 +768,54 @@ def deregister_documents(
         .eq("company_id", company_id)
         .eq("provider", provider)
         .in_("external_id", ids)
+        .execute()
+    )
+    return len(ids)
+
+
+def deregister_documents_in_containers(
+    company_id: str, provider: str, container_ids: Iterable[str]
+) -> int:
+    """Drop every catalog row belonging to the named CONTAINERS. Returns how
+    many containers were asked for, not how many rows went (the delete is
+    idempotent and silent, exactly like `deregister_documents`).
+
+    EXISTS BECAUSE SOME SELECTIONS ARE NOT MADE PER DOCUMENT. Slack and Drive
+    are picked file-by-file and channel-by-channel, so what the user removed
+    IS a list of `external_id`s and `deregister_documents` fits. Confluence is
+    picked per SPACE, and a space holds pages nobody enumerated by hand: the
+    selection is a list of space ids, the rows are keyed on page ids, and no
+    stored field joined the two until `container_id`. Enumerating the pages
+    instead would mean calling Confluence during a settings save — which is
+    both a network round trip on a config write and, far worse, exactly the
+    partial-enumeration hazard the design below refuses.
+
+    THE SAFETY PROPERTY IS THE SAME ONE, and it is why this is container-keyed
+    rather than sweep-shaped. The container list must come from a USER ACTION
+    — the stored previous selection minus the incoming one — and never from a
+    sync result. A sweep of the form "delete every row whose container is not
+    in the current selection" would look equivalent and is not: it deletes on
+    a SHORT input, so a truncated picker, a half-loaded settings page or a
+    selection posted by a client that only sent what it had rendered would
+    wipe rows for spaces the user never touched. Naming the removed containers
+    explicitly means the worst case of a wrong input is that too LITTLE is
+    cleaned up, which is the direction that loses no data.
+
+    Rows whose `container_id` is NULL are untouched by construction (SQL `IN`
+    never matches NULL) — that is the pre-repair state of every row written
+    before the column existed, and skipping them is correct: an unknown
+    container is not evidence of a removed one."""
+    if not company_id:
+        raise ValueError("company_id is required to deregister documents")
+    ids = [str(i) for i in container_ids if str(i or "").strip()]
+    if not ids:
+        return 0
+    (
+        require_client().table(_TABLE)
+        .delete()
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .in_("container_id", ids)
         .execute()
     )
     return len(ids)
