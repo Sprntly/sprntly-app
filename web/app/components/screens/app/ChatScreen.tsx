@@ -36,7 +36,7 @@ import { ChatSuggestionIcon, IconDocument, IconMic, IconSendUp, IconSparkle, Ico
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
-import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import { ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -3443,7 +3443,11 @@ export function ChatScreen() {
           t.id === tabId ? { ...t, thread: t.thread.filter((tn) => tn.id !== turnId) } : t))
       void (async () => {
         try {
-          const { artifactsApi } = await import("../../../lib/api")
+          // Static `artifactsApi` binding, deliberately NOT `await import(...)`:
+          // this file already imports lib/api statically, so the dynamic form
+          // split nothing — and under vitest it raced the mock registry, with
+          // this late detached import resolving the REAL module while every
+          // earlier import in the same flow got the test's mock.
           const { summary } = await artifactsApi.chatSummary(kind, artifactId)
           if (!summary?.trim()) {
             dropPendingTurn()

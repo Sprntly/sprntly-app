@@ -437,7 +437,12 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     // It must never go to the ask agent — that path answers "no document was
     // attached" because the ask payload is text-only.
     expect(runAskGeneration).not.toHaveBeenCalled()
-    expect(extractFile).not.toHaveBeenCalled()
+    // The doc IS extracted, exactly once — BEFORE the planner call, so the
+    // verdict is made over the document's text rather than a bare "Import this
+    // document" with no subject (submitAsk's early-extraction block). That
+    // read feeds the planner only; the import above still uploads the
+    // ORIGINAL file, never the extraction.
+    expect(extractFile).toHaveBeenCalledTimes(1)
     expect(briefCurrent).not.toHaveBeenCalled()
   })
 
@@ -470,12 +475,18 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
   })
 
   it("keeps the attachment and does not send when extraction fails", async () => {
-    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    // Persistent rejection, not `…Once`: extraction now runs twice per send —
+    // an early best-effort read that feeds the planner, then the real gate the
+    // send hangs on. A single rejection only fails the early read, which is
+    // DESIGNED to swallow errors (the planner just sees the bare message), so
+    // the retry would succeed and the send would proceed.
+    extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc()
     await typeAndSend("What does this deck say?")
 
-    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    // Both reads failed: the early planner read, then the real send gate.
+    await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
     // The send is aborted — nothing reaches the ask agent…
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …and the attachment chip is still there for a retry (not silently lost).
@@ -550,12 +561,14 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
   })
 
   it("extraction failure after the optimistic render removes the ghost turn but keeps the attachment", async () => {
-    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    // Persistent, not `…Once` — the early planner read swallows the first
+    // failure by design; only the real gate's failure aborts the send.
+    extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc("Fraznet Enhancements.pptx")
     await typeAndSend("What does this deck say?")
 
-    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
     // The send is aborted — nothing reaches the ask agent…
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …the optimistic turn is rolled back (no stranded "thinking" ghost): no
