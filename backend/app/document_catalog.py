@@ -525,6 +525,11 @@ def register_document(
                     require_client().table(_TABLE)
                     .update({"provider_workspace_id": provider_workspace_id})
                     .eq("id", existing["id"])
+                    # Redundant by provenance — `existing` came from a
+                    # company-scoped read — and kept anyway, because every
+                    # other write in this module carries the tenant filter and
+                    # a lone `.eq("id", …)` is the shape a later edit copies.
+                    .eq("company_id", company_id)
                     .execute()
                 )
             except Exception:  # noqa: BLE001 — a backfill is never worth a sync

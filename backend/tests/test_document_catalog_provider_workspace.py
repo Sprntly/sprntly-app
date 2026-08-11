@@ -32,7 +32,6 @@ here deletes anything; these pin the invariants that rule will rest on.
 """
 from __future__ import annotations
 
-import inspect
 
 import pytest
 
@@ -116,32 +115,121 @@ def test_the_workspace_id_is_never_the_permalink_subdomain(catalog):
     assert _TEAM_DOMAIN in (row["url"] or ""), "the permalink lost its domain"
 
 
-def test_sync_reads_the_team_id_from_stored_config_not_from_the_api():
-    """The id must come off the connection row this sync already loaded.
+#: A REALISTIC stored Slack connection config. Every value here is something
+#: a careless read could mistake for "the workspace", which is the whole point
+#: — a fixture carrying only the right key cannot catch the wrong read.
+_REAL_CONFIG = {
+    "team": {"id": "T123", "name": "Acme", "domain": "acme"},
+    "bot_user_id": "U999",
+    "channel_id": "C777",
+    "channel_name": "general",
+    "target_type": "channel",
+}
 
-    Sourcing it from `fetch_team_info` (the call that resolves the domain a
-    line earlier) would make the column unwritable whenever Slack is
-    unreachable — for a fact already on disk — and would introduce a second
-    source of truth for a value whose entire purpose is to be compared,
-    field-for-field, against `connections.config.team.id`.
 
-    Read at the SOURCE rather than by stubbing the network: the assertion is
-    about which of two in-scope values is chosen, which a behavioural test
-    passes on for the wrong reason whenever both happen to agree.
+def test_team_id_from_config_reads_the_id_and_not_a_display_name():
+    """THE EXTRACTION ITSELF, pinned behaviourally.
+
+    The earlier version of this guard asserted on `inspect.getsource` — that
+    the extracting line contained "config" and not "fetch_team_info". That is
+    SPELLING, and it was proven false-green: both `.get("name")` and a read of
+    `config["team_domain"]` satisfy it while storing a renameable display name
+    in a column whose only job is to match `connections.config.team.id`.
+
+    The consequence of that miss is not cosmetic. The disconnect rule compares
+    this value against `connections.config.team.id`; a display name matches
+    NOTHING, so every catalogued Slack document classifies as an orphan and a
+    tenant's entire Slack catalog is deleted on the next disconnect.
+
+    So: assert the returned VALUE, against a config that carries all three
+    tempting neighbours.
+    """
+    from app.connectors.slack_sync import team_id_from_config
+
+    assert team_id_from_config(_REAL_CONFIG) == "T123"
+
+
+@pytest.mark.parametrize("wrong", ["Acme", "acme", "U999", "C777", "general"])
+def test_team_id_from_config_returns_none_of_the_neighbouring_values(wrong):
+    """Named individually so a failure says WHICH wrong value was picked."""
+    from app.connectors.slack_sync import team_id_from_config
+
+    assert team_id_from_config(_REAL_CONFIG) != wrong
+
+
+@pytest.mark.parametrize("config", [
+    {},                                   # never connected
+    {"team": {}},                          # team recorded, id absent
+    {"team": {"id": ""}},                  # blank id
+    {"team": {"id": "   "}},               # whitespace-only id
+    {"team": {"name": "Acme", "domain": "acme"}},   # ONLY the wrong keys
+])
+def test_team_id_from_config_yields_none_rather_than_a_wrong_value(config):
+    """No id available => None => the column stays NULL (UNKNOWN).
+
+    The last case is the load-bearing one: a config carrying the display name
+    and domain but no id must produce NOTHING, not a fallback to whichever
+    string happens to be present. A fallback here is precisely how a column
+    becomes populated-but-unmatchable.
+    """
+    from app.connectors.slack_sync import team_id_from_config
+
+    assert team_id_from_config(config) is None
+
+
+def test_sync_slack_hands_the_extractor_the_stored_team_id(
+    isolated_settings, monkeypatch
+):
+    """END TO END THROUGH THE REAL `sync_slack`, because nothing else crosses it.
+
+    Every other test here injects `team_id=` into `register_slack_catalog`
+    directly, so the expression that DERIVES it was never executed under test
+    — which is precisely how the source-string guard went unnoticed. This
+    drives the actual function and asserts on what arrives at the extractor.
+
+    `_slack_team_domain` returns a DIFFERENT string from the stored id, and
+    the config's own `team.name`/`team.domain` differ from it too, so a
+    regression that forwards any neighbour cannot be masked by two values
+    coincidentally agreeing.
     """
     from app.connectors import slack_sync
 
-    src = inspect.getsource(slack_sync.sync_slack)
-    team_id_line = next(
-        (ln for ln in src.splitlines() if "team_id = " in ln), None
+    seen: dict = {}
+    monkeypatch.setattr(
+        slack_sync, "_get_company_token_and_config",
+        lambda cid: ("xoxb-token", _REAL_CONFIG, {"user_id": "u1"}),
     )
-    assert team_id_line, "sync_slack no longer derives a team_id — update this guard"
-    assert "config" in team_id_line, (
-        "team_id is not being read from the stored connection config; if it "
-        "now comes from _slack_team_domain or fetch_team_info, that is the "
-        "defect this test exists for"
+    monkeypatch.setattr(slack_sync, "fetch_users", lambda _t: {})
+    monkeypatch.setattr(
+        slack_sync, "fetch_channels", lambda _t: [{"id": "C1", "name": "general"}]
     )
-    assert "fetch_team_info" not in team_id_line
+    monkeypatch.setattr(
+        slack_sync, "fetch_channel_history", lambda *a, **k: [
+            {"ts": "1754000000.000100", "user": "U1", "text": "hello"}
+        ],
+    )
+    monkeypatch.setattr(slack_sync, "_slack_team_domain", lambda _t: "acme")
+    monkeypatch.setattr(slack_sync, "_update_sync_status", lambda *a, **k: None)
+
+    # The seam. `sync_slack` imports this INSIDE the function, so patching the
+    # module attribute is what the local import will resolve at call time.
+    import app.kg_ingest.slack_extract as se
+
+    monkeypatch.setattr(
+        se, "kickoff_slack_extract",
+        lambda cid, docs, **kw: (seen.update(kw), True)[1],
+    )
+
+    slack_sync.sync_slack("ds-team-id", company_id="co-sync")
+
+    assert seen, "sync_slack never reached the extraction kickoff"
+    assert seen["team_id"] == "T123", (
+        f"the workspace id reaching the extractor was {seen['team_id']!r}. It "
+        "must be config['team']['id'] — not team.name ('Acme'), not "
+        "team.domain / the permalink subdomain ('acme'), not an API result"
+    )
+    assert seen["team_domain"] == "acme"
+    assert seen["team_id"] != seen["team_domain"]
 
 
 # ═════════════ 2. A promoted personal install keeps its catalog ════════════
