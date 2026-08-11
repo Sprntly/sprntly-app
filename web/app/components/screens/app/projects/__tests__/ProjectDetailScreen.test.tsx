@@ -1,0 +1,399 @@
+// @vitest-environment jsdom
+//
+// Tests for the group-chat-centric detail SHELL: the pure `ProjectDetailView`
+// (rail sections, agent member, artifacts/memory/task cards, chat-row
+// active-state + composer swap, a11y) and the `ProjectDetailScreen`
+// container's fetch + 403/404 state machine. Same View/Screen split posture
+// as `ProjectsView`/`ProjectsScreen`'s own test file; all context boundaries
+// mocked, not re-implemented.
+import * as React from "react"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+import { renderToStaticMarkup } from "react-dom/server"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
+
+;(globalThis as typeof globalThis & { React?: typeof React }).React = React
+
+const getMock = vi.fn()
+const artifactsMock = vi.fn()
+const memorySummaryMock = vi.fn()
+const openModalMock = vi.fn()
+
+// `ApiError` is defined INSIDE the factory (self-contained — no outer-scope
+// reference) so vi.mock's hoisting-to-the-top-of-file needs nothing hoisted
+// alongside it; the mocked class is retrieved for test use via a normal
+// (non-type-only) `import { ApiError } from "../../../../../lib/api"` below,
+// which resolves to this same mocked export at runtime.
+vi.mock("../../../../../lib/api", () => {
+  class ApiError extends Error {
+    status: number
+    body: unknown
+    // Matches the real `ApiError(status, body, message?)` signature
+    // (`web/app/lib/api.ts`) so calls in the tests below type-check against
+    // the real class's declaration.
+    constructor(status: number, body: unknown, message?: string) {
+      super(message ?? String(status))
+      this.status = status
+      this.body = body
+    }
+  }
+  return {
+    ApiError,
+    projectsApi: {
+      get: (...a: unknown[]) => getMock(...a),
+      artifacts: (...a: unknown[]) => artifactsMock(...a),
+      memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
+    },
+  }
+})
+vi.mock("../../AppLayout", () => ({
+  AppLayout: ({ children }: { children: React.ReactNode }) =>
+    React.createElement("div", { "data-testid": "app-layout" }, children),
+}))
+vi.mock("../../../../../context/NavigationContext", () => ({
+  useNavigation: () => ({ openModal: openModalMock }),
+}))
+vi.mock("next/link", () => ({
+  default: ({
+    href,
+    children,
+    ...rest
+  }: React.PropsWithChildren<{ href: string } & Record<string, unknown>>) =>
+    React.createElement("a", { href, ...rest }, children),
+}))
+
+import { ProjectDetailView, ProjectDetailScreen, type ProjectDetailViewProps } from "../ProjectDetailScreen"
+// Regular (non-type-only) import: resolves to the mocked `ApiError` above,
+// the SAME class reference the component's `instanceof` checks compare
+// against — required for the 403/404 container tests below.
+import { ApiError } from "../../../../../lib/api"
+import type { ArtifactItem, ProjectDetail, ProjectMemorySummary } from "../../../../../lib/api"
+
+const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
+
+const PROJECT: ProjectDetail = {
+  id: 101,
+  company_id: "c1",
+  workspace_id: "w1",
+  name: "Instant-quote flow",
+  origin: "manual",
+  created_by: "u1",
+  created_at: hoursAgo(48),
+  updated_at: hoursAgo(2),
+  group_chat_id: 55,
+  members: [
+    {
+      kind: "agent",
+      user_id: null,
+      name: "Sprntly",
+      role_label: "Agent coworker · dispatches tasks",
+      status: "working",
+    },
+    {
+      kind: "human",
+      user_id: "u1",
+      name: "David M.",
+      email: "david@example.com",
+      avatar_url: null,
+      job_role: "PM",
+      added_at: hoursAgo(48),
+    },
+    {
+      kind: "human",
+      user_id: "u2",
+      name: "Shristi",
+      email: "shristi@example.com",
+      avatar_url: null,
+      job_role: "Design",
+      added_at: hoursAgo(40),
+    },
+  ],
+}
+
+const ARTIFACTS: ArtifactItem[] = [
+  {
+    type: "prd",
+    id: 1,
+    title: "Instant-quote flow — v3",
+    status: "ready",
+    created_at: hoursAgo(2),
+    source: { brief_id: 1, week_label: null, insight_index: null },
+    open: { brief_id: 1, insight_index: null, prd_id: 1 },
+  } as ArtifactItem,
+  {
+    type: "evidence",
+    id: 2,
+    title: "Xometry call",
+    status: "ready",
+    created_at: hoursAgo(70),
+    source: { brief_id: 1, week_label: null, insight_index: null },
+    open: { brief_id: 1, insight_index: null, evidence_id: 2 },
+  } as ArtifactItem,
+  {
+    type: "evidence",
+    id: 3,
+    title: "Pricing latency benchmark",
+    status: "ready",
+    created_at: hoursAgo(5),
+    source: { brief_id: 1, week_label: null, insight_index: null },
+    open: { brief_id: 1, insight_index: null, evidence_id: 3 },
+  } as ArtifactItem,
+]
+
+const MEMORY: ProjectMemorySummary = {
+  summary_md:
+    "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
+  entry_count: 24,
+  stale: false,
+}
+
+const noop = () => {}
+
+function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDetailViewProps {
+  return {
+    project: PROJECT,
+    artifacts: ARTIFACTS,
+    memory: MEMORY,
+    railCollapsed: false,
+    onToggleRail: noop,
+    activeChat: "group",
+    onSelectChat: noop,
+    onOpenArtifacts: noop,
+    onCreateArtifact: noop,
+    onOpenMemory: noop,
+    onAddMemory: noop,
+    onOpenTasks: noop,
+    onInvite: noop,
+    ...overrides,
+  }
+}
+
+afterEach(() => {
+  cleanup()
+  getMock.mockReset()
+  artifactsMock.mockReset()
+  memorySummaryMock.mockReset()
+  openModalMock.mockReset()
+})
+
+describe("ProjectDetailView — top bar", () => {
+  it("renders the back-link, serif project name, member avatars, and no status pill", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const back = screen.getByTestId("back-to-projects")
+    expect(back.getAttribute("href")).toBe("/projects")
+    expect(screen.getByTestId("project-name").textContent).toContain("Instant-quote flow")
+    expect(screen.getByTestId("topbar-avatars")).toBeTruthy()
+    expect(screen.queryByText(/status/i)).toBeNull()
+    expect(screen.queryByTestId("status-pill")).toBeNull()
+  })
+})
+
+describe("ProjectDetailView — right rail structure", () => {
+  it("renders CHATS / ARTIFACTS / PROJECT / MEMBERS in order, with no Overview card", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const labels = screen
+      .getAllByTestId("rail-section-label")
+      .map((el) => (el.textContent?.trim().match(/^[A-Za-z]+/) ?? [""])[0])
+    expect(labels).toEqual(["Chats", "Artifacts", "Project", "Members"])
+    expect(screen.queryByText("Overview")).toBeNull()
+  })
+
+  it("renders the Sprntly AGENT member row with the green working status, from the virtual member", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const agentRow = screen.getByTestId("member-row-agent")
+    expect(agentRow.textContent).toContain("Sprntly")
+    expect(within(agentRow).getByText("Agent")).toBeTruthy()
+    expect(within(agentRow).getByText("Agent coworker · dispatches tasks")).toBeTruthy()
+    expect(within(agentRow).getByText("working")).toBeTruthy()
+  })
+
+  it("human member rows carry their job_role label", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const rows = screen.getAllByTestId("member-row-human")
+    expect(rows).toHaveLength(2)
+    expect(within(rows[0]).getByText("David M.")).toBeTruthy()
+    expect(within(rows[0]).getByText("PM")).toBeTruthy()
+    expect(within(rows[1]).getByText("Shristi")).toBeTruthy()
+    expect(within(rows[1]).getByText("Design")).toBeTruthy()
+  })
+
+  it("renders one compact card per artifact type present, sourced from the artifacts list, plus a Create-new card", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    expect(screen.getByTestId("artifact-card-prd-sub").textContent).toContain("1 item")
+    expect(screen.getByTestId("artifact-card-evidence-sub").textContent).toContain("2 items")
+    expect(screen.queryByTestId("artifact-card-prototype")).toBeNull()
+    expect(screen.queryByTestId("artifact-card-report")).toBeNull()
+    expect(screen.getByTestId("artifact-create")).toBeTruthy()
+  })
+
+  it("clicking an artifact card's ↗ opens artifacts for that type", () => {
+    const onOpenArtifacts = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts })))
+    fireEvent.click(screen.getByTestId("artifact-card-prd"))
+    expect(onOpenArtifacts).toHaveBeenCalledWith("prd")
+  })
+
+  it("Project-memory card teaser is the summary's first sentence, with the entry count and View all/Add", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const card = screen.getByTestId("memory-card")
+    expect(within(card).getByText(/A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds\./)).toBeTruthy()
+    expect(within(card).getByText("24")).toBeTruthy()
+    expect(screen.getByTestId("memory-view-all").textContent).toContain("24")
+    expect(screen.getByTestId("memory-add")).toBeTruthy()
+  })
+
+  it("clicking View all / Add on the memory card invokes their callbacks", () => {
+    const onOpenMemory = vi.fn()
+    const onAddMemory = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenMemory, onAddMemory })))
+    fireEvent.click(screen.getByTestId("memory-view-all"))
+    fireEvent.click(screen.getByTestId("memory-add"))
+    expect(onOpenMemory).toHaveBeenCalledTimes(1)
+    expect(onAddMemory).toHaveBeenCalledTimes(1)
+  })
+
+  it("Task ledger card carries a Fast-follow badge", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const card = screen.getByTestId("task-ledger-card")
+    expect(within(card).getByTestId("task-ledger-fastfollow").textContent).toContain("Fast-follow")
+  })
+})
+
+describe("ProjectDetailView — state", () => {
+  it("Hide panel / Show panel toggles the rail via railCollapsed", () => {
+    const onToggleRail = vi.fn()
+    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ onToggleRail })))
+    expect(screen.getByTestId("project-rail")).toBeTruthy()
+    fireEvent.click(screen.getByTestId("rail-toggle"))
+    expect(onToggleRail).toHaveBeenCalledTimes(1)
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ railCollapsed: true })))
+    expect(screen.queryByTestId("project-rail")).toBeNull()
+    expect(screen.getByTestId("rail-toggle").textContent).toContain("Show panel")
+  })
+
+  it("selecting the individual CHATS row sets activeChat and marks it active", () => {
+    const onSelectChat = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
+    const groupRow = screen.getByTestId("chat-row-group")
+    const indivRow = screen.getByTestId("chat-row-individual")
+    expect(groupRow.getAttribute("aria-pressed")).toBe("true")
+    expect(indivRow.getAttribute("aria-pressed")).toBe("false")
+    fireEvent.click(indivRow)
+    expect(onSelectChat).toHaveBeenCalledWith("individual")
+  })
+
+  it("the individual chat row renders active when activeChat='individual'", () => {
+    render(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
+    expect(screen.getByTestId("chat-row-individual").getAttribute("aria-pressed")).toBe("true")
+    expect(screen.getByTestId("chat-row-group").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("composer placeholder and note bar swap group ⇆ individual copy", () => {
+    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
+    expect(screen.getByTestId("composer-placeholder").textContent).toContain("Message the team, or @Sprntly to hand it a task")
+    expect(screen.getByTestId("chat-note").textContent).toContain("smart interjection")
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
+    expect(screen.getByTestId("composer-placeholder").textContent).toBe("Message Sprntly…")
+    expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
+  })
+})
+
+describe("ProjectDetailView — accessibility", () => {
+  it("every rail control is a real interactive element with an aria-label on icon-only affordances", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    expect(screen.getByTestId("rail-toggle").tagName).toBe("BUTTON")
+    expect(screen.getByTestId("chat-row-group").tagName).toBe("BUTTON")
+    expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
+    expect(screen.getByTestId("artifact-card-prd").tagName).toBe("BUTTON")
+    expect(screen.getByLabelText("Open PRD artifacts")).toBeTruthy()
+    expect(screen.getByLabelText("Voice message")).toBeTruthy()
+    expect(screen.getByLabelText("Attach file")).toBeTruthy()
+    expect(screen.getByLabelText("Send message")).toBeTruthy()
+    expect(screen.getByLabelText("Invite by email")).toBeTruthy()
+  })
+
+  it("static markup renders (SSR-safe) with no interactive element disabled by default", () => {
+    const html = renderToStaticMarkup(React.createElement(ProjectDetailView, viewProps()))
+    expect(html).toContain("Instant-quote flow")
+    expect(html).not.toContain("disabled")
+  })
+})
+
+describe("ProjectDetailScreen module CSS — tokens only", () => {
+  it("resolves every color/spacing/radius/shadow to a globals.css custom property — no new palette", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    // Only exception: `#fff` for on-accent/on-dark button text — the SAME
+    // exception `ProjectsScreen.module.css`'s `.newBtn` already takes (no
+    // `--on-*`-text token exists for it in globals.css).
+    const found = css.match(/#[0-9A-Fa-f]{3,8}/g) ?? []
+    const disallowed = found.filter((hex) => hex.toLowerCase() !== "#fff")
+    expect(disallowed).toEqual([])
+  })
+
+  it("the artifact-type badge palette in the .tsx matches ArtifactsScreen's real hexes, never the design mockup's purple", () => {
+    const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
+    expect(src).toContain("#DBEAFE")
+    expect(src).toContain("#1E40AF")
+    expect(src).not.toContain("634AB0")
+  })
+})
+
+describe("ProjectDetailScreen source — never touches ChatScreen.tsx", () => {
+  it("contains no import of or reference to ChatScreen", () => {
+    const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
+    expect(src).not.toContain("ChatScreen")
+  })
+})
+
+// ── ProjectDetailScreen — container fetch + membership-gate state machine ──
+describe("ProjectDetailScreen — data fetch", () => {
+  it("fetches project/artifacts/memory for the given id and renders the shell", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
+    expect(getMock).toHaveBeenCalledWith("101")
+    expect(artifactsMock).toHaveBeenCalledWith("101")
+    expect(memorySummaryMock).toHaveBeenCalledWith("101")
+  })
+
+  it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
+    getMock.mockRejectedValue(new ApiError(403, "Not a member of this project"))
+    artifactsMock.mockResolvedValue([])
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-detail-forbidden")).toBeTruthy())
+    expect(screen.getByText("You're not a member of this project")).toBeTruthy()
+  })
+
+  it("renders a graceful 'not found' state on a 404, never a crash", async () => {
+    getMock.mockRejectedValue(new ApiError(404, "Project not found"))
+    artifactsMock.mockResolvedValue([])
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "999" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-detail-not_found")).toBeTruthy())
+    expect(screen.getByText("Project not found")).toBeTruthy()
+  })
+
+  it("invite button opens the shared invite modal mechanics", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("invite-button"))
+    expect(openModalMock).toHaveBeenCalledWith("invite")
+  })
+})

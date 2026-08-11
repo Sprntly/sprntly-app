@@ -5111,6 +5111,59 @@ export type ProjectListItem = {
   memory_count: number
 }
 
+/** A project member row from `GET /v1/projects/{id}` — either a real
+ *  `project_members` row (`kind: "human"`) or the virtual "Sprntly" agent
+ *  member the backend prepends to every response (`kind: "agent"`,
+ *  AD-P6 — never a stored row, always this shape). */
+export type ProjectMember =
+  | {
+      kind: "human"
+      user_id: string
+      name: string | null
+      email: string | null
+      avatar_url: string | null
+      job_role: string | null
+      added_at: string | null
+    }
+  | {
+      kind: "agent"
+      user_id: null
+      name: string
+      role_label: string
+      status: string
+    }
+
+/** `GET /v1/projects/{id}` — the project row plus its member roster
+ *  (human members + the prepended virtual agent member, AD-P6) and the
+ *  project's single group-chat id (`null` until a group chat has been
+ *  created for this project). Membership-gated server-side: a same-tenant
+ *  non-member gets 403, a foreign-tenant project id 404s
+ *  (`ApiError.status`, never a crash). */
+export type ProjectDetail = {
+  id: number
+  company_id: string
+  workspace_id: string
+  name: string
+  origin: "manual" | "prd_auto" | "artifact"
+  created_by: string
+  created_at: string
+  updated_at: string
+  members: ProjectMember[]
+  group_chat_id: number | null
+}
+
+/** `GET /v1/projects/{id}/memory/summary` — the cached synthesized
+ *  "what this project knows" summary, read-only (never triggers an LLM
+ *  call). `summary_md` is `null` until a summary has been generated;
+ *  `entry_count` always reflects the current discrete-entry count. */
+export type ProjectMemorySummary = {
+  project_id?: number
+  summary_md: string | null
+  entry_count: number
+  generated_at?: string
+  stale: boolean
+}
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -5119,4 +5172,19 @@ export const projectsApi = {
   /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`). */
   create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact" }) =>
     api.post<ProjectListItem>("/v1/projects", payload),
+  /** Project detail: members (incl. the virtual agent member) + group-chat
+   *  id. Throws `ApiError` with `.status` 403 (same-tenant non-member) or
+   *  404 (foreign-tenant/absent) — callers must handle both without
+   *  crashing (design-spec AC — membership-gated detail view). */
+  get: (id: number | string) =>
+    api.get<ProjectDetail>(`/v1/projects/${encodeURIComponent(String(id))}`),
+  /** The project's artifacts, in the same unified shape `GET /v1/artifacts`
+   *  returns (AD-P1/AD-P12), filtered to this project's refs. */
+  artifacts: (id: number | string) =>
+    api
+      .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)
+      .then((r) => r.artifacts),
+  /** The cached project-memory summary — read-only, no LLM call. */
+  memorySummary: (id: number | string) =>
+    api.get<ProjectMemorySummary>(`/v1/projects/${encodeURIComponent(String(id))}/memory/summary`),
 }
