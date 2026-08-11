@@ -6,6 +6,23 @@ synthesis over a full window — and until 2026-08-11 they had no live preview:
 `call_digest.answer`. Measured on staging, 76.8s of an 83.6s turn was spent in
 that call with a static spinner on screen the whole time.
 
+THE RULE THE WHOLE CHANGE RESTS ON: **at most ONE generation per turn may
+receive the sink.** `on_delta` is bound to a single
+`app.ask_stream.AnswerFieldExtractor` that is never reset between generations,
+so a second one's tokens are appended to the first's abandoned text and the
+user reads one garbled answer assembled from two. A streamed call must
+therefore be TERMINAL for the turn: if it can fall through on failure, it must
+not receive the sink. That is the whole reason `call_digest._answer_query` and
+the pinned `_answer_voc_report` are deliberately left unstreamed — not a
+preference about which answers deserve a preview.
+
+That rule is enforced here by the `gateway` fixture, which counts the
+generations handed a live sink and asserts the count at TEARDOWN. Every test in
+this file is checked whether or not it thinks to look, and so is every test
+added later. Pinning the RULE is strictly stronger than pinning the two
+instances of it: it does not care what the parameter is spelled, which helper
+it is threaded through, or whether it is passed positionally.
+
 WHY THIS FILE IS ALL BEHAVIOUR AND NO SPELLING. Three earlier versions pinned
 how the code was WRITTEN and every one of them was false-green:
 
@@ -25,33 +42,26 @@ how the code was WRITTEN and every one of them was false-green:
      passing the sink positionally satisfies the substring while the route
      starts streaming again.
 
-The lesson is that a guard which reads source text or an AST is checking
-SPELLING, and every mutation above is a re-spelling. So: stub the gateway,
-drive `qa_agent.answer` down each route with a RECORDING SINK, and assert on
-the TEXT THE CLIENT WOULD HAVE SEEN.
+Every one of those defeats is a re-spelling, and no source-text or AST guard
+survives one. So: stub the gateway, drive `qa_agent.answer` down each route
+with a RECORDING SINK, and assert on the TEXT THE CLIENT WOULD HAVE SEEN.
 
-Three properties are pinned here, all of them observable:
+The routes are driven through `qa_agent.answer` — NOT `call_digest.answer` —
+because the sink was dropped at the qa_agent CALL SITE, and a test that calls
+the callee itself cannot see that.
 
-  * The four routes that reach `call_digest.answer` publish text. They are
-    driven through `qa_agent.answer` — NOT `call_digest.answer` directly —
-    because the sink was dropped at the qa_agent CALL SITE, and a test that
-    calls the callee itself cannot see that.
-  * `call_digest._answer_query` publishes NOTHING. It is followed by
-    `except -> fall through to the report`, so a mid-generation failure runs a
-    SECOND full generation into the same never-reset extractor; streaming both
-    yields one garbled preview out of two coherent answers.
-  * The PINNED `voice-of-customer-report` publishes NOTHING, for the same
-    reason: `_answer_voc_report` returns None on failure and None does not end
-    the turn — control falls through to `_answer_single_shot`.
-
-The stub gateway INVOKES the sink it is handed (see `_stub_gateway`). Without
-that, "the sink received nothing" would pass for a route that forwards the
-sink perfectly, and this file would be false-green a fourth time.
+The stub gateway INVOKES the sink it is handed. Without that, "the sink
+received nothing" would pass for a route that forwards the sink perfectly, and
+this file would be false-green a fourth time.
 
 Decoding fragments is `app.ask_stream`'s own suite; the transport is the
 gateway's.
 """
 from __future__ import annotations
+
+import contextlib
+
+import pytest
 
 import app.call_digest as cd
 import app.call_index as call_index
@@ -92,8 +102,10 @@ class _RecordingSink:
     """The Ask worker's token sink, recording what the client would have seen.
 
     Stands in for `app.ask_stream.AnswerFieldExtractor`, which is the real
-    thing `on_delta` is bound to. Assertions in this file are about `.text` —
-    never about how the sink was passed, spelled or named.
+    thing `on_delta` is bound to — including its defining property, that it is
+    ONE object for the whole turn and is never reset between generations.
+    Assertions in this file are about `.text`, never about how the sink was
+    passed, spelled or named.
     """
 
     def __init__(self):
@@ -107,31 +119,72 @@ class _RecordingSink:
         return "".join(self.fragments)
 
 
-def _stub_gateway(monkeypatch) -> list[str | None]:
-    """One recording gateway for both namespaces; returns the purposes seen.
+class _Gateway:
+    """Recording stand-in for `app.graph.gateway.llm_call`.
+
+    Records every generation's `purpose`, and separately the purposes of the
+    generations that were handed a LIVE sink — the quantity the turn-level
+    invariant is about.
+
+    `raises_on(purpose)` makes that generation stream its fragments and THEN
+    fail. Streaming first is the point: a model that dies after publishing
+    half an answer is the case where a non-terminal streamed path does damage,
+    and a stub that failed before streaming would hide it.
+    """
+
+    def __init__(self):
+        self.purposes: list[str | None] = []
+        self.streamed: list[str | None] = []
+        self._failing: set[str] = set()
+
+    def raises_on(self, purpose: str) -> None:
+        self._failing.add(purpose)
+
+    def __call__(self, **kw):
+        purpose = kw.get("purpose")
+        self.purposes.append(purpose)
+        sink = kw.get("on_delta")
+        if sink is not None:
+            self.streamed.append(purpose)
+            for fragment in _FRAGMENTS:
+                sink(fragment)
+        if purpose in self._failing:
+            raise RuntimeError(f"{purpose}: model died mid-generation")
+        return _Result(_payload())
+
+
+@pytest.fixture
+def gateway(monkeypatch):
+    """The recording gateway, plus the turn-level invariant, checked for every
+    test in this file — including ones written after this comment.
 
     Patched in TWO places on purpose. `call_digest` imports `llm_call` inside
     each function, so it resolves through `app.graph.gateway` at call time;
     `qa_agent` aliased it into its own namespace at import. Patching only one
     leaves a live gateway on the other half of the route under test.
 
-    The stub CALLS the sink it is handed before returning. That is what makes
-    a negative assertion mean something: with a gateway that ignores `on_delta`
-    every "publishes nothing" test would pass no matter how the route is wired.
+    The teardown assertion is the design rule itself, and it is deliberately
+    NOT raised from inside `__call__`: the production ladder is full of
+    `except Exception` handlers that would swallow it and degrade to a
+    fallback, turning a real violation into a green run.
+
+    A test that legitimately drives more than one TURN must reset
+    `gw.streamed` between them — the budget is per turn, not per test.
     """
-    purposes: list[str | None] = []
-
-    def fake_llm_call(**kw):
-        purposes.append(kw.get("purpose"))
-        sink = kw.get("on_delta")
-        if sink is not None:
-            for fragment in _FRAGMENTS:
-                sink(fragment)
-        return _Result(_payload())
-
-    monkeypatch.setattr(gateway_mod, "llm_call", fake_llm_call)
-    monkeypatch.setattr(qa, "llm_call", fake_llm_call)
-    return purposes
+    gw = _Gateway()
+    monkeypatch.setattr(gateway_mod, "llm_call", gw)
+    monkeypatch.setattr(qa, "llm_call", gw)
+    yield gw
+    assert len(gw.streamed) <= 1, (
+        f"{len(gw.streamed)} generations in ONE turn were handed the caller's "
+        f"sink ({gw.streamed}). At most ONE may be. The sink is a single "
+        "AnswerFieldExtractor that is never reset between generations, so the "
+        "second one's tokens are appended to the first's ABANDONED text and "
+        "the user reads one garbled answer assembled from two — and "
+        "token_stream._accum replays it to anyone who reloads. A streamed "
+        "call must be TERMINAL for the turn: if it can fall through on "
+        "failure, it must not receive the sink."
+    )
 
 
 def _stub_live_calls(monkeypatch):
@@ -143,6 +196,14 @@ def _stub_live_calls(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
     monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+
+
+def _stub_kg(monkeypatch):
+    """A populated knowledge graph, so the pinned VoC path runs its generation
+    instead of declining before it (returning None with nothing generated)."""
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    import app.graph.retrieval as retrieval
+    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
 
 
 def _route_voc(monkeypatch):
@@ -164,13 +225,8 @@ _UNPINNED_REPORT_Q = "what are the themes in customer feedback"
 # ── the routes that MUST stream ──────────────────────────────────────────────
 
 
-def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(monkeypatch):
-    """THE route this PR fixes: no pinned skill, routed to VoC, report-shaped.
-
-    Driven through `qa_agent.answer`, because the sink was dropped in
-    `qa_agent` — a test that called `call_digest.answer` itself would pass with
-    the caller handing over nothing at all.
-    """
+def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(gateway, monkeypatch):
+    """THE route this PR fixes: no pinned skill, routed to VoC, report-shaped."""
     # The route, pinned by behaviour rather than by line number: every
     # interceptor ahead of the VoC dispatch declines this phrasing.
     assert sr.is_call_digest(_UNPINNED_REPORT_Q) is False
@@ -178,7 +234,6 @@ def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(monkeypatch)
     assert call_index.is_listing_request(_UNPINNED_REPORT_Q) is False
     assert cd.is_voc_query(_UNPINNED_REPORT_Q) is False  # → the report pass
 
-    purposes = _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     _route_voc(monkeypatch)
     sink = _RecordingSink()
@@ -191,7 +246,7 @@ def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(monkeypatch)
     assert out["_skill_source"] == "call-digest", (
         f"expected the merged digest report, got {out.get('_skill_source')!r} "
         f"— the turn took a different route and this test is not testing what "
-        f"it says it does (purposes seen: {purposes})"
+        f"it says it does (generations: {gateway.purposes})"
     )
     assert sink.text == _STREAMED, (
         "the unpinned voice-of-customer answer published NOTHING to the "
@@ -200,9 +255,11 @@ def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(monkeypatch)
         "this PR exists to fix. Whatever is between qa_agent.answer and the "
         "report llm_call is no longer carrying the caller's sink."
     )
+    # Terminal: the streamed generation IS the answer, nothing ran after it.
+    assert gateway.purposes == ["voc_report"]
 
 
-def test_call_digest_interception_publishes_the_answer_as_it_generates(monkeypatch):
+def test_call_digest_interception_publishes_the_answer_as_it_generates(gateway, monkeypatch):
     """"summarize the customer calls from last week" — the pre-routing
     interception, a different call site from the VoC dispatch above. A sink
     dropped at any ONE site is a route that spins with no preview, so each is
@@ -211,7 +268,6 @@ def test_call_digest_interception_publishes_the_answer_as_it_generates(monkeypat
     assert sr.is_call_digest(question) is True
     assert cd.is_voc_query(question) is False
 
-    _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     sink = _RecordingSink()
 
@@ -223,16 +279,16 @@ def test_call_digest_interception_publishes_the_answer_as_it_generates(monkeypat
     assert sink.text == _STREAMED, (
         f"the call-digest interception published nothing (saw {sink.fragments!r})"
     )
+    assert gateway.purposes == ["voc_report"]
 
 
-def test_bare_voc_report_request_publishes_the_answer_as_it_generates(monkeypatch):
+def test_bare_voc_report_request_publishes_the_answer_as_it_generates(gateway, monkeypatch):
     """"give me a voice of customer report" — the third call site, reached by
     `is_voc_report_request` when a call source is connected."""
     question = "give me a voice of customer report"
     assert sr.is_voc_report_request(question) is True
     assert cd.is_voc_query(question) is False
 
-    _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     sink = _RecordingSink()
 
@@ -244,15 +300,15 @@ def test_bare_voc_report_request_publishes_the_answer_as_it_generates(monkeypatc
     assert sink.text == _STREAMED, (
         f"the bare VoC-report route published nothing (saw {sink.fragments!r})"
     )
+    assert gateway.purposes == ["voc_report"]
 
 
-def test_windowed_call_question_publishes_the_answer_as_it_generates(monkeypatch):
+def test_windowed_call_question_publishes_the_answer_as_it_generates(gateway, monkeypatch):
     """The fourth call site: a question the call INDEX resolves to a window.
 
     Reached with the index stubbed to claim the window, which is what it does
     in production for "what did customers say last Tuesday"-shaped asks.
     """
-    _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     monkeypatch.setattr(
         call_index, "windowed_call_question",
@@ -269,18 +325,14 @@ def test_windowed_call_question_publishes_the_answer_as_it_generates(monkeypatch
     assert sink.text == _STREAMED, (
         f"the windowed-call route published nothing (saw {sink.fragments!r})"
     )
+    assert gateway.purposes == ["voc_report"]
 
 
 # ── the routes that MUST NOT stream ──────────────────────────────────────────
 
 
-def test_query_shaped_voc_publishes_nothing(monkeypatch):
+def test_query_shaped_voc_publishes_nothing(gateway, monkeypatch):
     """`call_digest._answer_query` must stay silent.
-
-    It is followed by `except -> fall through to the report`: a mid-generation
-    failure runs a SECOND full generation into the SAME never-reset extractor,
-    so streaming both publishes the abandoned attempt's partial text and then
-    appends the report's — one garbled preview out of two coherent answers.
 
     The caller hands a sink all the way down (the same sink the report route
     streams with), so this pins the QUERY PATH's own decision, not the absence
@@ -289,7 +341,6 @@ def test_query_shaped_voc_publishes_nothing(monkeypatch):
     question = "what are customers feedback"
     assert cd.is_voc_query(question) is True
 
-    purposes = _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     _route_voc(monkeypatch)
     sink = _RecordingSink()
@@ -300,9 +351,9 @@ def test_query_shaped_voc_publishes_nothing(monkeypatch):
 
     assert out["_skill_source"] == "voc-query", (
         f"expected the query pass, got {out.get('_skill_source')!r} — the turn "
-        f"never reached the path under test (purposes seen: {purposes})"
+        f"never reached the path under test (generations: {gateway.purposes})"
     )
-    assert "voc_query" in purposes  # the generation really did run
+    assert "voc_query" in gateway.purposes  # the generation really did run
     assert sink.fragments == [], (
         f"the query path published {sink.fragments!r} to the client. On failure "
         "it falls through to a second, different generation into the same "
@@ -312,19 +363,14 @@ def test_query_shaped_voc_publishes_nothing(monkeypatch):
     )
 
 
-def test_pinned_voc_report_publishes_nothing(monkeypatch):
+def test_pinned_voc_report_publishes_nothing(gateway, monkeypatch):
     """The PINNED `voice-of-customer-report` (KG-only) must stay silent.
 
     `_answer_voc_report` returns None on failure, and None does NOT end the
-    turn: control falls out of the block into `_answer_single_shot` — a second
-    full generation into the same extractor, which then replays the abandoned
-    text to anyone who reloads. Strictly worse than the spinner it replaced.
+    turn: control falls out of the block into `_answer_single_shot`.
     """
-    purposes = _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
-    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
-    import app.graph.retrieval as retrieval
-    monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
+    _stub_kg(monkeypatch)
     sink = _RecordingSink()
 
     out = qa.answer(
@@ -333,10 +379,10 @@ def test_pinned_voc_report_publishes_nothing(monkeypatch):
     )
 
     assert out["_skill"] == "voice-of-customer-report"
-    assert purposes == ["voc_from_kg"], (
-        f"expected exactly the KG-only generation, saw {purposes} — a second "
-        "purpose means the turn fell through to another answer path and the "
-        "sink assertion below would be measuring the wrong thing"
+    assert gateway.purposes == ["voc_from_kg"], (
+        f"expected exactly the KG-only generation, saw {gateway.purposes} — a "
+        "second purpose means the turn fell through to another answer path and "
+        "the sink assertion below would be measuring the wrong thing"
     )
     assert sink.fragments == [], (
         f"the pinned VoC report published {sink.fragments!r} to the client. It "
@@ -345,13 +391,145 @@ def test_pinned_voc_report_publishes_nothing(monkeypatch):
     )
 
 
+# ── the fall-through branches: where a second generation actually happens ────
+#
+# The tests above pin which routes stream on the HAPPY path. These pin the rule
+# that makes streaming safe at all, on the paths where a turn really does run a
+# second generation. Each forces the first generation to publish fragments and
+# THEN fail, which is the only case where a non-terminal streamed path does
+# damage — a stub that failed before streaming would hide exactly the defect.
+
+
+def test_a_failed_pinned_voc_generation_does_not_stream_twice(gateway, monkeypatch):
+    """FIRST GENERATION RETURNS NONE, and None does not end the turn.
+
+    The documented hazard, executed end to end: `_answer_voc_report`'s
+    generation dies, it returns None, and control falls through to
+    `_answer_single_shot` — a SECOND full generation into the SAME extractor.
+    Only the generation that actually answers may reach the client.
+    """
+    gateway.raises_on("voc_from_kg")
+    _stub_live_calls(monkeypatch)
+    _stub_kg(monkeypatch)
+    sink = _RecordingSink()
+
+    out = qa.answer(
+        enterprise_id="ent", question=_UNPINNED_REPORT_Q, dataset="acme",
+        pinned_skill="voice-of-customer-report", on_delta=sink,
+    )
+
+    # The fall-through really happened — otherwise this test proves nothing.
+    assert gateway.purposes == ["voc_from_kg", "skill_answer"], (
+        f"expected the KG generation to fail and the turn to fall through to "
+        f"the single-shot answer, saw {gateway.purposes}"
+    )
+    assert gateway.streamed == ["skill_answer"], (
+        f"the abandoned KG generation streamed to the client ({gateway.streamed}). "
+        "It returned None and the turn carried on, so its partial text is now "
+        "sitting in the extractor with the real answer appended to it."
+    )
+    assert sink.text == _STREAMED, (
+        f"the client saw {sink.text!r} — one turn must publish ONE answer's "
+        f"worth of text, not an abandoned attempt plus the real one"
+    )
+    assert out["answer"]
+
+
+def test_a_failed_query_generation_does_not_stream_twice(gateway, monkeypatch):
+    """FIRST GENERATION RAISES, and the turn continues to the report pass.
+
+    `_answer_query` fails mid-generation and `call_digest.answer` degrades to
+    the full report — a second generation, which DOES stream. If the query
+    pass had also streamed, the user would read the abandoned attempt with the
+    report appended to it.
+    """
+    gateway.raises_on("voc_query")
+    _stub_live_calls(monkeypatch)
+    _route_voc(monkeypatch)
+    sink = _RecordingSink()
+
+    out = qa.answer(
+        enterprise_id="ent", question="what are customers feedback",
+        dataset="acme", on_delta=sink,
+    )
+
+    assert gateway.purposes == ["voc_query", "voc_report"], (
+        f"expected the query pass to fail and degrade to the report, saw "
+        f"{gateway.purposes}"
+    )
+    assert gateway.streamed == ["voc_report"], (
+        f"the abandoned query generation streamed to the client "
+        f"({gateway.streamed}) before the report replaced it"
+    )
+    assert sink.text == _STREAMED
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_failed_report_generation_ends_the_turn(gateway, monkeypatch):
+    """The streamed route must be TERMINAL — that is what licenses streaming it.
+
+    Its generation dies mid-answer; the digest returns its own error payload
+    and the turn STOPS. If it instead fell through to another answer path, the
+    partial text already on screen would be joined by a second generation's.
+    """
+    gateway.raises_on("voc_report")
+    _stub_live_calls(monkeypatch)
+    _route_voc(monkeypatch)
+    sink = _RecordingSink()
+
+    out = qa.answer(
+        enterprise_id="ent", question=_UNPINNED_REPORT_Q, dataset="acme",
+        on_delta=sink,
+    )
+
+    assert gateway.purposes == ["voc_report"], (
+        f"a generation ran after the streamed report failed ({gateway.purposes}) "
+        "— the streamed route is no longer terminal, so the abandoned partial "
+        "answer on screen is about to have a second one appended to it"
+    )
+    assert "error" in out["answer"].lower()
+    assert out["_skill_source"] == "call-digest"
+
+
+def test_a_failure_before_any_generation_still_answers_once(gateway, monkeypatch):
+    """The fetch itself explodes, before anything has been published.
+
+    Nothing has reached the client yet, so a fall-through here would be
+    harmless — what must still hold is the budget: whatever ends up answering
+    the turn, exactly one generation may stream. Pins the invariant on the
+    branch where the digest raises OUT of `call_digest.answer` instead of
+    degrading inside it.
+    """
+    def _boom(*a, **k):
+        raise RuntimeError("fireflies unreachable")
+
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(cd, "build_corpus", _boom)
+    _route_voc(monkeypatch)
+    sink = _RecordingSink()
+
+    # Whether the turn dies or degrades is the ladder's business; the sink
+    # budget is not, and it holds either way.
+    with contextlib.suppress(Exception):
+        qa.answer(
+            enterprise_id="ent", question=_UNPINNED_REPORT_Q, dataset="acme",
+            on_delta=sink,
+        )
+
+    assert len(gateway.streamed) <= 1
+    assert sink.text in ("", _STREAMED), (
+        f"the client saw {sink.text!r} — a turn publishes one answer's worth "
+        "of text or none, never two"
+    )
+
+
 # ── callers that pass no sink at all ─────────────────────────────────────────
 
 
-def test_a_caller_without_a_sink_still_gets_the_answer(monkeypatch):
+def test_a_caller_without_a_sink_still_gets_the_answer(gateway, monkeypatch):
     """`on_delta` is optional and advisory: omitting it must behave exactly as
     before the streaming change, on the same route that streams."""
-    purposes = _stub_gateway(monkeypatch)
     _stub_live_calls(monkeypatch)
     _route_voc(monkeypatch)
 
@@ -361,7 +539,8 @@ def test_a_caller_without_a_sink_still_gets_the_answer(monkeypatch):
 
     assert out["_skill_source"] == "call-digest"
     assert out["answer"]
-    assert "voc_report" in purposes
+    assert gateway.purposes == ["voc_report"]
+    assert gateway.streamed == []
 
 
 def test_call_digest_answer_without_a_sink_is_unchanged(monkeypatch):
