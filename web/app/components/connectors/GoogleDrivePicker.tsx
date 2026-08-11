@@ -345,6 +345,17 @@ export function mergePickedFiles(
 // Viewer), then clicks Scan — no OAuth Picker. Reuses DriveTreeChildren so the
 // scanned tree looks identical to the OAuth/drive.readonly tree.
 
+/** Preview of a long service-account email: first `n` characters + an
+ * ellipsis. The full address is long and only ever needs copying, not
+ * reading in full — so the visible text is a short preview while the full
+ * string stays available via the copy payload and a `title` attribute.
+ * Defensive: an email already at or under the preview length renders whole,
+ * with no ellipsis. */
+export function previewEmail(email: string, n = 10): string {
+  if (email.length <= n) return email
+  return `${email.slice(0, n)}…`
+}
+
 export type GoogleDriveServiceAccountViewProps = {
   email: string | null
   sharedRoots: GoogleDriveTreeNode[]
@@ -387,11 +398,18 @@ export function GoogleDriveServiceAccountView({
   return (
     <div className="conn-drive-setup">
       <p className="conn-drive-selected-label">
-        Share a Google Drive folder with this address as Viewer, then click Scan.
+        Copy the email address below. Go to your Google Drive and share your
+        Google Drive with the email below.
       </p>
+      <p className="conn-drive-selected-label">
+        Give it read-only access (not edit access).
+      </p>
+      <span className="conn-drive-selected-label">Email</span>
       <div className="conn-drive-file-list">
         <div className="conn-drive-file">
-          <span className="conn-drive-file-name">{email}</span>
+          <span className="conn-drive-file-name" title={email}>
+            {previewEmail(email)}
+          </span>
           <button
             type="button"
             className="conn-drive-file-remove"
@@ -699,33 +717,21 @@ export function GoogleDrivePicker({
     [onSaved],
   )
 
-  // Service-account mode shows BOTH routes: the individual-file OAuth Picker
-  // (drive.file, exactly like main) AND the SA share panel (folders shared with
-  // the SA email). OAuth mode shows the Picker only, unchanged.
+  // Service-account mode shows the SA share panel only: folders shared with
+  // the SA email are the sole route in this mode. OAuth mode shows the
+  // individual-file Picker only, unchanged.
   if (saMode) {
     return (
-      <>
-        <GoogleDrivePickerView
-          savedFiles={savedFiles ?? []}
-          configured={configured}
-          busy={busy}
-          error={error}
-          onAddFiles={() => void handleAddFiles()}
-          onRemoveFile={(id) => void handleRemoveFile(id)}
-          removingId={removingId}
-          folderContents={folderContents}
-        />
-        <GoogleDriveServiceAccountView
-          email={saEmail}
-          sharedRoots={saRoots}
-          folderContents={saTree}
-          scanning={scanning}
-          error={saError}
-          copied={copied}
-          onCopy={handleCopyEmail}
-          onScan={() => void handleScan()}
-        />
-      </>
+      <GoogleDriveServiceAccountView
+        email={saEmail}
+        sharedRoots={saRoots}
+        folderContents={saTree}
+        scanning={scanning}
+        error={saError}
+        copied={copied}
+        onCopy={handleCopyEmail}
+        onScan={() => void handleScan()}
+      />
     )
   }
 
