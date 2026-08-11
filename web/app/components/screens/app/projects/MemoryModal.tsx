@@ -28,6 +28,7 @@ import {
   type ProjectMemorySummary,
 } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
+import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./MemoryModal.module.css"
 
 /** Same compact relative-time bucketing every other Projects surface
@@ -258,13 +259,15 @@ export function MemoryModalView({
     }
   }, [open])
 
+  // Document-level listener — reliable Escape-to-close regardless of where
+  // focus actually is (the panel's own onKeyDown below only ever handles
+  // Tab-wrap now; see useEscapeToClose.ts for why). Escape always closes
+  // the whole modal, including while an entry is mid-edit — matches this
+  // handler's existing intent, not a new sub-state-first behavior.
+  useEscapeToClose(open, onClose)
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        onClose()
-        return
-      }
       if (e.key !== "Tab") return
       const focusables = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
@@ -283,7 +286,7 @@ export function MemoryModalView({
         first.focus()
       }
     },
-    [onClose],
+    [],
   )
 
   if (!open) return null

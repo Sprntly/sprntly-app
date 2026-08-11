@@ -39,6 +39,7 @@ import { projectPath } from "../../../../lib/routes"
 import { artifactsApi, projectsApi, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import type { InviteRole } from "../../../../lib/teamApi"
 import { IconClose } from "../../../shared/app-icons"
+import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./CreateProjectModal.module.css"
 
 export type CreateTab = "manual" | "artifact" | "auto"
@@ -136,13 +137,13 @@ export function CreateProjectModalView({
     }
   }, [open])
 
+  // Document-level listener — reliable Escape-to-close regardless of where
+  // focus actually is (the panel's own onKeyDown below only ever handles
+  // Tab-wrap now; see useEscapeToClose.ts for why).
+  useEscapeToClose(open, onCancel)
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        onCancel()
-        return
-      }
       if (e.key !== "Tab") return
       const focusables = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
@@ -161,7 +162,7 @@ export function CreateProjectModalView({
         first.focus()
       }
     },
-    [onCancel],
+    [],
   )
 
   if (!open) return null

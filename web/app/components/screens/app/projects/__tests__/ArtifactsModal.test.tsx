@@ -180,9 +180,55 @@ describe("ArtifactsModalView — a11y mechanics", () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it("closes on Escape dispatched at the document level — not routed through the panel's own onKeyDown", () => {
+    const onClose = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onClose })))
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it("renders nothing when closed", () => {
     render(React.createElement(ArtifactsModalView, viewProps({ open: false })))
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+})
+
+describe("ArtifactsModalView — Tab focus-trap wraps within the dialog (regression)", () => {
+  it("Tab from the last focusable wraps to the first; Shift+Tab from the first wraps to the last", () => {
+    render(React.createElement(ArtifactsModalView, viewProps()))
+    const dialog = screen.getByRole("dialog")
+    const first = screen.getByTestId("artifacts-modal-close")
+    const last = screen.getByTestId(`artifacts-row-${ARTIFACTS[2].type}-${ARTIFACTS[2].id}`)
+
+    last.focus()
+    expect(document.activeElement).toBe(last)
+    fireEvent.keyDown(dialog, { key: "Tab" })
+    expect(document.activeElement).toBe(first)
+
+    first.focus()
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+})
+
+describe("ArtifactsModalView — Escape listener cleanup (no leaked listener)", () => {
+  it("does not call onClose for Escape dispatched after the modal has closed", () => {
+    const onClose = vi.fn()
+    const { rerender } = render(React.createElement(ArtifactsModalView, viewProps({ onClose })))
+    rerender(React.createElement(ArtifactsModalView, viewProps({ open: false, onClose })))
+    onClose.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it("does not call onClose for Escape dispatched after the modal has unmounted", () => {
+    const onClose = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onClose })))
+    cleanup()
+    onClose.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).not.toHaveBeenCalled()
   })
 })
 

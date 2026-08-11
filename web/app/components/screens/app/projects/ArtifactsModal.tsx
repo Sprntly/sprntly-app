@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ApiError, projectsApi, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
+import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./ArtifactsModal.module.css"
 
 type ArtifactFilter = "all" | ProjectArtifactType
@@ -195,13 +196,13 @@ export function ArtifactsModalView({
     }
   }, [open])
 
+  // Document-level listener — reliable Escape-to-close regardless of where
+  // focus actually is (the panel's own onKeyDown below only ever handles
+  // Tab-wrap now; see useEscapeToClose.ts for why).
+  useEscapeToClose(open, onClose)
+
   const onKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === "Escape") {
-        e.stopPropagation()
-        onClose()
-        return
-      }
       if (e.key !== "Tab") return
       const focusables = Array.from(
         dialogRef.current?.querySelectorAll<HTMLElement>(
@@ -220,7 +221,7 @@ export function ArtifactsModalView({
         first.focus()
       }
     },
-    [onClose],
+    [],
   )
 
   if (!open) return null

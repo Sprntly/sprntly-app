@@ -276,6 +276,13 @@ describe("CreateProjectModalView — a11y + cancel (AC7/AC8/AC12)", () => {
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 
+  it("closes on Escape dispatched at the document level — not routed through the panel's own onKeyDown", () => {
+    const onCancel = vi.fn()
+    render(React.createElement(CreateProjectModalView, viewProps({ onCancel })))
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
   it("focus lands inside the dialog on open, and renders nothing when closed", () => {
     render(React.createElement(CreateProjectModalView, viewProps()))
     expect(document.activeElement).not.toBe(document.body)
@@ -292,6 +299,45 @@ describe("CreateProjectModalView — a11y + cancel (AC7/AC8/AC12)", () => {
     const tabs = within(tablist).getAllByRole("tab")
     expect(tabs).toHaveLength(3)
     for (const t of tabs) expect(t.tagName).toBe("BUTTON")
+  })
+})
+
+describe("CreateProjectModalView — Tab focus-trap wraps within the dialog (regression)", () => {
+  it("Tab from the last focusable wraps to the first; Shift+Tab from the first wraps to the last", () => {
+    render(React.createElement(CreateProjectModalView, viewProps()))
+    const dialog = screen.getByRole("dialog")
+    const first = screen.getByTestId("create-project-close")
+    const last = screen.getByTestId("create-project-cancel")
+
+    last.focus()
+    expect(document.activeElement).toBe(last)
+    fireEvent.keyDown(dialog, { key: "Tab" })
+    expect(document.activeElement).toBe(first)
+
+    first.focus()
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+})
+
+describe("CreateProjectModalView — Escape listener cleanup (no leaked listener)", () => {
+  it("does not call onCancel for Escape dispatched after the modal has closed", () => {
+    const onCancel = vi.fn()
+    const { rerender } = render(React.createElement(CreateProjectModalView, viewProps({ onCancel })))
+    rerender(React.createElement(CreateProjectModalView, viewProps({ open: false, onCancel })))
+    onCancel.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onCancel).not.toHaveBeenCalled()
+  })
+
+  it("does not call onCancel for Escape dispatched after the modal has unmounted", () => {
+    const onCancel = vi.fn()
+    render(React.createElement(CreateProjectModalView, viewProps({ onCancel })))
+    cleanup()
+    onCancel.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onCancel).not.toHaveBeenCalled()
   })
 })
 

@@ -219,6 +219,20 @@ describe("MemoryModalView — a11y mechanics", () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it("closes on Escape dispatched at the document level — not routed through the panel's own onKeyDown", () => {
+    const onClose = vi.fn()
+    render(React.createElement(MemoryModalView, viewProps({ onClose })))
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it("Escape closes the whole modal even mid-edit, matching the existing handler's intent (not a new sub-state-first behavior)", () => {
+    const onClose = vi.fn()
+    render(React.createElement(MemoryModalView, viewProps({ onClose, editingId: USER_ENTRY.id })))
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
   it("focus lands inside the dialog on open, and the close button is keyboard-reachable", () => {
     render(React.createElement(MemoryModalView, viewProps()))
     expect(document.activeElement).not.toBe(document.body)
@@ -228,6 +242,45 @@ describe("MemoryModalView — a11y mechanics", () => {
   it("renders nothing when closed", () => {
     render(React.createElement(MemoryModalView, viewProps({ open: false })))
     expect(screen.queryByRole("dialog")).toBeNull()
+  })
+})
+
+describe("MemoryModalView — Tab focus-trap wraps within the dialog (regression)", () => {
+  it("Tab from the last focusable wraps to the first; Shift+Tab from the first wraps to the last", () => {
+    render(React.createElement(MemoryModalView, viewProps()))
+    const dialog = screen.getByRole("dialog")
+    const first = screen.getByTestId("memory-modal-close")
+    const last = screen.getByTestId(`memory-remove-${AGENT_ENTRY.id}`)
+
+    last.focus()
+    expect(document.activeElement).toBe(last)
+    fireEvent.keyDown(dialog, { key: "Tab" })
+    expect(document.activeElement).toBe(first)
+
+    first.focus()
+    expect(document.activeElement).toBe(first)
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true })
+    expect(document.activeElement).toBe(last)
+  })
+})
+
+describe("MemoryModalView — Escape listener cleanup (no leaked listener)", () => {
+  it("does not call onClose for Escape dispatched after the modal has closed", () => {
+    const onClose = vi.fn()
+    const { rerender } = render(React.createElement(MemoryModalView, viewProps({ onClose })))
+    rerender(React.createElement(MemoryModalView, viewProps({ open: false, onClose })))
+    onClose.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it("does not call onClose for Escape dispatched after the modal has unmounted", () => {
+    const onClose = vi.fn()
+    render(React.createElement(MemoryModalView, viewProps({ onClose })))
+    cleanup()
+    onClose.mockClear()
+    fireEvent.keyDown(document, { key: "Escape" })
+    expect(onClose).not.toHaveBeenCalled()
   })
 })
 
