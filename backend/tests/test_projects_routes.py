@@ -332,6 +332,131 @@ def test_add_member_unknown_email_404(isolated_settings, monkeypatch):
     assert r.status_code == 404
 
 
+# ── Remove member (WAVE INVARIANT: gated on _require_project_member, same
+# as every other members/memory/group route) ───────────────────────────────
+
+
+def test_remove_member_by_another_member_succeeds(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Growing team"}).json()
+
+    from app.db import projects as projects_db
+    from app.db.client import require_client
+
+    other_id, other_headers = seed_same_tenant_non_member(ctx)
+    projects_db.add_member(project["id"], other_id)
+
+    r = ctx.client.delete(f"/v1/projects/{project['id']}/members/{other_id}")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"removed": True}
+
+    rows = (
+        require_client()
+        .table("project_members")
+        .select("user_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert [row["user_id"] for row in rows] == [ctx.user_id]
+
+    # AC1: membership is re-checked per-request — the removed user is now a
+    # same-tenant non-member and gets 403, not a stale 200.
+    r2 = ctx.client.get(f"/v1/projects/{project['id']}", headers=other_headers)
+    assert r2.status_code == 403
+
+
+def test_remove_member_creator_cannot_be_removed(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Solo→team"}).json()
+
+    from app.db import projects as projects_db
+    from app.db.client import require_client
+
+    other_id, other_headers = seed_same_tenant_non_member(ctx)
+    projects_db.add_member(project["id"], other_id)
+
+    # Another member (not the creator) tries to remove the creator.
+    r = ctx.client.delete(
+        f"/v1/projects/{project['id']}/members/{ctx.user_id}", headers=other_headers
+    )
+    assert r.status_code == 409
+
+    rows = (
+        require_client()
+        .table("project_members")
+        .select("user_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert ctx.user_id in [row["user_id"] for row in rows]
+
+
+def test_remove_member_self_removal_rejected(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "No leaving yet"}).json()
+
+    from app.db.client import require_client
+
+    r = ctx.client.delete(f"/v1/projects/{project['id']}/members/{ctx.user_id}")
+    assert r.status_code == 400
+
+    rows = (
+        require_client()
+        .table("project_members")
+        .select("user_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert ctx.user_id in [row["user_id"] for row in rows]
+
+
+def test_remove_member_non_member_target_404(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Just the creator"}).json()
+
+    r = ctx.client.delete(f"/v1/projects/{project['id']}/members/never-added")
+    assert r.status_code == 404
+
+
+def test_remove_member_non_member_caller_403(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Gated"}).json()
+    _, non_member_headers = seed_same_tenant_non_member(ctx)
+
+    r = ctx.client.delete(
+        f"/v1/projects/{project['id']}/members/{ctx.user_id}", headers=non_member_headers
+    )
+    assert r.status_code == 403
+
+
+def test_remove_member_foreign_tenant_project_404(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    foreign = _seed_foreign_project()
+
+    r = ctx.client.delete(f"/v1/projects/{foreign['id']}/members/{ctx.user_id}")
+    assert r.status_code == 404
+
+
+def test_member_removed_log_carries_only_identifiers(isolated_settings, monkeypatch, caplog):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Logged team"}).json()
+
+    from app.db import projects as projects_db
+
+    other_id, _ = seed_same_tenant_non_member(ctx)
+    projects_db.add_member(project["id"], other_id)
+
+    with caplog.at_level(logging.INFO, logger="app.routes.projects"):
+        r = ctx.client.delete(f"/v1/projects/{project['id']}/members/{other_id}")
+    assert r.status_code == 200
+    lines = [rec.getMessage() for rec in caplog.records]
+    expected = f"member_removed project_id={project['id']} target_user_id={other_id} by={ctx.user_id}"
+    assert any(line == expected for line in lines)
+
+
 # ── Observability ────────────────────────────────────────────────────────
 
 

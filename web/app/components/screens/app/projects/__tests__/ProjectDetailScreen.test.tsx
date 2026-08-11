@@ -19,6 +19,13 @@ const getMock = vi.fn()
 const artifactsMock = vi.fn()
 const memorySummaryMock = vi.fn()
 const openModalMock = vi.fn()
+const removeMemberMock = vi.fn()
+// Default: a viewer who is neither PROJECT's creator ("u1") nor either
+// listed human member — lets the container-level tests exercise the
+// "removable" branch (u2/Shristi) without also tripping the self-removal
+// suppression. Individual tests override this to prove the self-suppression
+// branch (`authMock.mockReturnValue({ kind: "authed", user: { id: "u2" } })`).
+const authMock = vi.fn(() => ({ kind: "authed" as const, user: { id: "current-viewer" } }))
 
 // `ApiError` is defined INSIDE the factory (self-contained — no outer-scope
 // reference) so vi.mock's hoisting-to-the-top-of-file needs nothing hoisted
@@ -44,9 +51,13 @@ vi.mock("../../../../../lib/api", () => {
       get: (...a: unknown[]) => getMock(...a),
       artifacts: (...a: unknown[]) => artifactsMock(...a),
       memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
+      removeMember: (...a: unknown[]) => removeMemberMock(...a),
     },
   }
 })
+vi.mock("../../../../../lib/auth", () => ({
+  useAuth: () => authMock(),
+}))
 vi.mock("../../AppLayout", () => ({
   AppLayout: ({ children }: { children: React.ReactNode }) =>
     React.createElement("div", { "data-testid": "app-layout" }, children),
@@ -182,6 +193,8 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onAddMemory: noop,
     onOpenTasks: noop,
     onInvite: noop,
+    currentUserId: "current-viewer",
+    onRemoveMember: noop,
     ...overrides,
   }
 }
@@ -192,6 +205,9 @@ afterEach(() => {
   artifactsMock.mockReset()
   memorySummaryMock.mockReset()
   openModalMock.mockReset()
+  removeMemberMock.mockReset()
+  authMock.mockReset()
+  authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })
 
 describe("ProjectDetailView — top bar", () => {
@@ -233,6 +249,31 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(within(rows[0]).getByText("PM")).toBeTruthy()
     expect(within(rows[1]).getByText("Shristi")).toBeTruthy()
     expect(within(rows[1]).getByText("Design")).toBeTruthy()
+  })
+
+  it("renders the Remove control only on the removable row — not the creator, not the caller, not the agent", () => {
+    // PROJECT: created_by="u1" (David M.), members u1/u2. currentUserId
+    // defaults ("current-viewer") to neither, so only u2 (Shristi) is
+    // removable — proves the creator suppression independently of self.
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const rows = screen.getAllByTestId("member-row-human")
+    expect(within(rows[0]).queryByTestId("member-remove")).toBeNull() // David M. — creator
+    expect(within(rows[1]).getByTestId("member-remove")).toBeTruthy() // Shristi — removable
+    expect(within(screen.getByTestId("member-row-agent")).queryByTestId("member-remove")).toBeNull()
+  })
+
+  it("withholds the Remove control on the caller's OWN row, even when not the creator", () => {
+    render(React.createElement(ProjectDetailView, viewProps({ currentUserId: "u2" })))
+    expect(screen.queryAllByTestId("member-remove")).toHaveLength(0)
+  })
+
+  it("clicking Remove invokes onRemoveMember with that human member", () => {
+    const onRemoveMember = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onRemoveMember })))
+    const rows = screen.getAllByTestId("member-row-human")
+    fireEvent.click(within(rows[1]).getByTestId("member-remove"))
+    expect(onRemoveMember).toHaveBeenCalledTimes(1)
+    expect(onRemoveMember.mock.calls[0][0]).toMatchObject({ user_id: "u2", name: "Shristi" })
   })
 
   it("renders one compact card per artifact type present, sourced from the artifacts list, plus a Create-new card", () => {
@@ -421,5 +462,79 @@ describe("ProjectDetailScreen — data fetch", () => {
     await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
     fireEvent.click(screen.getByTestId("invite-button"))
     expect(openModalMock).toHaveBeenCalledWith("invite")
+  })
+
+  // ── Remove member: confirm → DELETE call → roster refetch (AC3) ──
+  describe("removing a member", () => {
+    const PROJECT_AFTER_REMOVE = { ...PROJECT, members: PROJECT.members.filter((m) => m.user_id !== "u2") }
+
+    it("Remove → confirm calls removeMember and refetches the roster in place (no full reload)", async () => {
+      getMock.mockResolvedValueOnce(PROJECT).mockResolvedValueOnce(PROJECT_AFTER_REMOVE)
+      artifactsMock.mockResolvedValue(ARTIFACTS)
+      memorySummaryMock.mockResolvedValue(MEMORY)
+      removeMemberMock.mockResolvedValue({ removed: true })
+      await act(async () => {
+        render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+      })
+      await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
+
+      const rows = screen.getAllByTestId("member-row-human")
+      fireEvent.click(within(rows[1]).getByTestId("member-remove")) // Shristi (u2)
+
+      // The confirm dialog opens, naming the member, and does NOT call the
+      // API until confirmed.
+      expect(screen.getByText("Remove Shristi?")).toBeTruthy()
+      expect(removeMemberMock).not.toHaveBeenCalled()
+
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }))
+
+      await waitFor(() => expect(removeMemberMock).toHaveBeenCalledWith("101", "u2"))
+      // Refetches the project (roster) — never re-enters the full-screen
+      // loading state (AC3 "without a full reload"): the shell/thread host
+      // stays mounted throughout.
+      expect(screen.getByTestId("main-thread-stub")).toBeTruthy()
+      await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(1))
+      expect(screen.queryByText("Shristi")).toBeNull()
+      expect(getMock).toHaveBeenCalledTimes(2)
+    })
+
+    it("Cancel closes the dialog without calling removeMember", async () => {
+      getMock.mockResolvedValue(PROJECT)
+      artifactsMock.mockResolvedValue(ARTIFACTS)
+      memorySummaryMock.mockResolvedValue(MEMORY)
+      await act(async () => {
+        render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+      })
+      await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
+      const rows = screen.getAllByTestId("member-row-human")
+      fireEvent.click(within(rows[1]).getByTestId("member-remove"))
+      expect(screen.getByText("Remove Shristi?")).toBeTruthy()
+
+      fireEvent.click(screen.getByRole("button", { name: "Cancel" }))
+      expect(screen.queryByText("Remove Shristi?")).toBeNull()
+      expect(removeMemberMock).not.toHaveBeenCalled()
+    })
+
+    it("a failed removal shows the error inline and keeps the dialog open, roster unchanged", async () => {
+      getMock.mockResolvedValue(PROJECT)
+      artifactsMock.mockResolvedValue(ARTIFACTS)
+      memorySummaryMock.mockResolvedValue(MEMORY)
+      removeMemberMock.mockRejectedValue(
+        new ApiError(409, { detail: "The project creator can't be removed" }, "The project creator can't be removed"),
+      )
+      await act(async () => {
+        render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+      })
+      await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
+      const rows = screen.getAllByTestId("member-row-human")
+      fireEvent.click(within(rows[1]).getByTestId("member-remove"))
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }))
+
+      await waitFor(() => expect(removeMemberMock).toHaveBeenCalled())
+      await waitFor(() => expect(screen.getByText("The project creator can't be removed")).toBeTruthy())
+      // Only the initial fetch happened — a failed removal does not refetch.
+      expect(getMock).toHaveBeenCalledTimes(1)
+      expect(screen.getAllByTestId("member-row-human")).toHaveLength(2)
+    })
   })
 })

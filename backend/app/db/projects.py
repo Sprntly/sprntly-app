@@ -237,6 +237,35 @@ def add_member(project_id: int, user_id: str) -> dict:
 
 
 @retry_on_disconnect
+def remove_member(project_id: int, target_user_id: str) -> bool:
+    """Delete `target_user_id`'s `project_members` row for this project and
+    touch the project's `updated_at` (mirrors `add_member`'s mutation
+    contract — every project mutation touches it, per the recency ordering
+    `list_projects_for_workspace` relies on). Returns whether a row was
+    actually removed: False when the target wasn't a member, which the
+    route turns into 404 (same not-found posture as `delete_memory`).
+
+    Callers (the route) are responsible for the creator-can't-be-removed
+    and no-self-removal guards BEFORE calling this — this helper only
+    performs the delete once those checks have passed."""
+    client = require_client()
+    resp = (
+        client.table("project_members")
+        .delete()
+        .eq("project_id", project_id)
+        .eq("user_id", target_user_id)
+        .execute()
+    )
+    # Mirrors `delete_entry`'s existence check (`project_memory_entries.py`):
+    # real PostgREST reports `count`, the fake test client reports `data` —
+    # prefer whichever is populated.
+    removed = bool(resp.count) if resp.count is not None else bool(resp.data)
+    if removed:
+        client.table("projects").update({"updated_at": utc_now()}).eq("id", project_id).execute()
+    return removed
+
+
+@retry_on_disconnect
 def list_members(project_id: int) -> list[dict]:
     """Human members of this project, enriched with profile display data
     (mirrors `app.db.team.list_company_members`'s profile-join shape).

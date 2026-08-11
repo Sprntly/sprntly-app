@@ -339,6 +339,97 @@ def test_add_member_roundtrip(client, fixture_ids, project_ids, sb):
     assert [m["user_id"] for m in members] == [fixture_ids["user_id"]]
 
 
+def test_remove_member_roundtrip_and_403_after_removal(
+    client, non_member_client, fixture_ids, project_ids, sb
+):
+    """AC1/AC4 — real Postgres round-trip: add the second real account as a
+    member, remove them through the endpoint, confirm the row is actually
+    gone, and confirm membership is re-checked per-request (the removed
+    account 403s on their very next request, not a stale 200)."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live remove-member {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    sb.table("project_members").insert(
+        {"project_id": project["id"], "user_id": fixture_ids["non_member_user_id"]}
+    ).execute()
+    assert non_member_client.get(f"/v1/projects/{project['id']}").status_code == 200
+
+    r_remove = client.delete(
+        f"/v1/projects/{project['id']}/members/{fixture_ids['non_member_user_id']}"
+    )
+    assert r_remove.status_code == 200, r_remove.text
+    assert r_remove.json() == {"removed": True}
+
+    rows = (
+        sb.table("project_members")
+        .select("user_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert fixture_ids["non_member_user_id"] not in [r["user_id"] for r in rows]
+
+    r_after = non_member_client.get(f"/v1/projects/{project['id']}")
+    assert r_after.status_code == 403
+
+
+def test_remove_member_creator_guard_and_non_member_target(
+    client, non_member_client, fixture_ids, project_ids, sb
+):
+    """AC2 — real Postgres: a real OTHER member can't remove the creator
+    (409, roster unchanged), and a target who was never a member 404s."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live creator-guard {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    sb.table("project_members").insert(
+        {"project_id": project["id"], "user_id": fixture_ids["non_member_user_id"]}
+    ).execute()
+
+    r_creator = non_member_client.delete(
+        f"/v1/projects/{project['id']}/members/{fixture_ids['user_id']}"
+    )
+    assert r_creator.status_code == 409
+
+    ghost = str(uuid.uuid4())
+    r_ghost = client.delete(f"/v1/projects/{project['id']}/members/{ghost}")
+    assert r_ghost.status_code == 404
+
+    rows = (
+        sb.table("project_members")
+        .select("user_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert {r["user_id"] for r in rows} == {
+        fixture_ids["user_id"],
+        fixture_ids["non_member_user_id"],
+    }
+
+
+def test_remove_member_self_removal_and_non_member_caller(
+    client, non_member_client, fixture_ids, project_ids
+):
+    """Self-removal is out of scope (400, real Postgres); a same-tenant
+    non-member caller is blocked (403) from removing anyone."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live self-and-nonmember {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    r_self = client.delete(f"/v1/projects/{project['id']}/members/{fixture_ids['user_id']}")
+    assert r_self.status_code == 400
+
+    r_nonmember_caller = non_member_client.delete(
+        f"/v1/projects/{project['id']}/members/{fixture_ids['user_id']}"
+    )
+    assert r_nonmember_caller.status_code == 403
+
+
 def test_same_tenant_non_member_is_blocked(client, non_member_client, fixture_ids, project_ids):
     """The membership gap this proves shut: a real second account in the
     SAME company/workspace, never added to the project, must be blocked

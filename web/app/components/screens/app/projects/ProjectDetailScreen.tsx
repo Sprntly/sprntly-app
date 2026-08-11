@@ -30,7 +30,9 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { AppLayout } from "../AppLayout"
 import { EmptyPane } from "../../../shared/EmptyPane"
+import { ConfirmDialog } from "../../../shared/ConfirmDialog"
 import { useNavigation } from "../../../../context/NavigationContext"
+import { useAuth } from "../../../../lib/auth"
 import { PROJECTS_PATH } from "../../../../lib/routes"
 import {
   ApiError,
@@ -46,6 +48,8 @@ import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
 import { TaskModal } from "./TaskModal"
 import styles from "./ProjectDetailScreen.module.css"
+
+type HumanMember = Extract<ProjectMember, { kind: "human" }>
 
 /** Copied verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same
  *  exception `ProjectsScreen.module.css` already takes) — the app's real
@@ -188,6 +192,15 @@ function ChecklistIcon() {
   )
 }
 
+function RemoveIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+      <line x1="6" y1="6" x2="18" y2="18" />
+      <line x1="18" y1="6" x2="6" y2="18" />
+    </svg>
+  )
+}
+
 function WarnIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
@@ -223,6 +236,18 @@ export type ProjectDetailViewProps = {
   onAddMemory: () => void
   onOpenTasks: () => void
   onInvite: () => void
+  /** The signed-in caller's user id (`null` when unresolved) — used ONLY to
+   *  withhold the Remove control on the caller's OWN member row (self-
+   *  removal/"leave project" is out of scope for this ticket; the backend
+   *  rejects it too, this just avoids offering a control that would 400). */
+  currentUserId: string | null
+  /** Requests removing a human member — opens the confirm dialog. The
+   *  CONTAINER owns the confirm/busy/error state and the actual
+   *  `removeMember` call (same split as every other rail-triggered action
+   *  here). Never invoked for the agent member, the project creator, or
+   *  the caller themselves — the View withholds the control on those
+   *  rows entirely. */
+  onRemoveMember: (member: HumanMember) => void
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -241,8 +266,10 @@ export function ProjectDetailView({
   onAddMemory,
   onOpenTasks,
   onInvite,
+  currentUserId,
+  onRemoveMember,
 }: ProjectDetailViewProps) {
-  const humans = useMemo(() => project.members.filter((m): m is Extract<ProjectMember, { kind: "human" }> => m.kind === "human"), [project.members])
+  const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
   const agent = useMemo(() => project.members.find((m): m is Extract<ProjectMember, { kind: "agent" }> => m.kind === "agent"), [project.members])
   const byType = useMemo(() => groupArtifactsByType(artifacts), [artifacts])
   const presentTypes = TYPE_ORDER.filter((t) => (byType[t]?.length ?? 0) > 0)
@@ -435,17 +462,35 @@ export function ProjectDetailView({
               Members
               <span className={styles.railSectionCount}>{project.members.length}</span>
             </div>
-            {humans.map((m) => (
-              <div className={styles.memberRow} key={m.user_id} data-testid="member-row-human">
-                <span className={styles.memberAv} aria-hidden="true">
-                  {initials(m.name)}
-                </span>
-                <div className={styles.memberMain}>
-                  <div className={styles.memberName}>{m.name ?? "Unnamed member"}</div>
-                  <div className={styles.memberRole}>{m.job_role || "Member"}</div>
+            {humans.map((m) => {
+              // Removable-row rule (AC3): never the project creator, never
+              // the caller themselves. The agent member never reaches this
+              // loop at all (it's rendered separately below).
+              const removable = m.user_id !== project.created_by && m.user_id !== currentUserId
+              return (
+                <div className={styles.memberRow} key={m.user_id} data-testid="member-row-human">
+                  <span className={styles.memberAv} aria-hidden="true">
+                    {initials(m.name)}
+                  </span>
+                  <div className={styles.memberMain}>
+                    <div className={styles.memberName}>{m.name ?? "Unnamed member"}</div>
+                    <div className={styles.memberRole}>{m.job_role || "Member"}</div>
+                  </div>
+                  {removable ? (
+                    <button
+                      type="button"
+                      className={styles.memberRemoveBtn}
+                      onClick={() => onRemoveMember(m)}
+                      aria-label={`Remove ${m.name ?? "member"} from project`}
+                      title="Remove from project"
+                      data-testid="member-remove"
+                    >
+                      <RemoveIcon />
+                    </button>
+                  ) : null}
                 </div>
-              </div>
-            ))}
+              )
+            })}
             {agent ? (
               <div className={`${styles.memberRow} ${styles.memberRowAgent}`} data-testid="member-row-agent">
                 <span className={styles.agentAv} aria-hidden="true">
@@ -500,10 +545,15 @@ type OpenModal = { kind: "memory" } | { kind: "artifacts"; type?: ProjectArtifac
 
 export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const { openModal } = useNavigation()
+  const auth = useAuth()
+  const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railCollapsed, setRailCollapsed] = useState(false)
   const [activeChat, setActiveChat] = useState<ActiveChat>("group")
   const [railModal, setRailModal] = useState<OpenModal>(null)
+  const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
+  const [removeBusy, setRemoveBusy] = useState(false)
+  const [removeError, setRemoveError] = useState<string | null>(null)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -530,6 +580,24 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     load()
   }, [load])
 
+  // Re-fetches ONLY the project row (members + count) after a roster
+  // mutation — deliberately not `load()`: that flashes the whole shell back
+  // to its "loading" state, wiping the artifacts/memory panes and the
+  // active thread for no reason. AC3 ("without a full reload") is best met
+  // by updating just the piece that changed.
+  const refetchProject = useCallback(() => {
+    projectsApi
+      .get(projectId)
+      .then((project) => {
+        setState((prev) => (prev.status === "ready" ? { ...prev, project } : prev))
+      })
+      .catch(() => {
+        // Best-effort: the removal itself already succeeded (this only
+        // refreshes the displayed roster); a transient refetch failure
+        // leaves the pre-removal roster showing until the next real load.
+      })
+  }, [projectId])
+
   const onToggleRail = useCallback(() => setRailCollapsed((v) => !v), [])
   const onInvite = useCallback(() => openModal("invite"), [openModal])
   // The memory/artifacts/task modals below are this ticket's bodies for
@@ -542,6 +610,34 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const onAddMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
   const onCloseRailModal = useCallback(() => setRailModal(null), [])
+
+  const onRemoveMember = useCallback((member: HumanMember) => {
+    setRemoveError(null)
+    setRemoveTarget(member)
+  }, [])
+  const onCancelRemove = useCallback(() => {
+    if (removeBusy) return
+    setRemoveTarget(null)
+    setRemoveError(null)
+  }, [removeBusy])
+  const onConfirmRemove = useCallback(() => {
+    if (!removeTarget) return
+    setRemoveBusy(true)
+    setRemoveError(null)
+    projectsApi
+      .removeMember(projectId, removeTarget.user_id)
+      .then(() => {
+        setRemoveBusy(false)
+        setRemoveTarget(null)
+        refetchProject()
+      })
+      .catch((err: unknown) => {
+        setRemoveBusy(false)
+        setRemoveError(
+          err instanceof ApiError ? err.message || "Couldn't remove that member." : "Couldn't remove that member.",
+        )
+      })
+  }, [projectId, removeTarget, refetchProject])
 
   if (state.status === "loading") {
     return (
@@ -596,6 +692,19 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         onAddMemory={onAddMemory}
         onOpenTasks={onOpenTasks}
         onInvite={onInvite}
+        currentUserId={currentUserId}
+        onRemoveMember={onRemoveMember}
+      />
+      <ConfirmDialog
+        open={removeTarget != null}
+        title={`Remove ${removeTarget?.name ?? "this member"}?`}
+        body={removeError ?? "They'll lose access to this project's chats, artifacts, and memory."}
+        confirmLabel="Remove"
+        busyLabel="Removing…"
+        tone="danger"
+        busy={removeBusy}
+        onConfirm={onConfirmRemove}
+        onCancel={onCancelRemove}
       />
       <MemoryModal
         projectId={projectId}

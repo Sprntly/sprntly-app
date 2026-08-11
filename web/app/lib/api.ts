@@ -5299,4 +5299,14 @@ export const projectsApi = {
     api.delete<{ deleted: true }>(
       `/v1/projects/${encodeURIComponent(String(id))}/memory/${encodeURIComponent(String(entryId))}`,
     ),
+  /** Remove a teammate (`DELETE /v1/projects/{id}/members/{user_id}`).
+   *  Authorization is v1-simple (AD-P11): any member may remove any OTHER
+   *  member except the creator. Throws `ApiError` with `.status` 400
+   *  (self-removal — out of scope, use a future leave-project flow), 409
+   *  (the project creator can't be removed), or 404 (target isn't a
+   *  current member) — callers must handle all three without crashing. */
+  removeMember: (id: number | string, userId: string) =>
+    api.delete<{ removed: true }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/members/${encodeURIComponent(userId)}`,
+    ),
 }

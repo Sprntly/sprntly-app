@@ -201,6 +201,42 @@ def add_member(
     return member
 
 
+@router.delete("/{project_id}/members/{user_id}")
+def remove_member(
+    project_id: int,
+    user_id: str,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Remove a teammate from the project. The caller must already be a
+    project member (membership = access, AD-P11) — a non-member gets 403
+    and the roster is unchanged. Authorization is v1-simple: any member may
+    remove any OTHER member except the creator (no per-project role column
+    yet — that tightening to owner-only removal is a later ticket once
+    `project_members.role` lands, the AD-P11 extension seam).
+
+    Guards, checked in order (roster unchanged on every rejection):
+      - self-removal ("leave project") is out of scope for this ticket →
+        400.
+      - the project creator (`projects.created_by`) can never be removed
+        (would orphan the project) → 409.
+      - a target who isn't currently a member → 404 (mirrors
+        `delete_memory`'s not-found posture for a client-supplied id that
+        doesn't resolve)."""
+    project = _require_project_member(project_id, ctx)
+    if user_id == ctx.user_id:
+        raise HTTPException(400, "Removing yourself isn't supported here")
+    if user_id == project["created_by"]:
+        raise HTTPException(409, "The project creator can't be removed")
+    removed = projects_db.remove_member(project_id, user_id)
+    if not removed:
+        raise HTTPException(404, "Not a member of this project")
+    logger.info(
+        "member_removed project_id=%s target_user_id=%s by=%s",
+        project_id, user_id, ctx.user_id,
+    )
+    return {"removed": True}
+
+
 @router.get("/{project_id}/artifacts")
 def list_project_artifacts(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
     """The project's artifacts, app-faithfully — the SAME unified shape
