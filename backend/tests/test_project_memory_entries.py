@@ -504,7 +504,14 @@ def test_memory_insight_returns_latest_agent_entry(isolated_settings, monkeypatc
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
     assert r.status_code == 200
-    assert r.json() == {"by": "Sprntly", "text": "Newest insight — flat pricing, not tiered."}
+    # source_kind="group" — the promoting conversation is the project's
+    # group chat (FIX: previously this label was hardcoded regardless of
+    # the actual source, mislabeling individual-chat promotions too).
+    assert r.json() == {
+        "by": "Sprntly",
+        "text": "Newest insight — flat pricing, not tiered.",
+        "source_kind": "group",
+    }
 
 
 def test_memory_insight_null_when_no_agent_entries(fake_llm, monkeypatch):
@@ -538,7 +545,55 @@ def test_memory_insight_ignores_user_entries(isolated_settings, monkeypatch):
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
     assert r.status_code == 200
-    assert r.json() == {"by": "Sprntly", "text": "Older agent insight."}
+    assert r.json() == {"by": "Sprntly", "text": "Older agent insight.", "source_kind": "group"}
+
+
+def test_memory_insight_labels_individual_chat_source_correctly(isolated_settings, monkeypatch):
+    """FIX (demo-embarrassing mislabel): an insight promoted from a
+    member's INDIVIDUAL chat (the cross-chat promotion classifier sets
+    `source_conversation_id` for that path too, not just group-chat
+    promotions) must report `source_kind: "individual"`, never be
+    indistinguishable from a group-chat promotion."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    from app.db.client import require_client
+    from app.db import project_memory_entries as memory_db_mod
+
+    individual_conv = (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": ctx.company_id,
+                "user_id": ctx.user_id,
+                "title": "My chat with Sprntly",
+                "query": "my chat",
+                "agent_type": "ask",
+                "kind": "individual",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    memory_db_mod.add_agent_promoted_entry(
+        project["id"],
+        body="Promoted from a private chat.",
+        source_conversation_id=individual_conv["id"],
+    )
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
+    assert r.status_code == 200
+    assert r.json() == {
+        "by": "Sprntly",
+        "text": "Promoted from a private chat.",
+        "source_kind": "individual",
+    }
+
+    # The entries payload behind the Memory modal's chip carries the same
+    # per-entry annotation.
+    entries = ctx.client.get(f"/v1/projects/{project['id']}/memory").json()["entries"]
+    assert entries[0]["source_conversation_kind"] == "individual"
 
 
 def test_memory_insight_non_member_403(isolated_settings, monkeypatch):

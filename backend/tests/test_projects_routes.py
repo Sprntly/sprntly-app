@@ -70,6 +70,180 @@ def test_create_project_origin_defaults_manual(isolated_settings, monkeypatch):
     assert r2.json()["origin"] == "artifact"
 
 
+# ── PRD-auto dedup (create-modal "Auto · from PRD" tab, AD-P9) ────────────
+#
+# FIX: re-selecting an already-forked PRD in the create-modal used to call
+# `projectsApi.create` unconditionally, bypassing the generation-time hook's
+# (`maybe_auto_create_project_for_prd`) first-write-wins guard and minting a
+# SECOND identical `prd_auto` project. The route now reuses that SAME dedup
+# fact server-side (`find_existing_prd_auto_project`,
+# `app/project_from_prd.py`) whenever `origin="prd_auto"` + `prd_id` are
+# both sent.
+
+
+def test_create_prd_auto_reuses_project_already_forked_by_generation_hook(
+    isolated_settings, monkeypatch
+):
+    ctx = company_client(monkeypatch)
+    ws_id = _default_workspace_id(ctx.company_id)
+
+    from app.db.client import require_client
+
+    conv_id = (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": ctx.company_id,
+                "user_id": ctx.user_id,
+                "title": "generate prd",
+                "query": "generate prd",
+                "agent_type": "ask",
+            }
+        )
+        .execute()
+        .data[0]["id"]
+    )
+
+    # `maybe_auto_create_project_for_prd` never sets `conversations.prd_id`
+    # itself — `bind_conversation_to_prd` does, called immediately before
+    # it at every real call site (`routes/prd.py`). Reproduce that ordering.
+    from app.db.conversations import bind_conversation_to_prd
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    prd_id = 909
+    bind_conversation_to_prd(conv_id, prd_id, ctx.company_id, ctx.user_id)
+    forked_id = maybe_auto_create_project_for_prd(
+        company_id=ctx.company_id,
+        workspace_id=ws_id,
+        user_id=ctx.user_id,
+        prd_id=prd_id,
+        prd_title="Dark mode PRD",
+        conversation_id=conv_id,
+    )
+    assert forked_id is not None
+
+    # The create-modal's "Auto · from PRD" tab re-selects the SAME PRD.
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Dark mode PRD", "origin": "prd_auto", "prd_id": prd_id},
+    )
+    assert r.status_code == 200
+    assert r.json()["id"] == forked_id
+
+    projects = (
+        require_client()
+        .table("projects")
+        .select("id")
+        .eq("company_id", ctx.company_id)
+        .execute()
+        .data
+    )
+    assert len(projects) == 1
+
+
+def test_create_prd_auto_no_existing_fork_creates_normally(isolated_settings, monkeypatch):
+    """No `conversations` row binds this `prd_id` to a project yet — the
+    dedup check finds nothing, so a real project is created (the
+    not-a-duplicate control for the test above)."""
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Fresh fork", "origin": "prd_auto", "prd_id": 12345},
+    )
+    assert r.status_code == 200
+    assert r.json()["origin"] == "prd_auto"
+
+    from app.db.client import require_client
+
+    projects = (
+        require_client()
+        .table("projects")
+        .select("id")
+        .eq("company_id", ctx.company_id)
+        .execute()
+        .data
+    )
+    assert len(projects) == 1
+
+
+def test_create_prd_auto_without_prd_id_is_unaffected(isolated_settings, monkeypatch):
+    """Backward-compat: `origin="prd_auto"` with no `prd_id` sent (an older
+    client, or a caller that never resolves one) skips the dedup check
+    entirely rather than erroring."""
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post("/v1/projects", json={"name": "No prd_id", "origin": "prd_auto"})
+    assert r.status_code == 200
+    assert r.json()["origin"] == "prd_auto"
+
+
+def test_create_manual_and_artifact_origins_ignore_prd_id(isolated_settings, monkeypatch):
+    """The dedup check is scoped to `origin="prd_auto"` ONLY — a stray
+    `prd_id` on a manual/artifact create (which should never happen from
+    the real client, but the field is present on the request model) must
+    never trigger the dedup branch or affect creation."""
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Manual with stray prd_id", "origin": "manual", "prd_id": 999},
+    )
+    assert r.status_code == 200
+    assert r.json()["origin"] == "manual"
+
+
+def test_create_prd_auto_dedup_is_company_scoped(isolated_settings, monkeypatch):
+    """A same-numbered `prd_id` forked in a DIFFERENT company must never
+    dedupe across tenants — the lookup is company-scoped, same as every
+    other cross-tenant existence check in this router."""
+    ctx = company_client(monkeypatch)
+
+    from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
+
+    foreign_ws = ensure_default_workspace("foreign-co")["id"]
+    foreign_conv_id = (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": "foreign-co",
+                "user_id": "someone-else",
+                "title": "generate prd",
+                "query": "generate prd",
+                "agent_type": "ask",
+            }
+        )
+        .execute()
+        .data[0]["id"]
+    )
+
+    from app.db.conversations import bind_conversation_to_prd
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    prd_id = 606
+    bind_conversation_to_prd(foreign_conv_id, prd_id, "foreign-co", "someone-else")
+    foreign_project_id = maybe_auto_create_project_for_prd(
+        company_id="foreign-co",
+        workspace_id=foreign_ws,
+        user_id="someone-else",
+        prd_id=prd_id,
+        prd_title="Foreign PRD",
+        conversation_id=foreign_conv_id,
+    )
+    assert foreign_project_id is not None
+
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Same prd_id, different tenant", "origin": "prd_auto", "prd_id": prd_id},
+    )
+    assert r.status_code == 200
+    assert r.json()["id"] != foreign_project_id
+    assert r.json()["company_id"] == ctx.company_id
+
+
 # ── Retrieval ────────────────────────────────────────────────────────────
 
 

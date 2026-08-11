@@ -78,6 +78,7 @@ const AGENT_ENTRY: ProjectMemoryEntry = {
   author_user_id: null,
   promoted_by: "agent",
   source_conversation_id: 55,
+  source_conversation_kind: "group",
   created_at: hoursAgo(5),
   updated_at: hoursAgo(2),
 }
@@ -160,7 +161,7 @@ describe("MemoryModalView — provenance differentiation (AC3/AC4)", () => {
     expect(within(row).queryByTestId("memory-src-user")).toBeNull()
   })
 
-  it("test_agent_entry_source_hint — an agent entry with source_conversation_id shows the group-chat hint; without it, no hint", () => {
+  it("test_agent_entry_source_hint — an agent entry sourced from the group chat shows the group-chat hint; with no source, no hint", () => {
     const { rerender } = render(
       React.createElement(
         MemoryModalView,
@@ -169,8 +170,13 @@ describe("MemoryModalView — provenance differentiation (AC3/AC4)", () => {
     )
     const withSource = screen.getByTestId(`memory-entry-${AGENT_ENTRY.id}`)
     expect(withSource.textContent).toContain("from the group chat")
+    expect(withSource.textContent).not.toContain("from a chat with Sprntly")
 
-    const noSourceEntry: ProjectMemoryEntry = { ...AGENT_ENTRY, source_conversation_id: null }
+    const noSourceEntry: ProjectMemoryEntry = {
+      ...AGENT_ENTRY,
+      source_conversation_id: null,
+      source_conversation_kind: null,
+    }
     rerender(
       React.createElement(
         MemoryModalView,
@@ -179,6 +185,28 @@ describe("MemoryModalView — provenance differentiation (AC3/AC4)", () => {
     )
     const withoutSource = screen.getByTestId(`memory-entry-${noSourceEntry.id}`)
     expect(withoutSource.textContent).not.toContain("from the group chat")
+  })
+
+  it("FIX B — an agent entry sourced from an INDIVIDUAL chat shows 'from a chat with Sprntly', never 'from the group chat'", () => {
+    // Ground: source_conversation_id is set for BOTH the group-chat
+    // mention path and the individual-chat cross-chat promotion path — the
+    // chip must read the actual source_conversation_kind, not assume group
+    // whenever the id is set (the mislabel this fixes).
+    const individualEntry: ProjectMemoryEntry = {
+      ...AGENT_ENTRY,
+      id: 3,
+      source_conversation_id: 77,
+      source_conversation_kind: "individual",
+    }
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({ state: { status: "ready", summary: SUMMARY, entries: [individualEntry] } }),
+      ),
+    )
+    const row = screen.getByTestId(`memory-entry-${individualEntry.id}`)
+    expect(row.textContent).toContain("from a chat with Sprntly")
+    expect(row.textContent).not.toContain("from the group chat")
   })
 })
 

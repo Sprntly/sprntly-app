@@ -571,7 +571,10 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       setCreating(true)
       const prd = selectedPrd
       projectsApi
-        .create({ name: artifactTitle(prd), origin: "prd_auto" })
+        // prd_id lets the server dedupe (first-write-wins, AD-P9):
+        // re-selecting an already-forked PRD returns the EXISTING project
+        // instead of minting a duplicate.
+        .create({ name: artifactTitle(prd), origin: "prd_auto", prd_id: prd.id })
         .then((project) =>
           projectsApi
             .addArtifact(project.id, prd.type, prd.id)

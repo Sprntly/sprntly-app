@@ -343,6 +343,86 @@ def test_generate_from_task_existing_prd_branch_creates_prd_auto_project(tenant_
     assert project["origin"] == "prd_auto"
 
 
+# ── Reverse dedup lookup — find_existing_prd_auto_project ───────────────────
+# Backs the create-modal's "Auto · from PRD" tab (POST /v1/projects,
+# origin=prd_auto), which never resolves a conversation_id — only the PRD
+# the user picked. Reuses the SAME dedup fact `_conversation_project_id`
+# reads, just entered from the other direction.
+#
+# `maybe_auto_create_project_for_prd` itself never sets `conversations.
+# prd_id` — that's `bind_conversation_to_prd`'s job, called separately
+# immediately BEFORE the hook at every real call site in `routes/prd.py`.
+# These tests reproduce that same ordering explicitly, rather than relying
+# on the hook alone to produce a PRD-bound conversation.
+
+
+def _fork_via_hook(company_id: str, user_id: str, workspace_id: str, prd_id: int, conv_id: int) -> int | None:
+    from app.db.conversations import bind_conversation_to_prd
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    bind_conversation_to_prd(conv_id, prd_id, company_id, user_id)
+    return maybe_auto_create_project_for_prd(
+        company_id=company_id, workspace_id=workspace_id, user_id=user_id,
+        prd_id=prd_id, prd_title="Dark mode PRD", conversation_id=conv_id,
+    )
+
+
+def test_find_existing_prd_auto_project_finds_the_bound_project(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    project_id = _fork_via_hook(t.company_id, t.user_id, "ws-1", prd_id, conv_id)
+    assert project_id is not None
+
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    found = find_existing_prd_auto_project(prd_id, t.company_id)
+    assert found == project_id
+
+
+def test_find_existing_prd_auto_project_none_when_unbound(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    assert find_existing_prd_auto_project(prd_id, t.company_id) is None
+
+
+def test_find_existing_prd_auto_project_ignores_conversations_with_no_project(
+    tenant_client, isolated_settings
+):
+    """A conversation bound to the PRD but with NO project (e.g. a plain
+    generate with no auto-fork) must not be mistaken for an existing
+    fork."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+
+    from app.db.conversations import bind_conversation_to_prd
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    bind_conversation_to_prd(conv_id, prd_id, t.company_id, t.user_id)
+
+    assert find_existing_prd_auto_project(prd_id, t.company_id) is None
+
+
+def test_find_existing_prd_auto_project_is_company_scoped(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    other = tenant_client.make(slug="widgets")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    project_id = _fork_via_hook(t.company_id, t.user_id, "ws-1", prd_id, conv_id)
+    assert project_id is not None
+
+    from app.project_from_prd import find_existing_prd_auto_project
+
+    # Same numeric prd_id, DIFFERENT company — must not resolve.
+    assert find_existing_prd_auto_project(prd_id, other.company_id) is None
+
+
 # ── Real local-Supabase round-trip (ship-gate tier) ────────────────────────
 #
 # `[[reference_local-supabase-real-db-verification]]` — proves the helper

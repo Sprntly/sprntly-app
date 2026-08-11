@@ -24,10 +24,23 @@ from app.db.client import require_client, retry_on_disconnect, utc_now
 
 @retry_on_disconnect
 def list_entries(project_id: int) -> list[dict]:
-    """Memory entries for this project, most-recently-updated first."""
-    return (
-        require_client()
-        .table("project_memory_entries")
+    """Memory entries for this project, most-recently-updated first. Each
+    row is annotated with `source_conversation_kind`
+    (`"group" | "individual" | None`) — the KIND of the conversation
+    `source_conversation_id` points at (`conversations.kind`, additive
+    group-chat column), batch-resolved in one extra query (never N+1, same
+    posture as `list_members`'s profile join).
+
+    An agent-promoted entry's `source_conversation_id` is set from BOTH the
+    project's group chat (an `@Sprntly` mention / smart-interjection reply)
+    AND a member's individual chat (a cross-chat promotion,
+    `app/project_memory.py`'s `maybe_promote_turn`) — the id alone can't
+    tell those apart, which is exactly the mislabeling this annotation
+    fixes: a caller must read `source_conversation_kind`, never assume
+    "group" just because the id is set."""
+    client = require_client()
+    entries = (
+        client.table("project_memory_entries")
         .select("*")
         .eq("project_id", project_id)
         .order("updated_at", desc=True)
@@ -35,6 +48,30 @@ def list_entries(project_id: int) -> list[dict]:
         .data
         or []
     )
+    if not entries:
+        return entries
+
+    conv_ids = {
+        e["source_conversation_id"]
+        for e in entries
+        if e.get("source_conversation_id") is not None
+    }
+    kind_by_id: dict[int, str] = {}
+    if conv_ids:
+        conv_rows = (
+            client.table("conversations")
+            .select("id, kind")
+            .in_("id", list(conv_ids))
+            .execute()
+            .data
+            or []
+        )
+        kind_by_id = {row["id"]: row["kind"] for row in conv_rows}
+
+    for entry in entries:
+        source_id = entry.get("source_conversation_id")
+        entry["source_conversation_kind"] = kind_by_id.get(source_id) if source_id is not None else None
+    return entries
 
 
 @retry_on_disconnect
@@ -207,16 +244,25 @@ def get_summary(project_id: int) -> dict:
 def get_latest_insight(project_id: int) -> dict | None:
     """The single most-recently-updated agent-promoted entry, shaped for
     the individual chat's cross-chat INSIGHT turn — `{"by": "Sprntly",
-    "text": <body>}`, or `None` when the project has no agent-promoted
-    entry yet (user-authored entries alone never produce an insight,
-    build spec AD-P3). Reuses `list_entries`'s existing updated_at-desc
-    ordering rather than adding a second ordering convention. Attribution
-    is fixed at "Sprntly" (v1) — the schema records `source_conversation_id`,
-    not the seeding human, so per-teammate attribution is a flagged
-    follow-on, not guessed here. Never calls an LLM."""
+    "text": <body>, "source_kind": <"group"|"individual"|None>}`, or `None`
+    when the project has no agent-promoted entry yet (user-authored entries
+    alone never produce an insight, build spec AD-P3). Reuses
+    `list_entries`'s existing updated_at-desc ordering AND its
+    `source_conversation_kind` annotation, rather than adding a second
+    ordering/lookup convention — `source_kind` is what lets the caller
+    render "from the group chat" vs "from a chat with Sprntly" instead of
+    assuming group whenever a source conversation is set (the bug this
+    field exists to fix). Attribution is fixed at "Sprntly" (v1) — the
+    schema records `source_conversation_id`, not the seeding human, so
+    per-teammate attribution is a flagged follow-on, not guessed here.
+    Never calls an LLM."""
     for entry in list_entries(project_id):
         if entry.get("promoted_by") == "agent":
-            return {"by": "Sprntly", "text": entry["body"]}
+            return {
+                "by": "Sprntly",
+                "text": entry["body"],
+                "source_kind": entry.get("source_conversation_kind"),
+            }
     return None
 
 

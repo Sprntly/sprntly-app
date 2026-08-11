@@ -34,6 +34,18 @@ import styles from "./MemoryModal.module.css"
 /** Same compact relative-time bucketing every other Projects surface
  *  duplicates locally (`ProjectDetailScreen.tsx`, `ArtifactsScreen.tsx`) —
  *  not a shared export in this codebase. */
+/** The provenance chip suffix for an agent-promoted entry — derived from
+ *  the ACTUAL source conversation kind, not just whether an id is set
+ *  (that alone can't tell a group-chat promotion from an individual-chat
+ *  one apart, `entry.source_conversation_kind`, batch-resolved
+ *  server-side). Empty string when the kind is unresolved, rather than
+ *  guessing "group chat". */
+function sourceChip(entry: ProjectMemoryEntry): string {
+  if (entry.source_conversation_kind === "group") return " · from the group chat"
+  if (entry.source_conversation_kind === "individual") return " · from a chat with Sprntly"
+  return ""
+}
+
 function relativeTime(iso: string): string {
   const then = new Date(iso).getTime()
   if (Number.isNaN(then)) return ""
@@ -202,9 +214,7 @@ function MemoryEntryRow({
           <div className={`${styles.itemHow} ${isUser ? styles.itemHowUser : ""}`}>
             {isUser
               ? `Added by ${author?.name ?? "a project member"}${author?.role ? ` · ${author.role}` : ""} · updated ${relativeTime(entry.updated_at)}`
-              : `Promoted by Sprntly · ${relativeTime(entry.updated_at)}${
-                  entry.source_conversation_id != null ? " · from the group chat" : ""
-                }`}
+              : `Promoted by Sprntly · ${relativeTime(entry.updated_at)}${sourceChip(entry)}`}
           </div>
         </>
       )}

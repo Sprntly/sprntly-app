@@ -14,6 +14,15 @@ conversation, a real prd_id, and the caller's WorkspaceContext are all known
 together. Mirrors `bind_conversation_to_prd`'s best-effort posture exactly:
 this is a side effect of PRD generation, not a step in it, so it must never
 turn a successful generation into a failed request.
+
+`find_existing_prd_auto_project` below is the REVERSE lookup: given a PRD
+(not a conversation), has it already been forked into a project? The
+create-modal's "Auto · from PRD" tab calls `POST /v1/projects` directly —
+it never resolves a `conversation_id`, only the PRD the user picked — so it
+cannot reuse `_conversation_project_id` as-is. Both directions key off the
+SAME fact (a `conversations` row binding both a PRD and a project), so this
+stays the one dedup mechanism for `origin='prd_auto'` projects rather than a
+second, divergent one.
 """
 from __future__ import annotations
 
@@ -41,6 +50,37 @@ def _conversation_project_id(conversation_id: int, company_id: str) -> int | Non
         .select("project_id")
         .eq("id", conversation_id)
         .eq("company_id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if rows:
+        return rows[0].get("project_id")
+    return None
+
+
+def find_existing_prd_auto_project(prd_id: int, company_id: str) -> int | None:
+    """The project already forked for `prd_id`, if any — the dedup check
+    behind the create-modal's "Auto · from PRD" tab (`POST /v1/projects`,
+    `origin=prd_auto`). Company-scoped only (mirrors
+    `_conversation_project_id`'s scoping rationale): first-write-wins must
+    hold regardless of which of the caller's own conversations originally
+    forked the PRD.
+
+    Reads `conversations` rows bound to this PRD (`prd_id` — set by
+    `bind_conversation_to_prd`) and returns the first one that is ALSO
+    bound to a project (`project_id` — set by `bind_conversation_to_project`,
+    including by this module's own `maybe_auto_create_project_for_prd`).
+    None when no such row exists — the caller creates a fresh project, same
+    as always."""
+    rows = (
+        require_client()
+        .table("conversations")
+        .select("project_id")
+        .eq("prd_id", prd_id)
+        .eq("company_id", company_id)
+        .not_.is_("project_id", "null")
         .limit(1)
         .execute()
         .data

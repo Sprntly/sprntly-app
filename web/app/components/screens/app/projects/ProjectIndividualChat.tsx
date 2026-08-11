@@ -65,11 +65,22 @@ export type ProjectIndividualChatProps = {
    *  wiring real candidates later is additive. */
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   /** The cross-chat INSIGHT turn (design-spec AC7/AC11) — a note surfaced
-   *  from the group chat, rendered with the SAME `bc-turn--insight`/
-   *  `bc-insight-msg-kind` CSS the app's existing insight-opening card wears
-   *  (read-only class reuse, not a second implementation). No data source
-   *  feeds this yet; omitted (the default) renders nothing. */
-  insightNote?: { by: string; text: string } | null
+   *  from EITHER the group chat or another member's individual chat,
+   *  rendered with the SAME `bc-turn--insight`/`bc-insight-msg-kind` CSS
+   *  the app's existing insight-opening card wears (read-only class reuse,
+   *  not a second implementation). `source_kind` picks the copy ("in the
+   *  group chat" vs "in a chat with Sprntly") — omitted/`null` renders a
+   *  kind-neutral note rather than guessing group. */
+  insightNote?: { by: string; text: string; source_kind?: "group" | "individual" | null } | null
+}
+
+/** The insight banner's location phrase — derived from the ACTUAL source
+ *  conversation kind (never assumed "group chat" just because a note
+ *  exists; that was the bug). Neutral when the kind is unresolved. */
+function insightSourcePhrase(sourceKind: "group" | "individual" | null | undefined): string {
+  if (sourceKind === "group") return "noted this in the group chat"
+  if (sourceKind === "individual") return "noted this in a chat with Sprntly"
+  return "noted this"
 }
 
 function formatTime(d: number): string {
@@ -164,7 +175,7 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           <div className="bc-turn bc-turn--insight" data-testid="cross-chat-insight">
             <span className="bc-insight-msg-kind">INSIGHT</span>
             <span>
-              <b>{insightNote.by}</b> noted this in the group chat: {insightNote.text}
+              <b>{insightNote.by}</b> {insightSourcePhrase(insightNote.source_kind)}: {insightNote.text}
             </span>
           </div>
         ) : null}

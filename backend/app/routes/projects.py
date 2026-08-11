@@ -39,6 +39,7 @@ from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_proj
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
+from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.routes.chat import _dataset_for
@@ -91,6 +92,10 @@ _AGENT_MEMBER = {
 class CreateProjectRequest(BaseModel):
     name: str = Field(min_length=1)
     origin: str = "manual"
+    # Only meaningful when origin="prd_auto" (the create-modal's "Auto ·
+    # from PRD" tab) — the PRD being forked, used for the first-write-wins
+    # dedup check below. Ignored for every other origin.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 class AddMemberRequest(BaseModel):
@@ -160,6 +165,22 @@ def create_project(
     payload: CreateProjectRequest,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
+    """Create a project. `origin="prd_auto"` + `prd_id` is first-write-wins
+    (AD-P9), same principle as the generation-time hook
+    (`maybe_auto_create_project_for_prd`, `app/project_from_prd.py`):
+    re-selecting an already-forked PRD in the create-modal's "Auto · from
+    PRD" tab returns the EXISTING project instead of minting a duplicate.
+    Every other origin (manual/artifact) is unaffected — no dedup key exists
+    for them, and none is checked."""
+    if payload.origin == "prd_auto" and payload.prd_id is not None:
+        existing_id = find_existing_prd_auto_project(payload.prd_id, ctx.company_id)
+        if existing_id is not None and projects_db.project_belongs_to_company(
+            existing_id, ctx.company_id, ctx.workspace_id
+        ):
+            existing = projects_db.get_project(existing_id)
+            if existing is not None:
+                return existing
+
     project = projects_db.create_project(
         company_id=ctx.company_id,
         workspace_id=ctx.workspace_id,

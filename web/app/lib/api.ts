@@ -5179,6 +5179,12 @@ export type ProjectMemorySummary = {
 export type ProjectMemoryInsight = {
   by: string
   text: string
+  /** The KIND of conversation this insight was promoted from — `"group"`
+   *  (the project's group chat) or `"individual"` (a member's private chat
+   *  with Sprntly). `null`/omitted when unresolved. Lets a renderer say
+   *  "from the group chat" vs "from a chat with Sprntly" instead of
+   *  assuming group whenever a source conversation exists. */
+  source_kind?: "group" | "individual" | null
 }
 
 /** One `project_memory_entries` row (`GET/POST/PATCH/DELETE
@@ -5197,6 +5203,11 @@ export type ProjectMemoryEntry = {
   author_user_id: string | null
   promoted_by: "agent" | null
   source_conversation_id: number | null
+  /** The KIND of conversation `source_conversation_id` points at —
+   *  `"group"` or `"individual"`, batch-resolved server-side
+   *  (`conversations.kind`). `null` when `source_conversation_id` is null
+   *  or unresolved. See `ProjectMemoryInsight.source_kind`. */
+  source_conversation_kind?: "group" | "individual" | null
   created_at: string
   updated_at: string
 }
@@ -5231,8 +5242,12 @@ export const projectsApi = {
    *  the caller's memberships by the backend — no `dataset`/company arg
    *  (tenancy rides the `X-Workspace-Id` header, `ask.py`'s pattern). */
   list: () => api.get<{ projects: ProjectListItem[] }>("/v1/projects").then((r) => r.projects),
-  /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`). */
-  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact" }) =>
+  /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`).
+   *  `prd_id` is only meaningful for `origin: "prd_auto"` — the create-
+   *  modal's "Auto · from PRD" tab sends the forked PRD's id so the server
+   *  can dedupe (first-write-wins, AD-P9): re-selecting an already-forked
+   *  PRD returns the EXISTING project instead of a new one. */
+  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact"; prd_id?: number }) =>
     api.post<ProjectListItem>("/v1/projects", payload),
   /** Add an existing user to the project by email
    *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`

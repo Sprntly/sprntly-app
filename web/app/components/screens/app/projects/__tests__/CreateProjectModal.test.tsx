@@ -480,10 +480,45 @@ describe("CreateProjectModal — Auto tab forks from a PRD (AD-P9)", () => {
     })
 
     await waitFor(() =>
-      expect(createMock).toHaveBeenCalledWith({ name: PRD_ARTIFACT.title, origin: "prd_auto" }),
+      expect(createMock).toHaveBeenCalledWith({
+        name: PRD_ARTIFACT.title,
+        origin: "prd_auto",
+        prd_id: PRD_ARTIFACT.id,
+      }),
     )
     await waitFor(() => expect(addArtifactMock).toHaveBeenCalledWith(99, "prd", 1))
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=99"))
+  })
+
+  it("FIX A — re-selecting an already-forked PRD navigates to the EXISTING project the server dedupes to, never a duplicate", async () => {
+    // The server's dedup (find_existing_prd_auto_project) returns the
+    // project that was already forked for this PRD — the modal must
+    // navigate to THAT id, not assume a fresh one was minted.
+    artifactsListMock.mockResolvedValue(ARTIFACTS)
+    createMock.mockResolvedValue({ id: 42, name: PRD_ARTIFACT.title, origin: "prd_auto" })
+    addArtifactMock.mockResolvedValue({ project_id: 42, artifact_type: "prd", artifact_id: 1 })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("create-project-tab-auto"))
+    await waitFor(() => expect(screen.getByTestId("create-project-auto-prd-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("create-project-auto-prd-row-1"))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    // Exactly one create call — the modal itself never double-submits or
+    // retries; dedup is entirely the server's job on this single call.
+    await waitFor(() => expect(createMock).toHaveBeenCalledTimes(1))
+    expect(createMock).toHaveBeenCalledWith({
+      name: PRD_ARTIFACT.title,
+      origin: "prd_auto",
+      prd_id: PRD_ARTIFACT.id,
+    })
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=42"))
   })
 
   it("no PRD selected shows an inline error and never calls create", async () => {

@@ -228,4 +228,43 @@ describe("ProjectIndividualChat — cross-chat INSIGHT turn (design-spec AC7/AC1
     render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
     expect(screen.queryByTestId("cross-chat-insight")).toBeNull()
   })
+
+  it("FIX B — source_kind='group' renders 'noted this in the group chat'", () => {
+    render(
+      React.createElement(ProjectIndividualChat, {
+        projectId: 202,
+        insightNote: { by: "Shristi", text: "the pricing model changed", source_kind: "group" },
+      }),
+    )
+    const note = screen.getByTestId("cross-chat-insight")
+    expect(note.textContent).toContain("noted this in the group chat")
+    expect(note.textContent).not.toContain("noted this in a chat with Sprntly")
+  })
+
+  it("FIX B — source_kind='individual' renders 'noted this in a chat with Sprntly', never the group-chat label", () => {
+    // Ground: source_conversation_id is set for individual-chat promotions
+    // too — the previous hardcoded 'in the group chat' copy mislabeled
+    // this case. This pins the fix.
+    render(
+      React.createElement(ProjectIndividualChat, {
+        projectId: 202,
+        insightNote: { by: "David", text: "flat pricing, not tiered", source_kind: "individual" },
+      }),
+    )
+    const note = screen.getByTestId("cross-chat-insight")
+    expect(note.textContent).toContain("noted this in a chat with Sprntly")
+    expect(note.textContent).not.toContain("noted this in the group chat")
+  })
+
+  it("source_kind omitted/unresolved renders a kind-neutral note, no guessed location", () => {
+    render(
+      React.createElement(ProjectIndividualChat, {
+        projectId: 202,
+        insightNote: { by: "Sprntly", text: "no source kind resolved" },
+      }),
+    )
+    const note = screen.getByTestId("cross-chat-insight")
+    expect(note.textContent).not.toContain("group chat")
+    expect(note.textContent).not.toContain("chat with Sprntly")
+  })
 })
