@@ -138,7 +138,10 @@ def test_compile_binds_the_prd_author_skill(isolated_settings, monkeypatch):
     assert seen["skill"] == "prd-author"
     assert seen["agent"] == "artifact_template"
     assert seen["purpose"] == "compile_prd_template"
-    assert seen["prompt_version"] == "prd-template-compile-v1"
+    # v2 since the compiler stopped ADDING house sections a customer's format
+    # has no home for — a materially different skeleton for the same source, so
+    # the two versions must not pool in the decision log.
+    assert seen["prompt_version"] == "prd-template-compile-v2"
     # enterprise_id is the COMPANY id — the gateway binds the tenant's own
     # Anthropic key off it (app.llm_keys.company_llm_key).
     assert seen["enterprise_id"] == "co-1"

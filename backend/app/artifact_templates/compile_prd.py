@@ -117,9 +117,28 @@ section's `form` field set accordingly.
 
 Use `.eyebrow` for section headings. If their format has a section Sprntly has \
 no equivalent for, keep it — give it an `.eyebrow` and a placeholder saying what \
-goes there. If Sprntly needs an element their format has no home for, place it \
-at the nearest logical point rather than dropping it, and note that in \
-`unmapped_house`.
+goes there.
+
+DO NOT ADD SECTIONS THEIR FORMAT DOES NOT HAVE. This is the rule customers care \
+about most, and it overrides any instinct to be helpful: a team that uploads \
+their format wants documents in THEIR shape, and a Sprntly section they never \
+asked for reads as the product ignoring the format they just uploaded. So if a \
+Sprntly concept — a hypothesis, a projected-impact block, a risks section, \
+anything — has no home in their format, LEAVE IT OUT and list it in \
+`unmapped_house`. Do not invent a section for it, do not append it to the end, \
+and do not graft an extra row or paragraph into one of their sections to carry \
+it.
+
+The class vocabulary above is the ONE exception, and it is not a section: those \
+elements are machinery four shipped features query by CSS selector, not content \
+a reader sees as an extra part of the document. Place each one inside whichever \
+of THEIR sections it belongs to — evidence into the section that holds evidence, \
+the inputs list into whatever they call open questions — and if their format \
+genuinely has no such section, leave the element out and record it in \
+`unmapped_house` so the validator can tell them which feature it costs.
+
+None of this applies to Sprntly's own built-in format, which is not compiled \
+here and keeps every section it has always had.
 
 NEVER emit: a <script> tag, an on* attribute, or a src/href pointing anywhere \
 except fonts.googleapis.com or fonts.gstatic.com. A skeleton containing any of \
@@ -270,7 +289,14 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
             enterprise_id=company_id,
             agent="artifact_template",
             purpose="compile_prd_template",
-            prompt_version="prd-template-compile-v1",
+            # v2: the compiler stopped ADDING house sections a customer's format
+            # has no home for. v1 placed them "at the nearest logical point",
+            # which is what produced the "Added by Sprntly" block in the preview
+            # — a hypothesis and a projected-impact row grafted into a format
+            # that asked for neither. A v2 skeleton is a materially different
+            # document from a v1 one for the same source, so the two must not be
+            # pooled in the decision log.
+            prompt_version="prd-template-compile-v2",
             system=_COMPILE_SYSTEM + _UNTRUSTED_TEMPLATE_ADDENDUM,
             # ONLY the customer's markdown is uncached. See the module docstring.
             input=_COMPILE_USER.format(source=source_md.strip()),
