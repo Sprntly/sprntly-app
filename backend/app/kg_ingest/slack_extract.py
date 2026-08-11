@@ -251,6 +251,7 @@ def register_slack_catalog(
     docs: list[SlackChannelDoc],
     *,
     team_domain: Optional[str] = None,
+    team_id: Optional[str] = None,
 ) -> None:
     """Upsert one `document_catalog` row per channel in `docs`.
 
@@ -265,7 +266,18 @@ def register_slack_catalog(
     file until a human edits it in Drive. Slack has no such latch — the next
     sync re-registers a failed channel for free, keyed on the same content
     hash the KG ledger already uses — so copying Drive's no-except here would
-    take a whole sync down for a cataloguing failure it does not need to."""
+    take a whole sync down for a cataloguing failure it does not need to.
+
+    `team_id` and `team_domain` are NOT interchangeable and the difference is
+    the whole point of storing the former. `team_domain` is the workspace's
+    subdomain, fetched live for the permalink, and it is a DISPLAY NAME a
+    workspace admin can change at will. `team_id` (`T…`) is the stable
+    identity, read from the connection row this company already has stored,
+    so the catalog row and the connection row carry the same value from the
+    same source — which is what lets a later "does any connection still serve
+    this company?" check be an exact comparison instead of a guess. Passing
+    the domain here would produce a column that looks populated and silently
+    never matches."""
     for doc in docs:
         try:
             document_catalog.register_document(
@@ -277,6 +289,7 @@ def register_slack_catalog(
                 url=_channel_permalink(doc.channel_id, team_domain),
                 doc_date=_latest_message_iso(doc.latest_ts),
                 content_hash=document_catalog.content_hash_for(doc.text),
+                provider_workspace_id=team_id,
                 get_text=lambda text=doc.text: text,
             )
         except Exception as e:  # noqa: BLE001 — log-and-continue (Confluence precedent)
@@ -310,13 +323,16 @@ def run_slack_extract(
     docs: list[SlackChannelDoc],
     *,
     team_domain: Optional[str] = None,
+    team_id: Optional[str] = None,
 ) -> dict:
     """Blocking extract + catalog registration. Serialized per company —
     overlapping callers can't double-extract the same channels."""
     with _extract_lock(company_id):
         facade = GraphFacade()
         result = extract_slack_channels(facade, company_id, docs)
-        register_slack_catalog(company_id, docs, team_domain=team_domain)
+        register_slack_catalog(
+            company_id, docs, team_domain=team_domain, team_id=team_id
+        )
         return result
 
 
@@ -325,9 +341,12 @@ def _run_isolated(
     docs: list[SlackChannelDoc],
     *,
     team_domain: Optional[str] = None,
+    team_id: Optional[str] = None,
 ) -> None:
     try:
-        run_slack_extract(company_id, docs, team_domain=team_domain)
+        run_slack_extract(
+            company_id, docs, team_domain=team_domain, team_id=team_id
+        )
     except Exception:  # noqa: BLE001 — fully isolated
         logger.exception("slack-extract failed for %s", company_id)
 
@@ -337,6 +356,7 @@ def kickoff_slack_extract(
     docs: list[SlackChannelDoc],
     *,
     team_domain: Optional[str] = None,
+    team_id: Optional[str] = None,
 ) -> bool:
     """Fire-and-forget: extract synced Slack channels into the KG and
     register their catalog rows, in a daemon thread. Never blocks; never
@@ -346,7 +366,7 @@ def kickoff_slack_extract(
     try:
         t = threading.Thread(
             target=_run_isolated, args=(company_id, docs),
-            kwargs={"team_domain": team_domain},
+            kwargs={"team_domain": team_domain, "team_id": team_id},
             name="slack-kg-extract", daemon=True,
         )
         t.start()

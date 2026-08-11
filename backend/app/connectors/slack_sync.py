@@ -659,8 +659,21 @@ def sync_slack(
     # below, for catalog permalinks — made ONCE per sync, not once per
     # channel.
     team_domain = _slack_team_domain(access_token)
+    # The workspace IDENTITY, read from the connection config this sync
+    # already loaded — deliberately not from `fetch_team_info` beside it, and
+    # deliberately not the domain above. This value is stored on each catalog
+    # row so a later disconnect check can ask "does any active connection for
+    # this company still carry this workspace id?" against the very same field
+    # it was read from (`connections.config.team.id`). Sourcing it from a live
+    # API call would make the column unwritable whenever Slack is unreachable,
+    # for a fact we already have on disk.
+    team_id = str(((config.get("team") or {}) if isinstance(config, dict) else {})
+                  .get("id") or "").strip() or None
     try:
-        kickoff_slack_extract(company_id, slack_channel_docs, team_domain=team_domain)
+        kickoff_slack_extract(
+            company_id, slack_channel_docs,
+            team_domain=team_domain, team_id=team_id,
+        )
     except Exception:  # noqa: BLE001 — extraction must never fail the sync
         logger.exception(
             "slack sync: KG extraction kick failed for %s", company_id
