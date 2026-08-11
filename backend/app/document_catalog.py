@@ -56,7 +56,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from pydantic import BaseModel
 
@@ -613,6 +613,48 @@ def _drop_planner_cache(company_id: str) -> None:
         invalidate_catalog_cache(company_id)
     except Exception:  # noqa: BLE001 — best-effort, never fails the write
         logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
+def deregister_documents(
+    company_id: str, provider: str, external_ids: Iterable[str]
+) -> int:
+    """Drop several catalog rows in one round trip. Returns how many ids were
+    asked for (not how many existed — the delete is idempotent and silent).
+
+    EXISTS BECAUSE REGISTRATION HAD NO COUNTERPART. Rows are written from
+    seven places — uploads, the uploads backfill, the Drive backfill, the
+    Slack extractor, the Drive extractor, the Confluence puller and chat
+    attachments — and `deregister_document` was called from exactly ONE, for
+    uploads. Everything a connector registered was therefore immortal: the
+    table recorded what had EVER been synced, not what is configured now.
+
+    That is not merely untidy for anything reading the catalog. A stale row is
+    indexed as an existing document, is rankable, and — since document
+    resolution shipped — can be ASSERTED as the subject of a question. The
+    body fetch then fails and the user is told the contents could not be
+    loaded, which reads as a transient problem when the truth is that the
+    document is no longer connected at all.
+
+    Deliberately takes an EXPLICIT id list rather than reconciling against a
+    sync's results. A sweep of the shape "delete every row this sync did not
+    return" deletes a tenant's whole catalog the first time an API call fails
+    or a token expires mid-enumeration, because a partial result is
+    indistinguishable from a shrunken one. Callers here pass ids that a user
+    action removed, so a transient failure cannot cause a deletion."""
+    if not company_id:
+        raise ValueError("company_id is required to deregister documents")
+    ids = [str(i) for i in external_ids if str(i or "").strip()]
+    if not ids:
+        return 0
+    (
+        require_client().table(_TABLE)
+        .delete()
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .in_("external_id", ids)
+        .execute()
+    )
+    return len(ids)
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────

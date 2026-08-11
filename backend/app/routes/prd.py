@@ -33,6 +33,7 @@ from app.db import (
     get_prd_rendered,
     start_prd,
 )
+from app.db.artifact_shares import get_or_mint_canonical_share
 from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
 from app.db.conversations import bind_conversation_to_prd
@@ -153,6 +154,21 @@ async def generate(
     # carried in the saved brief payload; enterprise_id == company_id (same
     # convention convergence/finding_state use).
     _record_prd_action(company.company_id, insight)
+
+    # Best-effort eager mint of the canonical share token — the PRD Share
+    # dropdown reads a pre-existing token rather than minting on open, so
+    # the token should exist by the time the panel first renders. Must NEVER
+    # break PRD creation: the GET-time lazy fallback (see get()/latest()
+    # below) backfills a token on first read if this fails or is skipped.
+    try:
+        get_or_mint_canonical_share(
+            artifact_type="prd", artifact_id=prd_id,
+            owner_company_id=company.company_id,
+            owner_workspace_id=company.workspace_id,
+            created_by_user_id=company.user_id,
+        )
+    except Exception:  # noqa: BLE001 — eager mint is best-effort, never fatal
+        logger.warning("eager canonical share mint failed for prd_id=%s", prd_id)
 
     task = asyncio.create_task(
         generate_prd_and_warm(
@@ -698,7 +714,17 @@ def latest(
     if not row:
         raise HTTPException(404, "No PRD found for this workspace")
     rendered = get_prd_rendered(row["id"])
-    return rendered or row
+    result = rendered or row
+    # Canonical share token: read-mostly get-or-create. Backfills exactly
+    # once for a legacy PRD with no pre-existing share; every later call
+    # returns the same token (see get_or_mint_canonical_share).
+    result["share_token"] = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=row["id"],
+        owner_company_id=company.company_id,
+        owner_workspace_id=company.workspace_id,
+        created_by_user_id=company.user_id,
+    )["token"]
+    return result
 
 
 @router.get("/{prd_id}")
@@ -711,6 +737,14 @@ def get(
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
+    # Canonical share token: read-mostly get-or-create (see the /latest
+    # handler's identical comment above).
+    row["share_token"] = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=row["id"],
+        owner_company_id=company.company_id,
+        owner_workspace_id=company.workspace_id,
+        created_by_user_id=company.user_id,
+    )["token"]
     return row
 
 

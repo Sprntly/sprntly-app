@@ -29,6 +29,15 @@ live; `subscribe()` hands a joiner one `{"kind":"replay","text":…}` catch-up
 frame (everything so far) before the live deltas. The buffer exists only
 between the first delta and `close()` — a finished generation replays nothing,
 and the poll carries the persisted result as before.
+
+RESTARTS: a transient gateway failure mid-generation makes the model re-emit
+the whole answer from zero on this same channel, so raw accumulation shows
+attempt 1's partial text glued to attempt 2's full text. `{"kind":"restart"}`
+is the explicit "everything so far is superseded" signal — published by the
+sink's `reset()` (see `delta_sink`), it drops the replay buffer here and the
+accumulator in the browser. It is advisory like every other frame: a client
+that does not understand the kind simply ignores it and behaves as it did
+before the frame existed.
 """
 from __future__ import annotations
 
@@ -67,8 +76,18 @@ def publish(channel: str, event: dict[str, Any]) -> None:
     Delta text is also accumulated into the channel's replay buffer — even with
     no subscribers connected — so a client that opens the panel mid-generation
     can be caught up by `subscribe()`.
+
+    A `{"kind":"restart"}` frame DROPS that buffer: the generation is about to
+    re-emit from zero after a transient failure, so everything accumulated so
+    far is superseded. Without this a late joiner would replay attempt 1
+    immediately followed by attempt 2. The overflow flag is cleared with it —
+    attempt 2 starts from zero, so whatever made attempt 1 overrun the cap no
+    longer holds and buffering should resume.
     """
-    if event.get("kind") == "delta" and event.get("text"):
+    if event.get("kind") == "restart":
+        _accum.pop(channel, None)
+        _accum_overflowed.discard(channel)
+    elif event.get("kind") == "delta" and event.get("text"):
         if channel not in _accum_overflowed:
             grown = _accum.get(channel, "") + event["text"]
             if len(grown) > _ACCUM_MAX:
@@ -150,6 +169,12 @@ def delta_sink(
     frame every `_FLUSH_INTERVAL_S` or `_FLUSH_BYTES`, whichever comes first —
     see the note above for why. Empty deltas are skipped. The final partial
     buffer is flushed by `close()`.
+
+    The returned callable carries a `.reset()`, which `app.llm` calls between
+    retry attempts when a transient failure restarts the stream from zero. It
+    DISCARDS whatever is still buffered here (attempt 1's tail, which no viewer
+    should ever see now) and publishes `{"kind":"restart"}` so the channel's
+    replay buffer and the browser's accumulator both drop attempt 1 too.
     """
     buf: list[str] = []
     pending = [0]                    # running byte count; summing buf per delta
@@ -189,6 +214,20 @@ def delta_sink(
             if chunk:
                 publish_threadsafe(loop, channel, {"kind": "delta", "text": chunk})
 
+    def _reset() -> None:
+        """Attempt 1 is being abandoned — drop its tail, then say so.
+
+        Called on the WORKER thread (from app.llm, between attempts), so the
+        discard runs under `_drain`'s own lock and the announcement hops onto
+        the loop. Ordering is safe without extra machinery: deltas and this
+        restart are scheduled from the same thread, and call_soon_threadsafe is
+        FIFO, so the restart frame always lands after attempt 1's last delta
+        and before attempt 2's first. Never raises.
+        """
+        _drain()   # discard, do not publish: this text is superseded
+        publish_threadsafe(loop, channel, {"kind": "restart"})
+
+    _on_delta.reset = _reset  # type: ignore[attr-defined]
     _pending_drains[channel] = _drain
     return _on_delta
 

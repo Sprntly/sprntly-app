@@ -522,6 +522,11 @@ async def stream_ask_generation(
     re-attaching mid-answer), `{"kind":"delta","text":…}` carrying decoded
     answer markdown (the `answer` field only — key_points/citations/confidence
     arrive with the poll), then a terminal `{"kind":"done"|"error"}`.
+    `{"kind":"restart"}` may appear between deltas: a transient gateway failure
+    made the generation re-emit from zero, so everything streamed before it is
+    superseded and the client drops its accumulated text (see
+    app.graph.token_stream). A client that ignores the kind degrades to
+    rendering both attempts until the poll replaces the preview.
 
     PROGRESSIVE DISPLAY ONLY — the client keeps polling GET /v1/ask/{id}, which
     stays the authoritative source of the finished answer. Cache-hit and

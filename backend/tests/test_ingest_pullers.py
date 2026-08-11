@@ -587,14 +587,143 @@ def test_confluence_puller_never_swallows_a_reconnect_signal(monkeypatch):
         list(confluence.pull("co-1"))
 
 
-def test_confluence_puller_caps_total_records(monkeypatch):
+def _iso_ago(days: int) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _dated(pid: str, created_at: str) -> dict:
+    """A _page whose version.createdAt (the MODIFIED date the window keys off)
+    is set to `created_at`."""
+    page = _page(pid=pid)
+    page["version"]["createdAt"] = created_at
+    return page
+
+
+def test_max_records_constant_is_gone(monkeypatch):
+    """AC11: the flat global cap is removed — per-space fairness replaces it,
+    so the module must no longer carry `_MAX_RECORDS` (nor its old walk bound
+    `_MAX_PAGES_PER_SPACE`)."""
     from app.kg_ingest.pullers import confluence
 
-    monkeypatch.setattr(confluence, "_MAX_RECORDS", 3)
-    ctx = _ctx()
+    assert not hasattr(confluence, "_MAX_RECORDS")
+    assert not hasattr(confluence, "_MAX_PAGES_PER_SPACE")
+
+
+def test_second_space_is_not_starved(monkeypatch):
+    """AC8: two spaces, each with more in-window pages than the per-space
+    extraction budget. The old global list-order cap let the first space spend
+    the whole budget; per-space fairness must yield from the SECOND space too."""
+    from app.kg_ingest.pullers import confluence
+
+    monkeypatch.setattr(confluence, "_MAX_EXTRACT_RECORDS_PER_SPACE", 2)
+    recent = _iso_ago(10)
+    ctx = _ctx(space_ids=[])
+    _stub(
+        monkeypatch, ctx,
+        pages_by_space={
+            "s1": [_dated(f"a{i}", recent) for i in range(5)],
+            "s2": [_dated(f"b{i}", recent) for i in range(5)],
+        },
+    )
+    recs = list(confluence.pull("co-1"))
+    by_space = {r.properties["space_key"] for r in recs}
+    assert "PROD" in by_space, "the second space was starved of extraction budget"
+    # Each space yields exactly its own budget — the budget is per-space, not
+    # global — so the first space cannot consume the second's.
+    eng = [r for r in recs if r.properties["space_key"] == "ENG"]
+    prod = [r for r in recs if r.properties["space_key"] == "PROD"]
+    assert len(eng) == 2 and len(prod) == 2
+
+
+def test_per_space_extraction_budget_caps_yield_but_not_catalog(monkeypatch):
+    """AC9: once a space hits its extraction budget it stops YIELDING but keeps
+    walking + cataloguing every remaining page."""
+    from app.kg_ingest.pullers import confluence
+
+    monkeypatch.setattr(confluence, "_MAX_EXTRACT_RECORDS_PER_SPACE", 3)
+    recent = _iso_ago(5)
+    registered: list[dict] = []
+    monkeypatch.setattr(
+        confluence.document_catalog, "register_document",
+        lambda company_id, **kw: registered.append({"company_id": company_id, **kw}),
+    )
+    ctx = _ctx(space_ids=["s1"], space_keys={"s1": "ENG"})
     _stub(monkeypatch, ctx,
-          pages_by_space={"s1": [_page(pid=f"p{i}") for i in range(10)]})
-    assert len(list(confluence.pull("co-1"))) == 3
+          pages_by_space={"s1": [_dated(f"p{i}", recent) for i in range(8)]})
+    recs = list(confluence.pull("co-1"))
+    assert len(recs) == 3                       # yield capped at the budget
+    assert len(registered) == 8                 # every walked page catalogued
+
+
+def test_catalog_walk_ceiling_logs_warning(monkeypatch, caplog):
+    """AC10: a space walk that hits the catalog document ceiling emits exactly
+    one WARNING naming the company id + space key — never a silent truncation."""
+    import logging as _logging
+
+    from app.kg_ingest.pullers import confluence
+
+    monkeypatch.setattr(confluence, "_MAX_CATALOG_DOCS_PER_SPACE", 3)
+    recent = _iso_ago(5)
+    ctx = _ctx(space_ids=["s1"], space_keys={"s1": "ENG"})
+    _stub(monkeypatch, ctx,
+          pages_by_space={"s1": [_dated(f"p{i}", recent) for i in range(6)]})
+    with caplog.at_level(_logging.WARNING, logger="app.kg_ingest.pullers.confluence"):
+        list(confluence.pull("co-1"))
+    ceiling_warnings = [
+        r for r in caplog.records
+        if r.levelno == _logging.WARNING and "ceiling" in r.getMessage()
+    ]
+    assert len(ceiling_warnings) == 1
+    msg = ceiling_warnings[0].getMessage()
+    assert "co-1" in msg and "ENG" in msg
+
+
+def test_window_read_from_settings(monkeypatch):
+    """AC12: the yield boundary is governed by
+    settings.kg_extraction_window_months (default 18), not a bare literal — so
+    shrinking the setting drops a page the default would have extracted, and
+    disabling it (0) extracts everything."""
+    from app.kg_ingest.pullers import confluence
+
+    ninety_days = _iso_ago(90)      # in-window at 18 months, out at 1 month
+    ctx = _ctx(space_ids=["s1"], space_keys={"s1": "ENG"})
+    _stub(monkeypatch, ctx, pages_by_space={"s1": [_dated("p1", ninety_days)]})
+
+    monkeypatch.setattr(confluence.settings, "kg_extraction_window_months", 18)
+    assert [r.external_id for r in confluence.pull("co-1")] == ["p1"]
+
+    monkeypatch.setattr(confluence.settings, "kg_extraction_window_months", 1)
+    assert list(confluence.pull("co-1")) == []
+
+    monkeypatch.setattr(confluence.settings, "kg_extraction_window_months", 0)
+    assert [r.external_id for r in confluence.pull("co-1")] == ["p1"]
+
+
+def test_out_of_window_page_is_walked_but_not_yielded(monkeypatch):
+    """AC6/AC7 at the pull() seam: an old page and a recent page in one space —
+    only the recent one is yielded, but the walk visits (and catalogues) both."""
+    from app.kg_ingest.pullers import confluence
+
+    registered: list[dict] = []
+    monkeypatch.setattr(
+        confluence.document_catalog, "register_document",
+        lambda company_id, **kw: registered.append(kw),
+    )
+    ctx = _ctx(space_ids=["s1"], space_keys={"s1": "ENG"})
+    _stub(
+        monkeypatch, ctx,
+        pages_by_space={"s1": [
+            _dated("recent", _iso_ago(10)),
+            _dated("ancient", "2019-01-01T00:00:00Z"),
+        ]},
+    )
+    recs = list(confluence.pull("co-1"))
+    assert [r.external_id for r in recs] == ["recent"]
+    assert {c["external_id"] for c in registered} == {"recent", "ancient"}
 
 
 def test_confluence_puller_quiet_when_not_connected(monkeypatch):
