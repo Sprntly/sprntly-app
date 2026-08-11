@@ -477,6 +477,31 @@ def create_group_chat_route(
     return conversation
 
 
+@router.post("/{project_id}/individual")
+def create_individual_chat_route(
+    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
+):
+    """Get-or-create THIS caller's durable individual project chat
+    (`kind='individual'`, scoped project_id+user_id) and return it.
+    Idempotent per (project, caller) — mirrors `POST /{project_id}/group`
+    one level down (per-user rather than per-project).
+
+    This is what gives `ProjectIndividualChat.tsx` ("My chat with
+    Sprntly") a real, reusable `conversation_id` to thread into `/v1/ask`:
+    without it, every turn from that surface POSTed a fresh, unbound ask,
+    so the individual-chat memory-promotion hook
+    (`project_id is not None and conversation_id is not None`,
+    `ask_job_runner._run_sync`) could never fire, no matter how durable an
+    insight the turn produced."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.create_individual_project_chat(project_id, ctx.user_id)
+    logger.info(
+        "individual_project_chat_created project_id=%s conversation_id=%s",
+        project_id, conversation["id"],
+    )
+    return conversation
+
+
 @router.get("/{project_id}/group/turns")
 def list_group_turns_route(
     project_id: int,

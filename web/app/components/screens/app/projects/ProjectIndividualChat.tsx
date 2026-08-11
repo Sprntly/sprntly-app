@@ -19,6 +19,19 @@
 // and the caller's job_role are folded in SERVER-SIDE by the backend when
 // `project_id` is set (`backend/app/routes/ask.py`, build spec AD-P8) — this
 // component sends the id and renders the answer, nothing more.
+//
+// Every send is also bound to a real, durable `conversation_id`
+// (`projectsApi.individualChat` — get-or-create, one row per
+// project+caller, mirrors the group chat's own `POST .../group` one level
+// down). Without a bound conversation, `/v1/ask`'s individual-chat
+// memory-promotion hook (`project_id` AND `conversation_id` both set,
+// `ask_job_runner._run_sync`) can never fire — this is what makes it
+// actually fire for "My chat with Sprntly". Fetched lazily on first send
+// and cached for the life of the mount (`ensureConversationId`) rather than
+// eagerly on mount, so opening the chat costs nothing until the caller
+// actually sends a message; best-effort (a failed fetch degrades to an
+// unbound ask, same as it behaved before this fix, rather than blocking
+// the send).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -37,7 +50,7 @@ import {
   AskCancelledError,
   AskTimeoutError,
 } from "../../../../lib/runAskGeneration"
-import type { AskResponse, OpenArtifactCandidate } from "../../../../lib/api"
+import { projectsApi, type AskResponse, type OpenArtifactCandidate } from "../../../../lib/api"
 import styles from "./ProjectIndividualChat.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
@@ -102,6 +115,33 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
   const tabId = useMemo(() => `project-individual-${projectId}`, [projectId])
   const [resuming, setResuming] = useState(false)
 
+  // The durable per-(project, caller) conversation id, get-or-created lazily
+  // on first send and cached here so every later send on this mount reuses
+  // the SAME id — the backend's own get-or-create (`projectsApi.individualChat`)
+  // is what makes it durable ACROSS mounts/reloads too, so no localStorage
+  // shadow of it is needed here. A ref (not state) because it is read
+  // synchronously inside `handleSend`'s promise chain, never rendered.
+  const conversationPromiseRef = useRef<Promise<number> | null>(null)
+  // Reset the cached lookup when the project changes — a stale id from a
+  // previous project must never leak into this one's asks.
+  useEffect(() => {
+    conversationPromiseRef.current = null
+  }, [projectId])
+  const ensureConversationId = useCallback((): Promise<number | undefined> => {
+    if (!conversationPromiseRef.current) {
+      conversationPromiseRef.current = projectsApi.individualChat(projectId).then((c) => c.id)
+    }
+    // Best-effort: a failed get-or-create degrades to an unbound ask (the
+    // pre-fix behavior) rather than blocking the send. Cleared on failure so
+    // the NEXT send retries instead of reusing a rejected promise forever.
+    return conversationPromiseRef.current.catch((err: unknown) => {
+      conversationPromiseRef.current = null
+      // eslint-disable-next-line no-console
+      console.warn("[project-individual-chat] failed to bind a conversation", err)
+      return undefined
+    })
+  }, [projectId])
+
   // A reload/remount mid-answer must not orphan the job (the same resume
   // contract every other Ask surface keeps, via the SAME shared
   // `getPendingAsk`/`resumeAskGeneration` — no new persistence mechanism).
@@ -139,10 +179,14 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
     setBusy(true)
     stoppedRef.current = false
 
-    runAskGeneration(question, activeCompany, tabId, {
-      project_id: Number(projectId),
-      isStopped: () => stoppedRef.current,
-    })
+    ensureConversationId()
+      .then((conversationId) =>
+        runAskGeneration(question, activeCompany, tabId, {
+          project_id: Number(projectId),
+          conversation_id: conversationId,
+          isStopped: () => stoppedRef.current,
+        }),
+      )
       .then((reply) => {
         setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
       })
@@ -162,7 +206,7 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
         setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message } : t)))
       })
       .finally(() => setBusy(false))
-  }, [draft, busy, activeCompany, tabId, projectId])
+  }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId])
 
   const handleStop = useCallback(() => {
     stoppedRef.current = true

@@ -5241,6 +5241,21 @@ export type GroupTurn = {
   open_candidates?: OpenArtifactCandidate[]
 }
 
+/** Response from `POST /v1/projects/{id}/individual` — the caller's durable
+ *  individual project chat (`conversations.kind='individual'`, scoped
+ *  project_id+user_id). Get-or-create, idempotent per (project, caller):
+ *  this is the `conversation_id` `ProjectIndividualChat` threads into every
+ *  `/v1/ask` call so the individual-chat memory-promotion hook
+ *  (`project_id` AND `conversation_id` both set) can actually fire. */
+export type IndividualChatConversation = {
+  id: number
+  project_id: number | null
+  user_id: string | null
+  kind: "individual" | "group"
+  created_at: string
+  updated_at: string
+}
+
 /** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
  *  minted `report` artifact ref (item-14 substrate, build spec §2). Always
  *  `artifact_type: "report"` in v1 — a saved chat output is captured as a
@@ -5340,6 +5355,13 @@ export const projectsApi = {
    *  busy state should span the whole request, not just the network hop. */
   postGroupTurn: (id: number | string, content: string) =>
     api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, { content }),
+  /** Get-or-create the caller's durable individual project chat
+   *  (create-if-absent, idempotent — mirrors the group chat's own
+   *  `POST .../group`, one level down). Called once per chat session
+   *  (the result is cached client-side) so every ask on this thread
+   *  reuses the SAME `conversation_id`. */
+  individualChat: (id: number | string) =>
+    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
   /** The discrete, provenance-tagged memory entries — the source of truth
    *  behind the cached `memorySummary` above (AD-P3). Most-recently-updated
    *  first, server-side. */

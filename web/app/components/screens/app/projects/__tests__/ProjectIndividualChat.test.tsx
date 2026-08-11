@@ -31,6 +31,7 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 const runAskGenerationMock = vi.fn()
 const resumeAskGenerationMock = vi.fn()
 const getPendingAskMock = vi.fn(() => null as { id: string } | null)
+const individualChatMock = vi.fn()
 
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
@@ -44,6 +45,17 @@ vi.mock("../../../../../lib/runAskGeneration", async () => {
   }
 })
 
+vi.mock("../../../../../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../../../../lib/api")>("../../../../../lib/api")
+  return {
+    ...actual,
+    projectsApi: {
+      ...actual.projectsApi,
+      individualChat: (...a: unknown[]) => individualChatMock(...a),
+    },
+  }
+})
+
 vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
@@ -53,11 +65,22 @@ import { AskStoppedError, AskTimeoutError } from "../../../../../lib/runAskGener
 
 const reply = (answer: string) => ({ answer, key_points: [], citations: [], confidence: 1, unanswered: "" })
 
+const individualChatRecord = (id: number, projectId: number) => ({
+  id,
+  project_id: projectId,
+  user_id: "u1",
+  kind: "individual" as const,
+  created_at: "2026-08-11T00:00:00Z",
+  updated_at: "2026-08-11T00:00:00Z",
+})
+
 beforeEach(() => {
   runAskGenerationMock.mockReset()
   resumeAskGenerationMock.mockReset()
   getPendingAskMock.mockReset()
   getPendingAskMock.mockReturnValue(null)
+  individualChatMock.mockReset()
+  individualChatMock.mockImplementation((id: number) => Promise.resolve(individualChatRecord(9001, id)))
 })
 afterEach(() => cleanup())
 
@@ -128,11 +151,12 @@ describe("ProjectIndividualChat — send + poll + render", () => {
       fireEvent.click(screen.getByLabelText("Send"))
     })
 
+    expect(individualChatMock).toHaveBeenCalledWith(202)
     expect(runAskGenerationMock).toHaveBeenCalledWith(
       "what did the team decide on pricing?",
       "acme",
       "project-individual-202",
-      expect.objectContaining({ project_id: 202 }),
+      expect.objectContaining({ project_id: 202, conversation_id: 9001 }),
     )
     expect(screen.getByTestId("ic-msg-you").textContent).toContain("what did the team decide on pricing?")
     expect(screen.getByTestId("ic-msg-pending")).toBeTruthy()
@@ -143,6 +167,52 @@ describe("ProjectIndividualChat — send + poll + render", () => {
     await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
     expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Flat $49/mo, decided last week.")
     expect(screen.queryByTestId("ic-msg-pending")).toBeNull()
+  })
+
+  it("get-or-creates the individual conversation ONCE and reuses it across sends on the same mount", async () => {
+    runAskGenerationMock.mockResolvedValue(reply("ok"))
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "first message here" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "second message here" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    expect(individualChatMock).toHaveBeenCalledTimes(1)
+    expect(runAskGenerationMock).toHaveBeenCalledTimes(2)
+    for (const call of runAskGenerationMock.mock.calls) {
+      expect(call[3]).toEqual(expect.objectContaining({ conversation_id: 9001 }))
+    }
+  })
+
+  it("a failed get-or-create degrades to an unbound ask rather than blocking the send", async () => {
+    individualChatMock.mockRejectedValue(new Error("network blip"))
+    runAskGenerationMock.mockResolvedValue(reply("still answers"))
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "ask anyway please" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    expect(runAskGenerationMock).toHaveBeenCalledWith(
+      "ask anyway please",
+      "acme",
+      "project-individual-202",
+      expect.objectContaining({ project_id: 202, conversation_id: undefined }),
+    )
+    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
   })
 
   it("Stop marks the turn stopped and does not render an error", async () => {

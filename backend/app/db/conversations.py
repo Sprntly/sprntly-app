@@ -491,3 +491,80 @@ def post_group_turn(
         "id", conversation_id
     ).execute()
     return resp.data[0] if resp.data else None
+
+
+# ── Individual project chat ("My chat with Sprntly") ─────────────────────
+#
+# ADDITIVE ONLY, mirrors the group-chat pair (`get_group_chat`/
+# `create_group_chat`) one level down: ONE `kind='individual'` conversation
+# per (project_id, user_id), rather than per project. This is what gives
+# `ProjectIndividualChat.tsx` a real, reusable `conversation_id` to thread
+# into `/v1/ask` — before this helper existed, every turn from that surface
+# POSTed a fresh, unbound ask, so `ask_job_runner._run_sync`'s memory-
+# promotion gate (`project_id is not None and conversation_id is not None`)
+# could never fire for it, no matter how durable an insight the turn
+# produced.
+#
+# Unlike `create_group_chat`, this does NOT add a partial unique index as a
+# concurrency backstop: `get_conversation_by_prd`/`get_conversation_by_evidence`
+# above already tolerate this exact same "select the most recent, else
+# create" shape without a DB-level guarantee, and a lost race here
+# self-heals the same way — a rare double-create on two simultaneous first
+# opens just means a later get-or-create (any subsequent mount) converges on
+# the most-recently-created row; the extra row sits unused and is never
+# read again. Flagged for the planner as the durable-vs-per-mount call this
+# ticket made (see the dispatch report), not silently decided.
+
+
+def get_individual_project_chat(project_id: int, user_id: str) -> dict[str, Any] | None:
+    """This caller's `kind='individual'` conversation for `project_id`,
+    most recently created first, or None if they haven't sent a message in
+    this project's individual chat yet. Read-only counterpart of
+    `create_individual_project_chat`."""
+    rows = (
+        require_client()
+        .table("conversations")
+        .select("*")
+        .eq("project_id", project_id)
+        .eq("kind", "individual")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0] if rows else None
+
+
+@retry_on_disconnect
+def create_individual_project_chat(project_id: int, user_id: str) -> dict[str, Any]:
+    """Create-if-absent: THIS caller's one individual project chat.
+    Idempotent (best-effort — see the module-level note above) — a second
+    call for the same (project, caller) pair returns the SAME row."""
+    existing = get_individual_project_chat(project_id, user_id)
+    if existing:
+        return existing
+
+    from app.db.projects import get_project  # local import: avoid a load-order cycle
+
+    project = get_project(project_id)
+    if not project:
+        raise ValueError(f"create_individual_project_chat: project {project_id} not found")
+
+    client = require_client()
+    row = (
+        client.table("conversations")
+        .insert(
+            {
+                "company_id": project["company_id"],
+                "workspace_id": project["workspace_id"],
+                "user_id": user_id,
+                "project_id": project_id,
+                "kind": "individual",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    return row
