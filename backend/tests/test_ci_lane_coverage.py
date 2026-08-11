@@ -151,6 +151,26 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
     ),
+    ("test_individual_project_chat_live.py", "RUN_ASK_PROJECT_PROMOTION_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the individual-"
+        "project-chat conversation binding: proves the get-or-create "
+        "conversation helper is genuinely idempotent against a real Postgres, "
+        "and that feeding its conversation_id through the real ask pipeline "
+        "(answer stubbed, classifier real) lands a correctly-provenanced "
+        "project_memory_entries row — closing the exact gap where the shipped "
+        "UI never had a durable conversation_id to send. Deterministic "
+        "backstop: test_individual_project_chat.py covers the same get-or-"
+        "create idempotency, membership/tenant gating, the real /v1/ask route "
+        "binding path, and the non-project no-op against FakeSupabaseClient "
+        "(fake classifier) in the fast lane; this suite is the real-DB/"
+        "real-LLM proof, run locally against the dev rig when touching this "
+        "binding."
+    ),
+    ("test_individual_project_chat_live.py", "ANTHROPIC_API_KEY"): (
+        "Same two live tests as RUN_ASK_PROJECT_PROMOTION_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
     ("test_project_group_gate.py", "RUN_INTERJECTION_GATE_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the smart-"
         "interjection should-respond gate: proves the REAL classifier "
