@@ -37,6 +37,7 @@ from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_proj
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
+from app.project_memory import schedule_regen
 from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
@@ -311,23 +312,26 @@ def list_memory(project_id: int, ctx: WorkspaceContext = Depends(require_workspa
 
 
 @router.post("/{project_id}/memory")
-def add_memory(
+async def add_memory(
     project_id: int,
     payload: AddMemoryEntryRequest,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
     """Add a user-authored memory entry. `author_user_id` is always the
     session user; `promoted_by` stays NULL — agent-promoted entries are a
-    Phase 2 writer. Flips an existing summary's `stale` flag.
-    Membership-gated."""
+    Phase 2 writer. Flips an existing summary's `stale` flag, then fires the
+    bounded synthesis regen off the request path (`schedule_regen` —
+    `app/project_memory.py`; the response below returns before that regen
+    completes in prod, AD-P7). Membership-gated."""
     _require_project_member(project_id, ctx)
     entry = memory_db.add_entry(project_id, body=payload.body, author_user_id=ctx.user_id)
     logger.info("memory_entry_added project_id=%s entry_id=%s", project_id, entry["id"])
+    schedule_regen(project_id)
     return entry
 
 
 @router.patch("/{project_id}/memory/{entry_id}")
-def update_memory(
+async def update_memory(
     project_id: int,
     entry_id: int,
     payload: UpdateMemoryEntryRequest,
@@ -336,27 +340,31 @@ def update_memory(
     """Edit a memory entry's body — scoped to this project; an entry_id
     from another project 404s, unchanged. Membership-gated: a member may
     edit any entry in a project they belong to (v1 all-or-nothing,
-    AD-P11), a same-tenant non-member gets 403 first."""
+    AD-P11), a same-tenant non-member gets 403 first. Fires the bounded
+    synthesis regen off the request path on a real edit (`schedule_regen`)."""
     _require_project_member(project_id, ctx)
     entry = memory_db.update_entry(project_id, entry_id, body=payload.body)
     if not entry:
         raise HTTPException(404, "Memory entry not found")
+    schedule_regen(project_id)
     return entry
 
 
 @router.delete("/{project_id}/memory/{entry_id}")
-def delete_memory(
+async def delete_memory(
     project_id: int,
     entry_id: int,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
     """Remove a memory entry — scoped to this project; an entry_id from
     another project 404s, unchanged. Membership-gated, same as
-    `update_memory`."""
+    `update_memory`. Fires the bounded synthesis regen off the request path
+    on a real delete (`schedule_regen`)."""
     _require_project_member(project_id, ctx)
     deleted = memory_db.delete_entry(project_id, entry_id)
     if not deleted:
         raise HTTPException(404, "Memory entry not found")
+    schedule_regen(project_id)
     return {"deleted": True}
 
 

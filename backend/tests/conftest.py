@@ -1796,6 +1796,53 @@ def _no_referent_adjudication(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_background_memory_synthesis(request, monkeypatch):
+    """Keep a project-memory mutation from firing a REAL Anthropic request.
+
+    `schedule_regen` (`app.project_memory`) runs `regenerate_summary` INLINE
+    under pytest by design (the writer's own contract), and EVERY
+    `add_memory`/`update_memory`/`delete_memory` route call triggers it —
+    not just the tests that mean to exercise synthesis. Without this guard,
+    every existing memory-CRUD test (`test_project_memory_entries.py`, and
+    any other route test that adds/edits/deletes a memory entry in passing)
+    would fire a real `call_md` request against Anthropic using the suite's
+    fake API key — the exact hazard class `_no_background_template_compile`/
+    `_no_referent_adjudication` above exist for.
+
+    A test that means to drive synthesis (`test_project_memory.py`) patches
+    `app.project_memory.call_md` itself; that patch runs AFTER this autouse
+    fixture and wins for that test (same ordering the two guards above rely
+    on). Opt out with `@pytest.mark.real_memory_synthesis` — the dedicated
+    real-LLM live suite drives an UNSTUBBED `call_md` instead.
+    """
+    if request.node.get_closest_marker("real_memory_synthesis"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return "Autouse placeholder synthesis summary for isolated tests."
+
+    try:
+        mod = importlib.import_module("app.project_memory")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_md", _fake_call_md, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_iterate_limiter():
     """Per-test isolation for the Design Agent rate limiters.
 

@@ -140,9 +140,22 @@ def test_memory_delete_foreign_entry_404(isolated_settings, monkeypatch):
 
 
 def test_memory_mutation_flips_summary_stale(isolated_settings, monkeypatch):
+    """`db/project_memory_entries.py`'s add/update/delete each flip an
+    EXISTING summary row's `stale` flag — exercised at the DB-helper level
+    directly, not the HTTP route. Since the memory-synthesis ticket, the
+    route layer ALSO fires a synthesis regen after each mutation
+    (`app.project_memory.schedule_regen`), which — inline under pytest —
+    would immediately clear `stale` again within the same request and mask
+    this specific `_flip_summary_stale` assertion. `db/project_memory_entries.py`
+    itself is unchanged by that ticket, so this stays the right layer to
+    prove its stale-flipping contract in isolation. The route-level
+    add/edit/delete → regen → stale-clears behavior is covered by
+    `test_project_memory.py::test_add_memory_triggers_regen` /
+    `test_edit_delete_memory_triggers_regen`."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
+    from app.db import project_memory_entries as memory_db_mod
     from app.db.client import require_client
 
     require_client().table("project_memory_summary").insert(
@@ -154,9 +167,7 @@ def test_memory_mutation_flips_summary_stale(isolated_settings, monkeypatch):
         }
     ).execute()
 
-    entry = ctx.client.post(
-        f"/v1/projects/{project['id']}/memory", json={"body": "New insight"}
-    ).json()
+    entry = memory_db_mod.add_entry(project["id"], body="New insight", author_user_id=ctx.user_id)
 
     def _summary_stale() -> bool:
         row = (
@@ -175,28 +186,33 @@ def test_memory_mutation_flips_summary_stale(isolated_settings, monkeypatch):
     require_client().table("project_memory_summary").update({"stale": False}).eq(
         "project_id", project["id"]
     ).execute()
-    ctx.client.patch(
-        f"/v1/projects/{project['id']}/memory/{entry['id']}", json={"body": "Edited insight"}
-    )
+    memory_db_mod.update_entry(project["id"], entry["id"], body="Edited insight")
     assert _summary_stale() is True
 
     require_client().table("project_memory_summary").update({"stale": False}).eq(
         "project_id", project["id"]
     ).execute()
-    ctx.client.delete(f"/v1/projects/{project['id']}/memory/{entry['id']}")
+    memory_db_mod.delete_entry(project["id"], entry["id"])
     assert _summary_stale() is True
 
 
 def test_memory_mutation_without_summary_row_is_a_noop(isolated_settings, monkeypatch):
-    """No `project_memory_summary` row exists yet — a mutation must not
-    error trying to flip a flag on a row that isn't there."""
+    """No `project_memory_summary` row exists yet — a bare `_flip_summary_stale`
+    call must not error trying to flip a flag on a row that isn't there.
+    Exercises `db/project_memory_entries.py::add_entry` directly (not the
+    HTTP route) so this stays a DB-helper-level assertion: since the memory-
+    synthesis ticket, POSTing via the route ALSO triggers a synthesis regen
+    that legitimately DOES create a summary row when none existed — that new
+    behavior is covered by `test_project_memory.py::test_add_memory_triggers_regen`."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
-    r = ctx.client.post(
-        f"/v1/projects/{project['id']}/memory", json={"body": "First ever insight"}
+    from app.db import project_memory_entries as memory_db_mod
+
+    entry = memory_db_mod.add_entry(
+        project["id"], body="First ever insight", author_user_id=ctx.user_id
     )
-    assert r.status_code == 200
+    assert entry["body"] == "First ever insight"
 
     from app.db.client import require_client
 
@@ -309,10 +325,20 @@ def test_get_summary_serves_cached_row_no_llm(fake_llm, monkeypatch):
 
 
 def test_get_summary_fallback_when_absent(fake_llm, monkeypatch):
+    """GET .../memory/summary is read-only and never calls an LLM itself —
+    proven by adding entries directly via `db/project_memory_entries.py`
+    (not the HTTP route), so no synthesis regen has run and the fallback
+    branch is genuinely reached. (Since the memory-synthesis ticket, POSTing
+    via the route WOULD trigger a regen — a different, correctly-tested
+    path; see `test_project_memory.py`. This test's job is narrowly the read
+    endpoint's own no-LLM-call guarantee, unchanged by that ticket.)"""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
-    ctx.client.post(f"/v1/projects/{project['id']}/memory", json={"body": "One"})
-    ctx.client.post(f"/v1/projects/{project['id']}/memory", json={"body": "Two"})
+
+    from app.db import project_memory_entries as memory_db_mod
+
+    memory_db_mod.add_entry(project["id"], body="One", author_user_id=ctx.user_id)
+    memory_db_mod.add_entry(project["id"], body="Two", author_user_id=ctx.user_id)
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/memory/summary")
     assert r.status_code == 200
