@@ -767,6 +767,23 @@
   border-radius: 50%;
   background: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-alpha-18);
+  animation: projectAgentPulse 2s ease-in-out infinite;
+}
+
+@keyframes projectAgentPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--accent-alpha-18);
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-alpha-18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workingPill::before {
+    animation: none;
+  }
 }
 
 .inviteRow {

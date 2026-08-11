@@ -259,6 +259,30 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(within(agentRow).getByText("working")).toBeTruthy()
   })
 
+  it("test_agent_pill_has_status_role — the agent pill is exposed to assistive tech as a live status with an accessible name referencing the status string", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const pill = screen.getByTestId("agent-working-status")
+    expect(pill.getAttribute("role")).toBe("status")
+    const accessibleName = pill.getAttribute("aria-label") ?? pill.textContent ?? ""
+    expect(accessibleName).toContain("Sprntly")
+    expect(accessibleName).toContain(PROJECT.members[0].kind === "agent" ? PROJECT.members[0].status : "")
+  })
+
+  it("test_agent_pill_shows_backend_status_string — the pill text equals the virtual member's status constant, no derived/overridden value", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const pill = screen.getByTestId("agent-working-status")
+    expect(pill.textContent).toBe("working")
+  })
+
+  it("test_working_pill_only_for_agent — no human member row renders the agent-working-status pill", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const humanRows = screen.getAllByTestId("member-row-human")
+    for (const row of humanRows) {
+      expect(within(row).queryByTestId("agent-working-status")).toBeNull()
+    }
+    expect(screen.getAllByTestId("agent-working-status")).toHaveLength(1)
+  })
+
   it("human member rows carry their job_role label", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
     const rows = screen.getAllByTestId("member-row-human")
@@ -423,6 +447,28 @@ describe("ProjectDetailScreen module CSS — tokens only", () => {
     expect(src).toContain("#DBEAFE")
     expect(src).toContain("#1E40AF")
     expect(src).not.toContain("634AB0")
+  })
+})
+
+describe("ProjectDetailScreen — agent working-pill pulse (presentational polish)", () => {
+  it("test_pulse_keyframe_in_module_not_globals — the module defines the pulse keyframe + a prefers-reduced-motion guard; globals.css is untouched", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    expect(css).toContain("@keyframes projectAgentPulse")
+    expect(css).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)/)
+    expect(css).toMatch(/\.workingPill::before\s*{[^}]*animation:\s*none/)
+
+    const globals = readFileSync(join(__dirname, "../../../../../globals.css"), "utf8")
+    expect(globals).not.toContain("projectAgentPulse")
+  })
+
+  it("test_no_new_state_for_status — no new useState/fetch is introduced for the agent status (source-scan guard against accidental activity-wiring)", () => {
+    const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
+    // Baseline pre-ticket declaration count (state/rail/activeChat/railModal/
+    // removeTarget/removeBusy/removeError) — this ticket is markup + CSS
+    // only, so the count must not grow.
+    const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
+    expect(useStateDeclarations).toHaveLength(7)
+    expect(src).not.toContain("posting")
   })
 })
 

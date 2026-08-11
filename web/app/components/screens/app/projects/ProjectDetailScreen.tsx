@@ -511,7 +511,14 @@ export function ProjectDetailView({
                   </div>
                   <div className={styles.memberRole}>{agent.role_label}</div>
                 </div>
-                <span className={styles.workingPill}>{agent.status}</span>
+                <span
+                  className={styles.workingPill}
+                  role="status"
+                  aria-label={`Sprntly — ${agent.status}`}
+                  data-testid="agent-working-status"
+                >
+                  {agent.status}
+                </span>
               </div>
             ) : null}
             <div className={styles.inviteRow}>
