@@ -257,6 +257,13 @@ def test_registration_still_has_exactly_one_deletion_counterpart(isolated_settin
         "app/document_sources.py",          # uploads, on file delete
         "app/routes/connectors.py",         # Slack, on channel deselection
         "app/connector_lookup/slack_voc.py",  # prose reference only
+        # Prose reference only, same as slack_voc above: `invalidate_catalog_cache`
+        # names the write paths that must drop the planner's cached catalogs, and
+        # `deregister_document` is one of them. This walk greps FILE TEXT, so a
+        # comment naming the function reads as a caller — which is the correct
+        # trade for a guard that would rather flag a mention than miss a real
+        # removal path.
+        "app/ask_planner.py",               # prose reference only
     }, (
         f"the set of modules that REMOVE catalog rows changed: {sorted(callers)}. "
         "Registration happens from seven places; if you added an eighth, it "
