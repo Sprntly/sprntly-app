@@ -254,3 +254,131 @@
   color: var(--ink-4);
   padding: 0 16px 6px;
 }
+
+/* ── @-mention people picker + chips + invite affordance ──
+   Tokens only, from globals.css :root (no new palette). The picker rides the
+   composer's existing `slashMenu` slot; these classes only style rows/chips. */
+
+/* A people-mention chip inside a rendered message bubble (presentational —
+   never triggers a write; the styled span is the whole affordance). */
+.mentionChip {
+  display: inline;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border-radius: 5px;
+  padding: 0 4px;
+  white-space: nowrap;
+}
+
+/* Unwrapped markdown paragraph (so chips + text flow inline in a bubble). */
+.mentionText {
+  display: inline;
+}
+
+/* The picker surface — a compact list floated above the composer input. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 240px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+  padding: 4px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+}
+
+.pickerHint {
+  font-size: 12px;
+  color: var(--ink-4);
+  padding: 8px 10px;
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.pickerRowActive {
+  background: var(--accent-alpha-08);
+}
+
+.pickerRow:hover {
+  background: var(--accent-alpha-06);
+}
+
+.pickerName {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.pickerEmail {
+  font-size: 11.5px;
+  color: var(--ink-4);
+}
+
+.pickerKind {
+  margin-left: auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: 5px;
+  padding: 2px 6px;
+}
+
+.pickerKind[data-kind="member"] {
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+}
+
+.pickerInvite {
+  font-weight: 600;
+  color: var(--accent-ink);
+}
+
+/* The post-select affordance (added / invite sent / copy-link fallback). */
+.affordance {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  margin: 0 16px 8px;
+}
+
+.affordanceError {
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.copyLinkBtn {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+}

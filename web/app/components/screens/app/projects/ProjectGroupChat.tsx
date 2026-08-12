@@ -39,6 +39,13 @@ import {
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
 import { useRealtimeChannel } from "./useRealtimeChannel"
+import {
+  detectMentionQuery,
+  insertMentionChip,
+  isEmailNeedle,
+  parseMentionChips,
+  type MentionQuery,
+} from "./mentions"
 import styles from "./ProjectGroupChat.module.css"
 
 /** The v1 deterministic trigger (mirrors `backend/app/routes/projects.py`'s
@@ -89,6 +96,61 @@ function formatTime(iso: string): string {
   return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
 }
 
+/** A row from `candidateSearch` (the tenant-scoped candidate typeahead read). */
+type CandidateRow = Awaited<ReturnType<typeof projectsApi.candidateSearch>>[number]
+
+/** `tagCandidate`'s response. The api.ts contract exposes `email_status` but
+ *  not `invite_link` (the backend `/tag` route returns `email_status` only,
+ *  not a link, as of this base) — so `invite_link` is read defensively here:
+ *  the copy-invite-link fallback renders only when a link is actually present.
+ *  Wiring the real link is a backend follow-up. */
+type TagResult = Awaited<ReturnType<typeof projectsApi.tagCandidate>> & { invite_link?: string }
+
+/** A row in the people picker: a directory candidate, or the invite-by-email
+ *  affordance row. `needle` is what `tagCandidate` is called with on select. */
+type MentionMenuItem =
+  | { row: "candidate"; kind: CandidateRow["kind"]; label: string; sublabel: string; needle: string }
+  | { row: "invite"; label: string; needle: string }
+
+/** The post-action affordance (AD-TNM6: degrade to copy, never throw/block). */
+type MentionAffordance = { tone: "ok" | "error"; text: string; inviteLink?: string }
+
+/** The email-send FAILED sentinel the backend returns (lowercase `"failed"`,
+ *  per `backend/app/team_email.py`) — compared case-insensitively so the copy
+ *  survives either casing. */
+function emailFailed(status: string | undefined): boolean {
+  return (status ?? "").toLowerCase() === "failed"
+}
+
+/** Render human-bubble content with `@name` segments as presentational chips
+ *  (a styled `<span>`, tokens only) while text segments keep their markdown
+ *  (react-markdown + remark-gfm, the SAME primitives the rest of the thread
+ *  uses — no second markdown implementation). Paragraphs are unwrapped to a
+ *  span so chips and text flow inline. `@sprntly` is never chipped (it is the
+ *  agent token). */
+function MentionBubble({ content }: { content: string }) {
+  const segments = parseMentionChips(content)
+  return (
+    <>
+      {segments.map((seg, i) =>
+        seg.type === "mention" ? (
+          <span key={i} className={styles.mentionChip} data-testid="gc-mention-chip">
+            @{seg.label}
+          </span>
+        ) : (
+          <ReactMarkdown
+            key={i}
+            remarkPlugins={[remarkGfm]}
+            components={{ p: ({ children }) => <span className={styles.mentionText}>{children}</span> }}
+          >
+            {seg.value}
+          </ReactMarkdown>
+        ),
+      )}
+    </>
+  )
+}
+
 export type ProjectGroupChatProps = {
   projectId: number | string
   /** Opens the artifacts modal on a specific candidate (a later ticket's
@@ -107,6 +169,20 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const [posting, setPosting] = useState(false)
   const [draft, setDraft] = useState("")
   const [error, setError] = useState<string | null>(null)
+
+  // ── @-mention people picker (spec decision #1 — a token DISTINCT from
+  // @Sprntly). The picker reuses the composer's generic `slashMenu` ReactNode
+  // slot (no second overlay, no ChatComposer edit); `candidateSearch` feeds
+  // the rows and `tagCandidate` drives the add/invite on select. ──
+  const [mentionQuery, setMentionQuery] = useState<MentionQuery | null>(null)
+  const [candidates, setCandidates] = useState<CandidateRow[]>([])
+  const [candLoading, setCandLoading] = useState(false)
+  const [candError, setCandError] = useState(false)
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0)
+  const [affordance, setAffordance] = useState<MentionAffordance | null>(null)
+  // A caret position to restore into the textarea after a chip insertion — the
+  // draft state update lands first, then this effect re-seats the cursor.
+  const pendingCaretRef = useRef<number | null>(null)
 
   // "Save as artifact" (agent turns only, v1 — see the ticket's scope
   // decision). Local, per-turn state only: no `sourceConversationId` is
@@ -197,12 +273,145 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   })
 
   const handleComposerInput = useCallback(
-    (value: string) => {
+    (value: string, caret: number) => {
       setDraft(value)
       if (myUserId) sendTyping({ userId: myUserId, name: myName })
+      // Distinct-token detection: opens the people picker for an @… token that
+      // is NOT @sprntly (the agent path). @sprntly returns null here → no
+      // picker; MENTION_RE + invokedBy still route it to the agent, untouched.
+      const q = detectMentionQuery(value, caret)
+      setMentionQuery(q)
+      setMentionActiveIndex(0)
     },
     [myUserId, myName, sendTyping],
   )
+
+  // Debounced candidate fetch for the active mention query (AD-P: never throw
+  // during render — a rejected search degrades to the in-menu error state).
+  const activeQuery = mentionQuery?.query ?? null
+  useEffect(() => {
+    if (activeQuery === null) {
+      setCandidates([])
+      setCandLoading(false)
+      setCandError(false)
+      return
+    }
+    setCandLoading(true)
+    setCandError(false)
+    let cancelled = false
+    const timer = setTimeout(() => {
+      projectsApi
+        .candidateSearch(projectId, activeQuery)
+        .then((rows) => {
+          if (cancelled) return
+          setCandidates(rows)
+          setCandLoading(false)
+        })
+        .catch(() => {
+          if (cancelled) return
+          setCandidates([])
+          setCandError(true)
+          setCandLoading(false)
+        })
+    }, 150)
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [activeQuery, projectId])
+
+  // The picker rows: directory candidates, plus an "invite by email" row when
+  // the query looks like an email OR the directory came back empty (AC-5).
+  const mentionItems = useMemo<MentionMenuItem[]>(() => {
+    if (mentionQuery === null) return []
+    const q = mentionQuery.query
+    const items: MentionMenuItem[] = candidates.map((c) => ({
+      row: "candidate" as const,
+      kind: c.kind,
+      label: c.name ?? c.email ?? "Unknown",
+      sublabel: c.email ?? "",
+      needle: c.email ?? c.name ?? "",
+    }))
+    const emailLike = isEmailNeedle(q)
+    if (emailLike || (!candLoading && !candError && candidates.length === 0)) {
+      items.push({
+        row: "invite",
+        needle: q,
+        label: emailLike ? `Invite ${q} by email` : "No matches — invite by email",
+      })
+    }
+    return items
+  }, [mentionQuery, candidates, candLoading, candError])
+
+  const closeMentionPicker = useCallback(() => {
+    setMentionQuery(null)
+    setMentionActiveIndex(0)
+  }, [])
+
+  const handleMentionSelect = useCallback(
+    (item: MentionMenuItem | undefined) => {
+      if (!item || mentionQuery === null) return
+      setAffordance(null)
+
+      // A member: insert the mention chip into the draft, NO network write —
+      // the live "mentioned" notify is a later change (AC-3).
+      if (item.row === "candidate" && item.kind === "member") {
+        const { text, caret } = insertMentionChip(draft, mentionQuery.end, item.label)
+        setDraft(text)
+        pendingCaretRef.current = caret
+        closeMentionPicker()
+        return
+      }
+
+      // A non-member candidate or the invite-by-email row: tag them. AD-TNM6 —
+      // never throw/block; a refuse (403/404) degrades to generic copy (AC-7).
+      const label = item.row === "invite" ? item.needle : item.label
+      closeMentionPicker()
+      projectsApi
+        .tagCandidate(projectId, item.needle)
+        .then((raw) => {
+          const res = raw as TagResult
+          if (res.tier === "t_workspace") {
+            setAffordance({ tone: "ok", text: `${label} added to the project` })
+          } else if (res.tier === "t_company" || res.tier === "t_newuser") {
+            if (emailFailed(res.email_status)) {
+              setAffordance({
+                tone: "error",
+                text: `Couldn't email ${label} — copy the invite link`,
+                inviteLink: res.invite_link,
+              })
+            } else {
+              setAffordance({ tone: "ok", text: `Invite sent to ${label}` })
+            }
+          } else {
+            // t_member (already on the project) — a benign echo.
+            setAffordance({ tone: "ok", text: `${label} is already on the project` })
+          }
+        })
+        .catch(() => {
+          // 403/404 (cross-tenant refuse, or gone) — one opaque message, no
+          // disclosure of the reason (AD-TNM1 mirrored in the UI).
+          setAffordance({ tone: "error", text: "Couldn't add that person" })
+        })
+    },
+    [draft, mentionQuery, projectId, closeMentionPicker],
+  )
+
+  // Re-seat the textarea caret after a chip insertion changed the draft.
+  useEffect(() => {
+    if (pendingCaretRef.current === null) return
+    const el = composerRef.current
+    const caret = pendingCaretRef.current
+    pendingCaretRef.current = null
+    if (el) {
+      el.focus()
+      try {
+        el.setSelectionRange(caret, caret)
+      } catch {
+        /* jsdom/older engines may reject setSelectionRange on an unrendered value */
+      }
+    }
+  }, [draft])
 
   // Focus-gated poll (AD-P4 origin, demoted to fallback by AD-P22): only
   // while the tab/window has focus, cleared on blur and on unmount — no
@@ -317,6 +526,51 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     [turns, myUserId],
   )
 
+  // The people picker, rendered into the composer's generic `slashMenu` slot
+  // (the composer's existing menu-rendering seam — no bespoke overlay, no
+  // ChatComposer edit). Row clicks and keyboard nav both route to
+  // `handleMentionSelect`.
+  const mentionPicker =
+    mentionQuery === null ? null : (
+      <div className={styles.picker} role="listbox" aria-label="Mention someone" data-testid="gc-mention-picker">
+        {candLoading ? (
+          <div className={styles.pickerHint} data-testid="gc-mention-loading">
+            Searching…
+          </div>
+        ) : candError ? (
+          <div className={styles.pickerHint} data-testid="gc-mention-error">
+            Couldn&rsquo;t search right now — keep typing to retry
+          </div>
+        ) : (
+          mentionItems.map((item, i) => (
+            <button
+              key={item.row === "invite" ? `invite:${item.needle}` : `${item.kind}:${item.needle}:${i}`}
+              type="button"
+              role="option"
+              aria-selected={i === mentionActiveIndex}
+              className={`${styles.pickerRow}${i === mentionActiveIndex ? " " + styles.pickerRowActive : ""}`}
+              data-testid={item.row === "invite" ? "gc-mention-invite" : "gc-mention-candidate"}
+              onMouseEnter={() => setMentionActiveIndex(i)}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => handleMentionSelect(item)}
+            >
+              {item.row === "invite" ? (
+                <span className={styles.pickerInvite}>{item.label}</span>
+              ) : (
+                <>
+                  <span className={styles.pickerName}>{item.label}</span>
+                  {item.sublabel ? <span className={styles.pickerEmail}>{item.sublabel}</span> : null}
+                  <span className={styles.pickerKind} data-kind={item.kind} data-testid="gc-mention-kind">
+                    {item.kind === "member" ? "Member" : "Not on project"}
+                  </span>
+                </>
+              )}
+            </button>
+          ))
+        )}
+      </div>
+    )
+
   return (
     <div className={styles.thread} data-testid="project-group-chat">
       {presenceMembers.length > 0 ? (
@@ -384,7 +638,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                         <span className={styles.time}>{formatTime(turn.created_at)}</span>
                       </div>
                       <div className={styles.bubbleMe}>
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content}</ReactMarkdown>
+                        <MentionBubble content={turn.content} />
                       </div>
                     </div>
                     <span className={styles.av} aria-hidden="true">
@@ -405,7 +659,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                       <span className={styles.time}>{formatTime(turn.created_at)}</span>
                     </div>
                     <div className={styles.bubbleOther}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content}</ReactMarkdown>
+                      <MentionBubble content={turn.content} />
                     </div>
                   </div>
                 </div>
@@ -444,6 +698,29 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         </div>
       ) : null}
 
+      {affordance ? (
+        <div
+          className={`${styles.affordance}${affordance.tone === "error" ? " " + styles.affordanceError : ""}`}
+          role="status"
+          data-testid="gc-mention-affordance"
+        >
+          <span>{affordance.text}</span>
+          {affordance.inviteLink ? (
+            <button
+              type="button"
+              className={styles.copyLinkBtn}
+              data-testid="gc-copy-invite-link"
+              title={affordance.inviteLink}
+              onClick={() => {
+                void navigator.clipboard?.writeText?.(affordance.inviteLink as string)
+              }}
+            >
+              Copy invite link
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
       <div className={styles.composerWrap}>
         <ChatComposer
           busy={posting}
@@ -453,11 +730,34 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           hint={null}
           menuOpen={false}
           menuActiveIndex={0}
-          slashMenu={null}
+          slashMenu={mentionPicker}
           composerRef={composerRef}
           fileInputRef={fileInputRef}
-          onInput={(e) => handleComposerInput(e.target.value)}
+          onInput={(e) => handleComposerInput(e.target.value, e.target.selectionStart ?? e.target.value.length)}
           onKeyDown={(e) => {
+            // Picker-open: arrow/enter/escape drive the picker, NOT the send.
+            if (mentionQuery !== null && mentionItems.length > 0) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault()
+                setMentionActiveIndex((i) => (i + 1) % mentionItems.length)
+                return
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault()
+                setMentionActiveIndex((i) => (i - 1 + mentionItems.length) % mentionItems.length)
+                return
+              }
+              if (e.key === "Enter") {
+                e.preventDefault()
+                handleMentionSelect(mentionItems[mentionActiveIndex])
+                return
+              }
+              if (e.key === "Escape") {
+                e.preventDefault()
+                closeMentionPicker()
+                return
+              }
+            }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault()
               handleSend()
