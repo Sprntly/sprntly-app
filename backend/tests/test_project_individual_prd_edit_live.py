@@ -95,14 +95,23 @@ def scene(sb):
 
     created = {"projects": [], "briefs": [], "prds": []}
 
-    brief = c.table("briefs").insert({
-        "dataset": slug, "week_label": "PRD-edit live", "is_current": False,
-    }).execute().data[0]
-    created["briefs"].append(brief["id"])
+    # ONE brief per PRD (distinct brief_id) — NOT one shared brief: PRDs sharing
+    # (brief_id, insight_index) collapse into a single artifact under
+    # `_prd_family_key`, which would hide one PRD from the company fan-out and
+    # break the cross-project / own-project scoping this test relies on.
+    # `briefs.payload` is jsonb NOT NULL (20260525120000_briefs.sql) → seed a
+    # minimal valid payload on EACH insert.
+    def _brief(label):
+        row = c.table("briefs").insert({
+            "dataset": slug, "week_label": label, "is_current": False,
+            "payload": {"insights": []},
+        }).execute().data[0]
+        created["briefs"].append(row["id"])
+        return row["id"]
 
-    def _prd(title):
+    def _prd(brief_id, title):
         row = c.table("prds").insert({
-            "brief_id": brief["id"], "insight_index": 0, "title": title,
+            "brief_id": brief_id, "insight_index": 0, "title": title,
             "payload_md": f"# {title}\n\nOriginal problem statement.", "status": "ready",
         }).execute().data[0]
         created["prds"].append(row["id"])
@@ -116,7 +125,8 @@ def scene(sb):
         return p["id"]
 
     p_a1, p_a2 = _project("PRD-edit A1"), _project("PRD-edit A2")
-    prd_a1, prd_a2 = _prd("A1 PRD"), _prd("A2 PRD")
+    prd_a1 = _prd(_brief("PRD-edit live A1"), "A1 PRD")
+    prd_a2 = _prd(_brief("PRD-edit live A2"), "A2 PRD")
     projects_db.add_artifact(p_a1, "prd", prd_a1)
     projects_db.add_artifact(p_a2, "prd", prd_a2)
 
