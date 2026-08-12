@@ -48,11 +48,14 @@ import { ProjectMainThread } from "./ProjectMainThread"
 import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
 import { TaskModal } from "./TaskModal"
+import { useRealtimeChannel } from "./useRealtimeChannel"
 import styles from "./ProjectDetailScreen.module.css"
 
-// Focus-gated poll interval for the unread badge — same cadence
-// `ProjectGroupChat.tsx`'s own `POLL_MS` uses (AD-P4), duplicated locally
-// per this file's existing precedent (TYPE_BADGE, relativeTime, etc.).
+// Focus-gated FALLBACK poll interval for the unread badge (AD-P22) — same
+// cadence `ProjectGroupChat.tsx`'s own `POLL_MS` uses (AD-P4), duplicated
+// locally per this file's existing precedent (TYPE_BADGE, relativeTime,
+// etc.). Demoted below: the live per-user channel + its reconnect reconcile
+// carry the badge while connected; this interval only arms when degraded.
 const UNREAD_POLL_MS = 4000
 
 type HumanMember = Extract<ProjectMember, { kind: "human" }>
@@ -633,10 +636,42 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     load()
   }, [load])
 
+  // Live individual-unread signal (AD-P25 S2): the caller's OWN, member+
+  // owner-gated per-user channel (`project:{id}:user:{uid}`) flips the badge
+  // the instant a `brief.delivered` broadcast lands — no poll wait. `onReconcile`
+  // fires exactly once per (re)subscribe (the hook's own guarantee) and
+  // re-derives the same `individualUnread` signal the poll below uses,
+  // closing any at-most-once Broadcast gap (AD-P22). `currentUserId` is the
+  // same session-derived id already resolved above (`useAuth()`) — no new
+  // fetch; a `null` id (unresolved auth) yields a `null` topic, the hook
+  // reports `degraded: true`, and the poll below carries the badge exactly
+  // as it always has.
+  const handleUnreadEvent = useCallback((event: string) => {
+    if (event !== "brief.delivered") return
+    setIndividualUnread(true)
+  }, [])
+  const handleUnreadReconcile = useCallback(() => {
+    projectsApi
+      .individualUnread(projectId)
+      .then((status) => setIndividualUnread(Boolean(status.unread)))
+      .catch(() => {
+        /* best-effort — the next reconnect or fallback poll tick retries */
+      })
+  }, [projectId])
+  const unreadTopic = currentUserId ? `project:${projectId}:user:${currentUserId}` : null
+  const { degraded: unreadDegraded } = useRealtimeChannel(unreadTopic, {
+    onEvent: handleUnreadEvent,
+    onReconcile: handleUnreadReconcile,
+  })
+
   // Unread badge: fetch on mount, then a focus-gated poll while the tab has
   // focus — same cadence + focus-gate posture `ProjectGroupChat.tsx`'s own
-  // poll uses (AD-P4, no realtime). Best-effort: a failed fetch/poll tick
-  // just leaves the badge in its last-known state, never an error surface.
+  // poll uses (AD-P4). Demoted to a fallback by AD-P22: while the realtime
+  // channel above is live, the broadcast + reconnect reconcile cover the
+  // badge and this interval does not arm; when the channel errors/drops,
+  // this re-arms exactly as it always has. Best-effort: a failed fetch/poll
+  // tick just leaves the badge in its last-known state, never an error
+  // surface.
   useEffect(() => {
     let cancelled = false
     const fetchUnread = () => {
@@ -654,6 +689,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
 
     let intervalId: ReturnType<typeof setInterval> | null = null
     const start = () => {
+      if (!unreadDegraded) return
       if (intervalId != null) return
       intervalId = setInterval(fetchUnread, UNREAD_POLL_MS)
     }
@@ -675,7 +711,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       window.removeEventListener("focus", onFocus)
       window.removeEventListener("blur", onBlur)
     }
-  }, [projectId])
+  }, [projectId, unreadDegraded])
 
   // Selecting the individual row clears the badge: POST /individual/read
   // advances the caller's own cursor server-side, then the local dot state
