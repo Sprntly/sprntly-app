@@ -52,6 +52,7 @@ from app.db.prds import (
     latest_prd_for_dataset,
     list_prd_generations,
     list_prd_versions,
+    mark_prd_generating,
     resolve_prd_id_by_public_id,
     restore_prd_version,
     save_prd_version,
@@ -61,7 +62,7 @@ from app.deps.ownership import require_owned_brief, require_owned_dataset, requi
 from app.prd_command import classify_prd_command
 from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
-    generate_prd_and_warm,
+    generate_prd_and_warm, regenerate_prd_into_template,
 )
 from app.prompts import (
     EVIDENCE_TEMPLATE_VERSION,
@@ -745,6 +746,25 @@ def get(
         owner_workspace_id=company.workspace_id,
         created_by_user_id=company.user_id,
     )["token"]
+    # The stamp's NAME, resolved server-side so the PRD panel's "Format: {name}"
+    # label needs no second fetch — the id alone is a uuid nobody recognises.
+    # None both for an unstamped row (the built-in; the client renders its own
+    # label) and for a stamped one whose format was since deleted (the id
+    # survives deletion by design — see 20260806160000's header). Best-effort:
+    # a lookup hiccup costs the label, never the document.
+    name = None
+    template_id = row.get("artifact_template_id")
+    if template_id:
+        try:
+            from app.db.artifact_templates import get_template_by_id
+
+            t = get_template_by_id(company.company_id, template_id)
+            name = t.get("name") if t else None
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "format-name lookup failed for prd_id=%s", prd_id, exc_info=True
+            )
+    row["artifact_template_name"] = name
     return row
 
 
@@ -1108,4 +1128,111 @@ def chat_edit(
         "prd": get_prd_rendered(prd_id),
         "sections_changed": edit["sections_changed"],
         "summary": edit["summary"],
+    }
+
+
+class ChangeTemplateIn(BaseModel):
+    # The target format's id — or null for Sprntly's built-in format, which is
+    # a real choice here (a stamped PRD switching BACK), not the "no
+    # preference" it means on the generate routes.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/{prd_id}/change-template")
+async def change_template(
+    prd_id: int,
+    body: ChangeTemplateIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Re-write an existing PRD into a different format, in place.
+
+    Not a relabel: the document's CONTENT is regenerated into the target
+    format's structure, via the import path's faithful re-layout mode — the
+    current document (the user's edits included) is the only source material,
+    so nothing is invented and nothing re-grounds. The current version is
+    snapshotted to history first, so the switch is always undoable.
+
+    Ordered gates, every one answered before anything is written:
+    ownership (404, indistinguishable from missing, like every check here) →
+    `ready` only (409 — a generating row is already someone's job, a failed one
+    has nothing trustworthy to re-lay-out) → the target format must be usable
+    (`_requested_template_id`: 404 foreign / 409 wrong-type-or-uncompiled; null
+    passes through as the built-in) → already in that format is a no-op the
+    response states rather than an error, because the user's intent is already
+    true.
+
+    Fire-and-forget like /generate: the row goes back to `generating` and the
+    existing poll (GET /v1/prd/{id}) and token stream (`prd:<id>`) carry the
+    regeneration exactly as they carry a first generation. A failed
+    regeneration restores the previous document's `ready` status with its
+    content untouched — the caller detects the failed switch by the row's
+    `artifact_template_id` still holding its old value."""
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    if row.get("status") != "ready":
+        raise HTTPException(
+            409,
+            "This PRD is still being worked on — try again when it's ready.",
+        )
+
+    # Validated BEFORE the snapshot and the status flip: a format the caller
+    # cannot use must be a refusal they can act on, not a PRD stuck generating.
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id
+    )
+
+    current = row.get("artifact_template_id") or None
+    if (template_id or None) == current:
+        # Already true — the no-op case. Stated, not 409'd: "make it X" when it
+        # is X is a satisfied request, and the client reads `unchanged` to skip
+        # the regenerating state entirely.
+        return {
+            "prd_id": prd_id,
+            "status": "ready",
+            "unchanged": True,
+            "artifact_template_id": current,
+        }
+
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "This PRD has no content to re-write yet.")
+
+    # The undo point, taken from the RAW payload_md — same discipline as the
+    # chat-edit and input-answer paths: design-agent 'applied' patches fold on
+    # read (get_prd_rendered), so snapshotting and re-laying-out the raw doc
+    # keeps them folding exactly once.
+    try:
+        save_prd_version(
+            prd_id, row.get("title", ""), prd_html, saved_by=_actor(company)
+        )
+    except Exception:  # noqa: BLE001 — losing the undo point must not lose the switch
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before change-template "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
+
+    mark_prd_generating(prd_id)
+
+    task = asyncio.create_task(
+        regenerate_prd_into_template(
+            prd_id,
+            source_md=prd_html,
+            brief_id=row["brief_id"],
+            insight_index=row.get("insight_index") or 0,
+            title=row.get("title") or "PRD",
+            artifact_template_id=template_id,
+            company_id=company.company_id,
+            user_id=company.user_id,
+            author=company.user_name,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": row.get("title") or "PRD",
+        "artifact_template_id": template_id,
+        "variant": PRD_VARIANT,
     }

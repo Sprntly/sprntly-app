@@ -933,6 +933,12 @@ export type ChatIntentEnvelope = {
     | "generate_prototype"
     | "multi_agent"
     | "open_artifact"
+    /** Switch the target PRD into a different uploaded format and re-write it
+     *  in place — dispatches POST /v1/prd/{id}/change-template with
+     *  `artifact_template_id`. Targeted like edit_prd (the tab's PRD or the
+     *  conversation's); the backend downgrades a target-less or format-less
+     *  request to `answer` before it ever reaches a surface. */
+    | "change_prd_template"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -953,9 +959,11 @@ export type ChatIntentEnvelope = {
   artifact_template_name: string | null
   reason: string
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
-   *  | "no_artifact_query" | "template_not_found" — the last meaning the user
-   *  named a format we could not find, so the build was deliberately downgraded
-   *  to an answer that asks which one they meant. */
+   *  | "no_artifact_query" | "template_not_found" | "no_target_format" —
+   *  template_not_found means the user named a format we could not find, so
+   *  the build/switch was deliberately downgraded to an answer that asks which
+   *  one they meant; no_target_format is a format switch that named no format
+   *  at all, answered with the library instead. */
   source: string
   prd_id: number | null
   prd_title: string | null
@@ -1113,6 +1121,15 @@ export type PrdRecord = {
    *  read). Optional: absent on any response shape that predates this
    *  field. */
   share_token?: string | null
+  /** WHICH uploaded format this PRD was written in (prds.artifact_template_id,
+   *  returned by the GET routes' `select("*")`). Null/absent = Sprntly's
+   *  built-in format. The id survives the format's deletion by design. */
+  artifact_template_id?: string | null
+  /** That format's NAME, resolved server-side by GET /{prd_id} so the panel's
+   *  "Format: {name}" label needs no second fetch. Null when unstamped OR when
+   *  the stamped format was since deleted — the client labels the built-in
+   *  itself and falls back to a generic label for a deleted one. */
+  artifact_template_name?: string | null
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -1799,6 +1816,11 @@ export type ArtifactTemplate = {
   /** How many notes there are — the "See all 3" affordance needs the count,
    *  and it cannot be derived from `compile_summary`. */
   compile_note_count: number
+  /** What the format CONTAINS — the LLM-written description a successful
+   *  compile stores (2–3 sentences: its sections, the document it produces,
+   *  what it emphasizes). '' until one exists: a fresh upload mid-compile, or
+   *  a legacy row the backend's self-heal hasn't described yet. */
+  summary: string
 }
 
 /** A row PLUS its uploaded source and full mapping — the edit form's source. */
@@ -2895,6 +2917,24 @@ export const prdApi = {
       `/v1/prd/${prdId}/chat-edit`,
       { instruction },
     ),
+  /** Re-write an existing PRD into a different format, in place — the content
+   *  is regenerated into the target's structure (faithful re-layout: edits
+   *  survive, nothing is invented), with the current version snapshotted to
+   *  history first. `artifactTemplateId: null` means Sprntly's built-in format
+   *  — a real choice here, unlike the generate routes' "no preference".
+   *  `unchanged: true` (already in that format) means nothing was written —
+   *  skip the regenerating state entirely. Otherwise the row is back at
+   *  `generating`: poll GET /v1/prd/{id} like any generation, and on `ready`
+   *  compare its `artifact_template_id` against the target — an unchanged
+   *  stamp means the switch failed and the previous document still stands. */
+  changeTemplate: (prdId: number, artifactTemplateId: string | null) =>
+    api.post<{
+      prd_id: number
+      status: "ready" | "generating"
+      unchanged?: boolean
+      artifact_template_id: string | null
+      title?: string
+    }>(`/v1/prd/${prdId}/change-template`, { artifact_template_id: artifactTemplateId }),
 }
 
 /** One structured "User input needed" item lifted out of the PRD document.

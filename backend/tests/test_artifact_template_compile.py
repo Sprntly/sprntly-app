@@ -234,6 +234,14 @@ def test_the_real_gateway_puts_the_method_in_the_prefix_and_not_the_customer_tex
         return {"skeleton_html": _GOOD_SKELETON, "section_map": _GOOD_MAP}
 
     monkeypatch.setattr(gateway, "call_json", _fake_call_json)
+    # The summary call a successful compile now makes rides the same real
+    # gateway and would overwrite `seen` with ITS kwargs — it has its own suite
+    # (test_artifact_template_summary.py); here it is pinned out of the way.
+    # Patched on compile_prd, whose `from ... import generate_summary` binding
+    # is fixed at import — the same two-module lesson conftest documents.
+    import app.artifact_templates.compile_prd as compile_prd_mod
+
+    monkeypatch.setattr(compile_prd_mod, "generate_summary", lambda *a, **k: "")
 
     from app.artifact_templates.compile_prd import compile_prd_template
 

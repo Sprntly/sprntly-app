@@ -639,6 +639,14 @@ export interface PrdState extends PrdContent {
   /** Canonical artifact-share token for this PRD's Share link; read, never
    *  minted on open. Absent-safe. */
   shareToken?: string | null
+  /** WHICH uploaded format wrote this PRD (`PrdRecord.artifact_template_id`).
+   *  null = Sprntly's built-in; UNDEFINED = the load path predates the field —
+   *  the panel's Format control hydrates it with one GET before rendering a
+   *  label, so absence degrades to a fetch, never to a wrong name. */
+  artifactTemplateId?: string | null
+  /** That format's name (`PrdRecord.artifact_template_name`, resolved
+   *  server-side). null when built-in or the format was deleted. */
+  artifactTemplateName?: string | null
 }
 
 export interface AppContentState {

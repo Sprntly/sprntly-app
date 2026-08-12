@@ -59,6 +59,7 @@ from app.artifact_templates.store import (
 # impl-spec compiler needs a local import, because that module imports from the
 # same two this one does and would close a cycle.
 from app.stories.layout import TicketLayoutError, compile_ticket_layout
+from app.artifact_templates.summarize import generate_summary
 from app.artifact_templates.validate import validate_prd_skeleton
 from app.graph.gateway import llm_call
 from app.skills.loader import get_skill
@@ -356,6 +357,18 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
     store_skeleton = None if verdict.status == "failed" else skeleton
     store_map = None if verdict.status == "failed" else section_map
 
+    # The summary rides exactly where the skeleton does: a stored skeleton means
+    # THIS source now governs the row, so its description is (re)written — even
+    # when generation failed and it is '', because a summary describing replaced
+    # source text is worse than none. A failed validate stores neither, keeping
+    # the summary paired with the `compiled` it describes. Never fails the
+    # compile: `generate_summary` returns '' on any failure.
+    summary = None
+    if store_skeleton is not None:
+        summary = generate_summary(
+            company_id, artifact_type="prd", source_md=source_md
+        )
+
     logger.info(
         "artifact_template_compiled company_present=%s status=%s notes=%s "
         "sections=%s",
@@ -368,6 +381,7 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
         compiled=store_skeleton,
         section_map=store_map,
         compile_notes=notes,
+        summary=summary,
     )
 
 
@@ -419,6 +433,16 @@ def _compile_ticket_layout_row(company_id: str, row: dict) -> dict | None:
         compile_status="ready",
         compiled=json.dumps(layout),
         compile_notes=[],
+        # The one model call this deterministic leg makes, and it is not part
+        # of the compile: the summary is how chat describes the format, it
+        # rides where `compiled` does (see the PRD leg), and `generate_summary`
+        # returns '' rather than raising — so this leg still cannot fail
+        # transiently.
+        summary=generate_summary(
+            company_id,
+            artifact_type="tickets",
+            source_md=row.get("source_md") or "",
+        ),
     )
 
 

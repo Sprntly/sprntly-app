@@ -1303,6 +1303,9 @@ CREATE TABLE artifact_templates (
                      CHECK (compile_status IN
                             ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
     compile_notes  TEXT NOT NULL DEFAULT '[]',
+    -- Mirrors 20260812200000_artifact_templates_summary.sql: the LLM-written
+    -- description a successful compile stores; '' = "no summary yet".
+    summary        TEXT NOT NULL DEFAULT '',
     content_hash   TEXT NOT NULL DEFAULT '',
     is_active      INTEGER NOT NULL DEFAULT 0,
     uploader_id    TEXT NOT NULL,
@@ -1697,6 +1700,27 @@ def _no_background_template_compile(request, monkeypatch):
         if hasattr(mod, "schedule_compile"):
             monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
                                 raising=False)
+
+    # The summary self-heal is the same hazard through a different door: the
+    # templates LIST route (and the planner's catalog read) schedules a
+    # background summarize for any ready row with an empty summary — which is
+    # every ready row a test seeds — and that call is a gateway `llm_call` too.
+    # 0 = "nothing scheduled", which is the function's no-work return, so list
+    # responses keep their shape under the patch. Same two-module patching,
+    # same reason. The summarize suite opts out with the marker above and
+    # drives the gateway with its own stub.
+    def _noop_summaries(company_id, rows):  # noqa: ARG001
+        return 0
+
+    for mod_name in ("app.artifact_templates.summarize",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_missing_summaries"):
+            monkeypatch.setattr(mod, "schedule_missing_summaries",
+                                _noop_summaries, raising=False)
     yield
 
 
