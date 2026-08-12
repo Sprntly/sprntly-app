@@ -249,6 +249,20 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_project_ledger_live.py", "RUN_PROJECT_LEDGER_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to evaluate the "
+        "`v_delegation_status` left-join-lateral derive-at-read view through "
+        "the REAL emit route + supabase-py client — the fake Supabase client "
+        "has no SQL engine behind it and cannot evaluate a view (same "
+        "reasoning as `test_delegation_events.py`). Deterministic backstop: "
+        "`test_delegation_events_api.py` covers the pure state-machine engine, "
+        "all four fail-closed authz gates (mutation-proofed, RED->GREEN), read "
+        "isolation, the ledger-row DTO shape, and cost/log-content assertions "
+        "against `FakeSupabaseClient` with the view stood in by a data-driven "
+        "equivalent in the fast lane; this suite is the real-DB proof that the "
+        "ACTUAL view + route agree, run locally against the dev rig when "
+        "touching this endpoint or `db/delegation_events.py`."
+    ),
     ("test_realtime_channel_auth.py", "RUN_PROJECTS_REALTIME_CHANNEL_AUTH_LIVE"): (
         "Needs a real local Supabase (Postgres + the installed Realtime "
         "service) to evaluate the group/per-user channel-join predicate "

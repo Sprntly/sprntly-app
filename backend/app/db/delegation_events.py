@@ -108,3 +108,68 @@ def list_events(delegation_id: int) -> list[dict]:
         .data
         or []
     )
+
+
+# ── State machine + party map (AD-P27, spec §3 decision 2) ────────────────
+#
+# Pure logic, no DB access — the emit route's gates 3/4 evaluate against
+# these directly. `assigned` is deliberately absent from `EVENT_PARTY`: it
+# is the server-only genesis event (the hand-off hook in `project_delegation.py`)
+# and is never client-emittable over this endpoint.
+
+OPEN_STATES: frozenset[str] = frozenset({"assigned", "accepted", "in_progress", "reopened"})
+CLOSED_STATES: frozenset[str] = frozenset({"completed", "declined", "cancelled"})
+
+#: Which PARTY may emit each client-emittable event. Assignee owns the
+#: forward-progress events (accept/start/finish/decline); assigner owns the
+#: two overrides (cancel, reopen) — no assigner-override completion.
+EVENT_PARTY: dict[str, str] = {
+    "accepted": "assignee",
+    "in_progress": "assignee",
+    "completed": "assignee",
+    "declined": "assignee",
+    "cancelled": "assigner",
+    "reopened": "assigner",
+}
+
+#: Legal edges: current derived status -> the set of events that may follow
+#: it. A `reopened` delegation behaves like a freshly-`assigned` one — same
+#: outgoing edges (spec-silent; adopted per spec §3 decision 2).
+TRANSITIONS: dict[str, frozenset[str]] = {
+    "assigned": frozenset({"accepted", "in_progress", "declined", "cancelled"}),
+    "accepted": frozenset({"in_progress", "completed", "declined", "cancelled"}),
+    "in_progress": frozenset({"completed", "declined", "cancelled"}),
+    "completed": frozenset({"reopened"}),
+    "declined": frozenset({"reopened", "cancelled"}),
+    "cancelled": frozenset({"reopened"}),
+    "reopened": frozenset({"accepted", "in_progress", "declined", "cancelled"}),
+}
+
+
+def is_legal_transition(current: str, event: str) -> bool:
+    """Whether `event` may legally follow a delegation currently at
+    `current` (its latest/derived status). Unknown `current` values (should
+    never happen — `current_status` only ever returns a value from the
+    fixed `delegation_events.event` CHECK vocabulary, or the `assigned`
+    fallback) legally transition to nothing."""
+    return event in TRANSITIONS.get(current, frozenset())
+
+
+@retry_on_disconnect
+def load_delegation_for_authz(delegation_id: int) -> dict | None:
+    """The four authz-relevant columns for one delegation, read straight off
+    `project_delegations` (the fact table, not the derived view) — mirrors
+    `db.projects.is_project_member`'s client/`.limit(1)` style. `None` only
+    if the id does not exist at all; the route's gate 2 uses that (plus a
+    `project_id` mismatch) to 404 opaquely."""
+    rows = (
+        require_client()
+        .table("project_delegations")
+        .select("id, project_id, assigner_user_id, assignee_user_id")
+        .eq("id", delegation_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0] if rows else None

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from app.auth import WorkspaceContext, require_workspace
 from app.db import conversation_read_cursors as read_cursors_db
 from app.db import conversations as conversations_db
+from app.db import delegation_events as delegation_events_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
@@ -182,6 +183,11 @@ class SaveChatArtifactRequest(BaseModel):
 
 class PostGroupTurnRequest(BaseModel):
     content: str = Field(min_length=1)
+
+
+class EmitDelegationEventRequest(BaseModel):
+    event: str = Field(min_length=1)
+    note: str | None = None
 
 
 def _require_project(project_id: int, ctx: WorkspaceContext) -> dict:
@@ -770,3 +776,122 @@ def _respond_as_group_agent(
             "group_chat_mention_reply_failed project_id=%s conversation_id=%s error=%s",
             project_id, conversation_id, type(exc).__name__,
         )
+
+
+# ── Delegation ledger (walking skeleton — the accountability ledger's one
+# mutating surface, AD-P29) ─────────────────────────────────────────────
+
+
+def _ledger_row_dto(row: dict, members: dict[str, str | None], view: str) -> dict:
+    """Shape one `v_delegation_status` row into the ledger's read DTO.
+    `other_party` is the ASSIGNER for `assigned_to_me` (the caller is the
+    assignee) and the ASSIGNEE for `waiting_on` (the caller is the
+    assigner); the name resolves via `list_members` — no PII beyond the
+    roster name already shown elsewhere in the product."""
+    other_party_id = (
+        row["assigner_user_id"] if view == "assigned_to_me" else row["assignee_user_id"]
+    )
+    return {
+        "delegation_id": row["delegation_id"],
+        "task_summary": row["task_summary"],
+        "status": row["status"],
+        "status_at": row["status_at"],
+        "bucket": "done" if row["status"] in delegation_events_db.CLOSED_STATES else "open",
+        "other_party_user_id": other_party_id,
+        "other_party_name": members.get(other_party_id),
+        "delivered_conversation_id": row["delivered_conversation_id"],
+        "delivered_turn_id": row["delivered_turn_id"],
+    }
+
+
+@router.post("/{project_id}/delegations/{delegation_id}/events")
+def emit_delegation_event_route(
+    project_id: int,
+    delegation_id: int,
+    payload: EmitDelegationEventRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Append one lifecycle event, gated by FOUR fail-closed server checks,
+    in this exact order — the ledger's IDOR-critical surface:
+
+      1. membership (`_require_project_member`) — tenant + membership.
+      2. delegation-in-project — a `delegation_id` that does not exist, or
+         belongs to a DIFFERENT project (or tenant), 404s opaquely; a
+         cross-project id's existence is never disclosed.
+      3. party-role — the caller must be the correct PARTY for the
+         requested event (`EVENT_PARTY`); `assigned` (server-only genesis)
+         or any unknown event has no party at all and 422s before any
+         state is revealed.
+      4. transition-legality — the requested event must be a legal edge
+         from the delegation's CURRENT derived status
+         (`is_legal_transition`); an illegal edge 409s.
+
+    Nothing is written unless all four pass — `record_event` is the last
+    line before the return."""
+    _require_project_member(project_id, ctx)                                   # GATE 1
+    deleg = delegation_events_db.load_delegation_for_authz(delegation_id)
+    if deleg is None or deleg["project_id"] != project_id:                     # GATE 2
+        raise HTTPException(404, "Delegation not found")
+    party = delegation_events_db.EVENT_PARTY.get(payload.event)                # GATE 3
+    if party is None:
+        raise HTTPException(422, "Unknown or non-emittable event")
+    if deleg[f"{party}_user_id"] != ctx.user_id:
+        raise HTTPException(403, "Not the correct party for this event")
+    current = delegation_events_db.current_status(delegation_id)               # GATE 4
+    if not delegation_events_db.is_legal_transition(current, payload.event):
+        raise HTTPException(409, "Illegal transition")
+    delegation_events_db.record_event(
+        delegation_id=delegation_id,
+        event=payload.event,
+        actor_user_id=ctx.user_id,
+        note=payload.note,
+    )
+    logger.info(
+        "delegation_event_emitted delegation_id=%s event=%s actor=%s",
+        delegation_id, payload.event, ctx.user_id,
+    )  # ids only, never note text
+    return {
+        "delegation_id": delegation_id,
+        "status": delegation_events_db.current_status(delegation_id),
+    }
+
+
+@router.get("/{project_id}/delegations")
+def list_delegations_route(
+    project_id: int,
+    view: str,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Party-filtered ledger reads (AD-P29) — a member never sees a
+    delegation they are not a party to; there is no "all project
+    delegations" read on this surface."""
+    _require_project_member(project_id, ctx)
+    if view == "assigned_to_me":
+        rows = delegation_events_db.list_status_for_assignee(project_id, ctx.user_id)
+    elif view == "waiting_on":
+        rows = delegation_events_db.list_status_for_assigner(project_id, ctx.user_id)
+    else:
+        raise HTTPException(422, "Unknown view")
+    members = {m["user_id"]: m.get("name") for m in projects_db.list_members(project_id)}
+    return [_ledger_row_dto(r, members, view) for r in rows]
+
+
+@router.get("/{project_id}/delegations/counts")
+def delegation_counts_route(
+    project_id: int,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Open-only ledger counts for the project rail card — the same derive-
+    and-count shape as `individual/unread`. `reopened` counts as open;
+    `completed`/`declined`/`cancelled` do not."""
+    _require_project_member(project_id, ctx)
+    assigned_to_me = delegation_events_db.list_status_for_assignee(project_id, ctx.user_id)
+    waiting_on = delegation_events_db.list_status_for_assigner(project_id, ctx.user_id)
+    return {
+        "assigned_to_me_open": sum(
+            1 for r in assigned_to_me if r["status"] in delegation_events_db.OPEN_STATES
+        ),
+        "waiting_on_open": sum(
+            1 for r in waiting_on if r["status"] in delegation_events_db.OPEN_STATES
+        ),
+    }

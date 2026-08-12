@@ -5296,6 +5296,39 @@ export type SavedChatArtifact = {
   project_id: number
 }
 
+/** One row from `GET /v1/projects/{id}/delegations?view=...` — the
+ *  ledger's party-filtered read DTO (`_ledger_row_dto`). `bucket` is
+ *  `"done"` once `status` lands in a closed state, else `"open"`;
+ *  `other_party` is the assigner for `assigned_to_me` and the assignee for
+ *  `waiting_on`. No endpoint returns a delegation the caller is not party
+ *  to. */
+export type DelegationLedgerRow = {
+  delegation_id: number
+  task_summary: string
+  status: string
+  status_at: string
+  bucket: "open" | "done"
+  other_party_user_id: string
+  other_party_name: string | null
+  delivered_conversation_id: number | null
+  delivered_turn_id: number | null
+}
+
+/** Response from `GET /v1/projects/{id}/delegations/counts` — open-only
+ *  counts (a `reopened` delegation counts as open; `completed`/`declined`/
+ *  `cancelled` do not) feeding the rail card. */
+export type DelegationCounts = {
+  assigned_to_me_open: number
+  waiting_on_open: number
+}
+
+/** Response from `POST /v1/projects/{id}/delegations/{delegationId}/events`
+ *  — the delegation's derived status right after the appended event. */
+export type DelegationEventResult = {
+  delegation_id: number
+  status: string
+}
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -5451,5 +5484,41 @@ export const projectsApi = {
   markIndividualRead: (id: number | string) =>
     api.post<{ last_read_turn_id: number }>(
       `/v1/projects/${encodeURIComponent(String(id))}/individual/read`,
+    ),
+  /** Append one lifecycle event to a delegation
+   *  (`POST /v1/projects/{id}/delegations/{delegationId}/events`) — server-
+   *  enforced four-gate authz + legal-transition graph — the ledger's
+   *  IDOR-critical surface. Throws `ApiError` `.status` 404 (delegation
+   *  not in this project, opaque — existence never disclosed), 403 (wrong
+   *  party for this event), 409 (illegal transition from the current
+   *  derived status), or 422 (unknown/non-emittable event — `assigned` is
+   *  server-only genesis, never client-emittable) — callers must handle
+   *  all four without crashing. */
+  emitDelegationEvent: (
+    id: number | string,
+    delegationId: number | string,
+    event: string,
+    note?: string,
+  ) =>
+    api.post<DelegationEventResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations/${encodeURIComponent(
+        String(delegationId),
+      )}/events`,
+      { event, note },
+    ),
+  /** Party-filtered ledger read (`GET /v1/projects/{id}/delegations?view=`)
+   *  — `"assigned_to_me"` returns rows where the caller is the assignee,
+   *  `"waiting_on"` where the caller is the assigner. No "all project
+   *  delegations" view exists — a member never sees a delegation they are
+   *  not a party to. */
+  ledger: (id: number | string, view: "assigned_to_me" | "waiting_on") =>
+    api.get<DelegationLedgerRow[]>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations?view=${encodeURIComponent(view)}`,
+    ),
+  /** Open-only ledger counts for the rail card
+   *  (`GET /v1/projects/{id}/delegations/counts`). */
+  ledgerCounts: (id: number | string) =>
+    api.get<DelegationCounts>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations/counts`,
     ),
 }
