@@ -65,6 +65,8 @@ connector/skill names be reached through another company's entry.
 """
 from __future__ import annotations
 
+from app.timing import timed_def
+
 import hashlib
 import json
 import logging
@@ -1463,6 +1465,7 @@ def apply_gates(
 
 # ── the planner call ─────────────────────────────────────────────────────────
 
+@timed_def("planner:plan")
 def plan(
     question: str,
     *,
@@ -2030,6 +2033,7 @@ def decide_enabled(enterprise_id: Optional[str]) -> bool:
     return bool(enterprise_id)
 
 
+@timed_def("planner:plan_for_answer")
 def plan_for_answer(
     *,
     enterprise_id: Optional[str],

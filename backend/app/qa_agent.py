@@ -38,6 +38,8 @@ Models (decision 2026-06-13): classifier = haiku, answer = sonnet, heavy → opu
 """
 from __future__ import annotations
 
+from app.timing import timed_def
+
 import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
@@ -1624,6 +1626,7 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
 _CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong", "zoom"})
 
 
+@timed_def("qa:answer")
 def answer(
     *,
     enterprise_id: str,

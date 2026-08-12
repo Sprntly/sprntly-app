@@ -1,3 +1,5 @@
+
+from app.timing import timed_def
 """Background warmer for the predefined Ask prompts.
 
 The home / Ask-Sprntly screens have a small fixed set of starter chips
@@ -1600,6 +1602,7 @@ def _question_embedding(
     return vec, False
 
 
+@timed_def("qa:embedding")
 def _resolve_question_embedding(
     enterprise_id: str | None, question: str
 ) -> tuple[list[float] | None, bool]:
@@ -1734,8 +1737,14 @@ def _gather(tasks: dict, deadline_s: float = _GATHER_DEADLINE_S) -> dict:
         # the answer was composed with no grounding while still reporting
         # success. Copies are taken HERE, on the calling thread, so each carries
         # the request's ContextVars.
+        from app.timing import timed_fn
+
+        # Each leg reports its own [timing] block under its dict name, so a
+        # single grep reconstructs where a gather's wall-clock actually went.
         submitted = {
-            pool.submit(contextvars.copy_context().run, fn): name
+            pool.submit(
+                contextvars.copy_context().run, timed_fn(f"gather:{name}", fn)
+            ): name
             for name, fn in tasks.items()
         }
         done, not_done = _futures.wait(submitted, timeout=deadline_s)
@@ -1761,6 +1770,7 @@ def _gather(tasks: dict, deadline_s: float = _GATHER_DEADLINE_S) -> dict:
     return results
 
 
+@timed_def("qa:compose")
 def compose_ask_answer(
     dataset: str,
     question: str,
