@@ -41,6 +41,7 @@ from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
+from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
@@ -61,6 +62,15 @@ _MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
 # grow the prompt unboundedly (mirrors the per-turn history clamp posture
 # `_load_history`/`app.prompt_history` already apply to individual chats).
 _GROUP_CONTEXT_TURNS = 30
+
+# The exact `list_group_turns` read-DTO key set — a hard whitelist applied
+# before every `turn.created` broadcast (AD-P21 no-schema-coupling), so an
+# internal `conversation_turns` column (e.g. `attachments`) can never ride
+# along on the wire even if a future column is added to the table.
+_GROUP_TURN_DTO_KEYS = (
+    "id", "role", "content", "author_user_id", "author_name",
+    "author_job_role", "created_at",
+)
 
 _GROUP_AGENT_SYSTEM_PROMPT = """\
 You are Sprntly, a project teammate embedded in this team's group chat.
@@ -636,6 +646,20 @@ def post_group_turn_route(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
+    if turn:
+        # Shape to the same read-DTO `list_group_turns` returns — never the
+        # raw insert row (AD-P21 no-schema-coupling). Re-reading via the
+        # `since` cursor reuses that serialization rather than hand-rolling
+        # a second shaper (author_name/author_job_role join included); the
+        # explicit key whitelist is a hard guarantee against an internal
+        # column ever riding along on the wire.
+        shaped = conversations_db.list_group_turns(conversation["id"], since=turn["id"] - 1)
+        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
+        if dto is not None:
+            publish_broadcast(
+                f"project:{project_id}", "turn.created",
+                {k: dto[k] for k in _GROUP_TURN_DTO_KEYS},
+            )
     if _MENTION_RE.search(payload.content):
         _respond_as_group_agent(project_id, conversation["id"], ctx)
     else:
@@ -707,7 +731,19 @@ def _respond_as_group_agent(
             model=DEFAULT_MODEL,
             meta_out=meta,
         )
-        conversations_db.post_group_turn(conversation_id, None, reply, role="assistant")
+        assistant_turn = conversations_db.post_group_turn(
+            conversation_id, None, reply, role="assistant"
+        )
+        if assistant_turn:
+            shaped = conversations_db.list_group_turns(
+                conversation_id, since=assistant_turn["id"] - 1
+            )
+            dto = next((t for t in shaped if t["id"] == assistant_turn["id"]), None)
+            if dto is not None:
+                publish_broadcast(
+                    f"project:{project_id}", "turn.created",
+                    {k: dto[k] for k in _GROUP_TURN_DTO_KEYS},
+                )
         usage = RunUsage(
             cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
             cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),

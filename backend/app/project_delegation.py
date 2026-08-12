@@ -29,14 +29,25 @@ import logging
 import time
 
 from app.db.artifacts import list_artifacts_for_project
-from app.db.conversations import create_individual_project_chat, post_individual_turn
+from app.db.conversations import (
+    create_individual_project_chat,
+    list_individual_turns,
+    post_individual_turn,
+)
 from app.db.project_delegations import record_delegation
 from app.db.projects import is_project_member, resolve_member
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
+from app.realtime import publish_broadcast
 
 logger = logging.getLogger(__name__)
+
+# The exact `list_individual_turns` read-DTO key set — a hard whitelist
+# applied before every `brief.delivered` broadcast (AD-P21 no-schema-
+# coupling), so an internal `conversation_turns` column can never ride
+# along on the wire even if a future column is added to the table.
+_BRIEF_TURN_DTO_KEYS = ("id", "role", "content", "created_at")
 
 # How many of the project's most-recently-touched artifacts to fold into
 # the brief — bounded the same way the reply path bounds its own group
@@ -282,6 +293,22 @@ def handle_delegate_task(
             "delegation_delivered project_id=%s assignee=%s delivered_turn_id=%s",
             project_id, assignee["user_id"], turn["id"],
         )
+        # Shape to the same read-DTO `list_individual_turns` returns — never
+        # the raw insert row (AD-P21). Publish on the ASSIGNEE'S per-user
+        # channel, never the group channel — a private brief broadcast on
+        # `project:{id}` would leak it to every other member.
+        shaped = list_individual_turns(conv["id"], assignee["user_id"], since=turn["id"] - 1)
+        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
+        if dto is not None:
+            publish_broadcast(
+                f"project:{project_id}:user:{assignee['user_id']}",
+                "brief.delivered",
+                {k: dto[k] for k in _BRIEF_TURN_DTO_KEYS},
+            )
+            logger.info(
+                "brief_broadcast_published project_id=%s assignee=%s conversation_id=%s",
+                project_id, assignee["user_id"], conv["id"],
+            )
         first = (assignee.get("name") or "").split()[0] if assignee.get("name") else "their"
         return f"Sent the brief to {first}'s chat."
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
