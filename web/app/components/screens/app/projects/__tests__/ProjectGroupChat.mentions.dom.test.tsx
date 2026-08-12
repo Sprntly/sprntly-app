@@ -191,13 +191,15 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     expect(affordance.textContent).toContain("Invite sent")
   })
 
-  it("test_email_failed_shows_copy_link_fallback", async () => {
+  it("test_email_failed_shows_reinvite_hint_no_dead_link", async () => {
+    // The /tag route returns no accept link, so a failed email degrades to a
+    // plain re-invite hint — never a dead copy-link affordance (AD-TNM6). The
+    // vestigial copy-link button is gone.
     candidateSearchMock.mockResolvedValue([])
     tagCandidateMock.mockResolvedValue({
       tier: "t_company",
       invited: true,
       email_status: "failed",
-      invite_link: "https://app.sprntly.ai/invite/abc123",
     })
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await screen.findByTestId("group-chat-scroll")
@@ -208,8 +210,11 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       fireEvent.click(invite)
     })
 
-    const copy = await screen.findByTestId("gc-copy-invite-link")
-    expect(copy.getAttribute("title")).toBe("https://app.sprntly.ai/invite/abc123")
+    const affordance = await screen.findByTestId("gc-mention-affordance")
+    expect(affordance.textContent).toContain("email didn't send")
+    expect(affordance.textContent).toContain("re-invite from Team settings")
+    // No dead copy-link affordance remains.
+    expect(screen.queryByTestId("gc-copy-invite-link")).toBeNull()
     // Composer stays usable — no thrown error, textarea still there.
     expect(document.querySelector(".cx-input")).toBeTruthy()
   })

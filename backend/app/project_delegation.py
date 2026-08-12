@@ -104,6 +104,83 @@ def _publish_delegation_event(
         publish_broadcast(f"project:{project_id}:user:{uid}", "delegation.event", shaped)
 
 
+# The mention/add liveness-signal DTO whitelist — the sibling of
+# `_DELEGATION_EVENT_DTO_KEYS`/`_BRIEF_TURN_DTO_KEYS` above, applied before
+# every `mention.received`/`member.added` broadcast. `kind` ∈ {"mentioned",
+# "added"}. Carries NO message text, NO brief, NO artifact, NO member list
+# (AD-TNM2) — a private nudge is ids + names only, never project content.
+_MENTION_SIGNAL_DTO_KEYS = ("project_id", "project_name", "actor_name", "kind")
+
+
+def _publish_member_added(
+    project_id: int, target_user_id: str, project_name: str | None
+) -> None:
+    """Best-effort publish-on-write of a `member.added` liveness signal to the
+    added person's OWN per-user channel `project:{id}:user:{uid}` — NEVER the
+    group channel `project:{id}` (a landing signal is private to the recipient,
+    AD-TNM2/AD-P30). Entirely swallowed (AD-P22): by the time this is called
+    the `project_members` write has already committed, so a realtime hiccup —
+    or a DTO-shaping error — must never make the tag route / accept hook report
+    failure or roll back a membership that succeeded. Mirrors
+    `_publish_brief_delivered`'s swallow shape."""
+    try:
+        dto = {
+            "project_id": project_id,
+            "project_name": project_name,
+            "actor_name": None,
+            "kind": "added",
+        }
+        publish_broadcast(
+            f"project:{project_id}:user:{target_user_id}",
+            "member.added",
+            {k: dto[k] for k in _MENTION_SIGNAL_DTO_KEYS},
+        )
+        logger.info(
+            "member_added_signal_published project_id=%s target_user_id=%s",
+            project_id, target_user_id,
+        )  # ids only — never the added person's name or any project content
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: never fails/rolls back the write
+        logger.warning(
+            "realtime_publish_prep_failed topic=project:%s:user:%s event=member.added "
+            "error_class=%s",
+            project_id, target_user_id, type(exc).__name__,
+        )
+
+
+def _publish_mention_signal(
+    project_id: int, target_user_id: str, actor_name: str | None, project_name: str | None
+) -> None:
+    """Best-effort publish-on-write of a `mention.received` signal to the
+    MENTIONED member's OWN per-user channel — NEVER the group channel (a
+    "you were mentioned" nudge is private to the recipient, AD-TNM2/AD-P30).
+    Carries the actor's display name for the recipient-side affordance but NO
+    message text and NO project content. Entirely swallowed (AD-P22): a
+    notify-only tag response must never fail or change because a realtime
+    publish hiccuped. Mirrors `_publish_member_added`."""
+    try:
+        dto = {
+            "project_id": project_id,
+            "project_name": project_name,
+            "actor_name": actor_name,
+            "kind": "mentioned",
+        }
+        publish_broadcast(
+            f"project:{project_id}:user:{target_user_id}",
+            "mention.received",
+            {k: dto[k] for k in _MENTION_SIGNAL_DTO_KEYS},
+        )
+        logger.info(
+            "mention_signal_published project_id=%s target_user_id=%s",
+            project_id, target_user_id,
+        )  # ids only — never actor/target names or any project content (AD-TNM2)
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: never fails/changes the tag response
+        logger.warning(
+            "realtime_publish_prep_failed topic=project:%s:user:%s event=mention.received "
+            "error_class=%s",
+            project_id, target_user_id, type(exc).__name__,
+        )
+
+
 # How many of the project's most-recently-touched artifacts to fold into
 # the brief — bounded the same way the reply path bounds its own group
 # transcript (`_GROUP_CONTEXT_TURNS`), so a heavily-artifacted project

@@ -319,6 +319,20 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "FakeSupabaseClient; this env-gated case is the real-DB proof, run "
         "locally when touching the invite primitives or the accept hook."
     ),
+    ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
+        "Needs a real local Supabase Realtime (the running Realtime service + "
+        "a live websocket) to prove a `member.added` published through the "
+        "ACTUAL Broadcast REST endpoint is genuinely RECEIVED on the target's "
+        "per-user channel — the fake Supabase client spies the publish call but "
+        "has no realtime transport to fan the event back over a socket. "
+        "Deterministic backstop: test_mention_liveness.py covers the per-user-"
+        "channel-only + never-group privacy gate, the whitelisted DTO / no-"
+        "content-leak assertion, the best-effort no-raise/no-rollback mutation "
+        "proof, the right-branch publisher wiring, and the accept-hook publish "
+        "against FakeSupabaseClient with publish_broadcast spied in the fast "
+        "lane; this suite is the real-transport proof, run locally against the "
+        "dev rig when touching the mention/add publishers or the tag route."
+    ),
 }
 
 

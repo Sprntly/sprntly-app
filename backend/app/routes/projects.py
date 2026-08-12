@@ -405,6 +405,19 @@ def _invite_carrying_project(
     }
 
 
+def _tag_actor_name(actor_user_id: str) -> str | None:
+    """Best-effort display name of the member doing the tag, for the private
+    `mention.received` DTO's `actor_name` (the recipient renders "X mentioned
+    you"). Returns None on any lookup failure — the signal is a nicety, never
+    load-bearing, and this must never raise into the tag route (AD-P22)."""
+    try:
+        from app.db.profiles import first_name_for_user
+
+        return first_name_for_user(actor_user_id) or None
+    except Exception:  # noqa: BLE001 — best-effort personalisation
+        return None
+
+
 @router.post("/{project_id}/tag")
 def tag_candidate_route(
     project_id: int,
@@ -421,8 +434,15 @@ def tag_candidate_route(
     tier = res["tier"]
 
     if tier == projects_db.TIER_MEMBER:
-        # Notify-only; the realtime "mentioned" signal is a later change.
-        return {"tier": tier, "member": res["member"]}
+        # Notify-only response; additionally emit a best-effort private
+        # "you were mentioned" signal on the mentioned member's OWN per-user
+        # channel (AD-TNM5). The publisher swallows every failure — this never
+        # changes the notify-only response or blocks it (AD-TNM2/AD-P22).
+        member = res["member"]
+        project_delegation._publish_mention_signal(
+            project_id, member.get("user_id"), _tag_actor_name(ctx.user_id), project["name"]
+        )
+        return {"tier": tier, "member": member}
 
     if tier == projects_db.TIER_WORKSPACE:
         uid = res["user_id"]
@@ -433,6 +453,10 @@ def tag_candidate_route(
             raise HTTPException(403, "That person can't be added to this project")
         member = projects_db.add_member(project_id, uid)
         logger.info("project_member_added project_id=%s user_id=%s via=tag", project_id, uid)
+        # Best-effort live landing on the added person's OWN per-user channel
+        # (AD-TNM5); swallows every failure, never changes this response or
+        # rolls back the add (AD-TNM2/AD-P22).
+        project_delegation._publish_member_added(project_id, uid, project["name"])
         return {"tier": tier, "added": member}
 
     if tier == projects_db.TIER_COMPANY:  # Extension A — workspace-join invite

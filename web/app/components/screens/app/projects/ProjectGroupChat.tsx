@@ -58,6 +58,11 @@ const MENTION_RE = /@sprntly\b/i
  *  live without a realtime transport (AD-P4). */
 const POLL_MS = 4000
 
+/** How long a transient liveness signal ("someone joined" / "you were
+ *  mentioned") stays on screen before it auto-dismisses (AD-TNM5 — ephemeral,
+ *  nothing persisted). */
+const LIVE_SIGNAL_MS = 6000
+
 const COMPOSER_PLACEHOLDER = "Message the team, or @Sprntly to hand it a task…"
 
 /** A group turn shaped into the minimal `AskResponse` `AskReplyBody` needs.
@@ -99,12 +104,10 @@ function formatTime(iso: string): string {
 /** A row from `candidateSearch` (the tenant-scoped candidate typeahead read). */
 type CandidateRow = Awaited<ReturnType<typeof projectsApi.candidateSearch>>[number]
 
-/** `tagCandidate`'s response. The api.ts contract exposes `email_status` but
- *  not `invite_link` (the backend `/tag` route returns `email_status` only,
- *  not a link, as of this base) — so `invite_link` is read defensively here:
- *  the copy-invite-link fallback renders only when a link is actually present.
- *  Wiring the real link is a backend follow-up. */
-type TagResult = Awaited<ReturnType<typeof projectsApi.tagCandidate>> & { invite_link?: string }
+/** `tagCandidate`'s response. The `/tag` route returns `email_status` only —
+ *  no accept link — so a failed email degrades to a plain re-invite hint, not
+ *  a copy-link affordance (AD-TNM6). */
+type TagResult = Awaited<ReturnType<typeof projectsApi.tagCandidate>>
 
 /** A row in the people picker: a directory candidate, or the invite-by-email
  *  affordance row. `needle` is what `tagCandidate` is called with on select. */
@@ -113,7 +116,7 @@ type MentionMenuItem =
   | { row: "invite"; label: string; needle: string }
 
 /** The post-action affordance (AD-TNM6: degrade to copy, never throw/block). */
-type MentionAffordance = { tone: "ok" | "error"; text: string; inviteLink?: string }
+type MentionAffordance = { tone: "ok" | "error"; text: string }
 
 /** The email-send FAILED sentinel the backend returns (lowercase `"failed"`,
  *  per `backend/app/team_email.py`) — compared case-insensitively so the copy
@@ -241,17 +244,58 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
   }, [projectId])
 
+  // A transient recipient-side liveness signal (AD-TNM5): "someone joined" for
+  // a `member.added`, "you were mentioned" for a `mention.received`. Ephemeral
+  // — nothing persisted, auto-dismissed after LIVE_SIGNAL_MS (AD-TNM2: the DTO
+  // carries only project_name/actor_name, never message or project content).
+  const [liveSignal, setLiveSignal] = useState<string | null>(null)
+  const liveSignalTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const showLiveSignal = useCallback((event: string, payload: unknown) => {
+    // Defensive read (AD-TNM6): a malformed/absent payload must never throw —
+    // it simply degrades to the existing poll/reconcile. Only the whitelisted
+    // signal DTO fields are read; unknown shapes fall back to generic copy.
+    const dto = (payload ?? {}) as { project_name?: unknown; actor_name?: unknown }
+    const projectName = typeof dto.project_name === "string" ? dto.project_name : ""
+    const actorName = typeof dto.actor_name === "string" ? dto.actor_name : ""
+    const text =
+      event === "member.added"
+        ? projectName
+          ? `Someone just joined ${projectName}`
+          : "Someone just joined the project"
+        : actorName
+          ? `${actorName} mentioned you`
+          : "You were mentioned"
+    if (liveSignalTimerRef.current) clearTimeout(liveSignalTimerRef.current)
+    setLiveSignal(text)
+    liveSignalTimerRef.current = setTimeout(() => setLiveSignal(null), LIVE_SIGNAL_MS)
+  }, [])
+  // Clear any pending dismissal timer on unmount so it never fires into a gone
+  // tree (the realtime channel's own teardown lives in useRealtimeChannel).
+  useEffect(
+    () => () => {
+      if (liveSignalTimerRef.current) clearTimeout(liveSignalTimerRef.current)
+    },
+    [],
+  )
+
   // Live transport (AD-P21): one channel per project, broadcast turns fed
   // through the SAME `applyTurns` the poll/reconcile use — no parallel merge
   // path. `onReconcile` fires exactly once per (re)subscribe (the hook's own
   // guarantee) and closes any at-most-once Broadcast gap via the `since`-
-  // cursor read (RR5/AD-P22).
+  // cursor read (RR5/AD-P22). `member.added`/`mention.received` are the
+  // recipient-side liveness signals (AD-TNM5) — a transient in-chat nudge,
+  // routed through `showLiveSignal`; every other event name is ignored.
   const handleRealtimeEvent = useCallback(
     (event: string, payload: unknown) => {
-      if (event !== "turn.created") return
-      applyTurns([payload as GroupTurn])
+      if (event === "turn.created") {
+        applyTurns([payload as GroupTurn])
+        return
+      }
+      if (event === "member.added" || event === "mention.received") {
+        showLiveSignal(event, payload)
+      }
     },
-    [applyTurns],
+    [applyTurns, showLiveSignal],
   )
   const handleReconcile = useCallback(() => {
     projectsApi
@@ -375,10 +419,13 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
             setAffordance({ tone: "ok", text: `${label} added to the project` })
           } else if (res.tier === "t_company" || res.tier === "t_newuser") {
             if (emailFailed(res.email_status)) {
+              // The invite ROW is persisted regardless of the email (AD-TNM6);
+              // there is no accept link to hand back (the /tag route returns
+              // none), so the honest degrade is a plain re-invite hint — never
+              // a dead copy-link affordance.
               setAffordance({
                 tone: "error",
-                text: `Couldn't email ${label} — copy the invite link`,
-                inviteLink: res.invite_link,
+                text: `Invite created for ${label} — email didn't send; you can re-invite from Team settings`,
               })
             } else {
               setAffordance({ tone: "ok", text: `Invite sent to ${label}` })
@@ -698,6 +745,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         </div>
       ) : null}
 
+      {liveSignal ? (
+        <div className={styles.affordance} role="status" data-testid="gc-live-signal">
+          <span>{liveSignal}</span>
+        </div>
+      ) : null}
+
       {affordance ? (
         <div
           className={`${styles.affordance}${affordance.tone === "error" ? " " + styles.affordanceError : ""}`}
@@ -705,19 +758,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           data-testid="gc-mention-affordance"
         >
           <span>{affordance.text}</span>
-          {affordance.inviteLink ? (
-            <button
-              type="button"
-              className={styles.copyLinkBtn}
-              data-testid="gc-copy-invite-link"
-              title={affordance.inviteLink}
-              onClick={() => {
-                void navigator.clipboard?.writeText?.(affordance.inviteLink as string)
-              }}
-            >
-              Copy invite link
-            </button>
-          ) : null}
         </div>
       ) : null}
 

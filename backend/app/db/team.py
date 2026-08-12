@@ -405,6 +405,19 @@ def _add_invite_project_member(invite: dict, user_id: str) -> None:
 
     projects_db.add_member(pid, user_id)
 
+    # Best-effort live landing (AD-TNM5): publish a `member.added` signal on the
+    # accepter's OWN per-user channel so an accept lands them live in the
+    # project for anyone viewing it. Fully swallowed — a realtime hiccup (or the
+    # project-name lookup) must NEVER fail or roll back the accept (AD-TNM2/
+    # AD-P22); the accepter's own client picks up membership on its normal load.
+    try:
+        from app import project_delegation
+
+        project = projects_db.get_project(pid) or {}
+        project_delegation._publish_member_added(pid, user_id, project.get("name"))
+    except Exception:  # noqa: BLE001 — best-effort, never blocks an accept
+        pass
+
 
 def accept_invite_for_user(
     *,
