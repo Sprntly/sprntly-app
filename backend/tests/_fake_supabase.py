@@ -105,6 +105,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     # Standalone ticket sets carry the same `stories` payload shape as
     # prd_tickets — the whole point of the second home.
     "ticket_sets":       {"stories"},
+    "call_transcripts":  {"payload"},
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},

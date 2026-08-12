@@ -1496,6 +1496,20 @@ CREATE TABLE artifact_share_joins (
     joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (share_id, joined_user_id)
 );
+
+-- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
+-- bigint identity / jsonb / timestamptz are INTEGER / TEXT here). The persisted
+-- call transcripts the VoC digest reads instead of live-fetching per question.
+create table if not exists call_transcripts (
+    id            integer primary key autoincrement,
+    company_id    text not null,
+    provider      text not null,
+    external_id   text not null,
+    call_date     text,
+    payload       text not null,
+    fetched_at    text not null default '',
+    unique (company_id, provider, external_id)
+);
 """
 
 
