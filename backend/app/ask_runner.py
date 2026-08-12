@@ -1781,6 +1781,7 @@ def compose_ask_answer(
     live_context: str = "",
     live_context_fn=None,
     library_context_fn=None,
+    library_only: bool = False,
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1876,7 +1877,18 @@ def compose_ask_answer(
     # "because it might be needed" would spend exactly what that branch exists
     # to save. Document grounding runs on BOTH branches — a PRD-tab chat must
     # not go blind to uploads.
-    wants_corpus_and_kg = not prd_context
+    # LIBRARY-ONLY ASKS ARE ANSWERED FROM THE LIBRARY. `library_only` is the
+    # planner's own verdict, relayed by the caller: the question is about the
+    # company's uploaded skills/templates (include_library) and the plan named
+    # NO other grounding (no KG, no documents, no sources). Corpus, KG and —
+    # crucially — document grounding are all skipped: the reported failure was
+    # "can you list the templates i have" answered from the DOCUMENT INDEX,
+    # whose catalog is full of Confluence pages titled "Template - …" with
+    # summaries that read exactly like format descriptions. The library block
+    # already tells the model those pages are not templates, but an index
+    # sitting beside it in the same prompt kept winning; not composing the
+    # index for these asks is what settles it.
+    wants_corpus_and_kg = not prd_context and not library_only
 
     # WAVE 1 — everything that needs nothing.
     #
@@ -1938,18 +1950,21 @@ def compose_ask_answer(
     # parameter — the ContextVar route exists for `qa_agent._answer_single_shot`,
     # which does not. Passed to RESOLUTION only: `question` stays bare, so the
     # name and topic stages still see what the user typed, not the thread.
-    wave2: dict = {
-        "docs": lambda: document_grounding(
+    wave2: dict = {}
+    if not library_only:
+        # Document grounding runs on BOTH branches (a PRD-tab chat must not go
+        # blind to uploads) — except on a library-only ask, where the index is
+        # the exact contamination being excluded (see `wants_corpus_and_kg`).
+        wave2["docs"] = lambda: document_grounding(
             enterprise_id, question,
             question_embedding=question_embedding, history=history,
-        ),
-    }
+        )
     if wants_corpus_and_kg:
         wave2["kg"] = lambda: _retrieve_kg_bundle(
             enterprise_id, question, question_embedding=question_embedding,
             embedding_unavailable=embedding_degraded,
         )
-    w2 = _gather(wave2)
+    w2 = _gather(wave2) if wave2 else {}
     docs_block, documents = w2.get("docs") or ("", [])
     kg_bundle = w2.get("kg")
 
@@ -1972,9 +1987,24 @@ def compose_ask_answer(
         from app.prompts import ASK_SYSTEM_PRD_ADDENDUM
 
         bundle = None
-        system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
-                  + connected_sources_line(enterprise_id))
-        user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM
+                  # The library rides PRD-tab asks too. The reported failure:
+                  # "can you list the templates i have", asked from a PRD tab,
+                  # never received the block the planner asked for — the old
+                  # wiring built the thunk only on the no-PRD branch — so the
+                  # model answered "your templates" from the document index's
+                  # Confluence pages instead.
+                  + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                  + today_line() + connected_sources_line(enterprise_id))
+        if library_context:
+            # The block is per-company and self-invalidating (uploads change
+            # it), so it rides the uncached user turn — the per-PRD cacheable
+            # prefix below must stay byte-stable across the conversation.
+            user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
+                kg_context=library_context, question=question
+            )
+        else:
+            user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
         # Both were gathered above (wave 1 / wave 2) — read, don't re-fetch.
@@ -2099,6 +2129,14 @@ def compose_ask_answer(
                     "live_sweep": bool(live_context),
                     "live_sweep_chars": len(live_context),
                     "prd_grounded": bool(prd_context),
+                    # Whether the company-library block was composed, and
+                    # whether it was the WHOLE grounding (corpus/KG/document
+                    # index all skipped). A library answer that stops carrying
+                    # its block — or one that quietly regains the index —
+                    # looks fine from the outside; these are what distinguish
+                    # them after the fact.
+                    "library": bool(library_context),
+                    "library_only": library_only,
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
                     # Counts only — never filenames or document text.

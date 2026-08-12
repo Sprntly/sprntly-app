@@ -1541,6 +1541,28 @@ def _planned_library_context(
         return ""
 
 
+def _library_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the library and about
+    nothing else: the library block is wanted and no other grounding was named
+    (no knowledge graph, no documents, no sources).
+
+    `compose_ask_answer` answers these from the library alone — no corpus, no
+    KG retrieval, and no document index, whose "Template - …" Confluence pages
+    are the exact contamination the owner reported twice ("it give me some
+    untrue stuff, it also according to your connected sources"). A mixed
+    question — "which of my templates fits last week's feedback" — plans
+    include_library WITH the knowledge graph and keeps every reader it asked
+    for; only the pure combination the planner emits for "what templates do I
+    have" narrows the grounding."""
+    return bool(
+        plan is not None
+        and plan.include_library
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
 def _persist_live_records(enterprise_id: str, result) -> None:
     """Hand what a live read produced to the KG persister.
 
@@ -2371,16 +2393,23 @@ def answer(
                 )
             else:
                 live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
-        if not prd_context and plan is not None:
+        if plan is not None:
             # The library read is a Postgres SELECT, not a connector call — it
-            # stays on regardless of the live-read flag.
+            # stays on regardless of the live-read flag. ON BOTH BRANCHES,
+            # PRD-tab included: the reported failure was "can you list the
+            # templates i have" asked from a PRD tab — the planner set
+            # include_library and this thunk was only ever built for the
+            # no-PRD branch, so the block never reached the answer and the
+            # model recited Confluence pages from the document index instead.
             library_context_fn = lambda: _planned_library_context(  # noqa: E731
                 enterprise_id, plan
             )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
-            library_context_fn=library_context_fn, on_delta=on_delta,
+            library_context_fn=library_context_fn,
+            library_only=_library_only_plan(plan),
+            on_delta=on_delta,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic

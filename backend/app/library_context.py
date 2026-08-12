@@ -15,11 +15,14 @@ They are uploaded on different screens, they are scoped the same way — by
 COMPANY, never by workspace — and a question about "my templates" is about the
 second while a question about "my methods" is about the first.
 
-WHAT THIS DELIBERATELY DOES NOT LIST: Sprntly's own built-in capabilities. The
-owner's call (2026-08-10) is that "what skills do I have" means the customer's
-own uploads, not a catalogue of the product — the system prompt already
-describes what the assistant can do, and duplicating it here would put a second,
-drifting copy of that list inside every library answer.
+THE BUILT-IN SKILLS ARE LISTED TOO (owner's reversal, 2026-08-12, superseding
+the 2026-08-10 call that kept them out). "What skills do I have" turned out to
+mean both halves to the person asking: the uploads AND the methods that come
+with the product — an answer naming only the uploads read as the product
+hiding its own capabilities, and the model filled the gap from connected
+sources, which is the one place skills never live. The list is generated from
+the vendored skill registry (name + its SKILL.md one-line description), so it
+cannot drift from what actually ships.
 
 Never raises, and returns "" for a company with nothing to show — an empty
 library is a real state with real copy ("you haven't uploaded any yet"), but
@@ -152,6 +155,38 @@ def _skill_lines(enterprise_id: str) -> tuple[list[str], bool]:
     return lines, True
 
 
+def _builtin_skill_lines() -> tuple[list[str], bool]:
+    """`(lines, read_ok)` for Sprntly's own vendored skills — name plus the
+    SKILL.md one-line description, exactly what the router classifies against,
+    so this list and the product's real capabilities cannot drift apart.
+
+    Reads through `get_skill`'s process-global `lru_cache` (the same reads the
+    router menu already pays), so after the first call this is dict lookups. A
+    skill whose spec fails to load is skipped rather than failing the list —
+    one broken SKILL.md must not make the assistant deny the other seventy."""
+    try:
+        from app.skills.loader import get_skill, list_skills
+
+        ids = list_skills()
+    except Exception:  # noqa: BLE001 — an unreadable registry is a failed read
+        logger.warning("library: built-in skill registry unavailable", exc_info=True)
+        return [], False
+
+    lines: list[str] = []
+    for skill_id in ids:
+        try:
+            spec = get_skill(skill_id)
+        except Exception:  # noqa: BLE001 — skip the row, keep the list
+            logger.warning("library: built-in skill %r unreadable", skill_id)
+            continue
+        description = _one_line(spec.description, _DESCRIPTION_CHARS)
+        line = f"- {skill_id}"
+        if description:
+            line += f" — {description}"
+        lines.append(line)
+    return lines, True
+
+
 def _template_lines(enterprise_id: str) -> tuple[dict[str, list[str]], bool]:
     """`({artifact_type: lines}, read_ok)` for the company's uploaded formats.
 
@@ -241,10 +276,12 @@ def library_block(enterprise_id: Optional[str]) -> str:
     templates, templates_ok = _template_lines(enterprise_id)
     if not skills_ok and not templates_ok:
         return ""
+    builtin_skills, builtin_ok = _builtin_skill_lines()
 
     parts: list[str] = [
         "=== THIS WORKSPACE'S SKILLS AND TEMPLATES ===",
-        "This is the complete, current list of what this company has uploaded. "
+        "This is the complete, current list of what this company has uploaded, "
+        "plus the skills built into Sprntly itself. "
         "It is authoritative: if something is not here, they have not uploaded "
         "it. Never name a skill or a template that does not appear below.",
         # The section is titled with the customer's own word, and says so, for
@@ -256,6 +293,12 @@ def library_block(enterprise_id: Optional[str]) -> str:
         "Confluence or Drive page titled \"Template - …\" is a wiki page their "
         "team writes in; it governs no Sprntly document and is never one of "
         "their templates.",
+        # Skills got the same treatment for the same reason, pre-emptively: a
+        # synced source can hold pages, fields or labels CALLED "skills", and
+        # none of them are what this customer means by the word.
+        "SKILLS here means the uploads below plus Sprntly's built-in methods "
+        "and nothing else — never anything found in a connected source or a "
+        "synced document.",
         "",
         "SKILLS (methods — how a piece of work is done). Uploaded and managed on "
         f"the {_SKILLS_SCREEN} screen, and shared by everyone in the company.",
@@ -267,6 +310,17 @@ def library_block(enterprise_id: Optional[str]) -> str:
         parts.append("(None uploaded yet.)")
     else:
         parts.extend(skills)
+
+    parts += [
+        "",
+        "SPRNTLY'S BUILT-IN SKILLS (methods that ship with the product — always "
+        "available to everyone, alongside the uploads above).",
+    ]
+    if not builtin_ok:
+        parts.append("(This list could not be read just now — say so rather than "
+                     "reporting it as empty.)")
+    else:
+        parts.extend(builtin_skills or ["(None.)"])
 
     parts += [
         "",

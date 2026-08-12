@@ -142,7 +142,16 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     the other half of what was reported. Widening on v4's rule both ways: a
 #     v6 row answers questions no v5 row was asked, so the two must not be
 #     pooled.
-_PROMPT_VERSION = "ask-planner-v6"
+# v7: library questions became EXCLUSIVE. The prompt now instructs kg=false /
+#     no sources for them, and the execution layer reads that combination
+#     (include_library and nothing else) as "answer from the library alone" —
+#     no corpus, no KG, no document index. v6 said only "name NO documents",
+#     which the model followed, and the answer STILL recited Confluence
+#     "Template - …" pages, because the document index rode the prompt
+#     regardless of the plan. A v7 row's kg flag on a library question is a
+#     contract where a v6 row's was a coincidence, so the two must not be
+#     pooled.
+_PROMPT_VERSION = "ask-planner-v7"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -828,6 +837,12 @@ as an answer to "what templates do I have".
 So, when the question is about templates or formats:
 
 - set include_library=true;
+- set include_knowledge_graph=false and pick NO sources — the library block is
+  the WHOLE grounding for these questions, and the execution layer treats that
+  combination (library yes, everything else no) as "answer from the library
+  alone". A question that genuinely needs both — "which of my templates fits
+  last week's feedback" — keeps the knowledge graph, and keeps every reader it
+  asked for;
 - and name NO documents. The document catalog is full of pages with "Template"
   in the title and every one of them is the wrong answer here. Reported: asked
   "how many templates do I have in my account", the assistant listed six

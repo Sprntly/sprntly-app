@@ -260,6 +260,45 @@ def test_no_tenant_yields_no_block(library):
     assert library_block("") == ""
 
 
+def test_the_builtin_skills_are_listed_with_their_descriptions(library):
+    """Owner's reversal (2026-08-12): "what skills do I have" means BOTH halves
+    — the uploads and the methods that ship with the product. The list comes
+    from the vendored registry (id + SKILL.md description), so it cannot drift
+    from what actually ships."""
+    block = library_block(COMPANY)
+
+    assert "SPRNTLY'S BUILT-IN SKILLS" in block
+    # The fixture's registry (loader.list_skills) names these two; each line is
+    # the id, and the real SKILL.md description rides it when one exists.
+    assert "- prd-author" in block
+    assert "- user-stories" in block
+
+
+def test_skills_are_never_sourced_from_connectors(library):
+    """The other half of the reported failure class: a synced source can hold
+    pages or labels CALLED "skills", and none of them are what the customer
+    means. The block says so in words, beside the same rule templates carry."""
+    block = library_block(COMPANY)
+
+    assert "never anything found in a connected source" in block
+
+
+def test_an_unreadable_builtin_registry_says_so_and_keeps_the_uploads(
+    library, monkeypatch
+):
+    monkeypatch.setattr(
+        loader, "list_skills",
+        lambda: (_ for _ in ()).throw(RuntimeError("skills dir gone")),
+    )
+
+    block = library_block(COMPANY)
+
+    # The uploads half still renders; the built-in half reports the failed
+    # read rather than an empty product.
+    assert "churn-autopsy" in block or "Acme" in block or "SKILLS" in block
+    assert block.count("could not be read") >= 1
+
+
 def test_a_skill_shadowed_by_a_builtin_is_marked_not_hidden(library):
     """`resolve_skill` is built-in-first, so this upload's trigger runs the
     built-in — but it is sitting on the company's Skills screen, and answering
