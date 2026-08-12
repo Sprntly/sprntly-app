@@ -51,9 +51,12 @@ from app.db import complete_prd, get_brief_by_id
 from app.db.artifact_templates import get_active_template
 from app.db.companies import company_id_for_slug, owner_name_for_company
 from app.db.prds import (
+    clear_prd_artifact_template,
     fail_prd,
     find_existing_prd,
+    get_prd,
     get_prd_rendered,
+    mark_prd_ready,
     prd_source_hash,
     set_prd_artifact_template,
     set_prd_impl_spec,
@@ -733,6 +736,15 @@ def _load_part_a_template() -> str:
     return get_skill(_SKILL).templates["prd-template.html"]
 
 
+#: `resolve_prd_template` override sentinel: "Sprntly's built-in format,
+#: explicitly" — as opposed to None, which has always meant "whatever is
+#: active". The change-template path needs the distinction: switching a PRD
+#: back to the built-in must not resolve to the company's active format. Never
+#: a real row id (uuids don't look like this), never stored, never sent to a
+#: client — routes translate a null template id into it at the call site.
+BUILTIN_FORMAT = "__builtin__"
+
+
 def resolve_prd_template(
     company_id: str | None, override_id: str | None = None
 ) -> tuple[str, str | None]:
@@ -796,6 +808,12 @@ def resolve_prd_template(
     """
     builtin = _load_part_a_template()
     if not company_id:
+        return builtin, None
+    if override_id == BUILTIN_FORMAT:
+        # An explicit "the built-in, not whatever is active" — the change-
+        # template path re-rendering a PRD back into Sprntly's own format.
+        # Checked before the active-format leg because that leg is exactly what
+        # this sentinel exists to outrank: None already means "the active one".
         return builtin, None
 
     row = None
@@ -1320,6 +1338,81 @@ async def generate_prd_and_warm(
     # helper swallows its own errors so a Slack hiccup never fails the task.
     if ctx is not None and company_id and user_id:
         await _notify_prd_ready_slack(company_id, user_id, prd_id, prd_title)
+
+
+async def regenerate_prd_into_template(
+    prd_id: int,
+    *,
+    source_md: str,
+    brief_id: int,
+    insight_index: int,
+    title: str,
+    artifact_template_id: str | None,
+    company_id: str,
+    user_id: str | None = None,
+    author: str | None = None,
+) -> None:
+    """Re-render an EXISTING PRD into a different format, in place.
+
+    The change-template path (POST /v1/prd/{id}/change-template): the route has
+    already validated the target format, snapshotted the current document to
+    version history, and moved the row to `generating` — this function is the
+    background half. It is `generate_prd_and_warm` in the import path's
+    FAITHFUL RE-LAYOUT mode: `source_md` (the PRD's current raw `payload_md`)
+    IS the source material, so the model restructures what exists — the user's
+    edits included — inventing nothing and re-grounding on nothing.
+    `artifact_template_id` None means the built-in, translated to the
+    `BUILTIN_FORMAT` sentinel because a bare None has always meant "whatever is
+    active", which is exactly the resolution a switch to the built-in must
+    outrank.
+
+    Completion re-stamps, re-extracts input questions (idempotent —
+    `replace_questions` is delete-then-insert) and re-warms Part B exactly like
+    any generation, because it IS one; the poll and the `prd:<id>` stream
+    behave identically too, since the row is the job state.
+
+    FAILURE LEAVES THE DOCUMENT STANDING, AND SAYS SO HONESTLY. An in-place
+    regeneration never touches `payload_md` until `complete_prd`, so a failed
+    one still holds the previous document in full — the finally below puts the
+    row back to `ready` rather than leaving a perfectly good PRD buried behind
+    a `failed` screen on every later open. The client detects the failed
+    switch by comparing the row's `artifact_template_id` against the target it
+    asked for: unchanged stamp = unchanged document. The same comparison is
+    why a SUCCESSFUL switch to the built-in clears the stamp here —
+    `set_prd_artifact_template` treats None as "nothing to record" for the
+    fresh-row paths, so the one path that must write NULL over a real id does
+    it explicitly."""
+    insight = {
+        "title": title,
+        "summary": "Re-rendered into a different format at the user's request.",
+    }
+    try:
+        await generate_prd_and_warm(
+            prd_id, brief_id, insight_index,
+            insight_override=insight,
+            author=author,
+            import_source_md=source_md,
+            company_id=company_id, user_id=user_id,
+            prd_title=title,
+            artifact_template_id=artifact_template_id or BUILTIN_FORMAT,
+        )
+    finally:
+        try:
+            row = get_prd(prd_id) or {}
+            if row.get("status") == "failed":
+                logger.warning(
+                    "change-template regeneration failed prd_id=%s target=%s — "
+                    "restoring the previous document's ready status",
+                    prd_id, artifact_template_id or "builtin",
+                )
+                mark_prd_ready(prd_id)
+            elif row.get("status") == "ready" and artifact_template_id is None:
+                clear_prd_artifact_template(prd_id)
+        except Exception:  # noqa: BLE001 — the restore is best-effort; the row
+            # is at worst `failed` with its content intact, never lost.
+            logger.exception(
+                "change-template post-regeneration restore failed prd_id=%s", prd_id
+            )
 
 
 def _run_sync(prd_id: int, brief_id: int, insight_index: int, **kwargs) -> None:
