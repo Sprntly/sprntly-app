@@ -144,6 +144,10 @@ def _run_sync(company_id: str, provider: str) -> None:
     """Blocking sync body — runs inside the daemon thread. Fully isolated:
     any failure is logged and stamped as last_sync_error, never raised."""
     try:
+        # Start-of-pull trace, pairing with the "auto-sync done" line below —
+        # without it a hung provider pull is indistinguishable from one that
+        # never started.
+        logger.info("auto-sync: START pull %s/%s", company_id, provider)
         row = db.get_connection(company_id, provider)
         if not row:
             logger.info("auto-sync: %s no longer connected for %s — skipping",
