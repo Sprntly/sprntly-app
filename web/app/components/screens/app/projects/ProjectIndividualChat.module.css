@@ -59,6 +59,12 @@
   color: var(--ink-2);
 }
 
+.delegationActions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
 .agentHead {
   display: flex;
   align-items: center;

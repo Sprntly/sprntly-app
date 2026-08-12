@@ -61,7 +61,14 @@ import {
   AskCancelledError,
   AskTimeoutError,
 } from "../../../../lib/runAskGeneration"
-import { projectsApi, type AskResponse, type IndividualTurn, type OpenArtifactCandidate } from "../../../../lib/api"
+import {
+  projectsApi,
+  type AskResponse,
+  type DelegationLedgerRow,
+  type IndividualTurn,
+  type OpenArtifactCandidate,
+} from "../../../../lib/api"
+import { DelegationActions } from "./DelegationActions"
 import styles from "./ProjectIndividualChat.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
@@ -130,6 +137,12 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
   const [history, setHistory] = useState<IndividualTurn[]>([])
   const [draft, setDraft] = useState("")
   const [busy, setBusy] = useState(false)
+  // Delegations assigned to THIS caller, keyed by the brief turn they were
+  // delivered on (`delivered_turn_id`) — so the inline `<DelegationActions>`
+  // affordance can render on the matching `ic-history-agent` turn. A
+  // read-only convenience: the Task-ledger modal is the authoritative surface
+  // (AD-P28); an unmatched turn renders exactly as before, no affordance.
+  const [delegationsByTurn, setDelegationsByTurn] = useState<Map<number, DelegationLedgerRow>>(new Map())
 
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -194,6 +207,63 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       cancelled = true
     }
   }, [projectId])
+
+  // Load the caller's assigned delegations once when the thread opens and
+  // index them by `delivered_turn_id`, so a delivered-brief turn in `history`
+  // can render the inline accept/decline affordance. Additive and
+  // fully independent of the load-on-open history effect above and the
+  // `brief.delivered` subscription below — it touches neither. Best-effort: a
+  // failed read leaves the map empty (no affordance rendered), never blocks
+  // the thread. `refetchDelegations` is reused after an inline emit to reflect
+  // the new status without a realtime push (AD-P22 baseline; a later pass
+  // adds live).
+  const refetchDelegations = useCallback(() => {
+    return projectsApi
+      .ledger(projectId, "assigned_to_me")
+      .then((rows) => {
+        const map = new Map<number, DelegationLedgerRow>()
+        for (const row of rows) {
+          if (row.delivered_turn_id != null) map.set(row.delivered_turn_id, row)
+        }
+        setDelegationsByTurn(map)
+      })
+      .catch(() => {
+        /* best-effort — no affordance rather than a thrown/blank thread */
+      })
+  }, [projectId])
+  useEffect(() => {
+    let cancelled = false
+    projectsApi
+      .ledger(projectId, "assigned_to_me")
+      .then((rows) => {
+        if (cancelled) return
+        const map = new Map<number, DelegationLedgerRow>()
+        for (const row of rows) {
+          if (row.delivered_turn_id != null) map.set(row.delivered_turn_id, row)
+        }
+        setDelegationsByTurn(map)
+      })
+      .catch(() => {
+        /* best-effort — leaves the map empty, no affordance */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId])
+
+  const emitOnDelegation = useCallback(
+    (delegationId: number, event: string, note?: string) => {
+      projectsApi
+        .emitDelegationEvent(projectId, delegationId, event, note)
+        .then(() => refetchDelegations())
+        .catch(() => {
+          // Non-blocking: resync so the affordance reflects the true state
+          // (the emit may have landed and just failed to return).
+          refetchDelegations()
+        })
+    },
+    [projectId, refetchDelegations],
+  )
 
   // Live subscribe (the delegated-brief-without-reopen gap this ticket
   // closes): the caller's OWN per-user channel, the same one
@@ -331,6 +401,19 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
                   <span className={styles.time}>{formatTime(new Date(h.created_at).getTime())}</span>
                 </div>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>
+                {delegationsByTurn.has(h.id) ? (
+                  <div className={styles.delegationActions} data-testid="ic-brief-delegation-actions">
+                    <DelegationActions
+                      delegationId={delegationsByTurn.get(h.id)!.delegation_id}
+                      status={delegationsByTurn.get(h.id)!.status}
+                      viewerParty="assignee"
+                      onEmit={(event, note) =>
+                        emitOnDelegation(delegationsByTurn.get(h.id)!.delegation_id, event, note)
+                      }
+                      compact
+                    />
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div className={styles.userTurn} data-testid="ic-history-you">

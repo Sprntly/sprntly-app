@@ -1,0 +1,87 @@
+/* DelegationActions — component-scoped styles (globals.css is never edited,
+ * per BUILD.md §6 hot-file rule). Every value resolves to an existing
+ * `web/app/globals.css` custom property — no new palette. */
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.compact {
+  gap: 5px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  background: var(--surface-4);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.compact .btn {
+  font-size: 11px;
+  padding: 4px 9px;
+}
+
+.btnAccent {
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border-color: var(--accent-soft);
+}
+
+.btnAccent:hover {
+  background: var(--accent-soft);
+}
+
+.btnDanger {
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.btnDanger:hover {
+  background: var(--danger-soft);
+  filter: brightness(0.98);
+}
+
+.declineWrap {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.declineNote {
+  flex: 1;
+  min-width: 140px;
+  font-size: 11.5px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 5px 8px;
+}
+
+.declineNote:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}

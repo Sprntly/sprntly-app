@@ -23,6 +23,9 @@ const openModalMock = vi.fn()
 const removeMemberMock = vi.fn()
 const individualUnreadMock = vi.fn()
 const markIndividualReadMock = vi.fn()
+const ledgerCountsMock = vi.fn()
+const ledgerMock = vi.fn()
+const emitDelegationEventMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
 // listed human member — lets the container-level tests exercise the
 // "removable" branch (u2/Shristi) without also tripping the self-removal
@@ -58,6 +61,9 @@ vi.mock("../../../../../lib/api", () => {
       removeMember: (...a: unknown[]) => removeMemberMock(...a),
       individualUnread: (...a: unknown[]) => individualUnreadMock(...a),
       markIndividualRead: (...a: unknown[]) => markIndividualReadMock(...a),
+      ledgerCounts: (...a: unknown[]) => ledgerCountsMock(...a),
+      ledger: (...a: unknown[]) => ledgerMock(...a),
+      emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
     },
   }
 })
@@ -209,6 +215,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     activeChat: "group",
     onSelectChat: noop,
     individualUnread: false,
+    ledgerCounts: { assigned_to_me_open: 0, waiting_on_open: 0 },
     onOpenArtifacts: noop,
     onCreateArtifact: noop,
     onOpenMemory: noop,
@@ -233,6 +240,12 @@ afterEach(() => {
   individualUnreadMock.mockResolvedValue({ unread: false, latest_turn_id: null, last_read_turn_id: 0 })
   markIndividualReadMock.mockReset()
   markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 0 })
+  ledgerCountsMock.mockReset()
+  ledgerCountsMock.mockResolvedValue({ assigned_to_me_open: 0, waiting_on_open: 0 })
+  ledgerMock.mockReset()
+  ledgerMock.mockResolvedValue([])
+  emitDelegationEventMock.mockReset()
+  emitDelegationEventMock.mockResolvedValue({ delegation_id: 1, status: "accepted" })
   authMock.mockReset()
   authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })
@@ -362,10 +375,39 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(onAddMemory).toHaveBeenCalledTimes(1)
   })
 
-  it("Task ledger card carries a Fast-follow badge", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
+  it("test_rail_card_shows_live_counts — the Task ledger card shows live counts, no Fast-follow badge / 'not wired yet' copy", () => {
+    render(
+      React.createElement(
+        ProjectDetailView,
+        viewProps({ ledgerCounts: { assigned_to_me_open: 3, waiting_on_open: 2 } }),
+      ),
+    )
     const card = screen.getByTestId("task-ledger-card")
-    expect(within(card).getByTestId("task-ledger-fastfollow").textContent).toContain("Fast-follow")
+    expect(within(card).queryByTestId("task-ledger-fastfollow")).toBeNull()
+    expect(card.textContent).not.toContain("Fast-follow")
+    expect(card.textContent).not.toContain("not wired yet")
+    const counts = within(card).getByTestId("task-ledger-counts")
+    expect(counts.textContent).toContain("3 assigned to you")
+    expect(counts.textContent).toContain("2 you're waiting on")
+  })
+
+  it("test_view_all_opens_real_modal_with_projectId — View all tasks opens the real TaskModal, threading projectId into its ledger reads", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("task-ledger-view-all")).toBeTruthy())
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("task-ledger-view-all"))
+    })
+    await waitFor(() => expect(screen.getByTestId("task-modal-title")).toBeTruthy())
+    // The modal's reads carry the container's projectId ("101") — proving the
+    // prop was threaded through, not a hard-coded stub.
+    await waitFor(() => expect(ledgerMock).toHaveBeenCalledWith("101", "assigned_to_me"))
+    expect(ledgerMock).toHaveBeenCalledWith("101", "waiting_on")
   })
 })
 
@@ -483,17 +525,17 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
 
   it("test_no_new_state_for_status — no new useState/fetch is introduced for the agent status (source-scan guard against accidental activity-wiring)", () => {
     const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
-    // Baseline pre-ticket declaration count was 7 (state/rail/activeChat/
-    // railModal/removeTarget/removeBusy/removeError). The assignee-
-    // awareness ticket adds exactly ONE more, legitimately in its own
-    // declared scope — `individualUnread` (the derived rail-badge flag,
-    // never a stored boolean upstream; this is client-side UI state
-    // mirroring the server's derived value, not new derived-state
-    // persistence). The guard this test protects — no NEW state for the
-    // AGENT STATUS pulse specifically — still holds: `posting` (the ask-
-    // composer wiring this guard was written against) is still absent.
+    // Baseline declaration count was 8 (state/rail/activeChat/railModal/
+    // removeTarget/removeBusy/removeError/individualUnread). The ledger-UI
+    // work adds exactly ONE more, legitimately in its own declared scope —
+    // `ledgerCounts` (the open-only delegation counts for the Task-ledger
+    // rail card, mirrored from the server's derived counts on fetch/poll the
+    // same way `individualUnread` is; a convenience readout, not new
+    // derived-state persistence). The guard this test protects — no NEW state
+    // for the AGENT STATUS pulse specifically — still holds: `posting` (the
+    // ask-composer wiring this guard was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(8)
+    expect(useStateDeclarations).toHaveLength(9)
     expect(src).not.toContain("posting")
   })
 })

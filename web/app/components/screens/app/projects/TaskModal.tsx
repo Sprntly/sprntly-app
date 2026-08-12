@@ -1,28 +1,36 @@
 "use client"
 
-// ── TaskModal — task ledger, STUBBED fast-follow (design-spec v3.2) ──
+// ── TaskModal — the project's task ledger (data-bound, AD-P28) ──
 //
-// Explicitly out of scope for this ticket (build spec §8, Phase 4+): there
-// is no task-ledger backend yet. This modal is PRESENTATIONAL ONLY — a
-// fixed Open/Done illustration plus the "Fast-follow · coming" badge, so
-// the rail's "Task ledger" card has somewhere real to open without
-// promising data this build doesn't have. It fetches nothing and wires no
-// callback beyond Close.
-import { useCallback, useEffect, useRef } from "react"
+// The authoritative ledger surface: on open it reads the caller's party-
+// filtered delegation views (`projectsApi.ledger`) and renders three
+// sections — Assigned to me / Waiting on / Done — each row carrying the
+// shared `<DelegationActions>` for the party- and state-appropriate moves.
+// Every action calls the one gated `projectsApi.emitDelegationEvent`; the
+// affected view refetches after a successful emit (no realtime yet).
+//
+// Presentation chrome (shell, focus-trap, Escape/backdrop close, the
+// `task-modal-*` test-ids) is preserved from the shipped stub this replaces.
+import { useCallback, useEffect, useRef, useState } from "react"
 import { IconClose } from "../../../shared/app-icons"
+import { projectsApi, type DelegationLedgerRow } from "../../../../lib/api"
+import { DelegationActions, type ViewerParty } from "./DelegationActions"
 import styles from "./TaskModal.module.css"
 
-type StubTask = { id: string; text: string; sub: string; done: boolean }
+/** Human-readable label for a derived delegation status. */
+const STATUS_LABEL: Record<string, string> = {
+  assigned: "Assigned",
+  accepted: "Accepted",
+  in_progress: "In progress",
+  completed: "Done",
+  declined: "Declined",
+  cancelled: "Cancelled",
+  reopened: "Reopened",
+}
 
-/** Illustrative only — never real project data. Shown so the stub reads as
- *  "here's the shape this will take", not an empty box. */
-const STUB_TASKS: StubTask[] = [
-  { id: "t1", text: "Review pricing-latency analysis", sub: "from David · handed off by the agent", done: false },
-  { id: "t2", text: "Upload reassurance state", sub: "from the group chat", done: false },
-  { id: "t3", text: "Draft quote-summary layout", sub: "your chat with the agent", done: false },
-  { id: "t4", text: "Pull pricing p95 benchmark", sub: "from the group chat", done: true },
-  { id: "t5", text: "Confirm sub-60s target with Xometry", sub: "from the group chat · David", done: true },
-]
+function statusLabel(status: string): string {
+  return STATUS_LABEL[status] ?? status
+}
 
 function ChecklistIcon() {
   return (
@@ -33,22 +41,86 @@ function ChecklistIcon() {
   )
 }
 
-function CheckGlyph() {
-  return (
-    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M5 12l5 5 9-11" />
-    </svg>
-  )
-}
+type LedgerState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; assigned: DelegationLedgerRow[]; waiting: DelegationLedgerRow[] }
 
 export type TaskModalViewProps = {
   open: boolean
+  projectId: number | string
   onClose: () => void
 }
 
-export function TaskModalView({ open, onClose }: TaskModalViewProps) {
+function LedgerRow({
+  row,
+  viewerParty,
+  onEmit,
+}: {
+  row: DelegationLedgerRow
+  viewerParty: ViewerParty
+  onEmit: (delegationId: number, event: string, note?: string) => void
+}) {
+  return (
+    <div className={styles.row} data-testid={`ledger-row-${row.delegation_id}`}>
+      <div className={styles.main}>
+        <div className={styles.text}>{row.task_summary}</div>
+        <div className={styles.sub}>
+          {row.other_party_name ?? "Someone"} · <span className={styles.statusLabel}>{statusLabel(row.status)}</span>
+        </div>
+        <DelegationActions
+          delegationId={row.delegation_id}
+          status={row.status}
+          viewerParty={viewerParty}
+          onEmit={(event, note) => onEmit(row.delegation_id, event, note)}
+        />
+      </div>
+    </div>
+  )
+}
+
+export function TaskModalView({ open, projectId, onClose }: TaskModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
+  const [state, setState] = useState<LedgerState>({ status: "loading" })
+  const [actionError, setActionError] = useState(false)
+
+  const load = useCallback(() => {
+    setState({ status: "loading" })
+    Promise.all([
+      projectsApi.ledger(projectId, "assigned_to_me"),
+      projectsApi.ledger(projectId, "waiting_on"),
+    ])
+      .then(([assigned, waiting]) => setState({ status: "ready", assigned, waiting }))
+      .catch(() => setState({ status: "error" }))
+  }, [projectId])
+
+  // Fetch on open (and whenever the project changes while open). Closing
+  // resets to loading so a re-open always shows fresh reads, never stale rows.
+  useEffect(() => {
+    if (!open) {
+      setState({ status: "loading" })
+      setActionError(false)
+      return
+    }
+    load()
+  }, [open, load])
+
+  const onEmit = useCallback(
+    (delegationId: number, event: string, note?: string) => {
+      setActionError(false)
+      projectsApi
+        .emitDelegationEvent(projectId, delegationId, event, note)
+        .then(() => load())
+        .catch(() => {
+          // Non-blocking: surface an inline note and resync from the server
+          // (the emit may have landed; the reload reflects the true state).
+          setActionError(true)
+          load()
+        })
+    },
+    [projectId, load],
+  )
 
   useEffect(() => {
     if (!open) return
@@ -93,8 +165,15 @@ export function TaskModalView({ open, onClose }: TaskModalViewProps) {
 
   if (!open) return null
 
-  const openTasks = STUB_TASKS.filter((t) => !t.done)
-  const doneTasks = STUB_TASKS.filter((t) => t.done)
+  const assignedOpen = state.status === "ready" ? state.assigned.filter((r) => r.bucket === "open") : []
+  const waitingOpen = state.status === "ready" ? state.waiting.filter((r) => r.bucket === "open") : []
+  const done =
+    state.status === "ready"
+      ? [
+          ...state.assigned.filter((r) => r.bucket === "done").map((r) => ({ row: r, viewerParty: "assignee" as const })),
+          ...state.waiting.filter((r) => r.bucket === "done").map((r) => ({ row: r, viewerParty: "assigner" as const })),
+        ]
+      : []
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -109,10 +188,7 @@ export function TaskModalView({ open, onClose }: TaskModalViewProps) {
         <div className="modal-head">
           <div className="modal-head-text">
             <h2 className="modal-title" id="task-modal-title" data-testid="task-modal-title">
-              <ChecklistIcon /> Task ledger{" "}
-              <span className={styles.ffBadge} data-testid="task-modal-fastfollow">
-                Fast-follow · coming
-              </span>
+              <ChecklistIcon /> Task ledger
             </h2>
             <p className="modal-sub">
               Who owes what across the project — from the group chat, individual chats and agent hand-offs. Each
@@ -125,38 +201,73 @@ export function TaskModalView({ open, onClose }: TaskModalViewProps) {
         </div>
 
         <div className="modal-body" data-testid="task-modal-body">
-          <div className={styles.sec} data-testid="task-modal-open-heading">
-            Open · {openTasks.length}
-          </div>
-          {openTasks.map((t) => (
-            <div className={styles.row} key={t.id} data-testid={`task-row-${t.id}`}>
-              <span className={styles.box} aria-hidden="true" />
-              <div className={styles.main}>
-                <div className={styles.text}>{t.text}</div>
-                <div className={styles.sub}>{t.sub}</div>
-              </div>
+          {state.status === "loading" ? (
+            <div className={styles.stateNote} data-testid="ledger-loading" aria-busy="true">
+              Loading tasks…
             </div>
-          ))}
-          <div className={styles.sec} data-testid="task-modal-done-heading">
-            Done · {doneTasks.length}
-          </div>
-          {doneTasks.map((t) => (
-            <div className={`${styles.row} ${styles.rowDone}`} key={t.id} data-testid={`task-row-${t.id}`}>
-              <span className={`${styles.box} ${styles.boxDone}`} aria-hidden="true">
-                <CheckGlyph />
-              </span>
-              <div className={styles.main}>
-                <div className={styles.text}>{t.text}</div>
-                <div className={styles.sub}>{t.sub}</div>
-              </div>
+          ) : state.status === "error" ? (
+            <div className={styles.stateNote} role="alert" data-testid="ledger-error">
+              Couldn't load tasks. Try reopening this in a moment.
             </div>
-          ))}
+          ) : (
+            <>
+              {actionError ? (
+                <div className={styles.actionError} role="alert" data-testid="ledger-action-error">
+                  Couldn't update that task. It may have already changed — this list is now refreshed.
+                </div>
+              ) : null}
+
+              <div className={styles.sec} data-testid="ledger-section-assigned">
+                Assigned to me · {assignedOpen.length}
+              </div>
+              {assignedOpen.length === 0 ? (
+                <div className={styles.emptyNote} data-testid="ledger-empty-assigned">
+                  Nothing here yet
+                </div>
+              ) : (
+                assignedOpen.map((row) => (
+                  <LedgerRow key={row.delegation_id} row={row} viewerParty="assignee" onEmit={onEmit} />
+                ))
+              )}
+
+              <div className={styles.sec} data-testid="ledger-section-waiting">
+                Waiting on · {waitingOpen.length}
+              </div>
+              {waitingOpen.length === 0 ? (
+                <div className={styles.emptyNote} data-testid="ledger-empty-waiting">
+                  Nothing here yet
+                </div>
+              ) : (
+                waitingOpen.map((row) => (
+                  <LedgerRow key={row.delegation_id} row={row} viewerParty="assigner" onEmit={onEmit} />
+                ))
+              )}
+
+              <div className={styles.sec} data-testid="ledger-section-done">
+                Done · {done.length}
+              </div>
+              {done.length === 0 ? (
+                <div className={styles.emptyNote} data-testid="ledger-empty-done">
+                  Nothing here yet
+                </div>
+              ) : (
+                done.map(({ row, viewerParty }) => (
+                  <LedgerRow
+                    key={`${viewerParty}-${row.delegation_id}`}
+                    row={row}
+                    viewerParty={viewerParty}
+                    onEmit={onEmit}
+                  />
+                ))
+              )}
+            </>
+          )}
         </div>
       </div>
     </div>
   )
 }
 
-export function TaskModal({ open, onClose }: TaskModalViewProps) {
-  return <TaskModalView open={open} onClose={onClose} />
+export function TaskModal({ open, projectId, onClose }: TaskModalViewProps) {
+  return <TaskModalView open={open} projectId={projectId} onClose={onClose} />
 }

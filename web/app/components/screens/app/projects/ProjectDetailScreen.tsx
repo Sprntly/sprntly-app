@@ -38,6 +38,7 @@ import {
   ApiError,
   projectsApi,
   type ArtifactItem,
+  type DelegationCounts,
   type ProjectArtifactType,
   type ProjectDetail,
   type ProjectMember,
@@ -245,6 +246,11 @@ export type ProjectDetailViewProps = {
    *  a dot on the "My chat with Sprntly" rail row; clears when the row is
    *  selected (the container POSTs `/individual/read` on that transition). */
   individualUnread: boolean
+  /** Open-only delegation counts for the Task-ledger rail card, mirrored
+   *  from `GET /v1/projects/{id}/delegations/counts` on fetch/poll the same
+   *  way `individualUnread` is — `null` before the first fetch resolves or
+   *  when it failed (a best-effort convenience; the modal is the authority). */
+  ledgerCounts: DelegationCounts | null
   onOpenArtifacts: (type?: ProjectArtifactType) => void
   onCreateArtifact: () => void
   onOpenMemory: () => void
@@ -282,6 +288,7 @@ export function ProjectDetailView({
   activeChat,
   onSelectChat,
   individualUnread,
+  ledgerCounts,
   onOpenArtifacts,
   onCreateArtifact,
   onOpenMemory,
@@ -476,12 +483,14 @@ export function ProjectDetailView({
                   <ChecklistIcon />
                   Task ledger
                 </h4>
-                <span className={styles.fastFollowBadge} data-testid="task-ledger-fastfollow">
-                  Fast-follow
-                </span>
               </div>
-              <p style={{ margin: "0 0 4px", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.45 }}>
-                Per-person to-do / waiting-on tracking is coming — not wired yet.
+              <p
+                style={{ margin: "0 0 4px", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.45 }}
+                data-testid="task-ledger-counts"
+              >
+                {ledgerCounts
+                  ? `${ledgerCounts.assigned_to_me_open} assigned to you · ${ledgerCounts.waiting_on_open} you're waiting on`
+                  : "Who owes what across the project — open it to see."}
               </p>
               <div className={styles.cardActions}>
                 <button type="button" className={styles.viewAllBtn} onClick={onOpenTasks} data-testid="task-ledger-view-all">
@@ -605,6 +614,11 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   // (AD-P3/AD-P20 — never stored client-side either, just mirrored from the
   // server's derived `unread` field on each fetch/poll tick).
   const [individualUnread, setIndividualUnread] = useState(false)
+  // Open-only delegation counts for the Task-ledger rail card — mirrored from
+  // the server's derived counts on each fetch/poll tick, exactly like
+  // `individualUnread` above (a convenience readout; the modal is the
+  // authority). `null` until the first fetch resolves, or when it failed.
+  const [ledgerCounts, setLedgerCounts] = useState<DelegationCounts | null>(null)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -683,6 +697,16 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         .catch(() => {
           /* best-effort — a dropped tick leaves the badge as-is */
         })
+      // Ledger counts ride the same fetch/poll tick, mirrored the same way —
+      // best-effort: a dropped tick leaves the last-known counts on the card.
+      projectsApi
+        .ledgerCounts(projectId)
+        .then((counts) => {
+          if (!cancelled) setLedgerCounts(counts)
+        })
+        .catch(() => {
+          /* best-effort — a dropped tick leaves the counts as-is */
+        })
     }
 
     fetchUnread()
@@ -760,7 +784,17 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   const onOpenMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onAddMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
-  const onCloseRailModal = useCallback(() => setRailModal(null), [])
+  const onCloseRailModal = useCallback(() => {
+    setRailModal(null)
+    // Acting on tasks inside the modal changes the open counts; refresh the
+    // rail card on close (best-effort — the poll tick catches up otherwise).
+    projectsApi
+      .ledgerCounts(projectId)
+      .then(setLedgerCounts)
+      .catch(() => {
+        /* best-effort — the next poll tick re-derives the counts */
+      })
+  }, [projectId])
 
   const onRemoveMember = useCallback((member: HumanMember) => {
     setRemoveError(null)
@@ -850,6 +884,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         activeChat={activeChat}
         onSelectChat={onSelectChat}
         individualUnread={individualUnread}
+        ledgerCounts={ledgerCounts}
         onOpenArtifacts={onOpenArtifacts}
         onCreateArtifact={onCreateArtifact}
         onOpenMemory={onOpenMemory}
@@ -882,7 +917,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onClose={onCloseRailModal}
       />
-      <TaskModal open={railModal?.kind === "tasks"} onClose={onCloseRailModal} />
+      <TaskModal open={railModal?.kind === "tasks"} projectId={projectId} onClose={onCloseRailModal} />
     </AppLayout>
   )
 }
