@@ -64,13 +64,23 @@ const { realtimeSpy, realtimeState } = vi.hoisted(() => ({
   realtimeSpy: vi.fn(),
   realtimeState: { degraded: true },
 }))
+// Presence/typing (added alongside this ticket) are exercised in their own
+// suites (useRealtimeChannel.presence.dom.test.tsx, and the render/degrade
+// cases below) — here the mock returns the honest empty defaults so this
+// file's turn-path assertions stay unaffected (AC-8 non-regression).
 vi.mock("../useRealtimeChannel", () => ({
   useRealtimeChannel: (
     topic: string | null,
     handlers: { onEvent?: (event: string, payload: unknown) => void; onReconcile?: () => void },
   ) => {
     realtimeSpy(topic, handlers)
-    return { status: realtimeState.degraded ? "degraded" : "live", degraded: realtimeState.degraded }
+    return {
+      status: realtimeState.degraded ? "degraded" : "live",
+      degraded: realtimeState.degraded,
+      presenceMembers: [],
+      sendTyping: vi.fn(),
+      typers: [],
+    }
   },
 }))
 

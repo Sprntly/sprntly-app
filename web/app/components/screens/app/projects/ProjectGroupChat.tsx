@@ -67,6 +67,22 @@ function initials(name: string | null | undefined): string {
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
 }
 
+/** The current viewer's display name for presence/typing (AD-P24 — no new
+ *  fetch, no context dependency: derived from the same `user_metadata`
+ *  `signUpWithPassword` already writes, mirroring `WorkspaceContext`'s
+ *  `profileDisplayName` shape without requiring its provider here). */
+function authDisplayName(user: { user_metadata?: unknown; email?: string | null } | null | undefined): string {
+  if (!user) return "You"
+  const meta = user.user_metadata as { first_name?: string; last_name?: string } | undefined
+  const full = [meta?.first_name, meta?.last_name].map((s) => s?.trim()).filter(Boolean).join(" ")
+  if (full) return full
+  if (user.email) {
+    const local = user.email.split("@")[0]
+    if (local) return local
+  }
+  return "You"
+}
+
 function formatTime(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ""
@@ -84,6 +100,7 @@ export type ProjectGroupChatProps = {
 export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChatProps) {
   const auth = useAuth()
   const myUserId = auth.kind === "authed" ? auth.user.id : null
+  const myName = authDisplayName(auth.kind === "authed" ? auth.user : null)
 
   const [turns, setTurns] = useState<GroupTurn[]>([])
   const [loading, setLoading] = useState(true)
@@ -168,10 +185,24 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         /* best-effort — the next reconnect or fallback poll tick retries */
       })
   }, [projectId, applyTurns])
-  const { degraded } = useRealtimeChannel(`project:${projectId}`, {
+  // Presence + typing (AD-P24 — ephemeral, ride the SAME channel + join this
+  // component already owns; no second subscription, no new authz — the
+  // existing member INSERT grant on `project:{id}` already covers `track()`
+  // + `typing` broadcasts). `presence.self` is omitted while `myUserId` is
+  // unknown (auth still resolving) so the hook simply never tracks.
+  const { degraded, presenceMembers, sendTyping, typers } = useRealtimeChannel(`project:${projectId}`, {
     onEvent: handleRealtimeEvent,
     onReconcile: handleReconcile,
+    presence: myUserId ? { self: { userId: myUserId, name: myName } } : undefined,
   })
+
+  const handleComposerInput = useCallback(
+    (value: string) => {
+      setDraft(value)
+      if (myUserId) sendTyping({ userId: myUserId, name: myName })
+    },
+    [myUserId, myName, sendTyping],
+  )
 
   // Focus-gated poll (AD-P4 origin, demoted to fallback by AD-P22): only
   // while the tab/window has focus, cleared on blur and on unmount — no
@@ -288,6 +319,16 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
 
   return (
     <div className={styles.thread} data-testid="project-group-chat">
+      {presenceMembers.length > 0 ? (
+        <div className={styles.roster} data-testid="gc-presence">
+          {presenceMembers.map((member) => (
+            <span key={member.userId} className={styles.rosterMember} data-testid="gc-presence-member" title={member.name}>
+              <span className={styles.rosterDot} aria-hidden="true" />
+              {initials(member.name)}
+            </span>
+          ))}
+        </div>
+      ) : null}
       <div className={styles.scroll} data-testid="group-chat-scroll">
         {loading ? (
           <AssistantThinkingSkeleton phase="Loading the group chat…" />
@@ -397,6 +438,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         </div>
       ) : null}
 
+      {typers.length > 0 ? (
+        <div className={styles.typingIndicator} data-testid="gc-typing">
+          {typers.map((t) => t.name).join(", ")} {typers.length === 1 ? "is" : "are"} typing…
+        </div>
+      ) : null}
+
       <div className={styles.composerWrap}>
         <ChatComposer
           busy={posting}
@@ -409,7 +456,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           slashMenu={null}
           composerRef={composerRef}
           fileInputRef={fileInputRef}
-          onInput={(e) => setDraft(e.target.value)}
+          onInput={(e) => handleComposerInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault()
