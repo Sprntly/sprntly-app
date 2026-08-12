@@ -99,6 +99,16 @@ ASK_RESPONSE_SCHEMA: dict = {
 }
 
 
+async def _timed_cache_resolve(dataset: str, question: str):
+    """[timing] wrapper for the cache-hit resolution — this leg contains the
+    deliberate 5-7s synthetic delay on a hit and up to 25s of waiting on a
+    warming row, so it must be individually visible in a latency trace."""
+    from app.timing import timed
+
+    with timed("route:ask.cache_resolve"):
+        return await asyncio.to_thread(_resolve_cache_hit, dataset, question)
+
+
 class AskIn(BaseModel):
     # The cap must fit a question PLUS an inlined `[Attached files]` block —
     # the composer appends extracted document markdown (clamped to 100k there,
@@ -295,7 +305,10 @@ async def ask(
     # holds an assistant turn must not be served a cache hit that never read
     # that thread. Moving it up costs one extra DB read on a cache hit; it
     # already ran on every miss.
-    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+    from app.timing import timed
+
+    with timed("route:ask.history"):
+        history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
@@ -313,7 +326,7 @@ async def ask(
     # ask has no thread yet to be blind to (that's what the starter chips send).
     mid_thread = any(turn.get("role") == "assistant" for turn in history)
     cached_payload = (
-        await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
+        await _timed_cache_resolve(body.dataset, body.question)
         if (
             body.prd_id is None
             # An artifact-tab ask is context-bound for the same reason a

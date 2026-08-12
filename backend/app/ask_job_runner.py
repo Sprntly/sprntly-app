@@ -1,3 +1,5 @@
+
+from app.timing import timed_def
 """Background worker for the blur-safe chat Ask flow.
 
 `POST /v1/ask` persists a `generating` row in `ask_jobs` and schedules
@@ -73,6 +75,7 @@ def _strip_citations(payload: dict) -> dict:
     return payload
 
 
+@timed_def("worker:ask")
 def _run_sync(
     ask_id: int,
     enterprise_id: str,

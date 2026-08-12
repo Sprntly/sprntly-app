@@ -127,14 +127,17 @@ def chat_intent(
     history = _load_history(body.conversation_id, company.company_id, company.user_id)
     prd_title = (prd_row or {}).get("title") or None
 
-    envelope = resolve_chat_intent(
-        company.company_id,
-        body.message,
-        history,
-        prd_id=prd_id,
-        prd_title=prd_title,
-        has_attachments=body.has_attachments,
-    )
+    from app.timing import timed
+
+    with timed("route:chat_intent.resolve"):
+        envelope = resolve_chat_intent(
+            company.company_id,
+            body.message,
+            history,
+            prd_id=prd_id,
+            prd_title=prd_title,
+            has_attachments=body.has_attachments,
+        )
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = prd_title
     if envelope.get("intent") == "open_artifact":
