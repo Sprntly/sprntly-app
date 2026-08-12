@@ -96,6 +96,7 @@ function row(over: Partial<ArtifactTemplate> = {}): ArtifactTemplate {
     source_chars: 4210,
     compile_summary: null,
     compile_note_count: 0,
+    summary: "",
     ...over,
   }
 }
@@ -675,5 +676,46 @@ describe("rename", () => {
       expect(updateMock).toHaveBeenCalledWith("t1", { name: "Acme PRD v4" }),
     )
     await waitFor(() => expect(screen.getByText("Acme PRD v4")).toBeTruthy())
+  })
+})
+
+describe("the format's own summary on the card", () => {
+  it("renders the summary between the name and the meta line", async () => {
+    listMock.mockResolvedValue(
+      listOf([row({ summary: "Two sections: Background and Requirements, evidence-first." })], PRD_LIVE),
+    )
+    await mount()
+    await waitFor(() =>
+      expect(
+        screen.getByText("Two sections: Background and Requirements, evidence-first."),
+      ).toBeTruthy(),
+    )
+    // Full text rides title= (the visual clamp is CSS-only).
+    expect(
+      screen
+        .getByText("Two sections: Background and Requirements, evidence-first.")
+        .getAttribute("title"),
+    ).toBe("Two sections: Background and Requirements, evidence-first.")
+  })
+
+  it("says a description is being written for a ready row that has none (the self-heal window)", async () => {
+    listMock.mockResolvedValue(listOf([row({ summary: "" })], PRD_LIVE))
+    await mount()
+    await waitFor(() =>
+      expect(
+        screen.getByText("Writing a short description of this format…"),
+      ).toBeTruthy(),
+    )
+  })
+
+  it("says nothing while the compile itself is still in flight — the badge owns that story", async () => {
+    listMock.mockResolvedValue(
+      listOf([row({ compile_status: "compiling", summary: "" })], PRD_LIVE),
+    )
+    await mount()
+    await waitFor(() => expect(screen.getByText("Acme PRD v3")).toBeTruthy())
+    expect(
+      screen.queryByText("Writing a short description of this format…"),
+    ).toBeNull()
   })
 })

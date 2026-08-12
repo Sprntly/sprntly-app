@@ -746,6 +746,25 @@ def get(
         owner_workspace_id=company.workspace_id,
         created_by_user_id=company.user_id,
     )["token"]
+    # The stamp's NAME, resolved server-side so the PRD panel's "Format: {name}"
+    # label needs no second fetch — the id alone is a uuid nobody recognises.
+    # None both for an unstamped row (the built-in; the client renders its own
+    # label) and for a stamped one whose format was since deleted (the id
+    # survives deletion by design — see 20260806160000's header). Best-effort:
+    # a lookup hiccup costs the label, never the document.
+    name = None
+    template_id = row.get("artifact_template_id")
+    if template_id:
+        try:
+            from app.db.artifact_templates import get_template_by_id
+
+            t = get_template_by_id(company.company_id, template_id)
+            name = t.get("name") if t else None
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "format-name lookup failed for prd_id=%s", prd_id, exc_info=True
+            )
+    row["artifact_template_name"] = name
     return row
 
 
