@@ -289,12 +289,43 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       return fresh.length === 0 ? prev : [...prev, ...fresh]
     })
   }, [])
+  // Live status patch: on a `delegation.event` for a delegation
+  // whose delivered brief turn is CURRENTLY rendered, update just that row's
+  // derived `status` so the inline `<DelegationActions>` re-renders (e.g. the
+  // assigner reopens → the affordance reflects the new open state). An event
+  // for a turn not in this thread is ignored — the map is keyed by
+  // `delivered_turn_id`, so a miss simply leaves it untouched. The Task-ledger
+  // modal stays the authoritative surface (AD-P28); this is a live convenience.
+  const patchDelegationStatus = useCallback((delegationId: number, status: string) => {
+    setDelegationsByTurn((prev) => {
+      let matchedTurnId: number | null = null
+      for (const [turnId, row] of prev) {
+        if (row.delegation_id === delegationId) {
+          matchedTurnId = turnId
+          break
+        }
+      }
+      if (matchedTurnId === null) return prev // event for a turn not rendered here
+      const next = new Map(prev)
+      const row = next.get(matchedTurnId)!
+      next.set(matchedTurnId, { ...row, status })
+      return next
+    })
+  }, [])
   const handleRealtimeEvent = useCallback(
     (event: string, payload: unknown) => {
-      if (event !== "brief.delivered") return
-      appendHistoryTurns([payload as IndividualTurn])
+      if (event === "brief.delivered") {
+        appendHistoryTurns([payload as IndividualTurn])
+        return
+      }
+      if (event === "delegation.event") {
+        const p = payload as { delegation_id?: unknown; status?: unknown }
+        if (typeof p?.delegation_id === "number" && typeof p?.status === "string") {
+          patchDelegationStatus(p.delegation_id, p.status)
+        }
+      }
     },
-    [appendHistoryTurns],
+    [appendHistoryTurns, patchDelegationStatus],
   )
   const handleReconcile = useCallback(() => {
     projectsApi
@@ -304,7 +335,11 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
         /* best-effort — the next reconnect retries; the thread's own
            load-on-open effect already covers the next-open case */
       })
-  }, [projectId, appendHistoryTurns])
+    // Delegations reconcile on reconnect too (AD-P22 reconcile authority) —
+    // re-derive the affordance map so a status changed while disconnected
+    // is reflected without a reopen.
+    refetchDelegations()
+  }, [projectId, appendHistoryTurns, refetchDelegations])
   useRealtimeChannel(myUserId ? `project:${projectId}:user:${myUserId}` : null, {
     onEvent: handleRealtimeEvent,
     onReconcile: handleReconcile,

@@ -50,6 +50,13 @@ export type TaskModalViewProps = {
   open: boolean
   projectId: number | string
   onClose: () => void
+  /** Bumped by the parent's per-user realtime subscription on a live
+   *  `delegation.event` or a reconnect reconcile. While open, a change
+   *  re-reads the party-filtered views so a live status change lands
+   *  without a reopen (AD-P22). Absent/unchanged on the degraded path —
+   *  the open-fetch + post-emit refetch stay the authority, and no new
+   *  poll loop is introduced. */
+  ledgerVersion?: number
 }
 
 function LedgerRow({
@@ -79,7 +86,7 @@ function LedgerRow({
   )
 }
 
-export function TaskModalView({ open, projectId, onClose }: TaskModalViewProps) {
+export function TaskModalView({ open, projectId, onClose, ledgerVersion }: TaskModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
   const [state, setState] = useState<LedgerState>({ status: "loading" })
@@ -105,6 +112,18 @@ export function TaskModalView({ open, projectId, onClose }: TaskModalViewProps) 
     }
     load()
   }, [open, load])
+
+  // Live re-read: the parent's per-user subscription bumps `ledgerVersion` on
+  // a `delegation.event` or a reconnect reconcile; while open, re-read the
+  // affected views so a status change lands without a reopen (AD-P22). Fires
+  // ONLY on a genuine bump — `open`/`load` are deliberately NOT deps here, so
+  // opening the modal doesn't double-fetch (the open-fetch effect above owns
+  // the initial load).
+  useEffect(() => {
+    if (!open || ledgerVersion === undefined) return
+    load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ledgerVersion])
 
   const onEmit = useCallback(
     (delegationId: number, event: string, note?: string) => {
@@ -268,6 +287,6 @@ export function TaskModalView({ open, projectId, onClose }: TaskModalViewProps) 
   )
 }
 
-export function TaskModal({ open, projectId, onClose }: TaskModalViewProps) {
-  return <TaskModalView open={open} projectId={projectId} onClose={onClose} />
+export function TaskModal({ open, projectId, onClose, ledgerVersion }: TaskModalViewProps) {
+  return <TaskModalView open={open} projectId={projectId} onClose={onClose} ledgerVersion={ledgerVersion} />
 }

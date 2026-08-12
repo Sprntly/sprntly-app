@@ -527,15 +527,17 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
     const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
     // Baseline declaration count was 8 (state/rail/activeChat/railModal/
     // removeTarget/removeBusy/removeError/individualUnread). The ledger-UI
-    // work adds exactly ONE more, legitimately in its own declared scope —
-    // `ledgerCounts` (the open-only delegation counts for the Task-ledger
-    // rail card, mirrored from the server's derived counts on fetch/poll the
-    // same way `individualUnread` is; a convenience readout, not new
-    // derived-state persistence). The guard this test protects — no NEW state
-    // for the AGENT STATUS pulse specifically — still holds: `posting` (the
+    // work added ONE — `ledgerCounts` (the open-only delegation counts for the
+    // Task-ledger rail card, mirrored from the server's derived counts on
+    // fetch/poll the same way `individualUnread` is). The ledger-liveness work
+    // adds exactly ONE more, legitimately in its own declared scope —
+    // `ledgerVersion` (a monotonic signal bumped on a live `delegation.event`
+    // / reconnect reconcile so an open Task modal re-reads; a pure signal, not
+    // stored derived-state). The guard this test protects — no NEW state for
+    // the AGENT STATUS pulse specifically — still holds: `posting` (the
     // ask-composer wiring this guard was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(9)
+    expect(useStateDeclarations).toHaveLength(10)
     expect(src).not.toContain("posting")
   })
 })

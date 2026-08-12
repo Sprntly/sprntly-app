@@ -60,6 +60,29 @@ def current_status(delegation_id: int) -> str | None:
 
 
 @retry_on_disconnect
+def status_dto(delegation_id: int) -> dict | None:
+    """The shaped client-facing status DTO for one delegation — the exact
+    `{delegation_id, status, status_at, task_summary}` key set the ledger's
+    realtime consumers patch on. A hard column whitelist read straight off
+    `v_delegation_status` (AD-P21 no-schema-coupling: never the raw
+    `project_delegations`/`delegation_events` row), so an internal column
+    can never ride along on the wire. `None` only if the delegation id does
+    not exist at all (the view's coalesce fallback means any real delegation
+    always yields a row)."""
+    rows = (
+        require_client()
+        .table("v_delegation_status")
+        .select("delegation_id, status, status_at, task_summary")
+        .eq("delegation_id", delegation_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0] if rows else None
+
+
+@retry_on_disconnect
 def list_status_for_assignee(project_id: int, user_id: str) -> list[dict]:
     """Derived-status rows handed TO this user in this project,
     newest-first by `status_at`. Read-only, no derivation of its own —

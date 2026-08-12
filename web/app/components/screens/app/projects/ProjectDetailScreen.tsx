@@ -619,6 +619,11 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   // `individualUnread` above (a convenience readout; the modal is the
   // authority). `null` until the first fetch resolves, or when it failed.
   const [ledgerCounts, setLedgerCounts] = useState<DelegationCounts | null>(null)
+  // Monotonic signal bumped whenever a live `delegation.event` (or a reconnect
+  // reconcile) lands on the caller's per-user channel — passed to `TaskModal`
+  // so an OPEN modal refetches its party-filtered reads without a reopen
+  // (AD-P22). A pure signal, not the data: the modal owns its own reads.
+  const [ledgerVersion, setLedgerVersion] = useState(0)
 
   const load = useCallback(() => {
     setState({ status: "loading" })
@@ -660,10 +665,34 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   // fetch; a `null` id (unresolved auth) yields a `null` topic, the hook
   // reports `degraded: true`, and the poll below carries the badge exactly
   // as it always has.
-  const handleUnreadEvent = useCallback((event: string) => {
-    if (event !== "brief.delivered") return
-    setIndividualUnread(true)
-  }, [])
+  // Refetch the open-only rail counts (best-effort) — shared by the live
+  // `delegation.event` path and the reconnect reconcile below, the same
+  // convenience readout the fallback poll tick also drives.
+  const refetchLedgerCounts = useCallback(() => {
+    projectsApi
+      .ledgerCounts(projectId)
+      .then((counts) => setLedgerCounts(counts))
+      .catch(() => {
+        /* best-effort — a dropped read leaves the last-known counts on the card */
+      })
+  }, [projectId])
+  // The caller's OWN per-user channel carries BOTH `brief.delivered` (R1-05,
+  // the unread badge) and `delegation.event` (the ledger status change): the
+  // latter refetches the rail counts and bumps `ledgerVersion` so an open
+  // modal re-reads. Any other event is ignored — one subscription, one topic.
+  const handleUnreadEvent = useCallback(
+    (event: string) => {
+      if (event === "brief.delivered") {
+        setIndividualUnread(true)
+        return
+      }
+      if (event === "delegation.event") {
+        refetchLedgerCounts()
+        setLedgerVersion((v) => v + 1)
+      }
+    },
+    [refetchLedgerCounts],
+  )
   const handleUnreadReconcile = useCallback(() => {
     projectsApi
       .individualUnread(projectId)
@@ -671,7 +700,11 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       .catch(() => {
         /* best-effort — the next reconnect or fallback poll tick retries */
       })
-  }, [projectId])
+    // Ledger surfaces reconcile on reconnect too (AD-P22 reconcile authority):
+    // refetch the counts and bump the modal so an open ledger re-reads once.
+    refetchLedgerCounts()
+    setLedgerVersion((v) => v + 1)
+  }, [projectId, refetchLedgerCounts])
   const unreadTopic = currentUserId ? `project:${projectId}:user:${currentUserId}` : null
   const { degraded: unreadDegraded } = useRealtimeChannel(unreadTopic, {
     onEvent: handleUnreadEvent,
@@ -917,7 +950,12 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onClose={onCloseRailModal}
       />
-      <TaskModal open={railModal?.kind === "tasks"} projectId={projectId} onClose={onCloseRailModal} />
+      <TaskModal
+        open={railModal?.kind === "tasks"}
+        projectId={projectId}
+        onClose={onCloseRailModal}
+        ledgerVersion={ledgerVersion}
+      />
     </AppLayout>
   )
 }

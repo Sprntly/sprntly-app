@@ -850,6 +850,25 @@ def emit_delegation_event_route(
         "delegation_event_emitted delegation_id=%s event=%s actor=%s",
         delegation_id, payload.event, ctx.user_id,
     )  # ids only, never note text
+    # Live dual per-user publish (AD-P30/AD-P22) — best-effort: the event is
+    # already recorded, so a publish failure never fails the emit and the
+    # response body is identical whether the publish succeeds or not. The DTO
+    # goes to the assigner's and assignee's per-user channels ONLY, NEVER the
+    # group channel `project:{id}` (a decline/cancel is private).
+    try:
+        dto = delegation_events_db.status_dto(delegation_id)
+        if dto is not None:
+            project_delegation._publish_delegation_event(
+                project_id=project_id,
+                assigner_user_id=deleg["assigner_user_id"],
+                assignee_user_id=deleg["assignee_user_id"],
+                dto=dto,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: realtime never blocks a recorded event
+        logger.warning(
+            "delegation_event_publish_prep_failed delegation_id=%s error_class=%s",
+            delegation_id, type(exc).__name__,
+        )
     return {
         "delegation_id": delegation_id,
         "status": delegation_events_db.current_status(delegation_id),

@@ -81,6 +81,29 @@ def _publish_brief_delivered(
             project_id, assignee_user_id, type(exc).__name__,
         )
 
+# The exact status-DTO key set (`v_delegation_status` client shape) — a hard
+# whitelist applied before every `delegation.event` broadcast (AD-P21 no-
+# schema-coupling), the sibling of `_BRIEF_TURN_DTO_KEYS` above.
+_DELEGATION_EVENT_DTO_KEYS = ("delegation_id", "status", "status_at", "task_summary")
+
+
+def _publish_delegation_event(
+    *, project_id: int, assigner_user_id: str, assignee_user_id: str, dto: dict
+) -> None:
+    """Best-effort: publish the SHAPED delegation-status DTO (never a raw row,
+    AD-P21) to BOTH affected parties' per-user channels — the two people who
+    care. NEVER the group channel `project:{id}` (a decline/cancel is private,
+    AD-P30). A failed publish degrades to the client's next reconcile/refetch
+    (AD-P22); `publish_broadcast` itself already never raises.
+
+    Mirrors `_publish_brief_delivered`'s per-user-channel publish shape, but
+    fans OUT to both parties where the brief helper is single-target/assignee-
+    only — the ledger event concerns the assigner and the assignee alike."""
+    shaped = {k: dto[k] for k in _DELEGATION_EVENT_DTO_KEYS}
+    for uid in (assigner_user_id, assignee_user_id):
+        publish_broadcast(f"project:{project_id}:user:{uid}", "delegation.event", shaped)
+
+
 # How many of the project's most-recently-touched artifacts to fold into
 # the brief — bounded the same way the reply path bounds its own group
 # transcript (`_GROUP_CONTEXT_TURNS`), so a heavily-artifacted project
