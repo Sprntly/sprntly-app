@@ -638,6 +638,11 @@ CREATE TABLE workspace_invites (
     job_role      TEXT,
     invited_by    TEXT,
     workspace_ids TEXT NOT NULL DEFAULT '[]',
+    -- Project association (mirrors 20260812120200_workspace_invites_project.sql):
+    -- when set, accept auto-adds the accepter to project_members (Extension B).
+    -- No FK here: workspace_invites is created before the projects table below,
+    -- and the fake schema mirrors columns, not constraint ordering.
+    project_id    INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, email)
 );

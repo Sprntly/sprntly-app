@@ -37,7 +37,11 @@ from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
+from app.db import team as team_db
+from app.db import workspaces as workspaces_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
+from app.db.companies import get_seat_limit
+from app.team_email import send_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
@@ -160,6 +164,12 @@ class CreateProjectRequest(BaseModel):
 
 class AddMemberRequest(BaseModel):
     email: str = Field(min_length=1)
+
+
+class TagCandidateRequest(BaseModel):
+    # A name (picked from the roster/picker) OR an email (invite-by-email).
+    # `resolve_candidate` decides which shape it is and classifies the tier.
+    needle: str = Field(min_length=1)
 
 
 class AddMemoryEntryRequest(BaseModel):
@@ -286,17 +296,203 @@ def add_member(
     payload: AddMemberRequest,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
-    """Add an existing user to the project by email. The caller must
-    already be a project member (membership = access, AD-P11) — a
-    non-member gets 403 and the roster is unchanged. Inviting a non-user
-    by email is `org_invites`-based and is a fast-follow (out of scope)."""
+    """Add an existing IN-TENANT user to the project by email. The caller must
+    already be a project member (membership = access, AD-P11) — a non-member
+    gets 403 and the roster is unchanged.
+
+    IDOR fix (AD-TNM1): resolution goes through `resolve_candidate`, which
+    classifies the email against THIS project's tenancy fail-closed, instead
+    of the old global `user_id_for_email` (which resolved any company's email
+    → a cross-company user could be added). Only an existing project member
+    (`t_member`, idempotent) or an in-tenant existing user (`t_workspace`/
+    `t_company`) is added; a foreign-company or non-user email → 404, no
+    write, no cross-tenant existence disclosure. The success response is
+    byte-identical to before (the member row / the existing member row).
+
+    Inviting a not-yet-existing user by email is the tag endpoint's job
+    (`POST .../tag`, which creates a project-carrying invite) — this route
+    only grows the roster with an account that already exists in-tenant."""
     _require_project_member(project_id, ctx)
-    user_id = projects_db.user_id_for_email(payload.email)
-    if not user_id:
-        raise HTTPException(404, "No account found for that email")
-    member = projects_db.add_member(project_id, user_id)
-    logger.info("project_member_added project_id=%s user_id=%s", project_id, user_id)
-    return member
+    res = projects_db.resolve_candidate(project_id, payload.email)
+    tier = res["tier"]
+    if tier == projects_db.TIER_MEMBER:
+        return res["member"]  # idempotent — already a member, byte-identical
+    if tier in (projects_db.TIER_WORKSPACE, projects_db.TIER_COMPANY):
+        member = projects_db.add_member(project_id, res["user_id"])
+        logger.info("project_member_added project_id=%s user_id=%s", project_id, res["user_id"])
+        return member
+    # t_newuser / t_refuse (foreign company, or no in-tenant account) — no add,
+    # no disclosure of which reason applied.
+    raise HTTPException(404, "No account in your company for that email")
+
+
+# ── Tag-action surface (the loop's one authorization/mutation surface) ──
+# `POST /{project_id}/tag` classifies a mentioned name/email via
+# `resolve_candidate` (the tenant-scoped tier resolver) and, per tier, adds the person to the project
+# (t_workspace), sends a project-carrying invite (t_company/t_newuser), or
+# hard-refuses (t_refuse) — each re-asserting tenancy immediately before the
+# write (AD-TNM1, fail-closed). De-gated to ANY project member (AD-TNM4 — no
+# admin/owner check), seat-priced for the invite tiers, and degrade-not-error
+# on email failure (AD-TNM6). No LLM call anywhere here (pure CRUD).
+
+
+def _invite_carrying_project(
+    project: dict, email: str, invited_by: str, *, existing_member: bool
+) -> dict:
+    """Extensions A (t_company) + B (t_newuser) share this: create a
+    workspace-join invite carrying THIS project (`project_id` + the project's
+    workspace), then best-effort send the branded invite email with the
+    project NAME only (AD-TNM2). Seat-priced (AD-TNM4): each pending invite
+    reserves a seat, so a full company 409s before the row is created.
+
+    Degrade-not-error (AD-TNM6): the invite ROW is written BEFORE the email
+    attempt, so a FAILED send never loses the invite and never 500s the tag —
+    the caller gets `email_status` and the person can be re-notified from Team
+    settings (no raw accept link is exposed)."""
+    company_id = project["company_id"]
+    workspace_id = project["workspace_id"]
+
+    # Seat guard — mirror routes/team.py::_require_free_seat exactly, incl. the
+    # None-is-unlimited contract (never NameError/TypeError on the no-limit case).
+    from app.routes.team import _seats_in_use
+
+    limit = get_seat_limit(company_id)
+    if limit is not None and _seats_in_use(company_id) >= limit:
+        raise HTTPException(409, "No paid seats available")
+
+    invite = team_db.create_invite(
+        company_id=company_id,
+        email=email,
+        role="member",
+        invited_by=invited_by,
+        workspace_ids=[workspace_id],
+        project_id=project["id"],  # carries the project (Extension B, AD-TNM3)
+    )
+
+    # Resolve personalization the same way routes/team.py::_send_invite_for_row
+    # does — best-effort, a failed lookup falls back to a friendly default.
+    from app.db.companies import display_name_for_company_id
+    from app.db.profiles import first_name_for_email, first_name_for_user
+
+    try:
+        inviter_first = first_name_for_user(invited_by)
+    except Exception:  # noqa: BLE001 — personalisation is best-effort
+        inviter_first = ""
+    try:
+        workspace_name = display_name_for_company_id(company_id) or ""
+    except Exception:  # noqa: BLE001
+        workspace_name = ""
+    try:
+        invitee_first = first_name_for_email(email)
+    except Exception:  # noqa: BLE001
+        invitee_first = ""
+
+    status = send_invite_email(
+        email,
+        inviter_first_name=inviter_first,
+        workspace_name=workspace_name,
+        first_name=invitee_first,
+        project_name=project["name"],  # NAME only, never project content (AD-TNM2)
+    )
+    logger.info(
+        "project_invite_created project_id=%s email_domain=%s status=%s existing=%s",
+        project["id"], email.split("@")[-1], status, existing_member,
+    )  # domain only — never the full address, invitee name, or needle text
+    return {
+        "tier": projects_db.TIER_COMPANY if existing_member else projects_db.TIER_NEWUSER,
+        "invited": True,
+        "email_status": status,
+    }
+
+
+@router.post("/{project_id}/tag")
+def tag_candidate_route(
+    project_id: int,
+    payload: TagCandidateRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Classify a tagged name/email and act per tier (AD-TNM1). GATE 1 is
+    `_require_project_member` (tenant + membership, ANY member — DE-GATED per
+    AD-TNM4, no admin/owner check) BEFORE `resolve_candidate` touches any
+    identity. Every add/invite re-asserts tenancy immediately before the
+    write; a refuse never writes and never discloses which reason applied."""
+    project = _require_project_member(project_id, ctx)  # GATE 1
+    res = projects_db.resolve_candidate(project_id, payload.needle)
+    tier = res["tier"]
+
+    if tier == projects_db.TIER_MEMBER:
+        # Notify-only; the realtime "mentioned" signal is a later change.
+        return {"tier": tier, "member": res["member"]}
+
+    if tier == projects_db.TIER_WORKSPACE:
+        uid = res["user_id"]
+        # AD-TNM1 backstop: re-assert live workspace membership against THIS
+        # project's workspace immediately before the write — never trust the
+        # tier the classifier returned as a substitute for the live check.
+        if not workspaces_db.get_workspace_member(project["workspace_id"], uid):
+            raise HTTPException(403, "That person can't be added to this project")
+        member = projects_db.add_member(project_id, uid)
+        logger.info("project_member_added project_id=%s user_id=%s via=tag", project_id, uid)
+        return {"tier": tier, "added": member}
+
+    if tier == projects_db.TIER_COMPANY:  # Extension A — workspace-join invite
+        return _invite_carrying_project(
+            project, res["email"], ctx.user_id, existing_member=True
+        )
+
+    if tier == projects_db.TIER_NEWUSER:  # Extension B — full company+workspace invite
+        return _invite_carrying_project(
+            project, res["email"], ctx.user_id, existing_member=False
+        )
+
+    # t_refuse — one opaque 403, no write, no disclosure of which reason
+    # (cross_company / other_company / no_match / ambiguous / no_project).
+    raise HTTPException(403, "That person can't be added to this project")
+
+
+@router.get("/{project_id}/candidates")
+def candidate_search_route(
+    project_id: int,
+    q: str = "",
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Tenant-scoped candidate directory for the picker (feeds the picker UI,
+    keeps it pure-frontend). Members already on the project + in-tenant non-members
+    (workspace directory, then the rest of the company directory), each tagged
+    `kind` in {"member","workspace","company"}, filtered by casefold-contains
+    on name/email, capped at 20. NEVER lists anyone outside the project's
+    `company_id`. Membership-gated (403 for a same-tenant non-member)."""
+    project = _require_project_member(project_id, ctx)
+    company_id = project["company_id"]
+    workspace_id = project["workspace_id"]
+    needle = (q or "").strip().casefold()
+
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _emit(user_id: str, name: str | None, email: str | None, kind: str) -> None:
+        if not user_id or user_id in seen:
+            return
+        if needle:
+            hay = f"{(name or '')} {(email or '')}".casefold()
+            if needle not in hay:
+                return
+        seen.add(user_id)
+        out.append({"kind": kind, "user_id": user_id, "name": name, "email": email})
+
+    # 1) members already on the project.
+    for m in projects_db.list_members(project_id):
+        _emit(m.get("user_id"), m.get("name"), m.get("email"), "member")
+
+    # 2) in-tenant workspace directory (non-members of the project).
+    for e in workspaces_db.list_workspace_members(workspace_id):
+        _emit(e.get("user_id"), e.get("display_name"), e.get("email"), "workspace")
+
+    # 3) the rest of the company directory (same tenant, other workspaces).
+    for e in team_db.list_company_members(company_id):
+        _emit(e.get("user_id"), e.get("display_name"), e.get("email"), "company")
+
+    return {"candidates": out[:20]}
 
 
 @router.delete("/{project_id}/members/{user_id}")

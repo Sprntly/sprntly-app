@@ -127,7 +127,7 @@ def get_invite(invite_id: str) -> dict | None:
     client = require_client()
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, invited_by, created_at, workspace_ids")
+        .select("id, company_id, email, role, invited_by, created_at, workspace_ids, project_id")
         .eq("id", invite_id)
         .limit(1)
         .execute()
@@ -214,6 +214,7 @@ def create_invite(
     invited_by: str | None,
     workspace_ids: list[str] | None = None,
     job_role: str | None = None,
+    project_id: int | None = None,
 ) -> dict:
     """Insert a workspace_invites row. Caller must have validated email +
     role + workspace ownership; this helper performs no validation. Returns
@@ -223,6 +224,11 @@ def create_invite(
     None means "the company's default workspace, resolved at ACCEPT time"
     (not stored — so an invite created before extra workspaces exist still
     lands somewhere sensible).
+
+    `project_id` (AD-TNM3, Extension B) is the project the invite was raised
+    from, if any: when set, `accept_invite_for_user` also adds the accepter to
+    that project's `project_members`. Defaults None and is only written when
+    set, so every existing WJ caller (which passes none) stays byte-identical.
 
     Raises if the (company_id, email) unique constraint is violated —
     routes should catch and translate to 409.
@@ -240,6 +246,10 @@ def create_invite(
         # step — display-only, distinct from the permission `role`.
         "job_role": job_role,
     }
+    if project_id is not None:
+        # Inert for every existing caller (defaults None) — only the tag-action
+        # invite path (`routes/projects.py`) sets it (Extension B).
+        payload["project_id"] = project_id
     client.table("workspace_invites").insert(payload).execute()
     # Re-read so we return the actual created_at the DB stamped.
     return get_invite(iid) or payload
@@ -331,7 +341,7 @@ def find_pending_invite_for_email_anywhere(email: str) -> dict | None:
         return None
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, created_at, workspace_ids")
+        .select("id, company_id, email, role, created_at, workspace_ids, project_id")
         .eq("email", needle)
         .execute()
         .data
@@ -381,6 +391,21 @@ def _grant_invite_workspaces(
     return granted
 
 
+def _add_invite_project_member(invite: dict, user_id: str) -> None:
+    """Extension B (AD-TNM3): if the invite carries a `project_id`, land the
+    accepter in that project's `project_members`. Fires on BOTH accept paths
+    (new-company insert AND same-company idempotent re-accept). `add_member`
+    is an idempotent upsert, so a re-accept never duplicates the row. A None
+    `project_id` (every plain WJ/team invite) is a no-op — the existing accept
+    behaviour is untouched."""
+    pid = invite.get("project_id")
+    if pid is None:
+        return
+    from app.db import projects as projects_db
+
+    projects_db.add_member(pid, user_id)
+
+
 def accept_invite_for_user(
     *,
     user_id: str,
@@ -419,6 +444,7 @@ def accept_invite_for_user(
                 role=role,
                 workspace_ids=invite.get("workspace_ids"),
             )
+            _add_invite_project_member(invite, user_id)
             delete_invite(invite["id"])
             return {
                 "company_id": company_id,
@@ -442,6 +468,7 @@ def accept_invite_for_user(
         role=role,
         workspace_ids=invite.get("workspace_ids"),
     )
+    _add_invite_project_member(invite, user_id)
     delete_invite(invite["id"])
     return {"company_id": company_id, "role": role, "workspace_ids": granted}
 

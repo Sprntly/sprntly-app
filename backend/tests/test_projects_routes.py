@@ -572,10 +572,21 @@ def test_add_member_by_email_succeeds_for_member(isolated_settings, monkeypatch)
     project = ctx.client.post("/v1/projects", json={"name": "Growing team"}).json()
 
     from app.db.client import require_client
+    from app.db.workspaces import upsert_workspace_member
 
+    # POST-IDOR-FIX (AD-TNM1): the add_member route now resolves the email
+    # through `resolve_candidate`, which only accepts an IN-TENANT existing
+    # user. The invitee must therefore be a real member of the caller's
+    # company + this project's workspace — a bare cross-tenant profile (what
+    # this test used to seed) now correctly 404s (see
+    # test_add_member_route_rejects_cross_company in test_tag_candidate_api.py).
     require_client().table("profiles").insert(
         {"id": "invitee-1", "email": "invitee@co.com"}
     ).execute()
+    require_client().table("company_members").insert(
+        {"id": "cm-invitee-1", "company_id": ctx.company_id, "user_id": "invitee-1", "role": "member"}
+    ).execute()
+    upsert_workspace_member(project["workspace_id"], "invitee-1", "member")
 
     r = ctx.client.post(
         f"/v1/projects/{project['id']}/members", json={"email": "invitee@co.com"}

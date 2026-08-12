@@ -292,6 +292,33 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "the real-DB proof, run locally against the dev rig when touching "
         "this resolver or the membership helpers it composes."
     ),
+    ("test_tag_candidate_live.py", "RUN_TAG_CANDIDATE_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove the "
+        "tag-action surface across TWO real tenants: a cross-tenant refuse "
+        "through the real HTTP route (403, zero writes in both tenants), a "
+        "real t_workspace add that lands a project_members row, and a real "
+        "t_newuser tag that creates a workspace_invites row carrying "
+        "project_id — the fake Supabase client cannot prove the tenancy "
+        "fail-closed re-assertion holds against a genuine second "
+        "company/workspace row. Deterministic backstop: test_tag_candidate_api.py "
+        "covers all five tiers, the per-tier mutation proofs (AC6), the "
+        "add_member-route IDOR fix (AC7), de-gate + seat guard, and the "
+        "candidate-search scoping against monkeypatched/fake-DB dependencies "
+        "in the fast lane; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching the tag route or resolve_candidate."
+    ),
+    ("test_invite_project_association.py", "RUN_INVITE_PROJECT_ASSOCIATION_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove a real "
+        "accept of a project-carrying invite inserts the project_members row "
+        "(Extension B) end to end through create_invite -> "
+        "accept_invite_for_user against real company_members/workspace_members "
+        "rows — the fake Supabase client has no real accept-flow FK/RLS engine "
+        "behind it. Deterministic backstop: the fast-lane tests in the SAME "
+        "file cover project_id round-trip through the invite, accept auto-add "
+        "on both accept paths, and the project-less non-breakage case against "
+        "FakeSupabaseClient; this env-gated case is the real-DB proof, run "
+        "locally when touching the invite primitives or the accept hook."
+    ),
 }
 
 
@@ -581,3 +608,16 @@ def test_the_detector_sees_each_gating_shape(tmp_path, marker_line):
     src = tmp_path / "test_probe.py"
     src.write_text(f"import os\nimport pytest\n{marker_line}\n\ndef test_x():\n    pass\n")
     assert _gated_env_names(src) == {"TOTALLY_UNSET_SECRET"}
+
+
+def test_ci_lane_registry_has_tag_and_invite_live():
+    """AC backstop: both env-gated tag-action live suites are registered in
+    `_KNOWN_UNRUNNABLE` with the env var that gates them. Removing either
+    entry reddens this test (and `test_no_test_is_gated_on_an_env_var_no_
+    workflow_provides` above), which is exactly the ratchet's intent —
+    a live security proof must never silently drop out of the accounted set."""
+    assert ("test_tag_candidate_live.py", "RUN_TAG_CANDIDATE_LIVE") in _KNOWN_UNRUNNABLE
+    assert (
+        "test_invite_project_association.py",
+        "RUN_INVITE_PROJECT_ASSOCIATION_LIVE",
+    ) in _KNOWN_UNRUNNABLE

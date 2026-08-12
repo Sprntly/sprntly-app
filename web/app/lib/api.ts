@@ -5353,6 +5353,42 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(String(id))}/members`,
       { email },
     ),
+  /** Tag a name-or-email onto the project (`POST /v1/projects/{id}/tag`).
+   *  The backend classifies the needle against the project's tenancy and
+   *  acts per tier: `t_member` (echo, no write), `t_workspace` (adds a
+   *  member), `t_company`/`t_newuser` (creates a project-carrying invite +
+   *  emails it), or refuses with 403 for a cross-tenant identity (AD-TNM1 —
+   *  same opaque body for every refuse reason). Any project member may call
+   *  it (AD-TNM4); a non-member gets 403. `409` when the company is at its
+   *  seat limit on an invite tier. Callers must handle the 403/409 without
+   *  crashing. */
+  tagCandidate: (id: number | string, needle: string) =>
+    api.post<{
+      tier: "t_member" | "t_workspace" | "t_company" | "t_newuser"
+      member?: unknown
+      added?: unknown
+      invited?: boolean
+      email_status?: string
+    }>(`/v1/projects/${encodeURIComponent(String(id))}/tag`, { needle }),
+  /** Tenant-scoped candidate directory for the tag picker
+   *  (`GET /v1/projects/{id}/candidates?q=`). Returns members already on the
+   *  project plus in-tenant non-members (workspace, then company), each
+   *  tagged `kind`, filtered by `q` (casefold-contains on name/email) and
+   *  capped at 20 — never anyone outside the project's company. A non-member
+   *  caller gets 403. */
+  candidateSearch: (id: number | string, q: string) =>
+    api
+      .get<{
+        candidates: {
+          kind: "member" | "workspace" | "company"
+          user_id: string
+          name: string | null
+          email: string | null
+        }[]
+      }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`,
+      )
+      .then((r) => r.candidates),
   /** Add an artifact ref to the project
    *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
    *  ownership validation happens server-side; a foreign/absent artifact

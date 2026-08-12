@@ -159,12 +159,18 @@ def _send_day0_email(
     inviter_first_name: str,
     workspace_name: str,
     first_name: str,
+    project_name: str | None = None,
 ) -> bool:
     """Send the branded Day-0 invite email via Resend. Returns True iff Resend
     accepted it. Shared by BOTH the new-user path (accept_link = the generated
     magic link) and the existing-user path (accept_link = /sign-in) — identical
     copy, only the link differs. Best-effort: a missing key or a send error
-    returns False (never raises)."""
+    returns False (never raises).
+
+    `project_name` (AD-TNM3, Extension B): when set, the subject + heading +
+    lead paragraph read "invited you to collaborate on {project_name}"; when
+    None the copy is byte-identical to the plain workspace invite. Only the
+    project NAME is ever threaded in — never any project content (AD-TNM2)."""
     api_key = getattr(config_mod.settings, "resend_api_key", None)
     if not api_key:
         logger.warning(
@@ -176,25 +182,51 @@ def _send_day0_email(
     inviter = (inviter_first_name or "").strip() or _DEFAULT_INVITER
     workspace = (workspace_name or "").strip() or _DEFAULT_WORKSPACE
     greet = (first_name or "").strip() or _DEFAULT_FIRST
+    project = (project_name or "").strip()
     safe_url = html.escape(accept_link, quote=True)
-    subject = f"{inviter} has invited you to Sprntly to collaborate"
-    text = (
-        f"Hi {greet}, {inviter} added you to the {workspace} workspace on "
-        "Sprntly. It's where the team writes PRDs, reviews tickets, and puts "
-        "prototypes in front of each other before anything gets built.\n\n"
-        f"Set up your account here: {accept_link}\n\n"
-        "It takes under 60 seconds.\n\n"
-        "Best,\nThe Sprntly Team"
-    )
-    body_html = _render_invite_html(
-        heading=f"{html.escape(inviter)} invited you to Sprntly",
-        paragraphs=[
+    if project:
+        subject = f"{inviter} has invited you to collaborate on {project}"
+        heading = (
+            f"{html.escape(inviter)} invited you to collaborate on "
+            f"{html.escape(project)}"
+        )
+        text = (
+            f"Hi {greet}, {inviter} invited you to collaborate on {project} in "
+            f"the {workspace} workspace on Sprntly. It's where the team writes "
+            "PRDs, reviews tickets, and puts prototypes in front of each other "
+            "before anything gets built.\n\n"
+            f"Set up your account here: {accept_link}\n\n"
+            "It takes under 60 seconds.\n\n"
+            "Best,\nThe Sprntly Team"
+        )
+        lead_paragraph = (
+            f"Hi {html.escape(greet)}, {html.escape(inviter)} invited you to "
+            f"collaborate on <strong style=\"color:#15171c\">{html.escape(project)}"
+            f"</strong> in the {html.escape(workspace)} workspace on Sprntly. "
+            "It's where the team writes PRDs, reviews tickets, and puts "
+            "prototypes in front of each other before anything gets built."
+        )
+    else:
+        subject = f"{inviter} has invited you to Sprntly to collaborate"
+        heading = f"{html.escape(inviter)} invited you to Sprntly"
+        text = (
+            f"Hi {greet}, {inviter} added you to the {workspace} workspace on "
+            "Sprntly. It's where the team writes PRDs, reviews tickets, and puts "
+            "prototypes in front of each other before anything gets built.\n\n"
+            f"Set up your account here: {accept_link}\n\n"
+            "It takes under 60 seconds.\n\n"
+            "Best,\nThe Sprntly Team"
+        )
+        lead_paragraph = (
             f"Hi {html.escape(greet)}, {html.escape(inviter)} added you to the "
             f"<strong style=\"color:#15171c\">{html.escape(workspace)}</strong> "
             "workspace on Sprntly. It's where the team writes PRDs, reviews "
             "tickets, and puts prototypes in front of each other before "
-            "anything gets built.",
-        ],
+            "anything gets built."
+        )
+    body_html = _render_invite_html(
+        heading=heading,
+        paragraphs=[lead_paragraph],
         cta_label="Set up your account",
         cta_url=safe_url,
         footnote="It takes under 60 seconds.",
@@ -223,18 +255,28 @@ def _send_day0_email(
 
 
 def _notify_existing_user(
-    email: str, *, inviter_first_name: str, workspace_name: str, first_name: str
+    email: str,
+    *,
+    inviter_first_name: str,
+    workspace_name: str,
+    first_name: str,
+    project_name: str | None = None,
 ) -> str:
     """Day-0 email for an already-registered invitee — same copy, but the link
     is /sign-in (NEVER a magic link: an email click must not log an existing
     account in). postLoginPath's auto-accept hook converts their pending
-    workspace_invites row into a membership on their next sign-in."""
+    workspace_invites row into a membership on their next sign-in.
+
+    `project_name` (AD-TNM3) threads straight through to `_send_day0_email` so
+    an existing user tagged into a project gets the same project-scoped copy;
+    None keeps the copy byte-identical."""
     ok = _send_day0_email(
         email=email,
         accept_link=_sign_in_url(),
         inviter_first_name=inviter_first_name,
         workspace_name=workspace_name,
         first_name=first_name,
+        project_name=project_name,
     )
     if ok:
         logger.info(
@@ -311,12 +353,19 @@ def send_invite_email(
     inviter_first_name: str = "",
     workspace_name: str = "",
     first_name: str = "",
+    project_name: str | None = None,
 ) -> str:
     """Email an invitee so they can join the workspace. Returns one of
     SENT (a new-user Day-0 email went out), SENT_EXISTING (the email already had
     an account, so the sign-in Day-0 email went out), or FAILED (see logs).
     Catches every exception so the caller never has to wrap it — the
     workspace_invites row is the source of truth either way.
+
+    `project_name` (AD-TNM3, Extension B): when set, the copy reads "invited
+    you to collaborate on {project_name}"; None → byte-identical to the plain
+    workspace-invite copy, so every existing caller (`routes/team.py`) is
+    unaffected. Only the project NAME is threaded in — never any project
+    content (AD-TNM2).
 
     Preferred path (RESEND configured): generate_link creates the user + returns
     the accept link WITHOUT Supabase sending its templated email, then we send
@@ -339,6 +388,11 @@ def send_invite_email(
         "workspace_name": (workspace_name or "").strip(),
         "first_name": (first_name or "").strip(),
     }
+    project = (project_name or "").strip()
+    if project:
+        # Only added when set, so an existing WJ invite's data dict is
+        # byte-identical (AD-TNM2 — name only, never project content).
+        invite_data["project_name"] = project
     api_key = getattr(config_mod.settings, "resend_api_key", None)
 
     # Preferred: code-owned Day-0 email (generate the link, send it ourselves).
@@ -352,6 +406,7 @@ def send_invite_email(
                     inviter_first_name=inviter_first_name,
                     workspace_name=workspace_name,
                     first_name=first_name,
+                    project_name=project_name,
                 )
             logger.warning(
                 "generate_link failed for %s: %s — falling back to the "
@@ -366,6 +421,7 @@ def send_invite_email(
                     inviter_first_name=inviter_first_name,
                     workspace_name=workspace_name,
                     first_name=first_name,
+                    project_name=project_name,
                 )
                 if ok:
                     return SENT
@@ -396,6 +452,7 @@ def send_invite_email(
                 inviter_first_name=inviter_first_name,
                 workspace_name=workspace_name,
                 first_name=first_name,
+                project_name=project_name,
             )
         logger.warning(
             "Supabase invite_user_by_email failed for %s: %s "
