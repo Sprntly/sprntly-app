@@ -72,6 +72,33 @@ _GROUP_TURN_DTO_KEYS = (
     "author_job_role", "created_at",
 )
 
+
+def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dict | None) -> None:
+    """Best-effort publish-on-write for one group turn (human or assistant).
+    The re-read (`list_group_turns`) that shapes the DTO, the shaping
+    itself, AND `publish_broadcast` are ALL swallowed here (AD-P22):
+    `turn` has already persisted by the time this is called, so a
+    transient re-read hiccup must never 500 the request or otherwise
+    mask the already-successful write. `publish_broadcast` itself never
+    raises either, but the re-read that feeds it is a separate DB call
+    with no such guarantee — hence this wrapper, not just a bare call."""
+    if not turn:
+        return
+    try:
+        shaped = conversations_db.list_group_turns(conversation_id, since=turn["id"] - 1)
+        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
+        if dto is not None:
+            publish_broadcast(
+                f"project:{project_id}", "turn.created",
+                {k: dto[k] for k in _GROUP_TURN_DTO_KEYS},
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: realtime-prep never breaks the write
+        logger.warning(
+            "realtime_publish_prep_failed topic=project:%s event=turn.created error_class=%s",
+            project_id, type(exc).__name__,
+        )
+
+
 _GROUP_AGENT_SYSTEM_PROMPT = """\
 You are Sprntly, a project teammate embedded in this team's group chat.
 You were tagged with @Sprntly in the transcript below. Read the recent
@@ -646,20 +673,7 @@ def post_group_turn_route(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
-    if turn:
-        # Shape to the same read-DTO `list_group_turns` returns — never the
-        # raw insert row (AD-P21 no-schema-coupling). Re-reading via the
-        # `since` cursor reuses that serialization rather than hand-rolling
-        # a second shaper (author_name/author_job_role join included); the
-        # explicit key whitelist is a hard guarantee against an internal
-        # column ever riding along on the wire.
-        shaped = conversations_db.list_group_turns(conversation["id"], since=turn["id"] - 1)
-        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
-        if dto is not None:
-            publish_broadcast(
-                f"project:{project_id}", "turn.created",
-                {k: dto[k] for k in _GROUP_TURN_DTO_KEYS},
-            )
+    _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
         _respond_as_group_agent(project_id, conversation["id"], ctx)
     else:
@@ -734,16 +748,7 @@ def _respond_as_group_agent(
         assistant_turn = conversations_db.post_group_turn(
             conversation_id, None, reply, role="assistant"
         )
-        if assistant_turn:
-            shaped = conversations_db.list_group_turns(
-                conversation_id, since=assistant_turn["id"] - 1
-            )
-            dto = next((t for t in shaped if t["id"] == assistant_turn["id"]), None)
-            if dto is not None:
-                publish_broadcast(
-                    f"project:{project_id}", "turn.created",
-                    {k: dto[k] for k in _GROUP_TURN_DTO_KEYS},
-                )
+        _publish_group_turn_created(project_id, conversation_id, assistant_turn)
         usage = RunUsage(
             cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
             cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),

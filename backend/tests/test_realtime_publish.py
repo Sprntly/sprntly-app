@@ -338,6 +338,112 @@ def test_publish_failure_does_not_fail_brief_delivery(isolated_settings, monkeyp
     assert len(turns) == 1
 
 
+def test_publish_failure_when_group_reread_raises_does_not_fail_write(
+    isolated_settings, monkeypatch, fake_group_llm
+):
+    """Best-effort MUTATION-PROOF (AD-P22): force the DTO-shaping RE-READ
+    (`list_group_turns`, called by `_publish_group_turn_created`
+    IMMEDIATELY after the human turn already persisted -- the first
+    `list_group_turns` call this route makes) to raise -> the route must
+    still return 200 with the turn's body, and the turn must still be the
+    one persisted row. Before the AD-P22 fix, this re-read sat outside any
+    try/except in `post_group_turn_route`, so this exact failure 500'd a
+    request whose write had already succeeded. The pre-filter in
+    `project_group_gate` short-circuits "hello team" (<=4 words, no "?",
+    no agent cue) to `respond=False` with NO classifier call, so the
+    route's LATER `list_group_turns` call for the smart-interjection
+    gate -- which must keep working -- never hits an LLM either."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    from app.db import conversations as conversations_db
+
+    real_list_group_turns = conversations_db.list_group_turns
+    calls = {"n": 0}
+
+    def _boom_on_first_call(conversation_id, since=None):
+        calls["n"] += 1
+        if calls["n"] == 1:  # the publish-prep re-read -- must not break the write
+            raise RuntimeError("transient DB hiccup")
+        return real_list_group_turns(conversation_id, since=since)
+
+    monkeypatch.setattr(conversations_db, "list_group_turns", _boom_on_first_call)
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns", json={"content": "hello team"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["content"] == "hello team"
+    assert r.json()["role"] == "user"
+
+    turns = real_list_group_turns(
+        conversations_db.get_group_chat(project["id"])["id"]
+    )
+    assert [t["content"] for t in turns] == ["hello team"]
+
+
+def test_publish_failure_when_brief_reread_raises_does_not_fail_delivery(
+    isolated_settings, monkeypatch
+):
+    """Best-effort MUTATION-PROOF (AD-P22): force the DTO-shaping RE-READ
+    (`list_individual_turns`, called by `_publish_brief_delivered` AFTER
+    the brief turn + `project_delegations` fact already persisted) to
+    raise -> `handle_delegate_task` must still return the success string,
+    with the fact and the individual turn both durably recorded. Before
+    the AD-P22 fix, this re-read sat inside the SAME try/except that
+    returns the decline string, so a re-read failure mis-reported an
+    already-successful delivery as failed."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _stub_brief_llm(monkeypatch)
+
+    from app import project_delegation
+    from app.db import projects as projects_db
+    from app.db.client import require_client
+
+    def _boom(conversation_id, user_id, since=None):
+        raise RuntimeError("transient DB hiccup")
+
+    monkeypatch.setattr(project_delegation, "list_individual_turns", _boom)
+
+    roster = projects_db.list_members(project["id"])
+    result = project_delegation.handle_delegate_task(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        source_conversation_id=1,
+        source_turn_id=1,
+        roster=roster,
+        dataset="",
+        company_id="unused-in-fake-db",
+        tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
+    )
+    assert "Sent the brief" in result  # normal string, NOT the decline path
+
+    assert (
+        len(require_client().table("project_delegations").select("id").execute().data) == 1
+    )
+    delivered = (
+        require_client()
+        .table("conversations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .eq("kind", "individual")
+        .execute()
+        .data
+    )
+    assert len(delivered) == 1
+    turns = (
+        require_client()
+        .table("conversation_turns")
+        .select("id")
+        .eq("conversation_id", delivered[0]["id"])
+        .execute()
+        .data
+    )
+    assert len(turns) == 1
+
+
 # ── Call-site wiring (AC4, AC5, AC6, AC7) ─────────────────────────────────
 
 

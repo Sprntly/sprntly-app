@@ -49,6 +49,37 @@ logger = logging.getLogger(__name__)
 # along on the wire even if a future column is added to the table.
 _BRIEF_TURN_DTO_KEYS = ("id", "role", "content", "created_at")
 
+
+def _publish_brief_delivered(
+    project_id: int, assignee_user_id: str, conversation_id: int, turn: dict
+) -> None:
+    """Best-effort publish-on-write for a delivered brief. The re-read
+    (`list_individual_turns`) that shapes the DTO, the shaping itself, AND
+    `publish_broadcast` are ALL swallowed here (AD-P22): by the time this
+    is called the brief turn AND the `project_delegations` fact have
+    already been written, so a transient re-read hiccup must never make
+    `handle_delegate_task` report the decline string over a delivery that
+    actually succeeded."""
+    try:
+        shaped = list_individual_turns(conversation_id, assignee_user_id, since=turn["id"] - 1)
+        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
+        if dto is not None:
+            publish_broadcast(
+                f"project:{project_id}:user:{assignee_user_id}",
+                "brief.delivered",
+                {k: dto[k] for k in _BRIEF_TURN_DTO_KEYS},
+            )
+            logger.info(
+                "brief_broadcast_published project_id=%s assignee=%s conversation_id=%s",
+                project_id, assignee_user_id, conversation_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: realtime-prep never masks a successful delivery
+        logger.warning(
+            "realtime_publish_prep_failed topic=project:%s:user:%s event=brief.delivered "
+            "error_class=%s",
+            project_id, assignee_user_id, type(exc).__name__,
+        )
+
 # How many of the project's most-recently-touched artifacts to fold into
 # the brief — bounded the same way the reply path bounds its own group
 # transcript (`_GROUP_CONTEXT_TURNS`), so a heavily-artifacted project
@@ -293,22 +324,11 @@ def handle_delegate_task(
             "delegation_delivered project_id=%s assignee=%s delivered_turn_id=%s",
             project_id, assignee["user_id"], turn["id"],
         )
-        # Shape to the same read-DTO `list_individual_turns` returns — never
-        # the raw insert row (AD-P21). Publish on the ASSIGNEE'S per-user
-        # channel, never the group channel — a private brief broadcast on
-        # `project:{id}` would leak it to every other member.
-        shaped = list_individual_turns(conv["id"], assignee["user_id"], since=turn["id"] - 1)
-        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
-        if dto is not None:
-            publish_broadcast(
-                f"project:{project_id}:user:{assignee['user_id']}",
-                "brief.delivered",
-                {k: dto[k] for k in _BRIEF_TURN_DTO_KEYS},
-            )
-            logger.info(
-                "brief_broadcast_published project_id=%s assignee=%s conversation_id=%s",
-                project_id, assignee["user_id"], conv["id"],
-            )
+        # Publish on the ASSIGNEE'S per-user channel, never the group
+        # channel — a private brief on `project:{id}` would leak it to
+        # every other member. Entirely best-effort (AD-P22): see
+        # `_publish_brief_delivered`.
+        _publish_brief_delivered(project_id, assignee["user_id"], conv["id"], turn)
         first = (assignee.get("name") or "").split()[0] if assignee.get("name") else "their"
         return f"Sent the brief to {first}'s chat."
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
