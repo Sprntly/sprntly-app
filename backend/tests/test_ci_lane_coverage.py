@@ -237,6 +237,21 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_realtime_channel_auth.py", "RUN_PROJECTS_REALTIME_CHANNEL_AUTH_LIVE"): (
+        "Needs a real local Supabase (Postgres + the installed Realtime "
+        "service) to evaluate the group/per-user channel-join predicate "
+        "functions and exercise the deployed RLS policies on "
+        "`realtime.messages` — the fake Supabase client has no SQL engine "
+        "behind it and cannot evaluate a PL/pgSQL function, enforce RLS, or "
+        "resolve `realtime.topic()`/`auth.uid()`. This is a schema/"
+        "policy-only ticket (no route/helper code path runs in CI), so "
+        "there is no deterministic unit coverage to stand in; the migration "
+        "SQL is reviewed in the PR, and this suite is the real-DB proof — "
+        "including both AC-12 mutation proofs (group allow-all and the "
+        "per-user uid-bypass) — run locally against the dev rig when "
+        "touching this migration, plus the ship-gate live proof before "
+        "promotion."
+    ),
 }
 
 
