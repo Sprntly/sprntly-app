@@ -146,8 +146,9 @@ def _run_sync(
     # block answers project-meta questions instead of a "connect a connector"
     # deflection. None for every non-project ask (interceptors unchanged there).
     project_id_token = ask_runner.set_active_project_id(project_id)
-    try:
-        payload = qa_agent.answer(
+
+    def _single_shot() -> dict:
+        return qa_agent.answer(
             enterprise_id=enterprise_id,
             question=question,
             dataset=dataset,
@@ -169,6 +170,30 @@ def _run_sync(
             on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
             on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
         )
+
+    try:
+        if project_id is not None:
+            # Project-scoped individual chat: a bounded tool-loop responder with
+            # the project read tools (depth) plus, when PROJECT_PRD_EDIT_ENABLED,
+            # the propose-PRD-patch write tool (§C/§D IDOR-gated). It returns the
+            # same payload shape as the single-shot path, so the strip/complete/
+            # capture/log calls below run UNCHANGED, and degrades to `_single_shot`
+            # on any failure. Non-project asks (`project_id is None`) skip this
+            # branch entirely — byte-identical to before this change.
+            from app.project_individual_agent import respond_individual
+            from app.project_prd_patch_tool import project_prd_edit_enabled
+
+            payload = respond_individual(
+                project_id=project_id,
+                dataset=dataset,
+                company_id=enterprise_id,
+                question=question,
+                history=history,
+                allow_prd_edit=project_prd_edit_enabled(),
+                single_shot=_single_shot,
+            )
+        else:
+            payload = _single_shot()
     finally:
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)

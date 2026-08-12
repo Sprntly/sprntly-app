@@ -335,6 +335,30 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "every PR; this suite is the real-DB proof, run locally against the dev "
         "rig when touching these read tools or `db/artifacts.py`."
     ),
+    ("test_project_individual_prd_edit_live.py", "RUN_PROJECT_PRD_EDIT_LIVE"): (
+        "Real local-Supabase + real-LLM round-trip for the project-chat PRD-edit "
+        "flow (private responder + group agent + the §C/§D IDOR write gate): the "
+        "bounded tool loop actually calls a project read tool, a genuine "
+        "cross-project prd_id handed to the propose tool writes ZERO rows and is "
+        "refused, and an own-project edit persists a pending patch that "
+        "POST /prd-patches/{id}/accept then flips to applied and folds into the "
+        "rendered PRD. Needs BOTH a live LLM (ANTHROPIC_API_KEY) to drive the "
+        "loop and a real Postgres fan-out (list_artifacts_for_project across five "
+        "tables) a fake in-memory store cannot exercise. Deterministic backstops "
+        "run every PR in the fast lane: test_project_prd_gate.py + "
+        "test_project_prd_patch_tool.py mutation-proof the identical gate "
+        "(cross-project/cross-tenant/gate-error -> zero rows) against "
+        "monkeypatched manifests, and test_project_individual_tool_loop.py covers "
+        "the loop with a fake LLM; this suite is the real-LLM+real-DB proof, run "
+        "locally against the dev rig when touching these responders or the gate."
+    ),
+    ("test_project_individual_prd_edit_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_PRD_EDIT_LIVE above — its tool loop needs a "
+        "real LLM in addition to the env flag, so it is gated on BOTH "
+        "(_RUN_LIVE = RUN_PROJECT_PRD_EDIT_LIVE=='1' and bool(ANTHROPIC_API_KEY)) "
+        "and is unrunnable in any CI lane on either count. See that entry for the "
+        "deterministic fast-lane backstops."
+    ),
     ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
         "Needs a real local Supabase Realtime (the running Realtime service + "
         "a live websocket) to prove a `member.added` published through the "

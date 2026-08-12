@@ -48,12 +48,18 @@ _UPDATES_HEADING = "## Design Agent updates"
 def insert_patch(
     *,
     prd_id: int,
-    prototype_id: int,
+    prototype_id: int | None,     # NULL for a project-chat patch (no prototype anchor)
     workspace_id: str,            # from the caller (session.aud); NEVER hardcoded
     rationale: str,
     patch_md: str,
 ) -> dict[str, Any]:
     """Insert a PENDING patch proposal. Returns the inserted row.
+
+    `prototype_id` is the Design-Agent prototype the patch was proposed against;
+    it is NULL for a project-chat patch, which edits a project's PRD directly
+    with no prototype in the loop (the 20260812130000 migration drops NOT NULL
+    on the column for exactly this). Both paths still write `workspace_id` from
+    the caller so the accept/reject routes' workspace filter sees the row.
 
     Raises ValueError on empty rationale or empty/whitespace patch_md — both are
     validation bugs (the sentinel input_schema marks them required), not runtime

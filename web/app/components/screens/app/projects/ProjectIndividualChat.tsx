@@ -69,6 +69,7 @@ import {
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
 import { DelegationActions } from "./DelegationActions"
+import { ProjectPrdPatchBanner } from "./ProjectPrdPatchBanner"
 import styles from "./ProjectIndividualChat.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
@@ -417,6 +418,10 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
 
   return (
     <div className={styles.thread} data-testid="project-individual-chat">
+      {/* Pending PRD-edit suggestions from the project chat (F11), gated on
+          NEXT_PUBLIC_PROJECT_PRD_EDIT_ENABLED; renders nothing when off or when
+          there are no pending patches. */}
+      <ProjectPrdPatchBanner projectId={projectId} />
       <div className={styles.scroll} data-testid="individual-chat-scroll">
         {insightNote ? (
           <div className="bc-turn bc-turn--insight" data-testid="cross-chat-insight">

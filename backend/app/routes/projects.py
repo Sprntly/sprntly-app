@@ -47,6 +47,11 @@ from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
+from app.project_prd_patch_tool import (
+    PROPOSE_PROJECT_PRD_PATCH_TOOL,
+    handle_propose_prd_patch,
+    project_prd_edit_enabled,
+)
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -960,6 +965,11 @@ def _respond_as_group_agent(
         source_turn_id = trigger["id"] if trigger else None
         roster = projects_db.list_members(project_id)
         dataset = _dataset_for(ctx)
+        # Behind PROJECT_PRD_EDIT_ENABLED (default off): the group agent may also
+        # propose a PRD edit against a PRD on THIS project. Same plain
+        # run_tool_loop tool + §C IDOR gate + workspace_id=company_id as the
+        # private chat, so a group chat can never patch another project's PRD.
+        allow_prd_edit = project_prd_edit_enabled()
         meta: dict = {}
 
         def _dispatch(name: str, tool_input: dict) -> str:
@@ -983,6 +993,12 @@ def _respond_as_group_agent(
                     company_id=ctx.company_id,
                     tool_input=tool_input,
                 )
+            if allow_prd_edit and name == "propose_prd_patch":
+                return handle_propose_prd_patch(
+                    tool_input,
+                    project_id=project_id, dataset=dataset,
+                    company_id=ctx.company_id, workspace_id=ctx.company_id,
+                )
             return f"(unknown tool: {name})"
 
         # Inject the bounded project-context block (best-effort, never raises)
@@ -992,10 +1008,13 @@ def _respond_as_group_agent(
             project_id, dataset, ctx.company_id
         )
         system = f"{_group_system_with_roster(roster)}\n\n{context_block}"
+        tools = [project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()]
+        if allow_prd_edit:
+            tools.append(PROPOSE_PROJECT_PRD_PATCH_TOOL)
         reply = run_tool_loop(
             system=system,
             user=transcript,
-            tools=[project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()],
+            tools=tools,
             dispatch=_dispatch,
             model=DEFAULT_MODEL,
             meta_out=meta,
