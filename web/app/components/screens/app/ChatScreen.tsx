@@ -3599,6 +3599,95 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent])
 
+  // "Change the template to Acme" on a PRD tab: dispatch the in-place format
+  // switch (POST /v1/prd/{id}/change-template) and acknowledge in the thread —
+  // the ack posts on dispatch, like the ticket-set ack, because the re-write
+  // renders live in the panel and the thread's job is to say what started and
+  // where to look. The regeneration's OUTCOME lands as a toast (the same pair
+  // the panel's own Format control shows), read from the row's stamp: a failed
+  // regeneration is restored to `ready` with its content intact and its OLD
+  // stamp — unchanged stamp, unchanged document.
+  const prdChangeTemplateFlow = useCallback(async (
+    query: string, targetTabId: string, prdId: number,
+    templateId: string, templateName: string | null,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    const label = templateName ? `“${templateName}”` : "that format"
+    let res: { status: "ready" | "generating"; unchanged?: boolean; artifact_template_id: string | null }
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      res = await prdApi.changeTemplate(prdId, templateId)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize({
+        answer: `I couldn't switch the format — ${msg}. The PRD is unchanged, and its version history is intact.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+      return
+    }
+    if (res.unchanged) {
+      finalize({
+        answer: `This PRD is already written in ${label} — nothing to change.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+      return
+    }
+    finalize({
+      answer: `Switching this PRD to ${label} — re-writing it into that structure now. It'll re-render in the panel on the right, and the previous version is saved in Version history.`,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    // The turn is answered; the thread stays usable while the re-write runs.
+    setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+
+    // Drive the panel exactly like a first generation: stale drafts cleared (a
+    // local draft must not overwrite the re-laid-out document), the tab and
+    // panel flip to generating, and the poll + SSE stream render it live.
+    clearPrdDrafts(prdId)
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, prd: null, prdGenerating: true } : t))
+    if (targetTabId === activeTabIdRef.current) {
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+    }
+    try {
+      const { resumePrdGeneration, loadPrdById } = await import("../../../lib/runPrdGeneration")
+      const result = await resumePrdGeneration(prdId, undefined, (html) => {
+        if (targetTabId === activeTabIdRef.current) setContent({ prdPartialHtml: html })
+      })
+      const prd = result.ok
+        ? result.prd
+        // Timeout/hiccup: the backend preserved the document — reload it so the
+        // panel shows the honest state, never a blank pane.
+        : await loadPrdById(prdId).then((r) => (r.ok ? r.prd : null)).catch(() => null)
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId ? { ...t, prd, prdGenerating: false } : t))
+      if (targetTabId === activeTabIdRef.current) {
+        setContent({ prd, prdGenerating: false, prdPartialHtml: null })
+      }
+      if (result.ok && (result.prd.artifactTemplateId ?? null) === templateId) {
+        showToast("Format switched", `This PRD is now written in ${templateName || "the new format"}.`)
+      } else {
+        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+      }
+    } catch {
+      showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
   // on screen next to the document — instead of spawning a new tab. Only a
@@ -4289,6 +4378,21 @@ export function ChatScreen() {
             }
             // No resolvable target/instruction → grounded ask (it can at least
             // answer about the document).
+          } else if (envelope.intent === "change_prd_template") {
+            // The in-place format switch. The backend downgrades a target-less
+            // or format-less request to `answer` before it reaches here, so
+            // this guard is the older-backend/edge fall-through, not the rule.
+            const targetPrd = envelope.prd_id ?? tabPrdId
+            if (!docFile && activeTab && targetPrd != null && envelope.artifact_template_id) {
+              void prdChangeTemplateFlow(
+                trimmed, activeTab.id, targetPrd,
+                envelope.artifact_template_id, envelope.artifact_template_name,
+              )
+              settlePendingSend()
+              return
+            }
+            // No target/format → grounded ask (the library block lets it say
+            // what formats exist and where the panel's Format control lives).
           } else if (envelope.intent === "open_artifact") {
             // OPEN, never generate. The two verbs are told apart in exactly one
             // place (backend app/chat_intent.py's OPEN-vs-GENERATE rule) and

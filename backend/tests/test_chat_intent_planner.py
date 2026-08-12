@@ -89,6 +89,64 @@ def test_a_format_we_could_not_find_stops_the_build_and_asks():
     assert envelope["source"] == "template_not_found"
 
 
+def test_a_format_switch_reaches_the_client_with_its_target(  # noqa: D103
+):
+    """change_prd_template dispatches POST /v1/prd/{id}/change-template with
+    the envelope's artifact_template_id; both halves must survive the trip."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_prd_template", action_confidence=0.9,
+            artifact_template_id="tpl-1", artifact_template_name="Acme PRD v2",
+        ),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "change_prd_template"
+    assert envelope["artifact_template_id"] == "tpl-1"
+    assert envelope["artifact_template_name"] == "Acme PRD v2"
+
+
+def test_a_format_switch_with_no_open_prd_is_answered_instead():
+    """Switching the format of no document is meaningless — same rule as
+    edit_prd, same tenant-scoped fact the planner cannot check itself."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_prd_template", action_confidence=0.9,
+            artifact_template_id="tpl-1",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_prd"
+
+
+def test_a_format_switch_naming_an_unknown_format_asks_which():
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_prd_template", action_confidence=0.9,
+            template_query="the Contoso format",
+        ),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "template_not_found"
+
+
+def test_a_format_switch_with_no_target_at_all_never_reaches_the_client():
+    """The planner downgrades this itself; re-applied here because this
+    function owns what the client is told to do, and a change-template dispatch
+    with no format id is an executor call with nothing to execute."""
+    envelope = ci._plan_to_envelope(
+        _plan("change_prd_template", action_confidence=0.9),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_format"
+
+
 def test_the_format_reason_wins_over_a_low_confidence_downgrade():
     """Both land on `answer`; only one of them tells the user something they can
     act on."""

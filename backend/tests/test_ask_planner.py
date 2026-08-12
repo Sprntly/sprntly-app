@@ -588,10 +588,11 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    # v4 since the planner learned about the company's uploaded FORMATS. The
-    # version is pinned here rather than merely compared to itself because
-    # pooling v3 and v4 rows would pool two different menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v5"
+    # v6 since the formats block gained per-format summaries and the action
+    # menu gained change_prd_template. The version is pinned here rather than
+    # merely compared to itself because pooling rows across versions would
+    # pool two different menus.
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v6"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does

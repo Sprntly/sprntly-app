@@ -24,7 +24,10 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration, changeTemplate } = vi.hoisted(() => ({
+  changeTemplate: vi.fn().mockResolvedValue({
+    prd_id: 501, status: "generating", artifact_template_id: "tpl-acme",
+  }),
   runTicketSetGeneration: vi.fn().mockResolvedValue({
     ok: true,
     set: { id: 7, title: "Webhook retries", stories: [], conversationId: 1, status: "ready" },
@@ -48,7 +51,7 @@ vi.mock("../../../../lib/api", () => {
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
-    prdApi: { generateFromTask, classifyCommand, clarifyTask },
+    prdApi: { generateFromTask, classifyCommand, clarifyTask, changeTemplate },
     chatIntentApi: { resolve: resolveIntent },
     // The thread-resume probe reads this on every chat open; it must find a
     // callable here even in a suite that is not about ticket sets.
@@ -151,6 +154,7 @@ beforeEach(() => {
   classifyCommand.mockClear()
   clarifyTask.mockClear()
   clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
+  changeTemplate.mockClear()
   resolveIntent.mockReset()
   resolveIntent.mockResolvedValue({
     intent: "answer", confidence: 0.9, task: null, instruction: null,
@@ -226,6 +230,49 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(resolveIntent).not.toHaveBeenCalled()
+  })
+
+  it("change_prd_template dispatches the in-place format switch and acknowledges in the thread", async () => {
+    renderChat()
+    // First turn creates the tab (a plain answer) — the switch needs an active
+    // tab to act on, exactly like edit_prd.
+    await typeAndSend("what changed for enterprise users last week?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    resolveIntent.mockResolvedValue({
+      intent: "change_prd_template", confidence: 0.95, task: null, instruction: null,
+      artifact_template_id: "tpl-acme", artifact_template_name: "Acme PRD v2",
+      reason: "format switch", source: "planner", prd_id: 501, prd_title: "Dark mode",
+    })
+    await typeAndSend("change the template to Acme")
+
+    await waitFor(() => expect(changeTemplate).toHaveBeenCalledWith(501, "tpl-acme"))
+    // The ack posts on dispatch — the re-write renders live in the panel, and
+    // the thread's job is to say what started and where to look.
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Switching this PRD to “Acme PRD v2”"),
+    )
+    // A switch is not an ask and not a generation-from-task.
+    expect(runAskGeneration).toHaveBeenCalledTimes(1)
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("change_prd_template with no format id falls through to the grounded ask", async () => {
+    // The backend downgrades these itself (no_target_format); this covers the
+    // older-backend edge where the intent arrives bare.
+    renderChat()
+    await typeAndSend("what changed for enterprise users last week?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    resolveIntent.mockResolvedValue({
+      intent: "change_prd_template", confidence: 0.95, task: null, instruction: null,
+      artifact_template_id: null, artifact_template_name: null,
+      reason: "format switch, no target", source: "planner", prd_id: 501, prd_title: null,
+    })
+    await typeAndSend("change the template")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(2))
+    expect(changeTemplate).not.toHaveBeenCalled()
   })
 
   it("generate_tickets with no PRD on the tab builds a STANDALONE ticket set", async () => {

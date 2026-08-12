@@ -933,6 +933,12 @@ export type ChatIntentEnvelope = {
     | "generate_prototype"
     | "multi_agent"
     | "open_artifact"
+    /** Switch the target PRD into a different uploaded format and re-write it
+     *  in place — dispatches POST /v1/prd/{id}/change-template with
+     *  `artifact_template_id`. Targeted like edit_prd (the tab's PRD or the
+     *  conversation's); the backend downgrades a target-less or format-less
+     *  request to `answer` before it ever reaches a surface. */
+    | "change_prd_template"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -953,9 +959,11 @@ export type ChatIntentEnvelope = {
   artifact_template_name: string | null
   reason: string
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
-   *  | "no_artifact_query" | "template_not_found" — the last meaning the user
-   *  named a format we could not find, so the build was deliberately downgraded
-   *  to an answer that asks which one they meant. */
+   *  | "no_artifact_query" | "template_not_found" | "no_target_format" —
+   *  template_not_found means the user named a format we could not find, so
+   *  the build/switch was deliberately downgraded to an answer that asks which
+   *  one they meant; no_target_format is a format switch that named no format
+   *  at all, answered with the library instead. */
   source: string
   prd_id: number | null
   prd_title: string | null

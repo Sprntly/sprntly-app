@@ -238,8 +238,12 @@ def looks_like_open_request(message: str) -> bool:
 # Intents that act ON an existing PRD. edit_prd with no resolvable target is
 # meaningless and downgrades to `answer`; tickets/prototype keep their intent
 # even without a target — the client already has the "generate a PRD first"
-# prerequisite flow for exactly that case.
-_NEEDS_PRD = frozenset({"edit_prd"})
+# prerequisite flow for exactly that case. change_prd_template joins edit_prd:
+# switching the format of no document is equally meaningless, and the answer it
+# downgrades to carries the library (the planner forces include_library on the
+# no-target plan), so it can truthfully say what formats exist and where the
+# PRD panel's Format control lives.
+_NEEDS_PRD = frozenset({"edit_prd", "change_prd_template"})
 
 _SCHEMA: dict = {
     "type": "object",
@@ -467,7 +471,12 @@ def _fallback(reason: str) -> dict:
 #: this is the wider set the planner can produce and a surface may act on.
 #: Kept as its own name rather than widening `INTENTS`, because the resolver
 #: below cannot produce these and asserting that is worth a constant.
-_CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {"multi_agent"}
+#: `change_prd_template` dispatches POST /v1/prd/{id}/change-template with the
+#: envelope's `artifact_template_id`; a surface that predates it falls through
+#: to its ask path like any unknown intent.
+_CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
+    "multi_agent", "change_prd_template",
+}
 
 
 def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
@@ -562,6 +571,15 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # CLIENT is told to do, and an open request with nothing to look up
         # must reach it as `answer`, never as an open of nothing.
         envelope.update(intent="answer", source="no_artifact_query")
+    if (
+        envelope["intent"] == "change_prd_template"
+        and not envelope["artifact_template_id"]
+    ):
+        # Re-applied like open_artifact above: the planner downgrades a
+        # switch with no target itself, but this function owns what the client
+        # is told to do, and a change-template dispatch with no format id would
+        # be an executor call with nothing to execute.
+        envelope.update(intent="answer", source="no_target_format")
     return envelope
 
 

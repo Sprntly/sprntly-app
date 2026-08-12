@@ -132,13 +132,16 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     by the pipeline's number, which is why "generate prd … use the template 1
 #     template" was downgraded to a plain answer at 0.5 with a `reason` saying
 #     the model knew exactly what was being asked for.
-# v6: the COMPANY FORMATS lines gained each format's stored SUMMARY
+# v6: two widenings that ship together, both from the same reported failure
+#     set. The COMPANY FORMATS lines gained each format's stored SUMMARY
 #     (artifact_templates.summary — what the format contains, written at
-#     compile time). Widening on v4's rule: a v6 plan for "what's in the Acme
-#     format" is made knowing the answer exists in the input, where a v5 plan
-#     was made knowing only the name — the reported failure was answers about
-#     format CONTENTS assembled from Confluence pages, and pooling the two
-#     versions would bury whether this fixed it.
+#     compile time), so a v6 plan for "what's in the Acme format" is made
+#     knowing the answer exists in the input where a v5 plan knew only the
+#     name. And the action menu gained `change_prd_template` — "change the
+#     template to Acme" used to land on edit_prd or a vague answer, which is
+#     the other half of what was reported. Widening on v4's rule both ways: a
+#     v6 row answers questions no v5 row was asked, so the two must not be
+#     pooled.
 _PROMPT_VERSION = "ask-planner-v6"
 
 # Both picks clear the same bar the router already applies to its own two picks
@@ -180,6 +183,14 @@ _ACTIONS: frozenset[str] = frozenset({
     # decide mode went on for everyone — the planner answers every message, and
     # an action it cannot name is an action nothing can choose.
     "open_artifact",
+    # Switch an EXISTING PRD into a different uploaded format and re-write it
+    # in place (POST /v1/prd/{id}/change-template). Its own action rather than
+    # a shading of `edit_prd`, because the reported failure was exactly that
+    # conflation: "change template to Acme" landed on the scoped section
+    # editor, which mangles the document instead of re-laying it out. Its
+    # argument is a FORMAT (artifact_template_id / template_query, gated by
+    # `_gate_template`), never a task or an instruction.
+    "change_prd_template",
 })
 
 #: Actions that need a `task` brief, and ones that need an `instruction`. An
@@ -291,10 +302,12 @@ _PLANNER_SCHEMA: dict = {
         "artifact_template_id": {
             "type": ["string", "null"],
             "description": (
-                "generate_prd / generate_tickets only: the exact id from "
-                "\"Company formats\" when the message asks for that format BY "
-                "NAME. null is the normal answer and means the company's active "
-                "format is used — never name one the user did not ask for."
+                "generate_prd / generate_tickets / change_prd_template only: "
+                "the exact id from \"Company formats\" when the message asks "
+                "for that format BY NAME. null is the normal answer and means "
+                "the company's active format is used — never name one the user "
+                "did not ask for. For change_prd_template it is the TARGET, "
+                "and one of this pair is required."
             ),
         },
         "template_query": {
@@ -487,6 +500,15 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
+- change_prd_template — the user wants an EXISTING PRD switched into a
+  different uploaded format and re-written in that structure: "change the
+  template to Acme", "switch this PRD to our lightweight format", "re-write
+  this in the new format". Resolve the name against "Company formats" and set
+  `artifact_template_id` (or `template_query` when nothing matches — never
+  both, never neither). Set no task and no instruction. When they ask for
+  Sprntly's own default/built-in format rather than an uploaded one, set
+  `template_query` to their words — the assistant explains the PRD panel's
+  Format control, which handles that switch.
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -507,6 +529,11 @@ Rules that decide the close calls:
 - generate_prd vs edit_prd: no PRD exists in this thread yet → generate_prd; one
   exists and the message asks to change it → edit_prd. "Redo it with X" aimed at
   an existing PRD is still edit_prd.
+- edit_prd vs change_prd_template: WHAT CHANGES decides it. Changing the
+  document's CONTENT (wording, sections, scope) → edit_prd. Changing which
+  FORMAT/template the document is written in → change_prd_template — "change
+  the template", "use the Acme format for this", "switch this to the new
+  format" are format switches even though they sound like edits.
 - DIRECTION decides edit_prd vs update_ticket, and the same words run both ways.
   "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
   "Update the ticket with the PRD details" changes the TICKET → update_ticket.
@@ -778,6 +805,15 @@ When a "Company formats" list is present in the input, two fields act on it:
   they meant.
 
 Never set both, and never set either when the message names no format at all.
+The one exception to "no format named → neither" is change_prd_template: its
+whole point is the format, so a switch request that names none (or names the
+built-in) sets template_query to the user's words and the assistant asks which
+— see the action's own bullet above.
+
+Each line in the list also carries a short description of what that format
+contains. Answer "what's in the Acme format" / "how is X structured" from
+those descriptions; a line without one means the description is still being
+written, and the honest answer says the format exists and what state it is in.
 
 === QUESTIONS ABOUT THE LIBRARY ===
 
@@ -1248,6 +1284,9 @@ def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
 #: right for one of them — both fall through to the active format, which is the
 #: behaviour they have today and the behaviour they keep.
 _TEMPLATE_ACTIONS: dict[str, str] = {
+    # Switching an existing PRD's format validates against the same rows a
+    # PRD build does — the target must be a usable PRD format.
+    "change_prd_template": "prd",
     "generate_prd": "prd",
     "generate_tickets": "tickets",
 }
@@ -1442,13 +1481,32 @@ def apply_gates(
         # noise that downstream would otherwise try to honour.
         _artifact_type = _artifact_query = None
 
+    # A format switch with no target is not a switch. `_gate_template` already
+    # turns a bad id into a `template_query` (a which-did-you-mean on the chat
+    # surface); this catches the plan that carried NEITHER — the model chose
+    # the action but never said which format. Same "an action whose ARGUMENT is
+    # missing is worse than no action" rule as open_artifact above, and the
+    # library is forced along so the answer can list what they DO have and
+    # point at the PRD panel's Format control.
+    _switch_without_target = (
+        action == "change_prd_template"
+        and not artifact_template_id
+        and not template_query
+    )
+    if _switch_without_target:
+        action, task, instruction = ACTION_ANSWER, "", ""
+
     # A FORMAT WE COULD NOT HONOUR IS A QUESTION, and this is where that becomes
     # a property of the code rather than a prompt instruction the model may or
     # may not have followed. `template_query` survives only when the user named
     # a format and nothing matched it; the answer that results has to be able to
     # list what they DO have, so the library rides along whether or not the model
     # remembered to ask for it.
-    include_library = bool(out.get("include_library")) or bool(template_query)
+    include_library = (
+        bool(out.get("include_library"))
+        or bool(template_query)
+        or _switch_without_target
+    )
 
     reason = out.get("reason")
     return Plan(

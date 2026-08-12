@@ -378,6 +378,63 @@ def test_an_action_that_writes_no_document_takes_no_format():
         assert plan.template_query is None, action
 
 
+def test_a_format_switch_carries_its_validated_target():
+    """`change_prd_template` rides the same gate a PRD build does: the target
+    must be this company's, a PRD format, and usable."""
+    plan = ap.apply_gates(
+        _plan_out(action="change_prd_template", action_confidence=0.95,
+                  artifact_template_id=PRD_READY),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.action == "change_prd_template"
+    assert plan.artifact_template_id == PRD_READY
+    assert plan.artifact_template_name == "Lightweight PRD"
+    assert plan.template_query is None
+
+
+def test_a_format_switch_to_a_ticket_format_becomes_a_question():
+    plan = ap.apply_gates(
+        _plan_out(action="change_prd_template",
+                  artifact_template_id=TICKETS_READY),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.artifact_template_id is None
+    assert plan.template_query == "Acme tickets"
+
+
+def test_a_format_switch_naming_nothing_degrades_to_a_library_answer():
+    """A switch with no target is not a switch — same "an action whose ARGUMENT
+    is missing is worse than no action" rule as open_artifact — and the library
+    is forced along so the answer can list what they DO have and point at the
+    PRD panel's Format control."""
+    plan = ap.apply_gates(
+        _plan_out(action="change_prd_template"),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.action == "answer"
+    assert plan.include_library is True
+    assert plan.artifact_template_id is None
+    assert plan.template_query is None
+
+
+def test_a_format_switch_to_an_unknown_name_keeps_the_action_and_the_query():
+    """The which-did-you-mean path: the ACTION survives here (the planner's
+    gate has nothing to refuse it with), and `chat_intent._plan_to_envelope`
+    is what turns the surviving `template_query` into the template_not_found
+    answer on the chat surface."""
+    plan = ap.apply_gates(
+        _plan_out(action="change_prd_template", template_query="the Globex format"),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.action == "change_prd_template"
+    assert plan.template_query == "the Globex format"
+    assert plan.include_library is True
+
+
 def test_tickets_take_a_ticket_format():
     plan = ap.apply_gates(
         _plan_out(action="generate_tickets", task="break down the PRD",
