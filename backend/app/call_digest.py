@@ -671,27 +671,66 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     fireflies_calls: list[CallTranscript] = []
     zoom_calls: list[CallTranscript] = []
 
+    # ── stored-first (owner decision 2026-08-12) ────────────────────────────
+    # Transcripts persist in `call_transcripts` now, so a provider whose window
+    # is already covered there is answered from the store — no third-party
+    # fetch. The live fetch remains the per-provider FALLBACK (empty store =
+    # exactly the old behaviour), and whatever it returns is written through,
+    # so the first ask over a window warms every later one. Staleness bound:
+    # the newest call can lag by up to one sync cycle (~10 minutes) plus
+    # whatever the provider itself takes to transcribe — accepted when the
+    # decision was made, in trade for the ~28s the live leg cost per question.
+    from app.db.call_transcripts import load_call_transcripts, store_call_transcripts
+
+    stored = load_call_transcripts(
+        company_id, window.since.isoformat(), window.until.isoformat()
+    )
+
+    def _revive(payloads: list[dict]) -> list[CallTranscript]:
+        out = []
+        for p in payloads:
+            try:
+                out.append(CallTranscript(**{
+                    k: p.get(k, v) for k, v in (
+                        ("external_id", ""), ("title", ""), ("date", ""),
+                        ("participants", []), ("overview", ""),
+                        ("action_items", ""), ("keywords", []), ("quotes", []),
+                        ("provider", "fireflies"), ("note", ""),
+                    )
+                }))
+            except Exception:  # noqa: BLE001 — one bad row must not cost the corpus
+                logger.warning("call-digest: unreadable stored transcript row skipped")
+        return out
+
     if api_key:
         sources.append(_SOURCE_LABELS["fireflies"])
-        try:
-            fireflies_calls = fetch_calls(
-                api_key, since=window.since, until=window.until
-            )
-        except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
-            logger.warning(
-                "call-digest: fireflies fetch failed for %s: %s", company_id, e
-            )
-            failed.append(_SOURCE_LABELS["fireflies"])
-            errors.append(f"Fireflies: {e}")
+        if stored.get("fireflies"):
+            fireflies_calls = _revive(stored["fireflies"])
+        else:
+            try:
+                fireflies_calls = fetch_calls(
+                    api_key, since=window.since, until=window.until
+                )
+                store_call_transcripts(company_id, fireflies_calls)
+            except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
+                logger.warning(
+                    "call-digest: fireflies fetch failed for %s: %s", company_id, e
+                )
+                failed.append(_SOURCE_LABELS["fireflies"])
+                errors.append(f"Fireflies: {e}")
 
     if zoom_ctx is not None:
         sources.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-        try:
-            zoom_calls = fetch_zoom_calls(zoom_ctx, window)
-        except Exception as e:  # noqa: BLE001 — same contract as Fireflies above
-            logger.warning("call-digest: zoom fetch failed for %s: %s", company_id, e)
-            failed.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-            errors.append(f"Zoom: {e}")
+        if stored.get(_ZOOM_PROVIDER):
+            zoom_calls = _revive(stored[_ZOOM_PROVIDER])
+        else:
+            try:
+                zoom_calls = fetch_zoom_calls(zoom_ctx, window)
+                store_call_transcripts(company_id, zoom_calls)
+            except Exception as e:  # noqa: BLE001 — same contract as Fireflies above
+                logger.warning("call-digest: zoom fetch failed for %s: %s", company_id, e)
+                failed.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
+                errors.append(f"Zoom: {e}")
 
     calls = fireflies_calls + zoom_calls
     if fireflies_calls and zoom_calls:
