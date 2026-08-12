@@ -586,7 +586,13 @@ export const askApi = {
   start: (
     question: string,
     company: string = "asurion",
-    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number },
+    opts?: {
+      conversation_id?: number
+      pinned_skill?: string
+      prd_id?: number
+      evidence_id?: number
+      ticket_set_id?: number
+    },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
       question,
@@ -596,6 +602,10 @@ export const askApi = {
       // PRD-tab chat: ground the answer on the PRD open beside this chat
       // (+ its insight, evidence, tickets, prototype).
       ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
+      // Standalone-artifact chat: ground on the open evidence report or the
+      // open ticket set instead — one primary artifact per tab.
+      ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
+      ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),

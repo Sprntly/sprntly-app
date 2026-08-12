@@ -1633,6 +1633,8 @@ def answer(
     pinned_skill: Optional[str] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     prd_id: Optional[int] = None,
+    evidence_id: Optional[int] = None,
+    ticket_set_id: Optional[int] = None,
     on_delta: Optional[Callable[[str], None]] = None,
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
@@ -2272,13 +2274,27 @@ def answer(
     if decision.source == "out_of_scope" and not is_context_dependent_followup(question, history):
         return _out_of_scope_payload()
 
-    # PRD-tab grounding, shared by the direct and skill paths. Best-effort:
-    # build_prd_context returns '' on any failure, degrading to a plain ask.
+    # Open-artifact grounding, shared by the direct and skill paths. The
+    # variable KEEPS the name `prd_context` because that is the parameter it
+    # rides all the way through compose_ask_answer — but it now carries the
+    # context block of whichever artifact the tab has open: a PRD, a standalone
+    # evidence report, or a standalone ticket set. One primary artifact per
+    # tab; the PRD wins when several ids arrive, because its block already
+    # contains the PRD's own evidence and tickets. Best-effort throughout:
+    # every builder returns '' on any failure, degrading to a plain ask.
     prd_context = ""
     if prd_id:
         from app.prd_context import build_prd_context
 
         prd_context = build_prd_context(enterprise_id, prd_id)
+    elif evidence_id:
+        from app.artifact_context import build_evidence_context
+
+        prd_context = build_evidence_context(enterprise_id, evidence_id)
+    elif ticket_set_id:
+        from app.artifact_context import build_ticket_set_context
+
+        prd_context = build_ticket_set_context(enterprise_id, ticket_set_id)
 
     if not decision.skill_id:
         # Direct path — corpus + KG, plus a bounded live read of every connected

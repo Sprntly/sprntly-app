@@ -171,6 +171,14 @@ type ChatTab = {
   prdId: number | null
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
+  /** The cached evidence's row id — what an ask from this tab sends as
+   *  `evidence_id` so "this evidence" is answered from the open document.
+   *  Optional and best-effort: stamped wherever evidence lands on the tab
+   *  (generation, resume, the existence probe); a tab that never learned
+   *  the id simply asks without it — exactly the pre-feature behaviour.
+   *  A tab with a PRD never sends it: the PRD context already carries its
+   *  evidence. */
+  evidenceId?: number | null
   /** This tab was opened from a Top Insights card's "View Evidence" — the
    *  finding's EVIDENCE is what it is about, so refocusing it restores the panel
    *  on the Evidence tab rather than closing it (a tab with no PRD) or jumping to
@@ -1311,11 +1319,19 @@ export function ChatScreen() {
         prd: null,
         prdId: t.prdId ?? null,
         evidence: null,
+        // Persisted (small int, like prdId): what an ask from this tab sends
+        // as evidence_id, so "this evidence" still grounds after a reload.
+        evidenceId: t.evidenceId ?? null,
         // Persisted: an evidence tab reopens on its Evidence panel, not closed.
         evidenceOnly: t.evidenceOnly ?? false,
         evidenceDetail: null,
         prdGenerating: false,
         evidenceGenerating: false,
+        // Not persisted today (reopening hydrates the set from its
+        // conversation), but restored when present so the id survives any
+        // future persist — and so an ask can name the set without waiting on
+        // that hydrate.
+        ticketSetId: t.ticketSetId ?? null,
         // Persisted: preserves the inline-vs-header card ordering across reload.
         prdInFlow: t.prdInFlow ?? false,
         prdFlowTurnId: t.prdFlowTurnId,
@@ -2610,7 +2626,7 @@ export function ChatScreen() {
         if (activeTabIdRef.current === tabId) setContent({ evidencePartialHtml: html })
       })
       if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence, evidenceId: result.evidenceId } : t))
         setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
         // Chat summary only when something was BUILT — the read-first path
         // marks a mere reopen of already-ready evidence with `existing`.
@@ -2684,7 +2700,7 @@ export function ChatScreen() {
               if (activeTabIdRef.current === activeTabId) setContent({ evidencePartialHtml: html })
             })
             if (result.ok) {
-              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence, evidenceId: result.evidenceId } : t))
               setContent({ evidencePartialHtml: null })
               // This path only exists because a FRESH generation was in flight
               // when the screen unmounted (pending-job marker) — summarize it.
@@ -4569,6 +4585,16 @@ export function ChatScreen() {
             // PRD-tab chat: also send the PRD id so the answer is grounded on the
             // open PRD + its insight/evidence/tickets/prototype.
             ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
+            // Standalone-artifact grounding: ONE primary artifact per tab,
+            // PRD first (its context already carries evidence + tickets),
+            // then an open evidence report, then a standalone ticket set.
+            ...(targetTab?.prdId == null && targetTab?.evidenceId != null
+              ? { evidence_id: targetTab.evidenceId }
+              : {}),
+            ...(targetTab?.prdId == null && targetTab?.evidenceId == null
+              && targetTab?.ticketSetId != null
+              ? { ticket_set_id: targetTab.ticketSetId }
+              : {}),
           })
         },
         onResult: (tabId, res) => {
@@ -5736,6 +5762,17 @@ export function ChatScreen() {
         const ev = await loadEvidenceByInsight(bId, iIdx)
         if (!cancelled && ev) {
           setInsightsWithEvidence((prev) => new Set(prev).add(activeEvidenceKey))
+          // The probe just learned which evidence row this tab's insight
+          // maps to — remember it so an ask from this tab can ground on
+          // it. Only filled where missing: a generation that already
+          // stamped a fresher id must not be overwritten by a probe that
+          // raced it.
+          setTabs((prev) => prev.map((t) =>
+            t.briefMeta
+              && `${t.briefMeta.briefId}:${t.briefMeta.insightIndex}` === activeEvidenceKey
+              && t.evidenceId == null
+              ? { ...t, evidenceId: ev.evidenceId }
+              : t))
         }
       } catch { /* non-fatal: default to the PRD action */ }
     })()
