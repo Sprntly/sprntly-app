@@ -34,6 +34,7 @@ from app.db.conversations import (
     list_individual_turns,
     post_individual_turn,
 )
+from app.db.delegation_events import record_event
 from app.db.project_delegations import record_delegation
 from app.db.projects import is_project_member, resolve_member
 from app.llm import DEFAULT_MODEL, call_md
@@ -310,7 +311,7 @@ def handle_delegate_task(
         # (project_id, kind='individual') thread — never a group chat,
         # never another user's thread.
         turn = post_individual_turn(conv["id"], "assistant", brief)  # deliver FIRST
-        record_delegation(  # THEN the fact (AD-P19 order)
+        deleg = record_delegation(  # THEN the fact (AD-P19 order)
             project_id=project_id,
             assigner_user_id=assigner_user_id,
             assignee_user_id=assignee["user_id"],
@@ -324,6 +325,19 @@ def handle_delegate_task(
             "delegation_delivered project_id=%s assignee=%s delivered_turn_id=%s",
             project_id, assignee["user_id"], turn["id"],
         )
+        # Own try/except (AD-P27, server-deterministic genesis fact): a lost
+        # genesis event must never roll back a delivery+fact write that has
+        # already committed. The zero-events fallback in `v_delegation_status`
+        # covers the case where this write is lost (belt-and-braces).
+        try:
+            record_event(
+                delegation_id=deleg["id"], event="assigned", actor_user_id=assigner_user_id
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a successful delivery
+            logger.warning(
+                "delegation_genesis_event_failed delegation_id=%s error=%s",
+                deleg["id"], type(exc).__name__,
+            )
         # Publish on the ASSIGNEE'S per-user channel, never the group
         # channel — a private brief on `project:{id}` would leak it to
         # every other member. Entirely best-effort (AD-P22): see

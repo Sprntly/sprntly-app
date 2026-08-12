@@ -424,6 +424,93 @@ def test_handle_delegate_task_never_raises(isolated_settings, monkeypatch):
     assert "hit a problem" in result
 
 
+# ── Genesis event (AC9/AC10 — the delegation-events genesis hook's blast radius on this file) ─────────
+
+
+def test_delegation_emits_single_assigned_genesis(isolated_settings, monkeypatch):
+    """A successful hand-off writes exactly one `assigned` `delegation_events`
+    row for the new delegation, with `actor_user_id == assigner_user_id`."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result
+
+    from app.db.client import require_client
+
+    deleg = (
+        require_client()
+        .table("project_delegations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data[0]
+    )
+    events = (
+        require_client()
+        .table("delegation_events")
+        .select("*")
+        .eq("delegation_id", deleg["id"])
+        .execute()
+        .data
+    )
+    assert len(events) == 1
+    assert events[0]["event"] == "assigned"
+    assert events[0]["actor_user_id"] == ctx.user_id
+
+
+def test_genesis_failure_does_not_rollback_delegation(isolated_settings, monkeypatch):
+    """A forced failure of the genesis `record_event` call must NOT roll
+    back the delegation — the `project_delegations` row and the delivered
+    brief turn still exist, and `handle_delegate_task` still returns its
+    normal confirmation string."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    def _boom(**kwargs):  # noqa: ARG001
+        raise RuntimeError("simulated genesis-event failure")
+
+    monkeypatch.setattr(project_delegation, "record_event", _boom)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+
+    from app.db.client import require_client
+
+    delegations = (
+        require_client()
+        .table("project_delegations")
+        .select("*")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert len(delegations) == 1
+
+    turns = (
+        require_client()
+        .table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", delegations[0]["delivered_conversation_id"])
+        .execute()
+        .data
+    )
+    assert len(turns) == 1
+    assert turns[0]["role"] == "assistant"
+
+    events = (
+        require_client()
+        .table("delegation_events")
+        .select("id")
+        .eq("delegation_id", delegations[0]["id"])
+        .execute()
+        .data
+    )
+    assert events == [], "the forced-failing genesis event must never have been written"
+
+
 # ── Cost / observability (AC10/AC11) ──────────────────────────────────────
 
 

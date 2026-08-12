@@ -202,6 +202,18 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "real-DB proof, run locally against the dev rig when touching this "
         "migration or `db/project_delegations.py`."
     ),
+    ("test_delegation_events.py", "RUN_DELEGATION_EVENTS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "delegation_events migration's CHECK constraint, FK cascade, index/"
+        "RLS-policy catalog entries, and to evaluate the v_delegation_status "
+        "left-join-lateral derive-at-read view — the fake Supabase client has "
+        "no SQL engine behind it and cannot enforce any of those or evaluate "
+        "a view. Deterministic backstop: test_project_delegation.py covers "
+        "the genesis-emit contract (exactly one assigned event per hand-off, "
+        "genesis-failure-does-not-rollback) against FakeSupabaseClient in the "
+        "fast lane; this suite is the real-DB proof, run locally against the "
+        "dev rig when touching this migration or `db/delegation_events.py`."
+    ),
     ("test_conversation_read_cursors.py", "RUN_CONVERSATION_READ_CURSORS_ROUNDTRIP"): (
         "Needs a real local Supabase (PostgREST + Postgres) to prove the "
         "conversation_read_cursors migration's composite PK and RLS/policy "

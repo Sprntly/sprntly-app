@@ -1588,6 +1588,24 @@ CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id
 CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
 CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
 
+-- Mirrors 20260812120100_delegation_events.sql. No FK on actor_user_id —
+-- same reasoning as project_delegations above (auth.users ids the fake
+-- DB never seeds a row for). The migration's own CHECK constraint and
+-- `v_delegation_status` left-join-lateral view are NOT mirrored here —
+-- sqlite cannot enforce/evaluate either; those are proven by the real
+-- local-Supabase round-trip (test_delegation_events.py). This mirror
+-- exists only so the genesis-emit fast-lane tests in
+-- test_project_delegation.py can insert against FakeSupabaseClient.
+CREATE TABLE delegation_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    delegation_id INTEGER NOT NULL REFERENCES project_delegations (id) ON DELETE CASCADE,
+    event         TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL,
+    note          TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_delegation_events_delegation ON delegation_events (delegation_id, id);
+
 -- Mirrors 20260811120400_conversation_read_cursors.sql. Inputs-only read
 -- cursor (AD-P3/AD-P20) — no `unread` boolean/count column anywhere;
 -- unread is derived at read time by the db helper. No FK on user_id —
