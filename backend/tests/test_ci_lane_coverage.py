@@ -278,6 +278,20 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "touching this migration, plus the ship-gate live proof before "
         "promotion."
     ),
+    ("test_resolve_candidate_live.py", "RUN_RESOLVE_CANDIDATE_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to classify a "
+        "real identity across t_workspace/t_company/t_newuser/t_refuse "
+        "against real workspace_members/company_members/profiles rows in "
+        "two tenants — the fake Supabase client cannot prove the tenancy "
+        "fail-closed re-assertion holds against a genuine second "
+        "company/workspace row, only that the stubbed gates were called with "
+        "the right arguments. Deterministic backstop: test_resolve_candidate.py "
+        "covers all five tiers, the cross-tenant fail-closed proofs (AC5, "
+        "AC6 RED->GREEN mutation proof), and the needle-shape branches "
+        "against monkeypatched dependencies in the fast lane; this suite is "
+        "the real-DB proof, run locally against the dev rig when touching "
+        "this resolver or the membership helpers it composes."
+    ),
 }
 
 

@@ -21,7 +21,12 @@ ever returns real `project_members` rows joined to `profiles`.
 """
 from __future__ import annotations
 
+import re
+
+from app.db.artifact_shares import owning_company_domain
 from app.db.client import require_client, retry_on_disconnect, utc_now
+from app.db.team import email_belongs_to_other_company, get_member, list_company_members
+from app.db.workspaces import get_workspace_member, list_workspace_members
 
 
 @retry_on_disconnect
@@ -480,3 +485,185 @@ def _escape_like(value: str) -> str:
     """Escape LIKE/ILIKE metacharacters so a pattern matches the value
     literally (emails routinely contain `_`, a single-char wildcard)."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+# ─────────────────── resolve_candidate (tag-non-members) ───────────────────
+
+TIER_MEMBER, TIER_WORKSPACE, TIER_COMPANY, TIER_NEWUSER, TIER_REFUSE = (
+    "t_member",
+    "t_workspace",
+    "t_company",
+    "t_newuser",
+    "t_refuse",
+)
+
+# needle is an EMAIL -> the invite path may reach OUTSIDE the tenant
+#                        (t_newuser/t_refuse are reachable).
+# needle is a NAME   -> resolution is tenant-only (no cross-tenant directory
+#                        read); a name with no in-tenant match refuses
+#                        (`no_match`), NEVER an invite — you cannot invite an
+#                        outsider you only know by name.
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _directory_match_keys(entry: dict) -> set[str]:
+    """Casefolded match keys for an enriched workspace/company-directory row
+    (`list_workspace_members`/`list_company_members` shape: `display_name` +
+    optional `job_role`). Mirrors `_match_keys`'s discipline for the
+    `list_members` row shape (`name`) above, widened to the directory
+    enrichment's field names."""
+    keys: set[str] = set()
+    name = (entry.get("display_name") or "").strip()
+    if name:
+        keys.add(name.casefold())
+        keys.add(name.split()[0].casefold())
+    job_role = (entry.get("job_role") or "").strip()
+    if job_role:
+        keys.add(job_role.casefold())
+    return keys
+
+
+def _match_directory(entries: list[dict], n: str) -> tuple[dict | None, bool]:
+    """Exact-then-prefix match of the already-casefolded needle `n` against
+    `entries`, reusing `resolve_member`'s exact-then-prefix discipline.
+    Returns `(matched_entry_or_None, ambiguous)` — never guesses: >1 hit at
+    either tier is ambiguous, not a pick."""
+    exact = [e for e in entries if n in _directory_match_keys(e)]
+    if len(exact) == 1:
+        return exact[0], False
+    if len(exact) > 1:
+        return None, True
+    if len(n) < 2:
+        return None, False
+    prefix = [e for e in entries if any(k.startswith(n) for k in _directory_match_keys(e))]
+    if len(prefix) == 1:
+        return prefix[0], False
+    if len(prefix) > 1:
+        return None, True
+    return None, False
+
+
+def _contact_from(matched_entry: dict | None, email_needle: str | None) -> tuple[str | None, str | None]:
+    """`(email, name)` for a resolved-but-non-member candidate, normalized
+    lower-case email (AC-9). A NAME-needle match already carries both from
+    the enriched directory row it was found in. An EMAIL-needle match
+    carries only the (normalized) needle itself as the email — the needle
+    IS the email that resolved the account, so no further profile read is
+    needed to satisfy the nullable `name` field of the return shape."""
+    if matched_entry is not None:
+        email = matched_entry.get("email")
+        return (email.strip().lower() if email else None), matched_entry.get("display_name")
+    if email_needle:
+        return email_needle.strip().lower(), None
+    return None, None
+
+
+def resolve_candidate(project_id: int, needle: str) -> dict:
+    """Classify a mentioned name-or-email into exactly one tier relative to
+    THIS project's tenancy — read-only sibling of `resolve_member` above,
+    widening the search project -> workspace -> company -> email while
+    re-asserting `project["company_id"]`/`project["workspace_id"]` on every
+    branch, never a caller-supplied tenant (AD-TNM1). Deterministic — NO LLM
+    call (AD-P18 fast-path), same posture as `resolve_member`.
+
+    Fail-closed root: a falsy `get_project(project_id)` short-circuits to
+    `t_refuse(no_project)` before any membership table is read.
+
+    Returns exactly one of:
+      {"tier": "t_member",    "member": {<list_members row>}}
+      {"tier": "t_workspace", "user_id": str, "email": str|None, "name": str|None}
+      {"tier": "t_company",   "user_id": str, "email": str|None, "name": str|None}
+      {"tier": "t_newuser",   "email": str}                       # lower-cased
+      {"tier": "t_refuse",    "reason": str}  # cross_company|other_company|no_match|ambiguous|no_project
+
+    This is classification only — it performs no write. The action layer
+    that consumes this tier re-runs the live membership assertion
+    immediately before any mutation, mirroring `handle_delegate_task`'s
+    `is_project_member` double-gate (`project_delegation.py`)."""
+    project = get_project(project_id)
+    if not project:
+        return {"tier": TIER_REFUSE, "reason": "no_project"}
+
+    company_id = project["company_id"]
+    workspace_id = project["workspace_id"]
+
+    raw = (needle or "").strip()
+    is_email = bool(_EMAIL_RE.match(raw))
+    # A leading "@" on a NAME needle is stripped exactly as `resolve_member`
+    # does; an email never legitimately starts with "@" so this never fires
+    # for the email shape.
+    name_raw = raw[1:] if (not is_email and raw.startswith("@")) else raw
+    n = name_raw.casefold()
+
+    # Tier 1 — already a project member. `resolve_member` covers the
+    # name/job_role match (its own casefold/@-strip/exact-then-prefix
+    # discipline over `list_members`); an EMAIL needle additionally checks
+    # the roster's `email` column directly, since `_match_keys` (above)
+    # matches only on name/job_role and never sees email.
+    if is_email:
+        roster = list_members(project_id)
+        email_matches = [
+            m for m in roster if (m.get("email") or "").strip().lower() == raw.lower()
+        ]
+        if len(email_matches) == 1:
+            return {"tier": TIER_MEMBER, "member": email_matches[0]}
+    member_res = resolve_member(project_id, needle)
+    if member_res["status"] == "resolved":
+        return {"tier": TIER_MEMBER, "member": member_res["member"]}
+    if member_res["status"] == "ambiguous":
+        # The picker disambiguates upstream; the resolver never guesses.
+        return {"tier": TIER_REFUSE, "reason": "ambiguous"}
+
+    if not n:
+        return {"tier": TIER_REFUSE, "reason": "no_match"}
+
+    user_id: str | None = None
+    matched_entry: dict | None = None
+
+    if is_email:
+        user_id = user_id_for_email(raw)
+    else:
+        ws_members = list_workspace_members(workspace_id)
+        match, ambiguous = _match_directory(ws_members, n)
+        if ambiguous:
+            return {"tier": TIER_REFUSE, "reason": "ambiguous"}
+        if match:
+            user_id, matched_entry = match["user_id"], match
+        else:
+            company_members = list_company_members(company_id)
+            match, ambiguous = _match_directory(company_members, n)
+            if ambiguous:
+                return {"tier": TIER_REFUSE, "reason": "ambiguous"}
+            if match:
+                user_id, matched_entry = match["user_id"], match
+
+    if user_id:
+        # Fail-closed re-assertion (AD-TNM1): t_workspace/t_company are
+        # returned ONLY after the LIVE membership check against THIS
+        # project's workspace_id/company_id — never the match set that
+        # found the candidate. There is no path where a user_id from a
+        # foreign tenant reaches either tier.
+        if get_workspace_member(workspace_id, user_id):
+            email, name = _contact_from(matched_entry, raw if is_email else None)
+            return {"tier": TIER_WORKSPACE, "user_id": user_id, "email": email, "name": name}
+        if get_member(company_id=company_id, user_id=user_id):
+            email, name = _contact_from(matched_entry, raw if is_email else None)
+            return {"tier": TIER_COMPANY, "user_id": user_id, "email": email, "name": name}
+        # A real account that exists but is NOT in this project's company
+        # (one-user-one-company) — cross-tenant, never disclosed as an
+        # addable tier.
+        return {"tier": TIER_REFUSE, "reason": "other_company"}
+
+    if not is_email:
+        # Cannot invite an outsider known only by name — no cross-tenant
+        # directory read happens for a NAME needle.
+        return {"tier": TIER_REFUSE, "reason": "no_match"}
+
+    # EMAIL needle, no existing account anywhere — the invite/domain gate.
+    if email_belongs_to_other_company(company_id=company_id, email=raw):
+        return {"tier": TIER_REFUSE, "reason": "other_company"}
+    domain = raw.rsplit("@", 1)[-1].strip().lower() if "@" in raw else None
+    owning_domain = owning_company_domain(company_id)
+    if owning_domain and domain == owning_domain:
+        return {"tier": TIER_NEWUSER, "email": raw.strip().lower()}
+    return {"tier": TIER_REFUSE, "reason": "cross_company"}
