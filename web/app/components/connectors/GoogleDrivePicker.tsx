@@ -386,18 +386,61 @@ export function GoogleDriveServiceAccountView({
   }
   return (
     <div className="conn-drive-setup">
-      <p className="conn-drive-selected-label">
-        Share a Google Drive folder with this address as Viewer, then click Scan.
-      </p>
-      <div className="conn-drive-file-list">
-        <div className="conn-drive-file">
-          <span className="conn-drive-file-name">{email}</span>
+      <ul
+        className="conn-drive-selected-label"
+        style={{ margin: "0 0 4px", paddingLeft: "18px", listStyle: "disc" }}
+      >
+        <li>Copy the email address below.</li>
+        <li>Go to your Google Drive and share it with that email.</li>
+        <li>Give it read-only access.</li>
+      </ul>
+      {/* Label on the LEFT, then a bordered field holding the full address
+          (ellipsised by width, full value in the tooltip + on copy) with the
+          copy button inside it. NB: the "Email" label is a plain span, NOT
+          .conn-drive-selected-label — that class is width:100% and would eat
+          the whole row, collapsing the field. */}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        <span
+          style={{
+            fontSize: "11px",
+            color: "var(--muted)",
+            flexShrink: 0,
+          }}
+        >
+          Email
+        </span>
+        {/* The whole field is a copy target: clicking anywhere on it (the
+            address or the icon) copies. role/tabIndex/keydown keep it operable
+            by keyboard, not mouse-only. */}
+        <div
+          className="conn-drive-file"
+          style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+          role="button"
+          tabIndex={0}
+          aria-label={copied ? "Copied" : "Copy service account email"}
+          title={copied ? "Copied" : "Click to copy"}
+          onClick={onCopy}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              onCopy()
+            }
+          }}
+        >
+          <span className="conn-drive-file-name" title={email}>
+            {email}
+          </span>
           <button
             type="button"
             className="conn-drive-file-remove"
+            style={{ flexShrink: 0 }}
             aria-label={copied ? "Copied" : "Copy service account email"}
             title={copied ? "Copied" : "Copy"}
-            onClick={onCopy}
+            // Field-level onClick already copies; stop this from double-firing.
+            onClick={(e) => {
+              e.stopPropagation()
+              onCopy()
+            }}
           >
             {copied ? "✓" : "⧉"}
           </button>
@@ -699,33 +742,21 @@ export function GoogleDrivePicker({
     [onSaved],
   )
 
-  // Service-account mode shows BOTH routes: the individual-file OAuth Picker
-  // (drive.file, exactly like main) AND the SA share panel (folders shared with
-  // the SA email). OAuth mode shows the Picker only, unchanged.
+  // Service-account mode shows the SA share panel only: folders shared with
+  // the SA email are the sole route in this mode. OAuth mode shows the
+  // individual-file Picker only, unchanged.
   if (saMode) {
     return (
-      <>
-        <GoogleDrivePickerView
-          savedFiles={savedFiles ?? []}
-          configured={configured}
-          busy={busy}
-          error={error}
-          onAddFiles={() => void handleAddFiles()}
-          onRemoveFile={(id) => void handleRemoveFile(id)}
-          removingId={removingId}
-          folderContents={folderContents}
-        />
-        <GoogleDriveServiceAccountView
-          email={saEmail}
-          sharedRoots={saRoots}
-          folderContents={saTree}
-          scanning={scanning}
-          error={saError}
-          copied={copied}
-          onCopy={handleCopyEmail}
-          onScan={() => void handleScan()}
-        />
-      </>
+      <GoogleDriveServiceAccountView
+        email={saEmail}
+        sharedRoots={saRoots}
+        folderContents={saTree}
+        scanning={scanning}
+        error={saError}
+        copied={copied}
+        onCopy={handleCopyEmail}
+        onScan={() => void handleScan()}
+      />
     )
   }
 

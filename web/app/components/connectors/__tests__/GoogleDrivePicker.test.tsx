@@ -794,12 +794,67 @@ describe("GoogleDriveServiceAccountView", () => {
         onScan: noopFn,
       }),
     )
-    expect(html).toContain("sprntly-abc123-def456@proj.iam.gserviceaccount.com")
+    // The FULL email is rendered (ellipsised by field WIDTH via CSS, not a
+    // hard character cut) and is also carried in `title` for hover/inspection.
+    expect(html).toContain(
+      'title="sprntly-abc123-def456@proj.iam.gserviceaccount.com"',
+    )
+    expect(html).toContain(
+      ">sprntly-abc123-def456@proj.iam.gserviceaccount.com<",
+    )
     expect(html).toContain("Scan shared folders")
     // Same button classes as "Add Drive files" — a consistent, equally-sized
     // sibling action, not a full-width bar.
     expect(html).toContain('class="btn btn-sm btn-primary"')
     expect(html).toContain("Nothing shared with this service account yet")
+  })
+
+  it("copies when the email field itself is clicked (the whole field is a copy target)", () => {
+    const onCopy = vi.fn()
+    renderDom(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sa@proj.iam.gserviceaccount.com",
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: null,
+        copied: false,
+        onCopy,
+        onScan: noopFn,
+      }),
+    )
+    // Clicking anywhere on the field (not just the icon) copies.
+    fireEvent.click(screen.getByTitle("Click to copy"))
+    expect(onCopy).toHaveBeenCalledTimes(1)
+    // The icon button also copies, and stops the field from double-firing:
+    // one click on it → exactly one more call, not two.
+    fireEvent.click(screen.getByTitle("Copy"))
+    expect(onCopy).toHaveBeenCalledTimes(2)
+    cleanup()
+  })
+
+  it("renders the 3-step share instructions and an Email label", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GoogleDriveServiceAccountView, {
+        email: "sa@proj.iam.gserviceaccount.com",
+        sharedRoots: [],
+        folderContents: {},
+        scanning: false,
+        error: null,
+        copied: false,
+        onCopy: noopFn,
+        onScan: noopFn,
+      }),
+    )
+    // Three scannable steps, not one run-on sentence.
+    expect(html).toContain("Copy the email address below.")
+    expect(html).toContain(
+      "Go to your Google Drive and share it with that email.",
+    )
+    expect(html).toContain("Give it read-only access.")
+    expect(html).toContain(">Email<")
+    expect(html.toLowerCase()).toContain("read-only")
+    expect(html).not.toContain("as Viewer, then click Scan")
   })
 
   it("renders the scanned shared-root tree, reusing the folder tree UI", () => {
@@ -910,7 +965,7 @@ describe("GoogleDrivePicker — service-account mode toggle", () => {
     expect(provisionGoogleDriveServiceAccountMock).not.toHaveBeenCalled()
   })
 
-  it("service_account mode: shows BOTH the OAuth Picker button and the SA panel", async () => {
+  it("service_account mode: shows only the SA share panel, not the OAuth Picker", async () => {
     getGoogleDriveModeMock.mockReset().mockResolvedValue({
       mode: "service_account",
       service_account_configured: true,
@@ -922,16 +977,14 @@ describe("GoogleDrivePicker — service-account mode toggle", () => {
     })
     renderDom(<GoogleDrivePicker dataset="acme" savedFiles={[]} />)
 
-    // Both routes are present as equally-sized sibling actions.
+    // The folder-share panel is the sole route — no individual-file Picker.
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /add drive files/i })).toBeTruthy(),
+      expect(screen.getByRole("button", { name: /scan shared folders/i })).toBeTruthy(),
     )
-    await waitFor(() =>
-      expect(
-        screen.getByText("sprntly-abc123-def456@proj.iam.gserviceaccount.com"),
-      ).toBeTruthy(),
-    )
-    expect(screen.getByRole("button", { name: /scan shared folders/i })).toBeTruthy()
+    expect(
+      screen.queryByRole("button", { name: /add drive files/i }),
+    ).toBeNull()
+    expect(screen.getByTitle("sprntly-abc123-def456@proj.iam.gserviceaccount.com")).toBeTruthy()
   })
 
   it("service_account mode: Scan calls the scan endpoint and refreshes the tree", async () => {
@@ -959,36 +1012,5 @@ describe("GoogleDrivePicker — service-account mode toggle", () => {
 
     await waitFor(() => expect(scanGoogleDriveServiceAccountMock).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByText("Shared")).toBeTruthy())
-  })
-
-  it("service_account mode: the OAuth Picker force-disables folder selection even when gated on", async () => {
-    getGoogleDriveModeMock.mockReset().mockResolvedValue({
-      mode: "service_account",
-      service_account_configured: true,
-    })
-    provisionGoogleDriveServiceAccountMock.mockResolvedValue({
-      service_account_email: "sa@proj.iam.gserviceaccount.com",
-      shared_roots: [],
-      folder_contents: {},
-    })
-    const builder = installMockPicker()
-    renderDom(
-      <GoogleDrivePicker
-        dataset="acme"
-        savedFiles={[]}
-        folderSelectEnabled={true}
-      />,
-    )
-
-    await waitFor(() =>
-      expect(screen.getByText("sa@proj.iam.gserviceaccount.com")).toBeTruthy(),
-    )
-    fireEvent.click(screen.getByRole("button", { name: /add drive files/i }))
-    await waitFor(() => expect(builder.build).toHaveBeenCalled())
-
-    // In service_account mode individual files still go through the same
-    // drive.file Picker, but folders come in via the SA share route — so
-    // folder selection stays off regardless of folderSelectEnabled.
-    expect(docsView.setSelectFolderEnabled).toHaveBeenCalledWith(false)
   })
 })
