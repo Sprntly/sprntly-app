@@ -32,6 +32,15 @@
 // actually sends a message; best-effort (a failed fetch degrades to an
 // unbound ask, same as it behaved before this fix, rather than blocking
 // the send).
+//
+// Live (delegated-brief-without-reopen): subscribes to the caller's OWN
+// per-user channel `project:{id}:user:{uid}` via the SAME `useRealtimeChannel`
+// primitive `ProjectGroupChat` uses, and appends a `brief.delivered`
+// broadcast straight into `history` above — so a task delegated to this
+// caller lands in their open thread with no re-open. `history` stays the
+// load-on-open + reconnect-reconcile authority; the channel is additive
+// and degrades silently (no throw, no error surfaced) to today's
+// load-on-open-only behaviour when unavailable.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -42,6 +51,8 @@ import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useCompany } from "../../../../context/CompanyContext"
+import { useAuth } from "../../../../lib/auth"
+import { useRealtimeChannel } from "./useRealtimeChannel"
 import {
   runAskGeneration,
   resumeAskGeneration,
@@ -102,6 +113,10 @@ function formatTime(d: number): string {
 
 export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }: ProjectIndividualChatProps) {
   const { activeCompany } = useCompany()
+  const auth = useAuth()
+  // The topic is keyed on the CALLER's own id (the assignee reading their
+  // own thread) — same session the app already holds, no new fetch.
+  const myUserId = auth.kind === "authed" ? auth.user.id : null
   const [turns, setTurns] = useState<LocalTurn[]>([])
   // Persisted history, loaded on open — this is what makes a delegated
   // brief (a standalone `role: "assistant"` turn, no paired question)
@@ -179,6 +194,51 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       cancelled = true
     }
   }, [projectId])
+
+  // Live subscribe (the delegated-brief-without-reopen gap this ticket
+  // closes): the caller's OWN per-user channel, the same one
+  // `_publish_brief_delivered` broadcasts a `brief.delivered` turn on the
+  // instant a teammate delegates a task to them
+  // (`backend/app/project_delegation.py`). `history` above stays the
+  // load-on-open + reconnect-reconcile authority (AD-P22) — this only
+  // appends what arrives live, through the SAME dedup-by-id guard the
+  // reconcile read uses, so a turn already known (from the initial load OR
+  // a prior live event) never renders twice. The individual thread has no
+  // `applyTurns` equivalent (that's group-only), so this is its own small
+  // id-set dedup, derived from the CURRENT `history` snapshot rather than a
+  // separate ref — no need to touch the load-on-open effect above to seed
+  // one. `topic` is `null` until the caller's user id resolves —
+  // `useRealtimeChannel` degrades to no-subscribe in that case, and this
+  // thread's pre-existing load-on-open behaviour is the whole fallback
+  // (there is no 4s poll to re-arm here; there never was one).
+  const appendHistoryTurns = useCallback((incoming: IndividualTurn[]) => {
+    if (incoming.length === 0) return
+    setHistory((prev) => {
+      const known = new Set(prev.map((t) => t.id))
+      const fresh = incoming.filter((t) => !known.has(t.id))
+      return fresh.length === 0 ? prev : [...prev, ...fresh]
+    })
+  }, [])
+  const handleRealtimeEvent = useCallback(
+    (event: string, payload: unknown) => {
+      if (event !== "brief.delivered") return
+      appendHistoryTurns([payload as IndividualTurn])
+    },
+    [appendHistoryTurns],
+  )
+  const handleReconcile = useCallback(() => {
+    projectsApi
+      .individualTurns(projectId)
+      .then(appendHistoryTurns)
+      .catch(() => {
+        /* best-effort — the next reconnect retries; the thread's own
+           load-on-open effect already covers the next-open case */
+      })
+  }, [projectId, appendHistoryTurns])
+  useRealtimeChannel(myUserId ? `project:${projectId}:user:${myUserId}` : null, {
+    onEvent: handleRealtimeEvent,
+    onReconcile: handleReconcile,
+  })
 
   // A reload/remount mid-answer must not orphan the job (the same resume
   // contract every other Ask surface keeps, via the SAME shared

@@ -62,6 +62,15 @@ vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
 
+// New on this ticket: the component now subscribes to the caller's own
+// per-user realtime channel, which needs a resolvable user id — mock
+// `useAuth` so mount doesn't throw for lack of a real `AuthProvider`. The
+// realtime wiring itself is covered end-to-end in
+// `ProjectIndividualChat.realtime.dom.test.tsx`.
+vi.mock("../../../../../lib/auth", () => ({
+  useAuth: () => ({ kind: "authed" as const, user: { id: "u1" } }),
+}))
+
 import { ProjectIndividualChat } from "../ProjectIndividualChat"
 
 const individualChatRecord = (id: number, projectId: number) => ({
