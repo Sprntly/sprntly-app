@@ -290,20 +290,43 @@ async def ask(
     # block the answer. An empty/new project also yields no block.
     if body.project_id is not None:
         try:
-            from app.project_context import assemble_project_context
+            from app.project_group_context import assemble_private_project_context
 
-            project_block = assemble_project_context(
-                body.project_id, company.user_id
+            # Same breadth the @Sprntly group agent gets — memory summary +
+            # roster + task-ledger digest + artifact manifest, plus the
+            # caller's own memory entries/job_role. Breadth only: single-shot,
+            # no read tools / no tool loop / no write path.
+            project_block = assemble_private_project_context(
+                body.project_id, company.user_id, body.dataset, enterprise_id
             )
         except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
             logger.warning(
-                "assemble_project_context failed project_id=%s",
+                "assemble_private_project_context failed project_id=%s",
                 body.project_id, exc_info=True,
             )
             project_block = ""
         if project_block:
+            # AUTHORITATIVE framing (not a passive "Context:" turn): ASK_SYSTEM
+            # tells the model to answer from connected sources and to deflect
+            # ("connect a connector") when a workspace-meta question — who is on
+            # the project, its tasks/delegations, its PRDs/artifacts — isn't in
+            # those sources. This block IS the source of truth for those, so the
+            # header explicitly tells the model to answer them from it and NOT
+            # to deflect. Breadth only; stays a single injected row (no tools).
+            project_preamble = (
+                "[Project workspace facts — AUTHORITATIVE for THIS project, and "
+                "the source of truth for anything about the project itself. The "
+                "lines below are the real members (and their roles), the real "
+                "task/delegation ledger, and the real artifacts (PRDs, "
+                "prototypes, evidence, reports, ticket sets) of the project this "
+                "chat belongs to. When asked who is on this project, what tasks "
+                "are open / who is doing what, or how many / which PRDs or "
+                "artifacts exist, answer directly and specifically from these "
+                "facts. Do NOT say you cannot see them and do NOT tell the user "
+                "to connect a data source for them — this block IS that source.]"
+            )
             history = [
-                {"role": "context", "content": f"[Project context]\n{project_block}"}
+                {"role": "context", "content": f"{project_preamble}\n{project_block}"}
             ] + history
         # Best-effort bind (first-write-wins, mirrors bind_conversation_to_prd):
         # navigating away mid-generation must not orphan the conversation ↔

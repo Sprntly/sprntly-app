@@ -46,6 +46,7 @@ from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
+from app import project_group_context
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -120,6 +121,17 @@ Rules:
 - You have a delegate_task tool: when someone asks you to hand a specific
   task to a teammate, call it (pick the assignee from the roster below).
   Do not call it for a plain question, an FYI, or human-to-human chatter.
+
+You KNOW this project. The PROJECT CONTEXT block below gives you the
+project's shared memory, its members (the roster), its open tasks (the
+delegation ledger), and its artifacts (PRDs, prototypes, evidence,
+reports). Answer questions about any of these directly — never say you
+"can't see" the team's files, tasks, or members. For the FULL detail
+behind the summary, use your read tools: get_project_memory,
+list_project_artifacts, get_artifact_content (to read a specific PRD/
+report/evidence body), and get_task_ledger. Every one of these is scoped
+to THIS project only. When someone asks what a document says, call
+get_artifact_content and answer from the real content.
 """
 
 
@@ -947,9 +959,19 @@ def _respond_as_group_agent(
         assigner_user_id = trigger["author_user_id"] if trigger else None
         source_turn_id = trigger["id"] if trigger else None
         roster = projects_db.list_members(project_id)
+        dataset = _dataset_for(ctx)
         meta: dict = {}
 
         def _dispatch(name: str, tool_input: dict) -> str:
+            # Project-scoped read tools first (breadth+depth project awareness);
+            # returns None when `name` isn't one of them, so delegate_task and
+            # the unknown-tool fallback still apply.
+            read = project_group_context.dispatch_read_tool(
+                name, tool_input,
+                project_id=project_id, dataset=dataset, company_id=ctx.company_id,
+            )
+            if read is not None:
+                return read
             if name == "delegate_task":
                 return project_delegation.handle_delegate_task(
                     project_id=project_id,
@@ -957,16 +979,23 @@ def _respond_as_group_agent(
                     source_conversation_id=conversation_id,
                     source_turn_id=source_turn_id,
                     roster=roster,
-                    dataset=_dataset_for(ctx),
+                    dataset=dataset,
                     company_id=ctx.company_id,
                     tool_input=tool_input,
                 )
             return f"(unknown tool: {name})"
 
+        # Inject the bounded project-context block (best-effort, never raises)
+        # onto the roster system prompt, and hand the agent the read tools
+        # alongside delegate_task so it can answer AND retrieve on demand.
+        context_block = project_group_context.assemble_group_agent_context(
+            project_id, dataset, ctx.company_id
+        )
+        system = f"{_group_system_with_roster(roster)}\n\n{context_block}"
         reply = run_tool_loop(
-            system=_group_system_with_roster(roster),
+            system=system,
             user=transcript,
-            tools=[project_delegation.DELEGATE_TASK_TOOL],
+            tools=[project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()],
             dispatch=_dispatch,
             model=DEFAULT_MODEL,
             meta_out=meta,

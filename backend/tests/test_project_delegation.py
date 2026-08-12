@@ -511,6 +511,112 @@ def test_genesis_failure_does_not_rollback_delegation(isolated_settings, monkeyp
     assert events == [], "the forced-failing genesis event must never have been written"
 
 
+# ── Ledger-create liveness (publish delegation.event on genesis) ──────────
+# The emit route publishes a `delegation.event` on every later status change so
+# the Task ledger updates live. Creation is the one transition that route never
+# sees, so a fresh hand-off used to appear in the ledger only on the recipient's
+# next refetch. `handle_delegate_task` now mirrors that publish on the genesis
+# `assigned` — best-effort/no-rollback (AD-P22) — to BOTH parties' per-user
+# channels. These tests prove the publish fires on create.
+
+
+def test_delegation_create_publishes_event_to_both_parties(isolated_settings, monkeypatch):
+    """A successful hand-off publishes exactly one `delegation.event` to the
+    assigner's AND the assignee's per-user channel on creation — never the
+    group channel — carrying only the shaped status-DTO whitelist."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    # Shape the status DTO deterministically (the view's SQL is proven by the
+    # real-DB delegation-events round-trip; here we prove the publish WIRING).
+    monkeypatch.setattr(
+        project_delegation, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "assigned",
+            "status_at": "2026-08-10T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result
+
+    events = [p for p in published if p[1] == "delegation.event"]
+    assert len(events) == 2, published
+    topics = {t for t, _e, _p in events}
+    assert f"project:{project['id']}:user:{ctx.user_id}" in topics    # assigner
+    assert f"project:{project['id']}:user:{assignee_id}" in topics    # assignee
+    # A create is private to the two parties — never the group channel.
+    assert f"project:{project['id']}" not in topics
+    for _t, _e, payload in events:
+        assert set(payload) == {"delegation_id", "status", "status_at", "task_summary"}
+        assert payload["status"] == "assigned"
+
+
+def test_delegation_self_assign_publishes_event(isolated_settings, monkeypatch):
+    """Self-assign (assigner == assignee): the genesis publish still fires to
+    that user's own per-user channel — the one-channel case."""
+    ctx = company_client(monkeypatch)
+    project, _ = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    monkeypatch.setattr(
+        project_delegation, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "assigned",
+            "status_at": "2026-08-10T00:00:00Z", "task_summary": "x",
+        },
+    )
+    published: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event)),
+    )
+
+    # The assigner (full_name "Alex Assigner") is a member of their own project,
+    # so a hand-off to "Alex" resolves to self.
+    result = _delegate(project, ctx.user_id, assignee="Alex")
+    assert "Sent the brief" in result
+
+    event_topics = [t for t, e in published if e == "delegation.event"]
+    assert event_topics, published
+    assert all(t == f"project:{project['id']}:user:{ctx.user_id}" for t in event_topics)
+
+
+def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, monkeypatch):
+    """The create-publish is best-effort (AD-P22): a raising `status_dto` or
+    `publish_broadcast` must NOT roll back the delivered hand-off — the
+    delegation row still exists and the handler still returns normally."""
+    ctx = company_client(monkeypatch)
+    project, _ = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    def _boom(*a, **k):
+        raise RuntimeError("simulated status_dto failure")
+
+    monkeypatch.setattr(project_delegation, "status_dto", _boom)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result, "a create-publish hiccup must never break the hand-off"
+
+    from app.db.client import require_client
+
+    delegations = (
+        require_client()
+        .table("project_delegations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert len(delegations) == 1
+
+
 # ── Cost / observability (AC10/AC11) ──────────────────────────────────────
 
 

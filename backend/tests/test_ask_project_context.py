@@ -142,7 +142,11 @@ def test_ask_with_project_folds_memory_and_role(tenant_client, isolated_settings
     assert body["status"] == "ready"
     assert len(fake_llm["calls"]) == 1
     prompt = fake_llm["calls"][0]["user"]
-    assert "[Project context]" in prompt
+    # The private project chat now folds an AUTHORITATIVE project-facts block
+    # (the same breadth the @Sprntly group agent gets) rather than the older
+    # passive "[Project context]" header — the framing tells the model these
+    # lines are the source of truth and NOT to deflect to "connect a connector".
+    assert "AUTHORITATIVE for THIS project" in prompt
     assert "This project tracks the Q3 onboarding launch." in prompt
     assert "Ship by Friday — no exceptions." in prompt
     assert "Product Manager" in prompt

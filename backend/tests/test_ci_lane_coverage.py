@@ -319,6 +319,22 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "FakeSupabaseClient; this env-gated case is the real-DB proof, run "
         "locally when touching the invite primitives or the accept hook."
     ),
+    ("test_read_tool_idor_live.py", "RUN_READ_TOOL_IDOR_LIVE"): (
+        "Real local-Supabase round-trip for the @Sprntly group agent's project "
+        "read tools' tenancy scoping (`project_group_context.dispatch_read_tool`): "
+        "proves a genuine cross-project id (same company, sibling project) and a "
+        "genuine cross-tenant id (a second real company) are BOTH refused by "
+        "get_artifact_content against real rows, that the manifest gate is "
+        "load-bearing (add-ref -> content returns -> remove -> refused, RED->GREEN), "
+        "and that list_project_artifacts surfaces only this project's own artifact "
+        "— the manifest-intersection + get_report(id, company_id) gates a fake "
+        "in-memory store cannot fully exercise. Deterministic backstop: "
+        "test_project_group_context.py mutation-proofs the identical gate "
+        "(manifest-off -> refused, flip-on -> foreign content returns, restore -> "
+        "refused) against monkeypatched dependencies and runs in the fast lane on "
+        "every PR; this suite is the real-DB proof, run locally against the dev "
+        "rig when touching these read tools or `db/artifacts.py`."
+    ),
     ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
         "Needs a real local Supabase Realtime (the running Realtime service + "
         "a live websocket) to prove a `member.added` published through the "

@@ -141,6 +141,11 @@ def _run_sync(
     # `routes.ask._load_history` fetched it, ownership-checked, before the job
     # started — so this publishes what is in hand rather than reading again.
     history_token = ask_runner.set_active_history(history)
+    # Project-scoped ask (individual project chat): let qa_agent skip the
+    # connector-lookup interceptors so the folded, authoritative project-context
+    # block answers project-meta questions instead of a "connect a connector"
+    # deflection. None for every non-project ask (interceptors unchanged there).
+    project_id_token = ask_runner.set_active_project_id(project_id)
     try:
         payload = qa_agent.answer(
             enterprise_id=enterprise_id,
@@ -168,6 +173,7 @@ def _run_sync(
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
+        ask_runner.reset_active_project_id(project_id_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask

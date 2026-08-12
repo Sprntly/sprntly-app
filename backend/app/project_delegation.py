@@ -34,7 +34,7 @@ from app.db.conversations import (
     list_individual_turns,
     post_individual_turn,
 )
-from app.db.delegation_events import record_event
+from app.db.delegation_events import record_event, status_dto
 from app.db.project_delegations import record_delegation
 from app.db.projects import is_project_member, resolve_member
 from app.llm import DEFAULT_MODEL, call_md
@@ -443,6 +443,27 @@ def handle_delegate_task(
         # every other member. Entirely best-effort (AD-P22): see
         # `_publish_brief_delivered`.
         _publish_brief_delivered(project_id, assignee["user_id"], conv["id"], turn)
+        # Ledger-create liveness: mirror the emit route's publish so the Task
+        # ledger updates LIVE on CREATION too (not only on later status
+        # changes). Publish the shaped `assigned` status DTO to BOTH parties'
+        # per-user channels (the self-assign case → the one channel). Entirely
+        # best-effort (AD-P22): the delivery + fact are already committed, so a
+        # publish hiccup degrades to the client's next reconcile and NEVER
+        # changes this handler's return.
+        try:
+            dto = status_dto(deleg["id"])
+            if dto is not None:
+                _publish_delegation_event(
+                    project_id=project_id,
+                    assigner_user_id=assigner_user_id,
+                    assignee_user_id=assignee["user_id"],
+                    dto=dto,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: never blocks a delivered handoff
+            logger.warning(
+                "delegation_create_event_publish_prep_failed delegation_id=%s error_class=%s",
+                deleg["id"], type(exc).__name__,
+            )
         first = (assignee.get("name") or "").split()[0] if assignee.get("name") else "their"
         return f"Sent the brief to {first}'s chat."
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
