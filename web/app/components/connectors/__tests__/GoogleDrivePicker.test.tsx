@@ -794,13 +794,12 @@ describe("GoogleDriveServiceAccountView", () => {
         onScan: noopFn,
       }),
     )
-    // The full email is recoverable via the `title` attribute, but the
-    // visible text is a short preview + ellipsis, not the full address.
+    // The FULL email is rendered (ellipsised by field WIDTH via CSS, not a
+    // hard character cut) and is also carried in `title` for hover/inspection.
     expect(html).toContain(
       'title="sprntly-abc123-def456@proj.iam.gserviceaccount.com"',
     )
-    expect(html).toContain("sprntly-ab…")
-    expect(html).not.toContain(
+    expect(html).toContain(
       ">sprntly-abc123-def456@proj.iam.gserviceaccount.com<",
     )
     expect(html).toContain("Scan shared folders")
@@ -810,25 +809,31 @@ describe("GoogleDriveServiceAccountView", () => {
     expect(html).toContain("Nothing shared with this service account yet")
   })
 
-  it("shows a short email whole, with no ellipsis, when it is already at or under the preview length", () => {
-    const html = renderToStaticMarkup(
+  it("copies when the email field itself is clicked (the whole field is a copy target)", () => {
+    const onCopy = vi.fn()
+    renderDom(
       React.createElement(GoogleDriveServiceAccountView, {
-        email: "sa@x.io",
+        email: "sa@proj.iam.gserviceaccount.com",
         sharedRoots: [],
         folderContents: {},
         scanning: false,
         error: null,
         copied: false,
-        onCopy: noopFn,
+        onCopy,
         onScan: noopFn,
       }),
     )
-    expect(html).toContain('title="sa@x.io"')
-    expect(html).toContain(">sa@x.io<")
-    expect(html).not.toContain("…")
+    // Clicking anywhere on the field (not just the icon) copies.
+    fireEvent.click(screen.getByTitle("Click to copy"))
+    expect(onCopy).toHaveBeenCalledTimes(1)
+    // The icon button also copies, and stops the field from double-firing:
+    // one click on it → exactly one more call, not two.
+    fireEvent.click(screen.getByTitle("Copy"))
+    expect(onCopy).toHaveBeenCalledTimes(2)
+    cleanup()
   })
 
-  it("renders the share instruction, an Email label, and read-only guidance", () => {
+  it("renders the 3-step share instructions and an Email label", () => {
     const html = renderToStaticMarkup(
       React.createElement(GoogleDriveServiceAccountView, {
         email: "sa@proj.iam.gserviceaccount.com",
@@ -841,9 +846,12 @@ describe("GoogleDriveServiceAccountView", () => {
         onScan: noopFn,
       }),
     )
+    // Three scannable steps, not one run-on sentence.
+    expect(html).toContain("Copy the email address below.")
     expect(html).toContain(
-      "Copy the email address below. Go to your Google Drive and share your Google Drive with the email below.",
+      "Go to your Google Drive and share it with that email.",
     )
+    expect(html).toContain("Give it read-only access.")
     expect(html).toContain(">Email<")
     expect(html.toLowerCase()).toContain("read-only")
     expect(html).not.toContain("as Viewer, then click Scan")

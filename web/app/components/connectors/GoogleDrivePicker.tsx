@@ -345,17 +345,6 @@ export function mergePickedFiles(
 // Viewer), then clicks Scan — no OAuth Picker. Reuses DriveTreeChildren so the
 // scanned tree looks identical to the OAuth/drive.readonly tree.
 
-/** Preview of a long service-account email: first `n` characters + an
- * ellipsis. The full address is long and only ever needs copying, not
- * reading in full — so the visible text is a short preview while the full
- * string stays available via the copy payload and a `title` attribute.
- * Defensive: an email already at or under the preview length renders whole,
- * with no ellipsis. */
-export function previewEmail(email: string, n = 10): string {
-  if (email.length <= n) return email
-  return `${email.slice(0, n)}…`
-}
-
 export type GoogleDriveServiceAccountViewProps = {
   email: string | null
   sharedRoots: GoogleDriveTreeNode[]
@@ -397,25 +386,61 @@ export function GoogleDriveServiceAccountView({
   }
   return (
     <div className="conn-drive-setup">
-      <p className="conn-drive-selected-label">
-        Copy the email address below. Go to your Google Drive and share your
-        Google Drive with the email below.
-      </p>
-      <p className="conn-drive-selected-label">
-        Give it read-only access (not edit access).
-      </p>
-      <span className="conn-drive-selected-label">Email</span>
-      <div className="conn-drive-file-list">
-        <div className="conn-drive-file">
+      <ul
+        className="conn-drive-selected-label"
+        style={{ margin: "0 0 4px", paddingLeft: "18px", listStyle: "disc" }}
+      >
+        <li>Copy the email address below.</li>
+        <li>Go to your Google Drive and share it with that email.</li>
+        <li>Give it read-only access.</li>
+      </ul>
+      {/* Label on the LEFT, then a bordered field holding the full address
+          (ellipsised by width, full value in the tooltip + on copy) with the
+          copy button inside it. NB: the "Email" label is a plain span, NOT
+          .conn-drive-selected-label — that class is width:100% and would eat
+          the whole row, collapsing the field. */}
+      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+        <span
+          style={{
+            fontSize: "11px",
+            color: "var(--muted)",
+            flexShrink: 0,
+          }}
+        >
+          Email
+        </span>
+        {/* The whole field is a copy target: clicking anywhere on it (the
+            address or the icon) copies. role/tabIndex/keydown keep it operable
+            by keyboard, not mouse-only. */}
+        <div
+          className="conn-drive-file"
+          style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+          role="button"
+          tabIndex={0}
+          aria-label={copied ? "Copied" : "Copy service account email"}
+          title={copied ? "Copied" : "Click to copy"}
+          onClick={onCopy}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              onCopy()
+            }
+          }}
+        >
           <span className="conn-drive-file-name" title={email}>
-            {previewEmail(email)}
+            {email}
           </span>
           <button
             type="button"
             className="conn-drive-file-remove"
+            style={{ flexShrink: 0 }}
             aria-label={copied ? "Copied" : "Copy service account email"}
             title={copied ? "Copied" : "Copy"}
-            onClick={onCopy}
+            // Field-level onClick already copies; stop this from double-firing.
+            onClick={(e) => {
+              e.stopPropagation()
+              onCopy()
+            }}
           >
             {copied ? "✓" : "⧉"}
           </button>
