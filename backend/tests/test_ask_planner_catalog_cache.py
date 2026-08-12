@@ -315,6 +315,10 @@ def test_writing_a_document_drops_the_planner_cache(monkeypatch):
             "delete_custom_skill", "detach_skills_from_source",
         ]),
         ("app.document_catalog", ["register_document", "deregister_document"]),
+        ("app.db.artifact_templates", [
+            "insert_template", "update_template", "set_compile_result",
+            "set_template_summary", "delete_template",
+        ]),
     ],
 )
 def test_every_known_write_path_invalidates(module, names):

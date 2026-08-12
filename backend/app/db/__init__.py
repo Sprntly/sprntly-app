@@ -152,6 +152,7 @@ from app.db.artifact_templates import (
     insert_template,
     list_templates,
     set_compile_result,
+    set_template_summary,
     update_template,
 )
 

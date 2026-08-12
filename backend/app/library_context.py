@@ -209,6 +209,14 @@ def _template_lines(enterprise_id: str) -> tuple[dict[str, list[str]], bool]:
             )
         uploader = _one_line(row.get("uploader_name"), _NAME_CHARS)
         line = f"- {name} — {state}"
+        # What the format CONTAINS (artifact_templates.summary, written at
+        # compile time). This block is what answers "what's in the Acme
+        # format?", so the description belongs here; absent (legacy row the
+        # self-heal hasn't reached, or a failed summary call) the line simply
+        # says less, which is still true.
+        summary = _one_line(row.get("summary"), _DESCRIPTION_CHARS)
+        if summary:
+            line += f". {summary}"
         if uploader:
             line += f" (uploaded by {uploader})"
         grouped[kind].append(line)

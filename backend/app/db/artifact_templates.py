@@ -163,6 +163,10 @@ def insert_template(
         "section_map": json.dumps({}),
         "compile_status": "pending",
         "compile_notes": json.dumps([]),
+        # '' = "no summary yet"; the compile that validates this row writes the
+        # real one (summarize.generate_summary), so a fresh upload is never
+        # described by anything.
+        "summary": "",
         "content_hash": content_hash,
         "is_active": False,
         "uploader_id": uploader_id,
@@ -182,8 +186,8 @@ def insert_template(
 # is exactly what the list is supposed to avoid.
 _LIST_COLUMNS = (
     "id, company_id, artifact_type, name, source_chars, compile_status, "
-    "compile_notes, content_hash, is_active, uploader_id, uploader_name, "
-    "created_at, updated_at"
+    "compile_notes, summary, content_hash, is_active, uploader_id, "
+    "uploader_name, created_at, updated_at"
 )
 
 
@@ -300,6 +304,7 @@ def set_compile_result(
     compiled: str | None = None,
     section_map: dict | None = None,
     compile_notes: list | None = None,
+    summary: str | None = None,
 ) -> dict | None:
     """Record what a compile produced; returns the decoded row, or None for a
     missing-or-foreign id.
@@ -310,6 +315,12 @@ def set_compile_result(
     currently generating with — the new value is written only when a compile
     succeeds, so the last good format keeps serving until the new one validates.
     Callers that genuinely want to clear them pass `""` / `{}` explicitly.
+
+    `summary` follows the same None-means-leave-it rule, but with the OPPOSITE
+    explicit case: a successful compile passes it even when generation failed
+    and it is '' — a summary describing source text that has since been replaced
+    is worse than no summary, so success paths overwrite and failure paths
+    (which change no source) leave the old one standing.
 
     `compile_notes` is a list of {code, message} objects, never free text: the
     web keys a translation table on `code`, so a raw validator note must never
@@ -324,6 +335,8 @@ def set_compile_result(
         patch["section_map"] = json.dumps(section_map)
     if compile_notes is not None:
         patch["compile_notes"] = json.dumps(compile_notes)
+    if summary is not None:
+        patch["summary"] = summary
     c = require_client()
     resp = (
         c.table("artifact_templates")
@@ -335,6 +348,38 @@ def set_compile_result(
     # A compile is what turns an uploaded format into a usable one, so the
     # planner's cached `compile_status` is exactly what decides whether it may
     # be named — stale here means refusing a format that just became ready.
+    _drop_planner_cache(company_id)
+    return _decode(resp.data[0] if resp.data else {**row, **patch})
+
+
+def set_template_summary(
+    *, company_id: str, template_id: str, summary: str
+) -> dict | None:
+    """Write ONLY the summary; returns the decoded row, or None for a
+    missing-or-foreign id.
+
+    The self-heal backfill's writer (`summarize._summarize_row`) — a row
+    uploaded before the summary column existed gets described without touching
+    its compile state, notes, or skeleton. Deliberately not routed through
+    `set_compile_result`: that signature requires a `compile_status`, and the
+    backfill has no business restating one a compile already wrote (a racing
+    recompile could have moved it between this path's read and write).
+
+    Drops the planner's catalog cache like every other write here — the drop IS
+    the self-heal loop's second half: the next plan re-reads the library and
+    sees the summary this write landed."""
+    row = get_template_by_id(company_id, template_id)
+    if row is None:
+        return None
+    patch = {"summary": summary, "updated_at": _now_iso()}
+    c = require_client()
+    resp = (
+        c.table("artifact_templates")
+        .update(patch)
+        .eq("company_id", company_id)
+        .eq("id", template_id)
+        .execute()
+    )
     _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, **patch})
 
