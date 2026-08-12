@@ -9,8 +9,10 @@ export type LegalSection = {
 
 type Props = {
   title: string
-  effective: string
-  lastUpdated: string
+  /** Omit both dates for undated pages (e.g. Support) — the meta line is
+   *  skipped entirely rather than rendered with blanks. */
+  effective?: string
+  lastUpdated?: string
   sections: LegalSection[]
   contactEmail: string
   contactLabel: string
@@ -39,11 +41,13 @@ export function LegalDocument({
 
       <main className="legal-main">
         <h1 className="legal-title">{title}</h1>
-        <p className="legal-meta">
-          Effective date: {effective}
-          <br />
-          Last updated: {lastUpdated}
-        </p>
+        {effective || lastUpdated ? (
+          <p className="legal-meta">
+            {effective ? <>Effective date: {effective}</> : null}
+            {effective && lastUpdated ? <br /> : null}
+            {lastUpdated ? <>Last updated: {lastUpdated}</> : null}
+          </p>
+        ) : null}
 
         {beforeSections}
 
