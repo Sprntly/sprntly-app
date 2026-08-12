@@ -77,6 +77,13 @@ vi.mock("../../AppLayout", () => ({
 vi.mock("../../../../../context/NavigationContext", () => ({
   useNavigation: () => ({ openModal: openModalMock }),
 }))
+// The container mounts `<ArtifactsModal>`, whose redesign reads `useRouter` for
+// its legacy deep-link fallback. Stub it — no Next app-router provider exists in
+// jsdom — or the shell throws on mount. `onOpenInPlace` is always wired here, so
+// the router `push` is never actually reached.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
 vi.mock("next/link", () => ({
   default: ({
     href,
@@ -216,7 +223,11 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onSelectChat: noop,
     individualUnread: false,
     ledgerCounts: { assigned_to_me_open: 0, waiting_on_open: 0 },
+    ledgerRows: [],
     onOpenArtifacts: noop,
+    onOpenArtifactInPlace: noop,
+    openArtifact: null,
+    onCloseArtifactDrawer: noop,
     onCreateArtifact: noop,
     onOpenMemory: noop,
     onAddMemory: noop,
@@ -263,12 +274,17 @@ describe("ProjectDetailView — top bar", () => {
 })
 
 describe("ProjectDetailView — right rail structure", () => {
-  it("renders CHATS / ARTIFACTS / PROJECT / MEMBERS in order, with no Overview card", () => {
+  it("renders the chat switcher, then ARTIFACTS / PROJECT / MEMBERS sections in order, with no Overview card", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
+    // Redesign: the mockup leads the rail with Artifacts, so the group⇆private
+    // Chat switch is now a compact segmented control at the top of the rail
+    // (`rail-chat-toggle`, a role="tablist") rather than its own "Chats"
+    // rail-section-label. The remaining labelled sections keep their order.
+    expect(screen.getByTestId("rail-chat-toggle")).toBeTruthy()
     const labels = screen
       .getAllByTestId("rail-section-label")
       .map((el) => (el.textContent?.trim().match(/^[A-Za-z]+/) ?? [""])[0])
-    expect(labels).toEqual(["Chats", "Artifacts", "Project", "Members"])
+    expect(labels).toEqual(["Artifacts", "Project", "Members"])
     expect(screen.queryByText("Overview")).toBeNull()
   })
 
@@ -349,11 +365,27 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(screen.getByTestId("artifact-create")).toBeTruthy()
   })
 
-  it("clicking an artifact card's ↗ opens artifacts for that type", () => {
+  it("clicking a MULTI-item artifact card's ↗ opens the browse modal for that type", () => {
+    // Evidence has 2 items in the fixture → no single artifact to open in
+    // place → the card still routes to the browse modal (onOpenArtifacts).
     const onOpenArtifacts = vi.fn()
     render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts })))
+    fireEvent.click(screen.getByTestId("artifact-card-evidence"))
+    expect(onOpenArtifacts).toHaveBeenCalledWith("evidence")
+  })
+
+  it("clicking a SINGLE in-place-type artifact card opens that artifact in the side drawer, not the modal", () => {
+    // Redesign: a rail card for an in-place type (prd/evidence/prototype) that
+    // maps to exactly ONE artifact opens it IN-PLACE beside the chat
+    // (onOpenArtifactInPlace) rather than the browse modal. The PRD fixture is
+    // a single item, so its card takes that path.
+    const onOpenArtifacts = vi.fn()
+    const onOpenArtifactInPlace = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts, onOpenArtifactInPlace })))
     fireEvent.click(screen.getByTestId("artifact-card-prd"))
-    expect(onOpenArtifacts).toHaveBeenCalledWith("prd")
+    expect(onOpenArtifactInPlace).toHaveBeenCalledTimes(1)
+    expect(onOpenArtifactInPlace.mock.calls[0][0]).toMatchObject({ type: "prd", id: 1 })
+    expect(onOpenArtifacts).not.toHaveBeenCalled()
   })
 
   it("Project-memory card teaser is the summary's first sentence, with the entry count and View all/Add", () => {
@@ -429,16 +461,18 @@ describe("ProjectDetailView — state", () => {
     render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
     const groupRow = screen.getByTestId("chat-row-group")
     const indivRow = screen.getByTestId("chat-row-individual")
-    expect(groupRow.getAttribute("aria-pressed")).toBe("true")
-    expect(indivRow.getAttribute("aria-pressed")).toBe("false")
+    // Redesign: the chat switch is a segmented tablist, so active-state is
+    // exposed via aria-selected on role="tab" (not aria-pressed).
+    expect(groupRow.getAttribute("aria-selected")).toBe("true")
+    expect(indivRow.getAttribute("aria-selected")).toBe("false")
     fireEvent.click(indivRow)
     expect(onSelectChat).toHaveBeenCalledWith("individual")
   })
 
   it("the individual chat row renders active when activeChat='individual'", () => {
     render(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    expect(screen.getByTestId("chat-row-individual").getAttribute("aria-pressed")).toBe("true")
-    expect(screen.getByTestId("chat-row-group").getAttribute("aria-pressed")).toBe("false")
+    expect(screen.getByTestId("chat-row-individual").getAttribute("aria-selected")).toBe("true")
+    expect(screen.getByTestId("chat-row-group").getAttribute("aria-selected")).toBe("false")
   })
 
   it("test_rail_badge_shows_and_clears — the individual row renders an unread dot when individualUnread is true, and none when false", () => {
@@ -482,7 +516,10 @@ describe("ProjectDetailView — accessibility", () => {
     expect(screen.getByTestId("chat-row-group").tagName).toBe("BUTTON")
     expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
     expect(screen.getByTestId("artifact-card-prd").tagName).toBe("BUTTON")
-    expect(screen.getByLabelText("Open PRD artifacts")).toBeTruthy()
+    // The single-item PRD card opens in place → its accessible name is "Open
+    // PRD"; a multi-item type keeps the "Browse … artifacts" browse label.
+    expect(screen.getByLabelText("Open PRD")).toBeTruthy()
+    expect(screen.getByLabelText("Browse Evidence artifacts")).toBeTruthy()
     expect(screen.getByLabelText("Invite by email")).toBeTruthy()
   })
 
@@ -527,17 +564,18 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
     const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
     // Baseline declaration count was 8 (state/rail/activeChat/railModal/
     // removeTarget/removeBusy/removeError/individualUnread). The ledger-UI
-    // work added ONE — `ledgerCounts` (the open-only delegation counts for the
-    // Task-ledger rail card, mirrored from the server's derived counts on
-    // fetch/poll the same way `individualUnread` is). The ledger-liveness work
-    // adds exactly ONE more, legitimately in its own declared scope —
-    // `ledgerVersion` (a monotonic signal bumped on a live `delegation.event`
-    // / reconnect reconcile so an open Task modal re-reads; a pure signal, not
-    // stored derived-state). The guard this test protects — no NEW state for
-    // the AGENT STATUS pulse specifically — still holds: `posting` (the
-    // ask-composer wiring this guard was written against) is still absent.
+    // work added `ledgerCounts` (9) and the ledger-liveness work added
+    // `ledgerVersion` (10). The Projects screen redesign adds exactly TWO more,
+    // each legitimately in its own declared scope: `ledgerRows` (a small
+    // OPEN-rows preview for the Task-ledger rail card — best-effort, party-
+    // filtered reads mirrored the same way `ledgerCounts` is) and `openArtifact`
+    // (the artifact opened IN-PLACE in the side-by-side drawer beside the chat;
+    // a pure local UI toggle, never the URL / never stored derived-state). The
+    // guard this test protects — no NEW state for the AGENT STATUS pulse
+    // specifically — still holds: `posting` (the ask-composer wiring this guard
+    // was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(10)
+    expect(useStateDeclarations).toHaveLength(12)
     expect(src).not.toContain("posting")
   })
 })

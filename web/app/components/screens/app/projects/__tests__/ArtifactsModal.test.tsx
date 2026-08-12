@@ -34,6 +34,15 @@ vi.mock("../../../../../lib/api", () => {
   }
 })
 
+// The redesign's ArtifactsModal container now reads `useRouter` for its legacy
+// deep-link FALLBACK (used only when no in-place `onOpenInPlace` is wired). The
+// hook must resolve to a stub here — there is no Next app-router provider in
+// jsdom — or the container throws on mount. The Projects screen always passes
+// `onOpenInPlace`, so this stub's `push` is never actually invoked.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
+
 import { ArtifactsModalView, ArtifactsModal, type ArtifactsModalViewProps } from "../ArtifactsModal"
 import { ApiError } from "../../../../../lib/api"
 import type { ArtifactItem } from "../../../../../lib/api"
@@ -83,6 +92,7 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
     onFilterChange: noop,
     selected: null,
     onSelect: noop,
+    onOpen: noop,
     onClose: noop,
     ...overrides,
   }

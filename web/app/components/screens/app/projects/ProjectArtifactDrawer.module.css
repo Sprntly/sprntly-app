@@ -1,0 +1,253 @@
+/* ProjectArtifactDrawer — in-place artifact viewer. Tokens only, from
+   globals.css :root (no new palette).
+
+   AD-HOC (live-rig): this is now a LAYOUT COLUMN beside the group chat, not
+   a blocking overlay. It fills its own grid cell in ProjectDetailScreen's
+   `.body` (the right region the rail normally occupies), so the chat to its
+   left stays fully interactive — scroll, type, send — while the artifact
+   is open. No backdrop, no scrim; a plain left border separates the two. */
+
+.drawer {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--line-strong);
+  animation: projectDrawerSlide 0.18s ease-out;
+}
+
+@keyframes projectDrawerSlide {
+  from {
+    transform: translateX(18px);
+    opacity: 0.5;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .drawer {
+    animation: none;
+  }
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 13px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  border-radius: 5px;
+  padding: 3px 8px;
+  flex-shrink: 0;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-serif);
+  font-size: 16px;
+  font-weight: 400;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.close {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--ink-3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+/* Read-only rendered markdown (PRD / evidence body). Scoped to this doc — no
+   globals touched. Spacing/typography off tokens. */
+.doc {
+  padding: 22px 26px 40px;
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--ink-2);
+  max-width: 720px;
+}
+
+.doc :global(h1),
+.doc :global(h2),
+.doc :global(h3) {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  color: var(--ink);
+  line-height: 1.25;
+  margin: 1.4em 0 0.5em;
+}
+
+.doc :global(h1) {
+  font-size: 22px;
+  margin-top: 0;
+}
+
+.doc :global(h2) {
+  font-size: 18px;
+}
+
+.doc :global(h3) {
+  font-size: 15px;
+}
+
+.doc :global(p),
+.doc :global(ul),
+.doc :global(ol),
+.doc :global(blockquote),
+.doc :global(table) {
+  margin: 0 0 0.9em;
+}
+
+.doc :global(ul),
+.doc :global(ol) {
+  padding-left: 1.3em;
+}
+
+.doc :global(li) {
+  margin: 0.2em 0;
+}
+
+.doc :global(a) {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.doc :global(code) {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.doc :global(pre) {
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0 0 1em;
+}
+
+.doc :global(pre code) {
+  background: none;
+  padding: 0;
+}
+
+.doc :global(blockquote) {
+  border-left: 3px solid var(--accent-soft);
+  padding-left: 14px;
+  color: var(--ink-3);
+}
+
+.doc :global(table) {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.doc :global(th),
+.doc :global(td) {
+  border: 1px solid var(--line);
+  padding: 6px 9px;
+  text-align: left;
+}
+
+.doc :global(th) {
+  background: var(--surface-2);
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.doc :global(hr) {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 1.4em 0;
+}
+
+.reportFrame {
+  width: 100%;
+  height: 100%;
+  border: none;
+  background: var(--surface);
+}
+
+.state {
+  padding: 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.stateNote {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink-3);
+  line-height: 1.5;
+}
+
+.skeletonLine {
+  height: 13px;
+  border-radius: 5px;
+  background: var(--surface-3);
+}
+
+.externalBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: flex-start;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--nav);
+  border-radius: 999px;
+  padding: 8px 15px;
+  text-decoration: none;
+}
+
+.externalBtn:hover {
+  background: var(--nav-2);
+}
+
+.externalBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

@@ -89,7 +89,10 @@ describe("ProjectGroupChat — AD-P13 reuse (source scan)", () => {
     expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
     expect(src).toContain('from "../../../shared/AssistantWaitState"')
     expect(src).toContain('from "../../../shared/OpenArtifactChips"')
-    expect(src).toContain('from "../../../shared/app-icons"')
+    // The redesign renders the agent avatar as the plain Sprntly wordmark glyph
+    // ("s"), so the shared IconSparkle/app-icons import is no longer pulled in
+    // here — a removed dependency, not a bespoke reimplementation (the reuse
+    // guard below still holds: no second markdown/chip/skeleton is defined).
     expect(src).toContain('from "../../../shared/ChatComposer"')
     // No second implementation of any of these.
     expect(src).not.toMatch(/function\s+AskReplyBody/)
@@ -163,14 +166,19 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
-  it("an agent turn triggered by an @Sprntly mention shows the invoker tag", async () => {
+  it("an agent turn triggered by an @Sprntly mention shows the invoked-by state badge", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly can you help?" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const invoker = await screen.findByTestId("gc-invoker")
-    expect(invoker.textContent).toContain("Shristi")
+    // The redesign replaced the invoke-only `gc-invoker` tag with an
+    // always-present agent state badge (`gc-state-badge`): an @Sprntly-triggered
+    // turn reads "invoked by <first name>"; a mention-less one reads "detected
+    // this was for it". Same smart-interjection semantics, one durable hook.
+    const badge = await screen.findByTestId("gc-state-badge")
+    expect(badge.textContent).toContain("invoked by")
+    expect(badge.textContent).toContain("Shristi")
   })
 
   it("renders OpenArtifactChips on an agent turn and fires the open callback on click", async () => {

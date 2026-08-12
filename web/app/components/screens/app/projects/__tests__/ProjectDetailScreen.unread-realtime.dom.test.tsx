@@ -53,6 +53,12 @@ vi.mock("../../AppLayout", () => ({
 vi.mock("../../../../../context/NavigationContext", () => ({
   useNavigation: () => ({ openModal: openModalMock }),
 }))
+// The container mounts `<ArtifactsModal>`, whose redesign reads `useRouter` for
+// its legacy deep-link fallback — stub it (no Next app-router provider in jsdom)
+// or the shell throws on mount.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
 vi.mock("next/link", () => ({
   default: ({
     href,

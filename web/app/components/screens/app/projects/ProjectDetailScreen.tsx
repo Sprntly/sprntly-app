@@ -39,6 +39,7 @@ import {
   projectsApi,
   type ArtifactItem,
   type DelegationCounts,
+  type DelegationLedgerRow,
   type ProjectArtifactType,
   type ProjectDetail,
   type ProjectMember,
@@ -48,6 +49,7 @@ import {
 import { ProjectMainThread } from "./ProjectMainThread"
 import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
+import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import styles from "./ProjectDetailScreen.module.css"
@@ -127,6 +129,11 @@ function mostRecent(items: ArtifactItem[]): string {
   }
   return latest
 }
+
+/** Types the in-place `ProjectArtifactDrawer` can render/route (prd/evidence
+ *  markdown-or-HTML, prototype → canvas link). `report`/`ticket_set` have no
+ *  in-place viewer, so their rail cards keep opening the browse modal. */
+const IN_PLACE_TYPES: ProjectArtifactType[] = ["prd", "evidence", "prototype"]
 
 // ── Small icons ──
 
@@ -251,7 +258,25 @@ export type ProjectDetailViewProps = {
    *  way `individualUnread` is — `null` before the first fetch resolves or
    *  when it failed (a best-effort convenience; the modal is the authority). */
   ledgerCounts: DelegationCounts | null
+  /** A small preview of OPEN ledger rows for the rail card's checklist — the
+   *  real party-filtered reads (`assigned_to_me` + `waiting_on`), capped for
+   *  the rail. Empty before the first fetch resolves or when none are open;
+   *  the modal (`onOpenTasks`) stays the authority. */
+  ledgerRows: DelegationLedgerRow[]
   onOpenArtifacts: (type?: ProjectArtifactType) => void
+  /** Open ONE artifact IN-PLACE in the drawer beside the chat (no route
+   *  change, no modal). The rail's per-type card uses this for a type that
+   *  maps to a single openable artifact; a multi-artifact type falls back to
+   *  `onOpenArtifacts` (the browse modal). Same handler the ArtifactsModal's
+   *  "Open ↗" routes through. */
+  onOpenArtifactInPlace: (artifact: ArtifactItem) => void
+  /** The artifact currently open IN-PLACE beside the chat (`null` = closed).
+   *  AD-HOC (live-rig): when set, the drawer renders as the RIGHT LAYOUT
+   *  COLUMN of the body grid — replacing the rail — so the chat stays a
+   *  fully interactive column to its left. */
+  openArtifact: ArtifactItem | null
+  /** Closes the in-place drawer and restores the rail. */
+  onCloseArtifactDrawer: () => void
   onCreateArtifact: () => void
   onOpenMemory: () => void
   onAddMemory: () => void
@@ -289,7 +314,11 @@ export function ProjectDetailView({
   onSelectChat,
   individualUnread,
   ledgerCounts,
+  ledgerRows,
   onOpenArtifacts,
+  onOpenArtifactInPlace,
+  openArtifact,
+  onCloseArtifactDrawer,
   onCreateArtifact,
   onOpenMemory,
   onAddMemory,
@@ -303,6 +332,11 @@ export function ProjectDetailView({
   const agent = useMemo(() => project.members.find((m): m is Extract<ProjectMember, { kind: "agent" }> => m.kind === "agent"), [project.members])
   const byType = useMemo(() => groupArtifactsByType(artifacts), [artifacts])
   const presentTypes = TYPE_ORDER.filter((t) => (byType[t]?.length ?? 0) > 0)
+  // AD-HOC (live-rig): the in-place artifact drawer is a LAYOUT COLUMN, not
+  // an overlay. When one is open it takes the right region (where the rail
+  // sits), the body grid reflows to [ chat | drawer ], the rail hides, and
+  // the chat column to the left stays fully interactive.
+  const drawerOpen = openArtifact != null
 
   return (
     <div className={styles.shell}>
@@ -338,7 +372,11 @@ export function ProjectDetailView({
         </button>
       </header>
 
-      <div className={`${styles.body} ${railCollapsed ? styles.bodyRailCollapsed : ""}`}>
+      <div
+        className={`${styles.body} ${
+          drawerOpen ? styles.bodyDrawerOpen : railCollapsed ? styles.bodyRailCollapsed : ""
+        }`}
+      >
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
@@ -371,45 +409,50 @@ export function ProjectDetailView({
           </div>
         </main>
 
-        {!railCollapsed ? (
+        {drawerOpen ? (
+          // Right region: the in-place artifact drawer, side-by-side with the
+          // still-interactive chat column. Replaces the rail while open;
+          // closing it (its own close control / Escape) restores the rail.
+          <ProjectArtifactDrawer artifact={openArtifact} onClose={onCloseArtifactDrawer} />
+        ) : !railCollapsed ? (
           <aside className={styles.rail} aria-label="Project panel" data-testid="project-rail">
-            <div className={styles.railSectionLabel} data-testid="rail-section-label">
-              Chats
-            </div>
-            <button
-              type="button"
-              className={`${styles.chatRow} ${activeChat === "group" ? styles.chatRowActive : ""}`}
-              onClick={() => onSelectChat("group")}
-              aria-pressed={activeChat === "group"}
-              data-testid="chat-row-group"
-            >
-              <span className={styles.chatRowIcon} aria-hidden="true">
+            {/* Compact chat switcher (redesign): the mockup leads the rail with
+                Artifacts, so the group⇆private toggle rides a small segmented
+                control at the top rather than two full rows. Same behavior +
+                test hooks as before. */}
+            <div className={styles.chatToggle} role="tablist" aria-label="Chat" data-testid="rail-chat-toggle">
+              <button
+                type="button"
+                role="tab"
+                className={`${styles.chatToggleBtn} ${activeChat === "group" ? styles.chatToggleBtnActive : ""}`}
+                onClick={() => onSelectChat("group")}
+                aria-selected={activeChat === "group"}
+                data-testid="chat-row-group"
+              >
                 <GroupChatIcon />
-              </span>
-              <span className={styles.chatRowTitle}>Group chat</span>
-              <span className={styles.chatRowDot} title="active now" aria-label="active now" />
-            </button>
-            <button
-              type="button"
-              className={`${styles.chatRow} ${activeChat === "individual" ? styles.chatRowActive : ""}`}
-              onClick={() => onSelectChat("individual")}
-              aria-pressed={activeChat === "individual"}
-              data-testid="chat-row-individual"
-            >
-              <span className={styles.chatRowIcon} aria-hidden="true">
+                Group
+                <span className={styles.chatToggleDot} title="active now" aria-label="active now" />
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={`${styles.chatToggleBtn} ${activeChat === "individual" ? styles.chatToggleBtnActive : ""}`}
+                onClick={() => onSelectChat("individual")}
+                aria-selected={activeChat === "individual"}
+                data-testid="chat-row-individual"
+              >
                 <LockIcon />
-              </span>
-              <span className={styles.chatRowTitle}>My chat with Sprntly</span>
-              {individualUnread ? (
-                <span
-                  className={styles.chatRowUnreadDot}
-                  title="unread"
-                  aria-label="unread"
-                  data-testid="individual-chat-unread-dot"
-                />
-              ) : null}
-              <span className={styles.chatRowPrivate}>private</span>
-            </button>
+                Private
+                {individualUnread ? (
+                  <span
+                    className={styles.chatRowUnreadDot}
+                    title="unread"
+                    aria-label="unread"
+                    data-testid="individual-chat-unread-dot"
+                  />
+                ) : null}
+              </button>
+            </div>
 
             <div className={styles.railSectionLabel} data-testid="rail-section-label">
               Artifacts
@@ -418,13 +461,18 @@ export function ProjectDetailView({
             {presentTypes.map((t) => {
               const items = byType[t] ?? []
               const cfg = TYPE_BADGE[t]
+              // Single openable artifact → open it directly in the in-place
+              // drawer (no modal). Multiple of an openable type → the browse
+              // modal (pick which). Non-in-place types (report/ticket_set) →
+              // always the modal, unchanged.
+              const openInPlace = IN_PLACE_TYPES.includes(t) && items.length === 1
               return (
                 <button
                   type="button"
                   key={t}
                   className={styles.artifactCard}
-                  onClick={() => onOpenArtifacts(t)}
-                  aria-label={`Open ${cfg.label} artifacts`}
+                  onClick={() => (openInPlace ? onOpenArtifactInPlace(items[0]) : onOpenArtifacts(t))}
+                  aria-label={openInPlace ? `Open ${cfg.label}` : `Browse ${cfg.label} artifacts`}
                   data-testid={`artifact-card-${t}`}
                 >
                   <ArtifactTypeIcon type={t} />
@@ -483,18 +531,43 @@ export function ProjectDetailView({
                   <ChecklistIcon />
                   Task ledger
                 </h4>
+                {ledgerCounts && ledgerCounts.assigned_to_me_open > 0 ? (
+                  <span className={styles.cardCount}>{ledgerCounts.assigned_to_me_open} for you</span>
+                ) : null}
               </div>
-              <p
-                style={{ margin: "0 0 4px", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.45 }}
-                data-testid="task-ledger-counts"
-              >
-                {ledgerCounts
-                  ? `${ledgerCounts.assigned_to_me_open} assigned to you · ${ledgerCounts.waiting_on_open} you're waiting on`
-                  : "Who owes what across the project — open it to see."}
-              </p>
+              {ledgerRows.length > 0 ? (
+                <div className={styles.taskList} data-testid="task-ledger-rows">
+                  {ledgerRows.slice(0, 4).map((row) => (
+                    <div className={styles.taskRow} key={row.delegation_id} data-testid="task-ledger-row">
+                      <span className={styles.taskBox} aria-hidden="true" />
+                      <span className={styles.taskSummary} title={row.task_summary}>
+                        {row.task_summary}
+                      </span>
+                      <span
+                        className={styles.taskAssignee}
+                        title={row.other_party_name ?? "Assignee"}
+                        aria-hidden="true"
+                      >
+                        {initials(row.other_party_name)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p
+                  style={{ margin: "0 0 4px", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.45 }}
+                  data-testid="task-ledger-counts"
+                >
+                  {ledgerCounts
+                    ? `${ledgerCounts.assigned_to_me_open} assigned to you · ${ledgerCounts.waiting_on_open} you're waiting on`
+                    : "Who owes what across the project — open it to see."}
+                </p>
+              )}
               <div className={styles.cardActions}>
                 <button type="button" className={styles.viewAllBtn} onClick={onOpenTasks} data-testid="task-ledger-view-all">
-                  View all tasks
+                  View all{" "}
+                  {ledgerCounts ? ledgerCounts.assigned_to_me_open + ledgerCounts.waiting_on_open : ledgerRows.length}{" "}
+                  tasks
                 </button>
               </div>
             </div>
@@ -619,6 +692,14 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   // `individualUnread` above (a convenience readout; the modal is the
   // authority). `null` until the first fetch resolves, or when it failed.
   const [ledgerCounts, setLedgerCounts] = useState<DelegationCounts | null>(null)
+  // A small preview of OPEN ledger rows for the rail card's checklist. Real,
+  // party-filtered reads (`assigned_to_me` + `waiting_on`), deduped and capped
+  // — best-effort (a dropped fetch just leaves the counts line showing). The
+  // TaskModal stays the authority on the full ledger.
+  const [ledgerRows, setLedgerRows] = useState<DelegationLedgerRow[]>([])
+  // The artifact opened IN-PLACE beside the chat (AD-HOC: no route change).
+  // `null` = drawer closed. Driven purely by local state, never the URL.
+  const [openArtifact, setOpenArtifact] = useState<ArtifactItem | null>(null)
   // Monotonic signal bumped whenever a live `delegation.event` (or a reconnect
   // reconcile) lands on the caller's per-user channel — passed to `TaskModal`
   // so an OPEN modal refetches its party-filtered reads without a reopen
@@ -676,6 +757,28 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         /* best-effort — a dropped read leaves the last-known counts on the card */
       })
   }, [projectId])
+  // The rail-card checklist preview: both party-filtered OPEN reads, merged
+  // (dedup by delegation_id; assigned-to-me first). Best-effort — a dropped
+  // read leaves the last-known rows (or the counts line) showing.
+  const refetchLedgerRows = useCallback(() => {
+    Promise.all([
+      projectsApi.ledger(projectId, "assigned_to_me").catch(() => [] as DelegationLedgerRow[]),
+      projectsApi.ledger(projectId, "waiting_on").catch(() => [] as DelegationLedgerRow[]),
+    ])
+      .then(([mine, waiting]) => {
+        const seen = new Set<number>()
+        const open: DelegationLedgerRow[] = []
+        for (const row of [...mine, ...waiting]) {
+          if (row.bucket !== "open" || seen.has(row.delegation_id)) continue
+          seen.add(row.delegation_id)
+          open.push(row)
+        }
+        setLedgerRows(open)
+      })
+      .catch(() => {
+        /* best-effort — leave the last-known rows */
+      })
+  }, [projectId])
   // The caller's OWN per-user channel carries BOTH `brief.delivered` (R1-05,
   // the unread badge) and `delegation.event` (the ledger status change): the
   // latter refetches the rail counts and bumps `ledgerVersion` so an open
@@ -688,10 +791,11 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       }
       if (event === "delegation.event") {
         refetchLedgerCounts()
+        refetchLedgerRows()
         setLedgerVersion((v) => v + 1)
       }
     },
-    [refetchLedgerCounts],
+    [refetchLedgerCounts, refetchLedgerRows],
   )
   const handleUnreadReconcile = useCallback(() => {
     projectsApi
@@ -703,8 +807,9 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
     // Ledger surfaces reconcile on reconnect too (AD-P22 reconcile authority):
     // refetch the counts and bump the modal so an open ledger re-reads once.
     refetchLedgerCounts()
+    refetchLedgerRows()
     setLedgerVersion((v) => v + 1)
-  }, [projectId, refetchLedgerCounts])
+  }, [projectId, refetchLedgerCounts, refetchLedgerRows])
   const unreadTopic = currentUserId ? `project:${projectId}:user:${currentUserId}` : null
   const { degraded: unreadDegraded } = useRealtimeChannel(unreadTopic, {
     onEvent: handleUnreadEvent,
@@ -740,6 +845,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         .catch(() => {
           /* best-effort — a dropped tick leaves the counts as-is */
         })
+      if (!cancelled) refetchLedgerRows()
     }
 
     fetchUnread()
@@ -768,7 +874,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       window.removeEventListener("focus", onFocus)
       window.removeEventListener("blur", onBlur)
     }
-  }, [projectId, unreadDegraded])
+  }, [projectId, unreadDegraded, refetchLedgerRows])
 
   // Selecting the individual row clears the badge: POST /individual/read
   // advances the caller's own cursor server-side, then the local dot state
@@ -827,7 +933,16 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
       .catch(() => {
         /* best-effort — the next poll tick re-derives the counts */
       })
-  }, [projectId])
+    refetchLedgerRows()
+  }, [projectId, refetchLedgerRows])
+
+  // Open an artifact IN-PLACE beside the chat (no route change) — the handoff
+  // the ArtifactsModal's "Open" button now uses instead of router.push.
+  const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
+    setRailModal(null)
+    setOpenArtifact(artifact)
+  }, [])
+  const onCloseArtifactDrawer = useCallback(() => setOpenArtifact(null), [])
 
   const onRemoveMember = useCallback((member: HumanMember) => {
     setRemoveError(null)
@@ -905,7 +1020,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
   return (
     <AppLayout
       hideChromeStrip
-      mainStyle={{ maxWidth: "none", padding: 0, display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 auto" }}
+      mainStyle={{ maxWidth: "none", padding: 0, display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 auto", position: "relative" }}
     >
       <ProjectDetailView
         project={state.project}
@@ -918,7 +1033,11 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         onSelectChat={onSelectChat}
         individualUnread={individualUnread}
         ledgerCounts={ledgerCounts}
+        ledgerRows={ledgerRows}
         onOpenArtifacts={onOpenArtifacts}
+        onOpenArtifactInPlace={onOpenArtifactInPlace}
+        openArtifact={openArtifact}
+        onCloseArtifactDrawer={onCloseArtifactDrawer}
         onCreateArtifact={onCreateArtifact}
         onOpenMemory={onOpenMemory}
         onAddMemory={onAddMemory}
@@ -949,6 +1068,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         open={railModal?.kind === "artifacts"}
         initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onClose={onCloseRailModal}
+        onOpenInPlace={onOpenArtifactInPlace}
       />
       <TaskModal
         open={railModal?.kind === "tasks"}

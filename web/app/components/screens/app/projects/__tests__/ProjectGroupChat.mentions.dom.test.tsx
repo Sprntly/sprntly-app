@@ -129,8 +129,12 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const invoker = await screen.findByTestId("gc-invoker")
-    expect(invoker.textContent).toContain("Shristi")
+    // Redesign: the invoke-only `gc-invoker` tag became the always-present agent
+    // `gc-state-badge` ("invoked by <first name>" here). Same invoked-by
+    // semantics.
+    const badge = await screen.findByTestId("gc-state-badge")
+    expect(badge.textContent).toContain("invoked by")
+    expect(badge.textContent).toContain("Shristi")
   })
 
   it("test_select_member_inserts_chip_no_network", async () => {
@@ -298,12 +302,12 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
-    // Multi-author bubbles + agent invoker tag intact.
+    // Multi-author bubbles + agent invoked-by state badge intact.
     const other = await screen.findByTestId("gc-msg-other")
     expect(within(other).getByText("Shristi")).toBeTruthy()
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
     expect(screen.getByTestId("gc-msg-agent")).toBeTruthy()
-    expect(screen.getByTestId("gc-invoker").textContent).toContain("Shristi")
+    expect(screen.getByTestId("gc-state-badge").textContent).toContain("Shristi")
 
     // Send path unaffected: a plain message posts through postGroupTurn.
     postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))

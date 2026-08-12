@@ -137,9 +137,20 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* AD-HOC (live-rig): artifact drawer open — [ chat | drawer ] side-by-side.
+   The drawer takes the right region (wider than the rail, so the artifact is
+   readable), the chat keeps a workable min width to its left, both scroll
+   independently. Overrides both the default and rail-collapsed templates. */
+.bodyDrawerOpen {
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 600px);
+}
+
 @media (max-width: 1080px) {
   .body {
     grid-template-columns: minmax(0, 1fr) 300px;
+  }
+  .bodyDrawerOpen {
+    grid-template-columns: minmax(300px, 1fr) minmax(380px, 520px);
   }
 }
 
@@ -148,6 +159,14 @@
     grid-template-columns: 1fr;
   }
   .rail {
+    display: none;
+  }
+  /* Narrow viewports: the drawer takes the full width (the chat is a tap
+     away behind the close control) rather than crushing both columns. */
+  .bodyDrawerOpen {
+    grid-template-columns: 1fr;
+  }
+  .bodyDrawerOpen .main {
     display: none;
   }
 }
@@ -307,6 +326,61 @@
   background: var(--surface-3);
   border-radius: 999px;
   padding: 0 6px;
+}
+
+/* Compact segmented chat switcher at the rail top (redesign). Tokens only. */
+.chatToggle {
+  display: flex;
+  gap: 4px;
+  margin: 12px 10px 2px;
+  padding: 3px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.chatToggleBtn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.chatToggleBtn svg {
+  flex-shrink: 0;
+}
+
+.chatToggleBtn:hover {
+  color: var(--ink);
+}
+
+.chatToggleBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chatToggleBtnActive {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+
+.chatToggleDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
 }
 
 .chatRow {
@@ -632,11 +706,17 @@
   background: var(--accent-soft);
 }
 
+.taskList {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+}
+
 .taskRow {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 6px 0;
+  padding: 7px 0;
   border-bottom: 1px solid var(--line);
   font-size: 12px;
   color: var(--ink);
@@ -653,6 +733,29 @@
   border: 1.5px solid var(--line-strong);
   background: var(--surface-2);
   flex-shrink: 0;
+}
+
+.taskSummary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.taskAssignee {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  background: var(--surface-4);
+  color: var(--ink-2);
 }
 
 .memberRow {

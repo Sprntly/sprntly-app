@@ -213,6 +213,37 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  margin-inline-start: auto;
+}
+
+/* Open-in-workspace affordance — hands off to the app's real drawer via the
+ * deep-link URL `useArtifactUrlSync` handles. Tokens-only, matching the
+ * accent-chip look of the active version pill above. */
+.openBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 5px 11px;
+  cursor: pointer;
+  transition: opacity 0.12s, background 0.12s;
+}
+
+.openBtn:hover:not(:disabled) {
+  background: var(--accent-ink);
+  border-color: var(--accent-ink);
+}
+
+.openBtn:disabled {
+  cursor: default;
+  color: var(--ink-4);
+  background: var(--surface-3);
+  border-color: var(--line);
 }
 
 .vchip {

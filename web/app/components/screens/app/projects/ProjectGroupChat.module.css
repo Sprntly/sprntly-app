@@ -14,22 +14,23 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: 16px 18px 8px;
+  padding: 20px 24px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 18px;
 }
 
 .msg {
   display: flex;
   gap: 11px;
-  padding: 8px;
-  border-radius: var(--radius);
+  padding: 0;
 }
 
+/* Agent turns are marked (state override for time) but not row-tinted — the
+   soft-green tint lives on the bubble (`.bubbleAgent`), matching the mockup
+   where only the message bubble is green, not the avatar/header gutter. */
 .msgAi {
-  background: var(--accent-alpha-06);
-  border: 1px solid var(--accent-soft);
+  align-items: flex-start;
 }
 
 .msgMe {
@@ -60,6 +61,9 @@
   justify-content: center;
   background: var(--accent-muted);
   color: var(--accent);
+  font-family: var(--font-serif);
+  font-size: 16px;
+  line-height: 1;
 }
 
 .body {
@@ -71,7 +75,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 3px;
+  margin-bottom: 6px;
   flex-wrap: wrap;
 }
 
@@ -110,37 +114,95 @@
   border-radius: 999px;
 }
 
+/* Smart-interjection state badge on an agent turn — the mockup's soft green
+   "detected this was for it" / "invoked by you" pill. Tokens only. */
+.stateBadge {
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.stateDetected,
+.stateInvoked {
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-soft);
+}
+
+/* Timestamp sits inline right after the name/role (mockup: "Shristi · Design ·
+   9:44 AM"), never pushed to the far edge of the wide message column. Own
+   turns right-align their whole header via `.msgMe .body` (flex-end). */
 .time {
   font-size: 10.5px;
   color: var(--ink-4);
-  margin-left: auto;
 }
 
-.msgMe .time {
-  margin-left: 0;
+/* Own messages read as a right-aligned bubble: the body column hugs the end
+   (bubble + time to the right), next to the avatar `.msgMe`'s row-reverse
+   already parks on the right. Layout only — no palette. */
+.msgMe .body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
 }
 
 .bubbleOther,
+.bubbleAgent,
 .bubbleMe {
   font-size: 13.5px;
   line-height: 1.5;
   color: var(--ink-2);
-  border-radius: var(--radius);
-  padding: 8px 12px;
-  max-width: 560px;
+  border-radius: var(--radius-lg);
+  padding: 10px 15px;
+  max-width: 620px;
+  width: fit-content;
 }
 
+/* Member (others') message — soft white bubble, subtle border + shadow,
+   generously rounded (mockup). */
 .bubbleOther {
-  background: var(--surface-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
 }
 
+/* Agent (Sprntly) message — same bubble shape, soft-green tint (mockup). The
+   artifact chips + save affordance sit inside it. */
+.bubbleAgent {
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-soft);
+  max-width: 720px;
+}
+
+/* Own message — deep brand-green right-aligned bubble, light text (mockup: the
+   own bubble is the dark desaturated teal-green `--nav`, NOT the near-black
+   `--ink`; that was the mismatch). */
 .bubbleMe {
-  background: var(--ink);
+  background: var(--nav);
   color: var(--on-dark-alpha-95);
+  border: 1px solid var(--nav);
 }
 
 .bubbleMe :global(a) {
   color: inherit;
+}
+
+/* A member @-mention chip sitting inside the OWN dark-green bubble: the base
+   `.mentionChip` is a blue-on-light-blue pill (`--info`/`--info-soft`) tuned for
+   the light member bubble — illegible on the dark bubble and the wrong hue. On
+   the dark bubble it reads as light-green inline text (mockup: the mention is
+   light/green, not blue), no pill. Tokens only — `--accent-2` is the light brand
+   green, ~7.7:1 on `--nav` (AA). */
+.bubbleMe .mentionChip {
+  color: var(--accent-2);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  /* No pill on the dark bubble, so keep a hair of trailing space the pill used
+     to provide — an inline mention never glues to the following word. */
+  margin-right: 0.15em;
 }
 
 .stayedOut {
@@ -150,19 +212,41 @@
   gap: 8px;
   font-size: 11px;
   color: var(--muted);
-  background: var(--surface);
-  border: 1px dashed var(--line-strong);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
   border-radius: 999px;
-  padding: 5px 13px;
-  margin: 6px auto;
+  padding: 6px 15px;
+  margin: 2px auto;
   width: fit-content;
+  box-shadow: var(--shadow-sm);
 }
 
 .stayedOutDot {
-  width: 6px;
-  height: 6px;
+  width: 11px;
+  height: 11px;
   border-radius: 50%;
+  border: 1.5px solid var(--accent);
+  position: relative;
+}
+
+.stayedOutDot::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  right: 2px;
+  height: 1.5px;
+  transform: translateY(-50%);
   background: var(--accent);
+}
+
+.stayedOutLead {
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.stayedOutRest {
+  color: var(--muted);
 }
 
 .postingWait {
@@ -264,10 +348,10 @@
 .mentionChip {
   display: inline;
   font-weight: 600;
-  color: var(--accent-ink);
-  background: var(--accent-muted);
-  border-radius: 5px;
-  padding: 0 4px;
+  color: var(--info);
+  background: var(--info-soft);
+  border-radius: 6px;
+  padding: 1px 5px;
   white-space: nowrap;
 }
 

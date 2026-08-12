@@ -17,6 +17,7 @@
 // plus a static two-chip version affordance (build spec §8 Phase 2+ for a
 // real version history endpoint). It never fabricates document content.
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { ApiError, projectsApi, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
@@ -85,6 +86,36 @@ function artifactTitle(a: ArtifactItem): string {
   return a.title
 }
 
+/**
+ * The app-side deep-link URL that opens this artifact in the REAL drawer,
+ * reusing the machinery `(app)/hooks/useArtifactUrlSync.ts` already mounts in
+ * AppShell (`?prd=`/`?evidence=`) and the pre-existing `/prototype` route.
+ * We route to `/` (not `/projects?…`): the ContentPanel/drawer only mounts on
+ * the workspace root, and `useArtifactUrlSync`'s `openPrdTab` navigates to `/`
+ * unconditionally anyway — so landing there directly is the honest target
+ * (same posture as ArtifactsScreen's own `openArtifact`).
+ *
+ * Returns null for types the hook has NO url-param entry point for:
+ *   • report     — opens only via NavigationContext.openReportTab / reportFocus
+ *                  (no `?report=` param exists).
+ *   • ticket_set — a STANDALONE set (no PRD behind it); the hook's `?ticket=`
+ *                  param is a PRD-backed `prd-{id}-…` key, which a library
+ *                  ticket_set has no way to form (only a ticket_set_id).
+ * Those are surfaced with a disabled affordance rather than a fabricated link.
+ */
+function artifactHref(a: ArtifactItem): string | null {
+  switch (a.type) {
+    case "prd":
+      return `/?prd=${a.open.prd_id}`
+    case "evidence":
+      return `/?evidence=${a.open.evidence_id}`
+    case "prototype":
+      return a.open.prd_id != null ? `/prototype?prd=${a.open.prd_id}` : null
+    default:
+      return null
+  }
+}
+
 function FolderGlyph({ cfg }: { cfg: { bg: string; color: string } }) {
   return (
     <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true">
@@ -97,9 +128,13 @@ function FolderGlyph({ cfg }: { cfg: { bg: string; color: string } }) {
 
 // ── Canvas (Preview/Spec, presentational) ──
 
-function ArtifactCanvas({ artifact }: { artifact: ArtifactItem }) {
+function ArtifactCanvas({ artifact, onOpen }: { artifact: ArtifactItem; onOpen: (a: ArtifactItem) => void }) {
   const [tab, setTab] = useState<"preview" | "spec">("preview")
   const cfg = BADGE[artifact.type]
+  // In-place open handles every type except a standalone ticket set (no single
+  // document body to render beside the chat). The old `artifactHref` gate only
+  // covered prd/evidence/prototype; the drawer additionally renders reports.
+  const openable = artifact.type !== "ticket_set"
   return (
     <div className={styles.canvas} data-testid="artifact-canvas">
       <div className={styles.canvasBar}>
@@ -133,6 +168,19 @@ function ArtifactCanvas({ artifact }: { artifact: ArtifactItem }) {
           <span className={`${styles.vchip} ${styles.vchipOn}`}>v2</span>
           <span className={styles.vchip}>v1</span>
         </div>
+        <button
+          type="button"
+          className={styles.openBtn}
+          onClick={() => openable && onOpen(artifact)}
+          disabled={!openable}
+          title={openable ? "Open the full artifact beside the chat" : "Ticket sets open from the Tickets workspace"}
+          data-testid="artifact-canvas-open"
+        >
+          Open
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M7 17 17 7M8 7h9v9" />
+          </svg>
+        </button>
       </div>
       <div className={styles.canvasTitle}>
         <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
@@ -167,6 +215,7 @@ export type ArtifactsModalViewProps = {
   onFilterChange: (f: ArtifactFilter) => void
   selected: ArtifactItem | null
   onSelect: (a: ArtifactItem) => void
+  onOpen: (a: ArtifactItem) => void
   onClose: () => void
 }
 
@@ -178,6 +227,7 @@ export function ArtifactsModalView({
   onFilterChange,
   selected,
   onSelect,
+  onOpen,
   onClose,
 }: ArtifactsModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -326,7 +376,7 @@ export function ArtifactsModalView({
                       )
                     })}
                   </div>
-                  {selected ? <ArtifactCanvas artifact={selected} /> : null}
+                  {selected ? <ArtifactCanvas artifact={selected} onOpen={onOpen} /> : null}
                 </div>
               )}
             </>
@@ -351,15 +401,39 @@ export function ArtifactsModal({
   open,
   initialFilter,
   onClose,
+  onOpenInPlace,
 }: {
   projectId: number | string
   open: boolean
   initialFilter?: ProjectArtifactType
   onClose: () => void
+  /** AD-HOC: open the artifact IN-PLACE beside the chat (no route change). When
+   *  provided, this supersedes the old deep-link `router.push` — the Projects
+   *  screen mounts a self-contained `ProjectArtifactDrawer` that renders the
+   *  real body. Falls back to the deep-link navigation when absent. */
+  onOpenInPlace?: (a: ArtifactItem) => void
 }) {
+  const router = useRouter()
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [filter, setFilter] = useState<ArtifactFilter>(initialFilter ?? "all")
   const [selected, setSelected] = useState<ArtifactItem | null>(null)
+
+  // Prefer the in-place drawer (no route change). Only when no in-place handler
+  // is wired do we fall back to the app's deep-link viewer (navigates to `/`),
+  // and then only for types with a url-param entry point.
+  const handleOpen = useCallback(
+    (a: ArtifactItem) => {
+      if (onOpenInPlace) {
+        onOpenInPlace(a)
+        return
+      }
+      const href = artifactHref(a)
+      if (!href) return
+      onClose()
+      router.push(href)
+    },
+    [router, onClose, onOpenInPlace],
+  )
 
   useEffect(() => {
     if (!open) return
@@ -389,6 +463,7 @@ export function ArtifactsModal({
       onFilterChange={setFilter}
       selected={selected}
       onSelect={setSelected}
+      onOpen={handleOpen}
       onClose={onClose}
     />
   )

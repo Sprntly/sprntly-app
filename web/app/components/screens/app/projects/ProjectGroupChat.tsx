@@ -28,7 +28,6 @@ import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
-import { IconSparkle } from "../../../shared/app-icons"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
@@ -72,6 +71,13 @@ function toAskResponse(content: string): AskResponse {
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+}
+
+/** First word of a display name — the mockup labels an agent turn's invoker by
+ *  first name ("invoked by David"), never the full "David M. (…)" string. */
+function firstName(name: string | null | undefined): string {
+  if (!name) return "someone"
+  return name.split(" ").filter(Boolean)[0] ?? name
 }
 
 /** The current viewer's display name for presence/typing (AD-P24 — no new
@@ -194,6 +200,9 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const cursorRef = useRef<number | undefined>(undefined)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // The scrollable message viewport — pinned to the newest turn on (re)load and
+  // as new turns arrive, like a normal chat. See the scroll-to-bottom effect.
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   // Every turn id ever applied (via `applyTurns` OR the initial-load fetch,
   // which seeds it directly). A turn can arrive twice — once as a live
@@ -464,6 +473,17 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
   }, [projectId, applyTurns, degraded])
 
+  // Auto-scroll to the newest turn. Keyed on `loading` (the async history read
+  // resolving) AND `turns.length` so it lands at the true bottom *after* the
+  // messages paint — not on the initial empty render (which would leave it
+  // pinned to the top) — and re-pins as new turns arrive. Runs after commit;
+  // the skeleton→messages swap happens in one paint so there's no visible jump.
+  useEffect(() => {
+    if (loading) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [loading, turns.length])
+
   const handleSend = useCallback(() => {
     const content = draft.trim()
     if (content.length < DRAFT_MIN_CHARS || posting) return
@@ -523,8 +543,15 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         const isMe = turn.role === "user" && turn.author_user_id != null && turn.author_user_id === myUserId
         const isAgent = turn.role === "assistant"
         const prev = i > 0 ? turns[i - 1] : null
-        const invokedBy = isAgent && prev && prev.role === "user" && MENTION_RE.test(prev.content) ? prev.author_name : null
-        return { turn, isMe, isAgent, invokedBy }
+        // Smart-interjection state (design-spec AC): an agent turn preceded by
+        // an explicit @Sprntly mention was INVOKED (by that author — "you" when
+        // it's the viewer); one with no mention trigger is the agent DETECTING
+        // a turn was for it. Presentational only — the server alone decides to
+        // reply, this just labels which kind of turn it was.
+        const triggerIsMention = isAgent && !!prev && prev.role === "user" && MENTION_RE.test(prev.content)
+        const invokedBy = triggerIsMention ? prev!.author_name : null
+        const invokedByMe = triggerIsMention ? prev!.author_user_id === myUserId : false
+        return { turn, isMe, isAgent, invokedBy, invokedByMe }
       }),
     [turns, myUserId],
   )
@@ -586,49 +613,52 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           ))}
         </div>
       ) : null}
-      <div className={styles.scroll} data-testid="group-chat-scroll">
+      <div ref={scrollRef} className={styles.scroll} data-testid="group-chat-scroll">
         {loading ? (
           <AssistantThinkingSkeleton phase="Loading the group chat…" />
         ) : (
           <>
-            {rows.map(({ turn, isMe, isAgent, invokedBy }) => {
+            {rows.map(({ turn, isMe, isAgent, invokedBy, invokedByMe }) => {
               if (isAgent) {
                 return (
                   <div key={turn.id} className={`gc-msg gc-msg--ai ${styles.msg} ${styles.msgAi}`} data-testid="gc-msg-agent">
                     <span className={styles.aiMark} aria-hidden="true">
-                      <IconSparkle size={14} />
+                      s
                     </span>
                     <div className={styles.body}>
                       <div className={styles.head}>
                         <span className={styles.name}>{AGENT_NAME}</span>
                         <span className={styles.agentTag}>AGENT</span>
-                        {invokedBy ? (
-                          <span className={styles.invoker} data-testid="gc-invoker">
-                            invoked by {invokedBy}
-                          </span>
-                        ) : null}
                         <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                      </div>
-                      <AskReplyBody reply={toAskResponse(turn.content)} />
-                      <OpenArtifactChips
-                        candidates={turn.open_candidates ?? []}
-                        onOpen={(c) => onOpenArtifact?.(c)}
-                      />
-                      {savedTurnIds.has(turn.id) ? (
-                        <span className={styles.savedTag} data-testid="gc-saved-artifact">
-                          Saved to artifacts
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          className={styles.saveBtn}
-                          data-testid="gc-save-artifact"
-                          disabled={savingTurnId === turn.id}
-                          onClick={() => handleSaveArtifact(turn.id, turn.content)}
+                        <span
+                          className={`${styles.stateBadge} ${invokedBy ? styles.stateInvoked : styles.stateDetected}`}
+                          data-testid="gc-state-badge"
                         >
-                          {savingTurnId === turn.id ? "Saving…" : "Save as artifact"}
-                        </button>
-                      )}
+                          {invokedBy ? (invokedByMe ? "invoked by you" : `invoked by ${firstName(invokedBy)}`) : "detected this was for it"}
+                        </span>
+                      </div>
+                      <div className={styles.bubbleAgent}>
+                        <AskReplyBody reply={toAskResponse(turn.content)} />
+                        <OpenArtifactChips
+                          candidates={turn.open_candidates ?? []}
+                          onOpen={(c) => onOpenArtifact?.(c)}
+                        />
+                        {savedTurnIds.has(turn.id) ? (
+                          <span className={styles.savedTag} data-testid="gc-saved-artifact">
+                            Saved to artifacts
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className={styles.saveBtn}
+                            data-testid="gc-save-artifact"
+                            disabled={savingTurnId === turn.id}
+                            onClick={() => handleSaveArtifact(turn.id, turn.content)}
+                          >
+                            {savingTurnId === turn.id ? "Saving…" : "Save as artifact"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )
@@ -639,6 +669,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                     <div className={styles.body}>
                       <div className={styles.head}>
                         <span className={styles.time}>{formatTime(turn.created_at)}</span>
+                        <span className={styles.name}>You</span>
                       </div>
                       <div className={styles.bubbleMe}>
                         <MentionBubble content={turn.content} />
@@ -671,7 +702,8 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
             {showStayedOut ? (
               <div className={styles.stayedOut} data-testid="gc-stayed-out">
                 <span className={styles.stayedOutDot} aria-hidden="true" />
-                Sprntly stayed out — no reply yet
+                <span className={styles.stayedOutLead}>Sprntly stayed out</span>
+                <span className={styles.stayedOutRest}> — no reply yet</span>
               </div>
             ) : null}
             {posting ? (
