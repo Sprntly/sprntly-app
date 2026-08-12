@@ -15,9 +15,12 @@
 // individual chat uses (extracted from `ChatScreen.tsx` alongside this
 // ticket), not a second one.
 //
-// Poll, not realtime (AD-P4/§7): `GET /group/turns?since=<cursor>` on a short
-// interval, focus-gated (mirrors the `prototype_comments` refetch posture —
-// no websocket/SSE in v1).
+// Realtime, poll as fallback (AD-P21/AD-P22 — supersedes the old AD-P4 v1
+// posture): subscribes to `project:{id}` via `useRealtimeChannel` and
+// applies `turn.created` broadcasts through `applyTurns`. The `since`-cursor
+// read (`GET /group/turns?since=<cursor>`) stays the history authority — one
+// reconcile per (re)connect, and the existing focus-gated poll re-arms at
+// its normal cadence whenever the channel is degraded.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -35,6 +38,7 @@ import {
   type GroupTurn,
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
+import { useRealtimeChannel } from "./useRealtimeChannel"
 import styles from "./ProjectGroupChat.module.css"
 
 /** The v1 deterministic trigger (mirrors `backend/app/routes/projects.py`'s
@@ -100,10 +104,25 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Every turn id ever applied (via `applyTurns` OR the initial-load fetch,
+  // which seeds it directly). A turn can arrive twice — once as a live
+  // `turn.created` broadcast, once via the reconnect reconcile / fallback
+  // poll (Broadcast is at-most-once, no replay/ordering) — and the poster's
+  // own optimistic reconcile races the broadcast of their own turn. This ref
+  // is the dedup guard: `applyTurns` drops anything already known and only
+  // advances `cursorRef` past ids it actually applies (AD-P22).
+  const knownTurnIdsRef = useRef<Set<number>>(new Set())
+
   const applyTurns = useCallback((incoming: GroupTurn[]) => {
     if (incoming.length === 0) return
-    setTurns((prev) => [...prev, ...incoming])
-    cursorRef.current = incoming[incoming.length - 1].id
+    const fresh = incoming.filter((t) => !knownTurnIdsRef.current.has(t.id))
+    if (fresh.length === 0) return
+    for (const t of fresh) knownTurnIdsRef.current.add(t.id)
+    setTurns((prev) => [...prev, ...fresh])
+    const maxFreshId = Math.max(...fresh.map((t) => t.id))
+    if (cursorRef.current == null || maxFreshId > cursorRef.current) {
+      cursorRef.current = maxFreshId
+    }
   }, [])
 
   // Initial load.
@@ -115,6 +134,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .then((all) => {
         if (cancelled) return
         setTurns(all)
+        knownTurnIdsRef.current = new Set(all.map((t) => t.id))
         cursorRef.current = all.length > 0 ? all[all.length - 1].id : undefined
       })
       .catch(() => {
@@ -128,8 +148,37 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
   }, [projectId])
 
-  // Focus-gated poll (AD-P4): only while the tab/window has focus, cleared on
-  // blur and on unmount — no interval survives either.
+  // Live transport (AD-P21): one channel per project, broadcast turns fed
+  // through the SAME `applyTurns` the poll/reconcile use — no parallel merge
+  // path. `onReconcile` fires exactly once per (re)subscribe (the hook's own
+  // guarantee) and closes any at-most-once Broadcast gap via the `since`-
+  // cursor read (RR5/AD-P22).
+  const handleRealtimeEvent = useCallback(
+    (event: string, payload: unknown) => {
+      if (event !== "turn.created") return
+      applyTurns([payload as GroupTurn])
+    },
+    [applyTurns],
+  )
+  const handleReconcile = useCallback(() => {
+    projectsApi
+      .groupTurns(projectId, cursorRef.current)
+      .then(applyTurns)
+      .catch(() => {
+        /* best-effort — the next reconnect or fallback poll tick retries */
+      })
+  }, [projectId, applyTurns])
+  const { degraded } = useRealtimeChannel(`project:${projectId}`, {
+    onEvent: handleRealtimeEvent,
+    onReconcile: handleReconcile,
+  })
+
+  // Focus-gated poll (AD-P4 origin, demoted to fallback by AD-P22): only
+  // while the tab/window has focus, cleared on blur and on unmount — no
+  // interval survives either. `start()` now additionally requires
+  // `degraded` — while the realtime channel is live, this always-on 4s poll
+  // does not run (the reconnect reconcile + live broadcasts cover it); when
+  // the channel errors/drops, this re-arms exactly as it always has.
   useEffect(() => {
     let intervalId: ReturnType<typeof setInterval> | null = null
 
@@ -143,6 +192,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
 
     const start = () => {
+      if (!degraded) return
       if (intervalId != null) return
       intervalId = setInterval(poll, POLL_MS)
     }
@@ -155,19 +205,21 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     if (typeof document !== "undefined" && document.hasFocus()) start()
     const onFocus = () => start()
     const onBlur = () => stop()
-    window.addEventListener("focus", onFocus)
-    window.addEventListener("blur", onBlur)
-    document.addEventListener("visibilitychange", () => {
+    const onVisibility = () => {
       if (document.hidden) stop()
       else start()
-    })
+    }
+    window.addEventListener("focus", onFocus)
+    window.addEventListener("blur", onBlur)
+    document.addEventListener("visibilitychange", onVisibility)
 
     return () => {
       stop()
       window.removeEventListener("focus", onFocus)
       window.removeEventListener("blur", onBlur)
+      document.removeEventListener("visibilitychange", onVisibility)
     }
-  }, [projectId, applyTurns])
+  }, [projectId, applyTurns, degraded])
 
   const handleSend = useCallback(() => {
     const content = draft.trim()
