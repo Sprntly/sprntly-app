@@ -58,6 +58,24 @@ const DATA: { current: DaySnapshot; previous: DaySnapshot } = {
   },
 }
 
+// Day-over-day comparison — the first table on the page. One row per logged
+// step; "—" where a day predates that step's instrumentation. Hand-updated in
+// the same ritual as DATA.
+type CompareRow = { label: string; prev: string; curr: string; change: string; good?: boolean }
+const COMPARISON: CompareRow[] = [
+  { label: "Questions asked", prev: "20", curr: "26", change: "—" },
+  { label: "Whole answer (median)", prev: "54s", curr: "33s", change: "−39%", good: true },
+  { label: "Whole answer (worst)", prev: "422s (7 min)", curr: "149s", change: "tail collapsed", good: true },
+  { label: "Answers over 90s", prev: "4 of 20", curr: "3 of 26", change: "improved", good: true },
+  { label: "Planner (median, blocks the send)", prev: "5.5s", curr: "5.6s", change: "unchanged", good: false },
+  { label: "Understanding the question (embedding)", prev: "—", curr: "0.5s", change: "new metric" },
+  { label: "Finding relevant documents", prev: "—", curr: "2.8s", change: "new metric" },
+  { label: "Searching product memory (KG)", prev: "—", curr: "6.0s", change: "new metric" },
+  { label: "Writing a standard answer", prev: "—", curr: "23.6s", change: "new metric" },
+  { label: "Voice-of-customer report", prev: "—", curr: "132s", change: "new metric" },
+  { label: "Prompt-cache hits (all model calls)", prev: "—", curr: "0", change: "next fix", good: false },
+]
+
 export const metadata: Metadata = {
   title: "Ask Timing · Sprntly",
   description: "Day-over-day timing for the chat ask flow, measured on staging.",
@@ -94,6 +112,30 @@ export default function AskTimingPage() {
           Compared against {previous.date}. Hand-updated from the staging timing logs; steps overlap
           (retrieval runs in parallel), so step times do not sum to the total.
         </p>
+
+        <h2 style={{ ...s.h2, marginTop: 0 }}>Yesterday vs today — every step</h2>
+        <div style={{ ...s.card, marginBottom: 28 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" as const, minWidth: 560 }}>
+            <thead>
+              <tr>
+                <th style={s.th}>Metric</th>
+                <th style={{ ...s.th, ...s.num }}>{previous.date}</th>
+                <th style={{ ...s.th, ...s.num }}>{current.date}</th>
+                <th style={{ ...s.th, ...s.num }}>Change</th>
+              </tr>
+            </thead>
+            <tbody>
+              {COMPARISON.map((r, i) => (
+                <tr key={r.label}>
+                  <td style={{ ...s.td, borderBottom: i === COMPARISON.length - 1 ? "none" : s.td.borderBottom }}>{r.label}</td>
+                  <td style={{ ...s.td, ...s.num }}>{r.prev}</td>
+                  <td style={{ ...s.td, ...s.num }}>{r.curr}</td>
+                  <td style={{ ...s.td, ...s.num, color: r.good === true ? "#10693c" : r.good === false ? "#a8631f" : "#5c6d64", fontWeight: r.good !== undefined ? 650 : 400 }}>{r.change}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
 
         <div style={s.kpis}>
           <div style={s.kpi}><span style={{ ...s.kpiV, color: "#10693c" }}>{current.workerMedianS}s</span><span style={s.kpiL}>median answer · {current.date}</span></div>
