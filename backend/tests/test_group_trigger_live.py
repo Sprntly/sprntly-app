@@ -84,13 +84,16 @@ def scene(sb):
     c = require_client()
 
     members = sb.table("company_members").select("company_id, user_id").limit(50).execute().data
-    company_id = workspace_id = user_id = None
+    company_id = workspace_id = user_id = slug = None
     for m in members:
+        comp = sb.table("companies").select("slug").eq("id", m["company_id"]).limit(1).execute().data
         ws = sb.table("workspaces").select("id").eq("company_id", m["company_id"]).limit(1).execute().data
-        if ws:
-            company_id, workspace_id, user_id = m["company_id"], ws[0]["id"], m["user_id"]
+        if comp and comp[0].get("slug") and ws:
+            company_id, workspace_id, user_id, slug = (
+                m["company_id"], ws[0]["id"], m["user_id"], comp[0]["slug"]
+            )
             break
-    assert company_id, "no (company, workspace, member) in the local rig"
+    assert company_id, "no (company w/ slug, workspace, member) in the local rig"
 
     created = {"projects": [], "briefs": [], "prds": []}
 
@@ -102,8 +105,13 @@ def scene(sb):
         return p["id"]
 
     def _prd(project_id, title):
+        # ★ dataset MUST be the caller's REAL workspace dataset slug — the
+        # group route resolves the project's PRD via `_resolve_prd_id` ->
+        # `list_artifacts_for_project`, which filters by `_dataset_for(ctx)`.
+        # A fabricated dataset here would never be resolvable and the write
+        # path this test exists to exercise would silently no-op every time.
         brief = c.table("briefs").insert({
-            "dataset": f"live-trigger-{project_id}", "week_label": title, "is_current": False,
+            "dataset": slug, "week_label": title, "is_current": False,
             "payload": {"insights": []},
         }).execute().data[0]
         created["briefs"].append(brief["id"])
