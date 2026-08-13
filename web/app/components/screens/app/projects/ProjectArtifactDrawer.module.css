@@ -86,11 +86,183 @@
   outline-offset: 2px;
 }
 
+/* PRD view segmented control (main-chat parity) — Document / Evidence /
+   Tickets. Tokens only, scoped to this doc. */
+.seg {
+  display: flex;
+  gap: 2px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.segBtn {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 5px 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.segBtn:hover {
+  color: var(--ink);
+  background: var(--surface-3);
+}
+
+.segBtnActive,
+.segBtnActive:hover {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: var(--accent-soft);
+}
+
+.segBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   background: var(--surface);
+}
+
+/* In-panel Tickets view. */
+.tickets {
+  padding: 16px 18px 32px;
+}
+
+.ticketNote {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--ink-3);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+
+.ticketNoteBtn {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.ticketList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ticketRow {
+  display: flex;
+  gap: 11px;
+  align-items: flex-start;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  background: var(--surface);
+}
+
+.ticketKey {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-4);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-top: 1px;
+}
+
+.ticketMain {
+  min-width: 0;
+}
+
+.ticketTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.35;
+}
+
+.ticketStory {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.5;
+  margin-top: 3px;
+}
+
+.genBtn {
+  align-self: flex-start;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-soft);
+  border-radius: 999px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+
+.genBtn:hover {
+  background: var(--accent-muted);
+}
+
+.genBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Inline PRD editor host (AD-P13b) — wraps the shared PrdHtmlView so the
+   iframe fills the scroll region the same way the read-only body did. */
+.editorWrap {
+  padding: 14px 16px 24px;
+}
+
+.saveStatus {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.saveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  transition: background 0.3s;
+}
+
+/* Footer holding the prototype launcher on the PRD Document view. */
+.footer {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
 }
 
 /* Read-only rendered markdown (PRD / evidence body). Scoped to this doc — no

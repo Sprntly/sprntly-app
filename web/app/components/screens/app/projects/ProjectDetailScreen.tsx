@@ -413,7 +413,7 @@ export function ProjectDetailView({
           // Right region: the in-place artifact drawer, side-by-side with the
           // still-interactive chat column. Replaces the rail while open;
           // closing it (its own close control / Escape) restores the rail.
-          <ProjectArtifactDrawer artifact={openArtifact} onClose={onCloseArtifactDrawer} />
+          <ProjectArtifactDrawer artifact={openArtifact} projectId={project.id} onClose={onCloseArtifactDrawer} />
         ) : !railCollapsed ? (
           <aside className={styles.rail} aria-label="Project panel" data-testid="project-rail">
             {/* Compact chat switcher (redesign): the mockup leads the rail with
