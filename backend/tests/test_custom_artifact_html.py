@@ -11,6 +11,8 @@ the page, not three spellings of `<script>`.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.custom_artifact_html import html_to_text, sanitize_artifact_html
@@ -230,3 +232,71 @@ def test_a_named_target_still_gets_noopener():
     assert 'rel="noopener noreferrer"' in out
     # A named window has no use in a document; it is only a way to keep a handle.
     assert 'target="x"' not in out
+
+
+# ─── The other half of the editor contract ──────────────────────────────────
+#
+# `web/app/(app)/artifacts/doc/editorSchema.ts` documents this pairing from the
+# TypeScript side; this is the Python end. The payloads below are REAL output
+# captured from the TipTap editor (via its own serializer, in jsdom), not
+# hand-written HTML — which matters, because the failure being guarded against
+# is the editor producing something the sanitizer silently strips, and
+# hand-written samples would only ever encode what I already believed.
+
+
+@pytest.mark.parametrize(
+    "editor_output",
+    [
+        # Marks the toolbar's four buttons produce.
+        "<p><strong>bold</strong> <em>italic</em> <u>under</u> <s>struck</s></p>",
+        # Headings, capped at 4 by the editor for exactly this reason.
+        "<h1>One</h1><h2>Two</h2><h3>Three</h3><h4>Four</h4>",
+        # Lists, quote, code block.
+        "<ul><li><p>a</p></li></ul>",
+        "<ol><li><p>a</p></li></ol>",
+        "<blockquote><p>quoted</p></blockquote>",
+        "<pre><code>x = 1</code></pre>",
+        # A font choice, serialized the way the DOM normalizes it.
+        '<p><span style="font-family: Georgia, \'Times New Roman\', serif">g</span></p>',
+        '<p><span style="font-size: 19px">big</span></p>',
+        # Colour: the editor stores what the DOM gives back, which is rgb()
+        # rather than the hex the picker offered. Both must survive, because
+        # which one is stored is the browser's choice, not ours.
+        '<p><span style="color: rgb(180, 35, 24)">red</span></p>',
+        '<p><span style="background-color: rgb(254, 243, 199)">hl</span></p>',
+        '<p><span style="color: #B42318">red</span></p>',
+        # A link, with the rel/target the editor attaches.
+        '<p><a target="_blank" rel="noopener noreferrer" href="https://sprntly.ai">s</a></p>',
+    ],
+)
+def test_editor_output_survives_the_sanitizer(editor_output):
+    """Whatever the toolbar can make, the storage layer must keep.
+
+    Not "does not crash" — the assertion is that the FORMATTING SURVIVES. An
+    unknown tag here is unwrapped and an unknown style property dropped, both
+    silently, so a mismatch shows up as the user's bold or font quietly
+    disappearing the moment they save. That is the exact failure this pairing
+    exists to prevent, and it is invisible to every test on either side alone.
+    """
+    out = sanitize_artifact_html(editor_output)
+
+    # Every tag the editor emitted is still there.
+    for tag in re.findall(r"<(\w+)", editor_output):
+        assert f"<{tag}" in out, f"{tag} was stripped from {editor_output!r}"
+
+    # Every style PROPERTY the editor emitted is still there (the value's
+    # notation may be normalized; the declaration must not vanish).
+    for prop in re.findall(r"([\w-]+)\s*:", re.sub(r"<[^>]*?href[^>]*?>", "", editor_output)):
+        if prop in {"font-family", "font-size", "color", "background-color"}:
+            assert prop in out, f"{prop} was dropped from {editor_output!r}"
+
+
+def test_the_editors_colour_notation_is_not_mistaken_for_a_fetch():
+    """`rgb(...)` contains a parenthesis, and the value guard rejects `url(`.
+
+    A guard written as "reject any function call" would take the editor's own
+    colour output with it — every coloured word in every document silently
+    losing its colour on save.
+    """
+    out = sanitize_artifact_html('<p><span style="color: rgb(14, 110, 73)">g</span></p>')
+    assert "rgb(14, 110, 73)" in out
