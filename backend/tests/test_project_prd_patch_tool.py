@@ -1,24 +1,20 @@
-"""§C + §D + §B — the project propose-PRD-patch tool, its IDOR gate proved at
-the WRITE, and the nullable-prototype helper widening.
+"""§B + the surviving §C target-resolution helpers.
 
-PER-PATH MUTATION PROOFS (the IDOR must be provably closed at the write): every
-refusal path asserts a real `select count(*) from prd_patches` is UNCHANGED
-before/after the handler runs, against the in-memory SQLite the fake Supabase
-client backs (the same SQL-semantics harness the sibling
-`test_design_agent_prd_patches.py` uses). The genuine Postgres five-table
-fan-out is exercised by the env-gated `test_project_individual_prd_edit_live.py`.
+The propose-PRD-patch tool (`PROPOSE_PROJECT_PRD_PATCH_TOOL` +
+`handle_propose_prd_patch`) this file used to cover was RETIRED once
+in-place editing was proven on both the private and group surfaces (see
+`project_chat_edit.py::apply_chat_edit_scoped`, the single writer now, and
+its ★ IDOR gate). What remains here:
 
-  - cross-project prd_id → ZERO rows + "only edit a PRD attached to this
-    project" refusal (AC20);
-  - cross-tenant prd_id → ZERO rows (AC21);
-  - manifest read error → ZERO rows + "couldn't verify" (fail-closed) (AC22);
-  - own-project prd_id → exactly one status='pending' row, prototype_id IS NULL,
-    workspace_id == company_id (AC23);
-  - prd_id resolution zero/one/many (AC24);
-  - the tool is NOT in the Design-Agent ACTION_TOOLS/SENTINEL_TOOLS (AC19);
-  - §B: insert_patch(prototype_id=None) persists SQL NULL and lists;
-    the real-int path still works; empty rationale/patch_md still raise (AC10/AC11);
-  - the migration file is nullable + idempotent (AC9/AC12).
+  - `_resolve_prd_id` zero/one/many/explicit-id resolution — the SAME
+    server-side target resolver BOTH surviving surfaces call, now exercised
+    directly rather than only indirectly through the retired handler;
+  - the flag reader default-off (AC25);
+  - §B: `insert_patch(prototype_id=None)` persists SQL NULL and lists; the
+    real-int path still works; empty rationale/patch_md still raise
+    (AC10/AC11) — `db/prd_patches.py` is KEPT (Design-Agent's own main-chat
+    propose/accept/reject flow still writes/reads it);
+  - the nullable-prototype migration file is present + idempotent (AC9/AC12).
 """
 from __future__ import annotations
 
@@ -65,151 +61,59 @@ def tool_env(isolated_settings, monkeypatch):
     return tool_mod, db
 
 
-def _count(db, prd_id):
-    return db.execute(
-        "SELECT COUNT(*) FROM prd_patches WHERE prd_id = ?", (prd_id,)
-    ).fetchone()[0]
-
-
 def _set_manifest(monkeypatch, tool_mod, items):
-    """Both the tool (resolution) and the gate (assert) read the manifest."""
-    import app.project_prd_gate as gate
-
     monkeypatch.setattr(tool_mod, "list_artifacts_for_project", lambda **kw: items)
-    monkeypatch.setattr(gate, "list_artifacts_for_project", lambda **kw: items)
 
 
-# ── AC19 — registry boundary (AD17) ──────────────────────────────────────────
-def test_propose_tool_not_in_design_agent_registry(tool_env):
+# ── retirement guard: the propose tool + handler no longer live here ─────────
+def test_propose_tool_and_handler_no_longer_exist(tool_env):
     tool_mod, _ = tool_env
-    from app.design_agent.tools import ACTION_TOOLS, SENTINEL_TOOLS
-
-    assert tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL["name"] == "propose_prd_patch"
-    assert tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL not in ACTION_TOOLS
-    assert tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL not in SENTINEL_TOOLS
-    # It's a plain dict tool, not a design-agent ToolDef.
-    assert isinstance(tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL, dict)
+    assert not hasattr(tool_mod, "PROPOSE_PROJECT_PRD_PATCH_TOOL")
+    assert not hasattr(tool_mod, "handle_propose_prd_patch")
 
 
-def test_tool_description_has_negative_space(tool_env):
+# ── _resolve_prd_id — explicit / zero / one / many, DIRECT (migrated from the
+# retired propose handler's AC24 coverage — both surviving surfaces
+# (routes/projects.py's private route + `_classify_and_maybe_edit_group_prd`)
+# call this exact function for their write target) ───────────────────────────
+def test_resolve_prd_id_explicit_zero_one_many(tool_env, monkeypatch):
     tool_mod, _ = tool_env
-    desc = tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL["description"]
-    # ≥3-4 sentences and explicit "do NOT" guidance.
-    assert desc.count(".") >= 4
-    assert "Do NOT" in desc or "not call" in desc.lower()
 
-
-# ── AC20 — cross-project write → ZERO rows ───────────────────────────────────
-def test_propose_cross_project_writes_zero_rows(tool_env, monkeypatch):
-    tool_mod, db = tool_env
-    # PRD 5 is valid in the company but on ANOTHER project → not on THIS manifest.
-    _set_manifest(monkeypatch, tool_mod, [{"type": "prd", "id": 9, "title": "Mine"}])
-    before = _count(db, 5)
-    out = tool_mod.handle_propose_prd_patch(
-        {"prd_id": 5, "rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
+    # Explicit id → returned as-is, no manifest read needed (the §C gate
+    # still validates it downstream — this function only resolves).
+    prd_id, refusal = tool_mod._resolve_prd_id(
+        {"prd_id": 42}, project_id=1, dataset="d", company_id="c1"
     )
-    assert _count(db, 5) == before == 0
-    assert "only edit a PRD that's attached to this project" in out
+    assert prd_id == 42 and refusal is None
 
-
-# ── AC21 — cross-tenant write → ZERO rows ────────────────────────────────────
-def test_propose_cross_tenant_writes_zero_rows(tool_env, monkeypatch):
-    tool_mod, db = tool_env
-    # A foreign company's PRD never appears in c1's fan-out.
-    _set_manifest(monkeypatch, tool_mod, [{"type": "prd", "id": 9, "title": "Mine"}])
-    before = _count(db, 777)
-    out = tool_mod.handle_propose_prd_patch(
-        {"prd_id": 777, "rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
+    # Invalid explicit id → refusal, no resolution.
+    prd_id, refusal = tool_mod._resolve_prd_id(
+        {"prd_id": "not-an-int"}, project_id=1, dataset="d", company_id="c1"
     )
-    assert _count(db, 777) == before == 0
-    assert "only edit a PRD that's attached to this project" in out
+    assert prd_id is None and "valid" in refusal
 
-
-# ── AC22 — gate-error is fail-closed → ZERO rows ─────────────────────────────
-def test_propose_gate_error_writes_zero_rows(tool_env, monkeypatch):
-    tool_mod, db = tool_env
-    import app.project_prd_gate as gate
-
-    # Resolution succeeds (explicit id) but the gate's manifest read raises.
-    monkeypatch.setattr(tool_mod, "list_artifacts_for_project", lambda **kw: [{"type": "prd", "id": 5}])
-
-    def _boom(**kw):  # noqa: ARG001
-        raise RuntimeError("manifest down")
-
-    monkeypatch.setattr(gate, "list_artifacts_for_project", _boom)
-    before = _count(db, 5)
-    out = tool_mod.handle_propose_prd_patch(
-        {"prd_id": 5, "rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
-    )
-    assert _count(db, 5) == before == 0
-    assert "couldn't verify" in out
-
-
-# ── AC23 — own-project write persists a pending patch ────────────────────────
-def test_propose_own_project_persists_pending_patch(tool_env, monkeypatch):
-    tool_mod, db = tool_env
-    _set_manifest(monkeypatch, tool_mod, [{"type": "prd", "id": 5, "title": "Mine"}])
-    out = tool_mod.handle_propose_prd_patch(
-        {"prd_id": 5, "rationale": "tighten scope", "patch_md": "## Scope\n\nMVP only."},
-        project_id=1, dataset="d", company_id="comp-uuid", workspace_id="comp-uuid",
-    )
-    assert "pending your review" in out
-    row = db.execute(
-        "SELECT prd_id, prototype_id, workspace_id, status FROM prd_patches WHERE prd_id=5"
-    ).fetchone()
-    assert row is not None
-    prd_id, prototype_id, workspace_id, status = row
-    assert prd_id == 5
-    assert prototype_id is None          # §B nullable — no prototype anchor
-    assert workspace_id == "comp-uuid"   # == company_id (accept/reject filter key)
-    assert status == "pending"
-
-    # Surfaces via list_pending_patches under that workspace.
-    import app.db.prd_patches as patches_mod
-    pending = patches_mod.list_pending_patches(prd_id=5, workspace_id="comp-uuid")
-    assert len(pending) == 1
-    assert pending[0]["prototype_id"] is None
-
-
-# ── AC24 — prd_id resolution zero / one / many ───────────────────────────────
-def test_propose_prd_id_resolution_zero_one_many(tool_env, monkeypatch):
-    tool_mod, db = tool_env
-
-    # ZERO PRDs → refusal, no write.
+    # ZERO PRDs on the project → refusal.
     _set_manifest(monkeypatch, tool_mod, [{"type": "report", "id": 1}])
-    out0 = tool_mod.handle_propose_prd_patch(
-        {"rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
-    )
-    assert "no PRD" in out0
-    assert db.execute("SELECT COUNT(*) FROM prd_patches").fetchone()[0] == 0
+    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
+    assert prd_id is None
+    assert "no PRD" in refusal
 
-    # EXACTLY ONE PRD → resolved + written.
+    # EXACTLY ONE PRD → auto-resolved.
     _set_manifest(monkeypatch, tool_mod, [{"type": "prd", "id": 42, "title": "Solo"}])
-    out1 = tool_mod.handle_propose_prd_patch(
-        {"rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
-    )
-    assert "pending your review" in out1
-    assert _count(db, 42) == 1
+    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
+    assert prd_id == 42 and refusal is None
 
-    # MANY PRDs, no prd_id → disambiguation listing ids, no write.
+    # MANY PRDs, no explicit id → disambiguation listing both ids.
     _set_manifest(monkeypatch, tool_mod, [
         {"type": "prd", "id": 7, "title": "Alpha"},
         {"type": "prd", "id": 8, "title": "Beta"},
     ])
-    outN = tool_mod.handle_propose_prd_patch(
-        {"rationale": "r", "patch_md": "m"},
-        project_id=1, dataset="d", company_id="c1", workspace_id="c1",
-    )
-    assert "id 7" in outN and "id 8" in outN
-    assert _count(db, 7) == 0 and _count(db, 8) == 0
+    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
+    assert prd_id is None
+    assert "id 7" in refusal and "id 8" in refusal
 
 
-# ── AC25 — flag reader default-off ───────────────────────────────────────────
+# ── flag reader default-off ───────────────────────────────────────────
 def test_project_prd_edit_enabled_defaults_off(tool_env, monkeypatch):
     tool_mod, _ = tool_env
     monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)

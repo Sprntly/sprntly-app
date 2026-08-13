@@ -152,6 +152,18 @@ describe("ProjectIndividualChat — AD-P13 reuse (source scan)", () => {
   })
 })
 
+describe("ProjectIndividualChat — PPE-01 propose-banner retirement", () => {
+  it("no longer imports or renders ProjectPrdPatchBanner; a structured edit now surfaces as a normal turn", () => {
+    const src = readFileSync(join(__dirname, "../ProjectIndividualChat.tsx"), "utf8")
+    expect(src).not.toContain("ProjectPrdPatchBanner")
+  })
+
+  it("ProjectGroupChat is unchanged — it never rendered the banner", () => {
+    const src = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
+    expect(src).not.toContain("ProjectPrdPatchBanner")
+  })
+})
+
 describe("ProjectIndividualChat — component-scoped CSS is tokens only", () => {
   it("resolves every color to a globals.css custom property — no new palette", () => {
     const css = readFileSync(join(__dirname, "../ProjectIndividualChat.module.css"), "utf8")

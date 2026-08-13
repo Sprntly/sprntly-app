@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext, require_workspace
+from app.chat_intent import resolve_chat_intent
 from app.db import conversation_read_cursors as read_cursors_db
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
@@ -49,12 +50,7 @@ from app import project_delegation
 from app import project_group_context
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied
-from app.project_prd_patch_tool import (
-    PROPOSE_PROJECT_PRD_PATCH_TOOL,
-    _resolve_prd_id,
-    handle_propose_prd_patch,
-    project_prd_edit_enabled,
-)
+from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -989,20 +985,69 @@ def post_group_turn_route(
     return turn
 
 
+def _classify_and_maybe_edit_group_prd(
+    project_id: int,
+    conversation_id: int,
+    ctx: WorkspaceContext,
+    message: str,
+    history: list[dict],
+    dataset: str,
+) -> dict | None:
+    """Classify one group turn via `resolve_chat_intent` (reused verbatim,
+    spec §Composition — group) and, when the envelope comes back `edit_prd`
+    with `PROJECT_PRD_EDIT_ENABLED` on AND a target actually resolves, apply
+    the edit through the SAME `apply_chat_edit_scoped` the private surface
+    calls (`project_chat_edit` route) — the ★ IDOR gate (`assert_prd_on_project`
+    then `require_owned_prd`) fires exactly as it does there. On success,
+    persists the result as an assistant turn, broadcasts it via
+    `_publish_group_turn_created`, and returns that turn.
+
+    Returns `None` for every outcome that should fall through to the
+    existing `run_tool_loop` instead: a non-`edit_prd` envelope, the flag
+    off, or an unresolved/ambiguous target (`_resolve_prd_id` — NEVER a
+    client/model-supplied id — over THIS project's own artifacts).
+
+    `ProjectPrdWriteDenied` (cross-project) and the cross-tenant
+    `HTTPException(404)` (from `require_owned_prd`, inside
+    `apply_chat_edit_scoped`) PROPAGATE — this function makes ZERO writes on
+    either refusal, fail-closed by construction same as the gate itself. The
+    caller (`_respond_as_group_agent`) is the one wrapping this in a
+    best-effort try/except (AD-P7); this function itself does not swallow."""
+    allow_prd_edit = project_prd_edit_enabled()
+    prd_id, _refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
+    if envelope["intent"] != "edit_prd" or not allow_prd_edit or prd_id is None:
+        return None
+
+    result = apply_chat_edit_scoped(
+        prd_id, envelope["instruction"], ctx, project_id=project_id, dataset=dataset,
+    )
+    summary = result.get("summary") or "I've updated the PRD."
+    assistant_turn = conversations_db.post_group_turn(
+        conversation_id, None, summary, role="assistant"
+    )
+    _publish_group_turn_created(project_id, conversation_id, assistant_turn)
+    return assistant_turn
+
+
 def _respond_as_group_agent(
     project_id: int, conversation_id: int, ctx: WorkspaceContext
 ) -> None:
     """Called on an `@Sprntly` mention OR a `should_respond=True`
     smart-interjection decision (`post_group_turn_route` decides which;
-    this function's own body is unchanged either way): assemble recent
-    group-turn context (each speaker tagged with their
-    `author_name`/`author_job_role`) and produce ONE assistant turn
-    (`role='assistant', author_user_id=NULL`). Never
-    raises (AD-P7 best-effort contract) — a failure yields no assistant
-    turn and the human turn that triggered this already persisted, so the
-    chat is never blocked. Meters ONLY this call (the structured
-    cost-summary log line — never emitted for a human-to-human turn,
-    because none is made for one).
+    this function's own body is unchanged either way): classify the
+    triggering turn via `_classify_and_maybe_edit_group_prd` — an `edit_prd`
+    envelope applies in place and returns, everything else (including
+    `answer` and any generate/open phrasing — group generate/open is
+    DEFERRED, spec ⭐) falls through to assemble recent group-turn context
+    (each speaker tagged with their `author_name`/`author_job_role`) and
+    produce ONE assistant turn (`role='assistant', author_user_id=NULL`) via
+    the EXISTING `run_tool_loop`. Never raises (AD-P7 best-effort contract)
+    — a failure (including a refused edit) yields no assistant turn and the
+    human turn that triggered this already persisted, so the chat is never
+    blocked. Meters ONLY the `run_tool_loop` path (the structured
+    cost-summary log line — never emitted for a human-to-human turn or a
+    structured edit_prd dispatch, because neither makes that call).
 
     The reply call is a `run_tool_loop` (AD-P15) carrying the
     `delegate_task` tool — zero new LLM calls: delegation piggybacks on
@@ -1015,24 +1060,33 @@ def _respond_as_group_agent(
     transcript — reusing it rather than re-querying. `maybe_promote_turn`
     is itself never-raising, so this call cannot turn a successful reply
     into a failure; it only ever runs on the agent-reply path, never on a
-    human-to-human turn."""
+    human-to-human turn or a structured edit_prd dispatch."""
     start = time.monotonic()
     try:
         recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
         transcript = render_group_transcript(recent)
         # The human who addressed Sprntly — the most recent turn with an
         # author_user_id (an agent turn has none). Used as the delegation
-        # assigner if the model calls delegate_task on this reply.
+        # assigner if the model calls delegate_task on this reply, AND as
+        # the message classified below.
         trigger = next((t for t in reversed(recent) if t.get("author_user_id")), None)
         assigner_user_id = trigger["author_user_id"] if trigger else None
         source_turn_id = trigger["id"] if trigger else None
-        roster = projects_db.list_members(project_id)
         dataset = _dataset_for(ctx)
-        # Behind PROJECT_PRD_EDIT_ENABLED (default off): the group agent may also
-        # propose a PRD edit against a PRD on THIS project. Same plain
-        # run_tool_loop tool + §C IDOR gate + workspace_id=company_id as the
-        # private chat, so a group chat can never patch another project's PRD.
-        allow_prd_edit = project_prd_edit_enabled()
+
+        if trigger is not None:
+            history = [
+                {"role": t.get("role") or "user", "content": t.get("content") or ""}
+                for t in recent
+                if t is not trigger
+            ]
+            edit_turn = _classify_and_maybe_edit_group_prd(
+                project_id, conversation_id, ctx, trigger["content"], history, dataset,
+            )
+            if edit_turn is not None:
+                return
+
+        roster = projects_db.list_members(project_id)
         meta: dict = {}
 
         def _dispatch(name: str, tool_input: dict) -> str:
@@ -1056,12 +1110,6 @@ def _respond_as_group_agent(
                     company_id=ctx.company_id,
                     tool_input=tool_input,
                 )
-            if allow_prd_edit and name == "propose_prd_patch":
-                return handle_propose_prd_patch(
-                    tool_input,
-                    project_id=project_id, dataset=dataset,
-                    company_id=ctx.company_id, workspace_id=ctx.company_id,
-                )
             return f"(unknown tool: {name})"
 
         # Inject the bounded project-context block (best-effort, never raises)
@@ -1072,8 +1120,6 @@ def _respond_as_group_agent(
         )
         system = f"{_group_system_with_roster(roster)}\n\n{context_block}"
         tools = [project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()]
-        if allow_prd_edit:
-            tools.append(PROPOSE_PROJECT_PRD_PATCH_TOOL)
         reply = run_tool_loop(
             system=system,
             user=transcript,
