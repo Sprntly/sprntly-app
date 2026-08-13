@@ -8271,6 +8271,203 @@
     font-style: italic;
   }
 
+  /* The one-line pointer that stands in for the clarify card while its batch
+     is being answered in the QuestionPopup below the thread. */
+  .cqc-popup-note {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  /* QuestionPopup — the chat's question stepper, docked above the composer.
+     One question at a time: category chip + ‹ 1/2 › + Skip in the head,
+     options as full-width rows with a description subline. Elevated so it
+     reads as "on top of the chat", not another thread message. */
+  .qpu {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0 0 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: var(--surface-2);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .qpu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .qpu-chip {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .qpu-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .qpu-nav-btn,
+  .qpu-skip,
+  .qpu-close {
+    border: none;
+    background: none;
+    padding: 2px 6px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--ink-3);
+    cursor: pointer;
+    border-radius: 6px;
+  }
+
+  .qpu-nav-btn {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .qpu-nav-btn:hover:not(:disabled),
+  .qpu-skip:hover:not(:disabled),
+  .qpu-close:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--surface-3);
+  }
+
+  .qpu-nav-btn:disabled,
+  .qpu-skip:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .qpu-close {
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .qpu-count {
+    font-size: 11.5px;
+    color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .qpu-prompt {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .qpu-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .qpu-option {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    font: inherit;
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .qpu-option:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    background: var(--surface-3);
+  }
+
+  .qpu-option:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .qpu-option--active {
+    border-color: var(--accent);
+  }
+
+  .qpu-option--other {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  .qpu-option-label {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.4;
+  }
+
+  .qpu-option-desc {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ink-3);
+  }
+
+  .qpu-other-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  .qpu-input {
+    width: 100%;
+    min-height: 52px;
+    resize: vertical;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .qpu-other-submit {
+    font-size: 12px;
+  }
+
+  .qpu-skip-hint {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink-4);
+  }
+
+  .qpu-foot {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .qpu-skip-all {
+    border: none;
+    background: none;
+    padding: 2px 4px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--ink-3);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .qpu-skip-all:hover:not(:disabled) {
+    color: var(--ink);
+  }
+
   /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
      Reuses the .bc-* agent chrome + .bc-action-btn buttons; these add the
      question-specific bits. */
