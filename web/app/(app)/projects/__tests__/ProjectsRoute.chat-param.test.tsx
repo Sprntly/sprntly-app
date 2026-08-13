@@ -10,8 +10,13 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 let searchString = ""
+const replace = vi.fn()
 vi.mock("next/navigation", () => ({
   useSearchParams: () => new URLSearchParams(searchString),
+  useRouter: () => ({ replace }),
+}))
+vi.mock("../../../lib/featureFlags", () => ({
+  projectsEnabled: () => true,
 }))
 vi.mock("../../../components/screens/app/projects/ProjectDetailScreen", () => ({
   ProjectDetailScreen: ({ projectId, initialChat }: { projectId: string; initialChat?: string }) =>

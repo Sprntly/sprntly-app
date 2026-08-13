@@ -24,6 +24,7 @@ this — the agent decides (v3.4 retired the Auto/mention-only setting).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Literal, NamedTuple
@@ -166,7 +167,27 @@ def _group_system_with_roster(roster: list[dict]) -> str:
     roster_block = "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
     return f"{_GROUP_AGENT_SYSTEM_PROMPT}\n{roster_block}"
 
-router = APIRouter(prefix="/v1/projects", tags=["projects"])
+def _projects_enabled() -> bool:
+    """Read PROJECTS_ENABLED at REQUEST TIME (never import time). Default-off;
+    never default-on in any commit. Request-time read means flipping the env
+    var takes effect without a code deploy and keeps the gate honest under
+    module reload in tests. The frontend uses a SEPARATE var,
+    NEXT_PUBLIC_PROJECTS_ENABLED; the two gate independently — THIS one is the
+    security boundary (the frontend build-time flag is not)."""
+    val = (os.environ.get("PROJECTS_ENABLED") or "").strip().lower()
+    return val in {"1", "true", "yes"}
+
+
+def _require_projects_enabled() -> None:
+    if not _projects_enabled():
+        raise HTTPException(status_code=404, detail="Not found")  # invisible, not 401/403
+
+
+router = APIRouter(
+    prefix="/v1/projects",
+    tags=["projects"],
+    dependencies=[Depends(_require_projects_enabled)],
+)
 
 
 # The agent is a virtual member — rendered from a constant, never a stored

@@ -2336,6 +2336,11 @@ def _enable_supabase_bearer(monkeypatch) -> None:
     monkeypatch.setattr(
         auth_mod.settings, "supabase_jwt_secret", _TEST_SUPABASE_SECRET, raising=False
     )
+    # `tenant_client`-based suites hit real `/v1/projects/...` routes too; the
+    # router-level gate 404s them all when unset, so flip it on here — the
+    # second of the two independent client-building seams (the other is
+    # `setup_supabase_auth` in `_company_helpers.py`).
+    monkeypatch.setenv("PROJECTS_ENABLED", "1")
 
 
 @pytest.fixture
