@@ -423,6 +423,30 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "lane; this suite is the real-transport proof, run locally against the "
         "dev rig when touching the mention/add publishers or the tag route."
     ),
+    ("test_project_artifacts_fanout_live.py", "RUN_PROJECT_ARTIFACTS_LIVE"): (
+        "Real local-Supabase round-trip for the project artifacts fan-out "
+        "(list_artifacts_for_project), including the regenerate-stays-"
+        "attached resolve-forward reproduction: a project + PRD, then a "
+        "force=True-style regenerate that mints a new prds.id in the same "
+        "family, proving the project's artifact list still resolves the "
+        "current generation against REAL rows — the fake Supabase client's "
+        "family-collapse/resolve-forward logic is identical either way, but "
+        "only real Postgres proves the write-time ownership gate and the "
+        "membership gate round-trip. Deterministic backstop: "
+        "test_project_artifacts_fanout.py covers the same regenerate/"
+        "resolve-forward/dedupe/tolerated-stale cases against "
+        "FakeSupabaseClient in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this fan-out."
+    ),
+    ("test_project_artifacts_fanout_live.py", "ANTHROPIC_API_KEY"): (
+        "One optional test in this file additionally drives the regenerate "
+        "reproduction through the GENUINE generate-from-task(force=True) "
+        "pipeline (not a direct DB insert) end to end — gated on BOTH this "
+        "key and RUN_PROJECT_ARTIFACTS_LIVE above, so it is unrunnable in "
+        "any CI lane on either count. See that entry for the deterministic "
+        "fast-lane backstop; the DB-fixture test in this same file already "
+        "proves the read path without a model."
+    ),
 }
 
 

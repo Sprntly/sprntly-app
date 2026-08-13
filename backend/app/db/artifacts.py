@@ -474,7 +474,34 @@ def list_artifacts_for_project(*, project_id: int, dataset: str, company_id: str
     surface an artifact the caller's own company doesn't own, even if a ref
     somehow got written for one: the filter only keeps rows that are ALSO in
     the caller's own tenant-scoped fan-out.
+
+    Resolve-forward for a superseded PRD pin: `project_artifacts` pins a PRD
+    by a FIXED `artifact_id`, with no current-version indirection. When that
+    PRD is regenerated (`force=True` mints a NEW `prds.id` in the same
+    family — see `db/prds.start_prd` — while the old row stays `ready`), the
+    company fan-out's family collapse (`latest_by_key` above) keeps only the
+    new id, so the pinned OLD id no longer appears in `items` at all and a
+    plain ref∩items intersection would silently drop the PRD from the
+    project (neither generation shows, even though the family is very much
+    alive). When a pinned `('prd', id)` ref is absent from `items` this way,
+    resolve it FORWARD to its family's latest generation via
+    `list_prd_generations` (keyed by prd_id, walks the SAME family the
+    pinned id belongs to — see db/prds.py) and surface THAT row instead,
+    provided the resolved row is itself present in the caller's own
+    tenant-scoped `items` (so a foreign-tenant or fully-deleted family still
+    drops out silently, preserving the tolerated-stale contract above). This
+    can never re-point a pin at a family other than its own, and a family
+    already pinned at its own latest generation is never double-surfaced
+    (the final filter is keyed by resolved id, not by ref).
+
+    Orphan GC — explicitly DEFERRED: orphaned `project_artifacts` rows are
+    never cleaned up on hard-delete (no FK/cascade on `artifact_id`), but
+    resolve-forward makes a stale pin harmless on read (it either resolves
+    forward within its family or silently drops per tolerated-stale above),
+    so no project's artifact list ever counts a permanently-unresolvable
+    artifact. GC itself is a fast-follow, not required here.
     """
+    from app.db.prds import list_prd_generations
     from app.db.projects import list_project_artifact_refs
 
     refs = {
@@ -484,4 +511,26 @@ def list_artifacts_for_project(*, project_id: int, dataset: str, company_id: str
     if not refs:
         return []
     items = list_artifacts_for_company(dataset=dataset, company_id=company_id)
-    return [it for it in items if (it["type"], it["id"]) in refs]
+    items_by_key = {(it["type"], it["id"]): it for it in items}
+
+    # Direct hits: the pinned (type, id) is present verbatim in the caller's
+    # own tenant-scoped fan-out — the common case, including a PRD pinned at
+    # its own current generation.
+    surfaced_keys = {key for key in refs if key in items_by_key}
+
+    # Resolve-forward: only for PRD refs that missed a direct hit (their
+    # generation was superseded, or the family/tenant is gone entirely).
+    for ref_type, ref_id in refs:
+        if ref_type != "prd" or (ref_type, ref_id) in surfaced_keys:
+            continue
+        family = list_prd_generations(ref_id)
+        if not family:
+            continue  # whole family unresolvable — tolerated-stale, drops out
+        newest_key = ("prd", family[0]["id"])
+        if newest_key in items_by_key:
+            surfaced_keys.add(newest_key)
+
+    # Iterate `items` (already recency-sorted), not `refs`, so a family
+    # reached by more than one pin — or already both directly-hit and
+    # resolved-forward to itself — surfaces exactly once.
+    return [it for it in items if (it["type"], it["id"]) in surfaced_keys]

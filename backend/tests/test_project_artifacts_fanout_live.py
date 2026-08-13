@@ -297,6 +297,142 @@ def test_list_foreign_tenant_project_404(client, sb, fixture_ids, project_ids):
     assert r.status_code == 404
 
 
+# ── Regenerate-stays-attached (resolve-forward-on-read, AC6) ────────────────
+
+
+def test_regenerate_keeps_prd_in_project_live(client, sb, fixture_ids, project_ids):
+    """The exact rig scenario, reconstructed on real local Supabase: a
+    project with a PRD, then a `force=True` regenerate that mints a NEW
+    `prds.id` in the SAME family (same brief_id/insight_index) — the
+    project's `project_artifacts` ref is never re-pointed, mirroring
+    `maybe_auto_create_project_for_prd`'s already-bound early-return. The
+    project's artifact LIST must still contain the PRD after regenerate,
+    resolved to the CURRENT generation. DB-fixture arm — proves the READ
+    path against real rows, needs no model (AC6)."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live regen {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    brief = sb.table("briefs").insert(
+        {
+            "dataset": fixture_ids["dataset"],
+            "week_label": f"Live regen {uuid.uuid4().hex[:8]}",
+            "payload": {},
+            "is_current": False,
+        }
+    ).execute().data[0]
+    prd_a = sb.table("prds").insert(
+        {"brief_id": brief["id"], "insight_index": 0, "title": "Pre-regenerate", "status": "ready"}
+    ).execute().data[0]
+
+    prd_b = None
+    try:
+        added = client.post(
+            f"/v1/projects/{project['id']}/artifacts",
+            json={"artifact_type": "prd", "artifact_id": prd_a["id"]},
+        )
+        assert added.status_code == 200, added.text
+
+        # The regenerate: a NEW prds row in the SAME family (same brief_id +
+        # insight_index) — mirrors what `db/prds.start_prd` mints when
+        # `routes/prd.py`'s `force=True` skips reuse. The project's ref
+        # above still points at prd_a; nothing re-pins it.
+        prd_b = sb.table("prds").insert(
+            {"brief_id": brief["id"], "insight_index": 0, "title": "Post-regenerate", "status": "ready"}
+        ).execute().data[0]
+
+        listed = client.get(f"/v1/projects/{project['id']}/artifacts")
+        assert listed.status_code == 200, listed.text
+        prd_items = [a for a in listed.json()["artifacts"] if a["type"] == "prd"]
+        assert len(prd_items) == 1
+        assert prd_items[0]["id"] == prd_b["id"]
+    finally:
+        # Tear down by CAPTURED primary keys only — never by dataset/tenant
+        # slug (a slug-scoped delete has previously cascaded onto a
+        # co-tenant row on this shared local rig).
+        if prd_b is not None:
+            sb.table("prds").delete().eq("id", prd_b["id"]).execute()
+        sb.table("prds").delete().eq("id", prd_a["id"]).execute()
+        sb.table("briefs").delete().eq("id", brief["id"]).execute()
+
+
+@pytest.mark.skipif(
+    not os.getenv("ANTHROPIC_API_KEY"),
+    reason=(
+        "optional real-LLM arm — the DB-fixture test above already proves the "
+        "read path deterministically; this additionally proves the genuine "
+        "generate-from-task(force=True) pipeline mints a new prds.id in the "
+        "same family and the auto-attach early-return leaves the project's "
+        "ref pointed at the old id, end to end"
+    ),
+)
+def test_force_regenerate_via_real_pipeline_keeps_prd_in_project_live(
+    client, sb, fixture_ids, project_ids
+):
+    """The real generate-from-task(force=True) pipeline, not a direct DB
+    insert: a conversation with no project yet generates a PRD (auto-creates
+    a `prd_auto` project + attaches it), then a second call with the SAME
+    task text and `force=True` mints a new `prds.id` in the same family —
+    `maybe_auto_create_project_for_prd`'s already-bound early-return leaves
+    the project's ref pointed at the FIRST id. The project's artifact list
+    must still resolve to the CURRENT (second) generation (AC6, optional
+    arm)."""
+    conversation = sb.table("conversations").insert(
+        {
+            "company_id": fixture_ids["company_id"],
+            "workspace_id": fixture_ids["workspace_id"],
+            "user_id": fixture_ids["user_id"],
+            "kind": "individual",
+        }
+    ).execute().data[0]
+
+    task_text = f"regenerate-live-probe {uuid.uuid4().hex[:8]}"
+    project_id = None
+    prd_a_id = None
+    prd_b_id = None
+    try:
+        first = client.post(
+            "/v1/prd/generate-from-task",
+            json={"task": task_text, "force": False, "conversation_id": conversation["id"]},
+        )
+        assert first.status_code == 200, first.text
+        prd_a_id = first.json()["prd_id"]
+
+        convo_row = (
+            sb.table("conversations").select("project_id").eq("id", conversation["id"])
+            .execute().data[0]
+        )
+        project_id = convo_row["project_id"]
+        assert project_id is not None, "auto-create-from-PRD did not attach a project"
+        project_ids.append(project_id)
+
+        second = client.post(
+            "/v1/prd/generate-from-task",
+            json={"task": task_text, "force": True, "conversation_id": conversation["id"]},
+        )
+        assert second.status_code == 200, second.text
+        prd_b_id = second.json()["prd_id"]
+        assert prd_b_id != prd_a_id, "force=True must mint a NEW prds.id"
+
+        listed = client.get(f"/v1/projects/{project_id}/artifacts")
+        assert listed.status_code == 200, listed.text
+        prd_items = [a for a in listed.json()["artifacts"] if a["type"] == "prd"]
+        assert len(prd_items) == 1
+        assert prd_items[0]["id"] == prd_b_id
+    finally:
+        # Tear down by CAPTURED primary keys only.
+        if prd_a_id is not None:
+            sb.table("prds").delete().eq("id", prd_a_id).execute()
+        if prd_b_id is not None:
+            sb.table("prds").delete().eq("id", prd_b_id).execute()
+        sb.table("conversations").delete().eq("id", conversation["id"]).execute()
+        if project_id is not None:
+            sb.table("projects").delete().eq("id", project_id).execute()
+            if project_id in project_ids:
+                project_ids.remove(project_id)
+
+
 def test_same_tenant_non_member_403_on_artifacts(client, non_member_client, fixture_ids, project_ids):
     """The exact membership gap the WAVE invariant requires: a real second
     account in the SAME company/workspace, never added to the project, is
