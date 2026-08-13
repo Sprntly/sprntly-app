@@ -3,8 +3,9 @@
 The user picks which channels the corpus sync reads (saved by
 POST /v1/connectors/slack/sync-channels as sync_channel_ids /
 sync_channel_names on the connection config); select_sync_channels applies
-that selection to the bot-visible channel list. No selection = legacy
-behavior (every channel the bot is a member of).
+that selection to the bot-visible channel list. No selection = sync NOTHING
+(nothing selected, nothing assessed — the 2026-08-13 connector-scope rule;
+the legacy every-bot-member-channel default is gone).
 
 Unticking is the reverse of ticking, so this file also covers the teardown
 half: remove_channels_from_corpus takes an unticked channel's messages back
@@ -31,19 +32,23 @@ def _ch(cid: str, name: str) -> dict:
 CHANNELS = [_ch("C1", "general"), _ch("C2", "support"), _ch("C3", "random")]
 
 
-def test_no_selection_keeps_all_channels():
+def test_no_selection_syncs_nothing():
+    """No stored selection syncs NOTHING — never every bot-member channel.
+    The error tells the user where to pick channels."""
     kept, errors = select_sync_channels(CHANNELS, {})
-    assert kept == CHANNELS
-    assert errors == []
+    assert kept == []
+    assert len(errors) == 1
+    assert "No channels selected" in errors[0]
 
 
-def test_empty_selection_keeps_all_channels():
-    """An empty stored list means 'no selection', not 'sync nothing'."""
+def test_empty_selection_syncs_nothing():
+    """An empty stored list is 'not configured yet', not 'take everything'."""
     kept, errors = select_sync_channels(
         CHANNELS, {CONFIG_SYNC_CHANNEL_IDS: []}
     )
-    assert kept == CHANNELS
-    assert errors == []
+    assert kept == []
+    assert len(errors) == 1
+    assert "No channels selected" in errors[0]
 
 
 def test_selection_filters_and_orders():

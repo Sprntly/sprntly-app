@@ -132,7 +132,11 @@ def select_sync_channels(
     """Apply the user's pull-channel selection to the bot-visible channels.
 
     Returns (channels_to_sync, errors). No stored selection (or an empty
-    one) keeps the legacy behavior — every channel the bot is a member of.
+    one) syncs NOTHING — nothing selected, nothing assessed. This flipped
+    from the legacy every-bot-member-channel default in the 2026-08-13
+    connector-scope hardening (same rule the GitHub sync got in #1158): a
+    sync must never read more than the tenant explicitly picked, and an
+    empty picker is "not configured yet", not "take everything".
     Selected channels the bot can't see (not a member / archived) come back
     as errors by name so the user knows to /invite the bot, and the sync
     proceeds with whatever remains.
@@ -141,7 +145,10 @@ def select_sync_channels(
         str(cid) for cid in (config.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
     ]
     if not selected_ids:
-        return channels, []
+        return [], [
+            "No channels selected — nothing was synced. Tick the channels "
+            "to pull from in the Slack connector's Configure panel."
+        ]
 
     names = config.get(CONFIG_SYNC_CHANNEL_NAMES) or {}
     by_id = {ch.get("id", ""): ch for ch in channels}
@@ -568,14 +575,14 @@ def sync_slack(
         return result
 
     # Honor the user's pull-channel selection (picked at connect time or in
-    # the connector's Configure drawer). No selection = every bot-member
-    # channel, unchanged from before the picker existed.
+    # the connector's Configure drawer). No selection = sync nothing —
+    # nothing selected, nothing assessed.
     channels, selection_errors = select_sync_channels(channels, config)
     result.errors.extend(selection_errors)
     result.channels_count = len(channels)
     if not channels:
-        # Everything the user selected is bot-invisible — the per-channel
-        # errors above say which and why; nothing to write.
+        # Nothing selected, or everything the user selected is bot-invisible
+        # — the errors above say which and why; nothing to write.
         _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
         return result
 

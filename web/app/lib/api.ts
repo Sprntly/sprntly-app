@@ -2541,8 +2541,9 @@ export const connectorsApi = {
     }),
   /** Save which channels the Slack corpus sync pulls from (stored on the
    * connection config as sync_channel_ids / sync_channel_names). An empty
-   * list clears the selection — the sync reverts to every channel the bot
-   * is a member of. `joined` echoes the public channels the bot could
+   * list clears the selection — the sync then pulls NOTHING until channels
+   * are picked again (2026-08-13 scope rule; the every-bot-member-channel
+   * fallback is gone). `joined` echoes the public channels the bot could
    * self-join right away.
    *
    * Unticking is the reverse of ticking, so the response also reports the

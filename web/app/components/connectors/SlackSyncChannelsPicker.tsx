@@ -7,8 +7,10 @@
  * get the admin-gate error inline), honored by the manual sync AND the
  * scheduled per-company refresh.
  *
- * No selection stored = the sync's legacy behavior: every channel the bot is
- * a member of. Saving an empty selection clears back to that.
+ * No selection stored = the sync pulls NOTHING (the 2026-08-13
+ * connector-scope rule: nothing selected, nothing assessed — the legacy
+ * every-bot-member-channel default is gone). Saving an empty selection
+ * clears back to that stopped state.
  *
  * Unticking is destructive on the backend — the bot leaves the channel and
  * the messages it already pulled are stripped out of the corpus — which is
@@ -39,7 +41,7 @@ export type SlackSyncChannelsPickerViewProps = {
   error: string | null
   /** Channel ids currently ticked in the picker (not yet saved). */
   selectedIds: ReadonlySet<string>
-  /** How many channels the persisted selection has (0 = pull everything). */
+  /** How many channels the persisted selection has (0 = nothing syncs). */
   savedCount: number
   isSaving: boolean
   onToggle: (channelId: string) => void
@@ -106,8 +108,8 @@ export function SlackSyncChannelsPickerView({
           Sprntly pulls those messages into your knowledge base on a schedule.
           Unticking a channel also deletes the messages already pulled from
           it. This applies to your whole workspace and only admins can change
-          it. With nothing ticked, every channel the bot has been invited to
-          is read.
+          it. With nothing ticked, no channels are read — pick at least one
+          to start syncing.
         </p>
       </div>
 
