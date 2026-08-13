@@ -80,6 +80,25 @@ vi.mock("../../../../../context/NavigationContext", () => ({
 vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
+// The component now reads the classifier flag (`chatIntentEnvelopeOn`) to
+// decide whether to classify-then-dispatch at all. Explicit OFF here keeps
+// every assertion in this file byte-identical to pre-classifier behaviour —
+// same stub shape `ProjectIndividualChat.test.tsx` uses.
+vi.mock("../../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false, profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
+}))
+// The detail screen mounts `<ArtifactsModal>`, whose redesign reads
+// `useRouter` for its legacy deep-link fallback — no Next app-router
+// provider exists in jsdom, so the shell throws on mount without this.
+// `onOpenInPlace` is always wired here, so the router `push` is never
+// actually reached. Same stub `ProjectDetailScreen.test.tsx` uses.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+}))
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
     "../../../../../lib/runAskGeneration",

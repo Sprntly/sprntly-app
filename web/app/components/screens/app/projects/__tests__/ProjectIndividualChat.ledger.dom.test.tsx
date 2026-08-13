@@ -68,6 +68,18 @@ vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
 
+// The component now reads the classifier flag (`chatIntentEnvelopeOn`) to
+// decide whether to classify-then-dispatch at all. Explicit OFF here keeps
+// every assertion in this file byte-identical to pre-classifier behaviour —
+// same stub shape `ProjectIndividualChat.test.tsx` uses.
+vi.mock("../../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false, profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
+}))
+
 vi.mock("../../../../../lib/auth", () => ({
   useAuth: () => authState,
 }))

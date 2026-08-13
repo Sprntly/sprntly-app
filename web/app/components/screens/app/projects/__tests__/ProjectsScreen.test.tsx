@@ -288,7 +288,16 @@ describe("ProjectsScreen — data + nav wiring", () => {
 
 // ── Sidebar — coexistence + nav plumbing (AC1) ───────────────────────────────
 describe("Sidebar — Projects rail entry", () => {
+  // The rail item is gated behind NEXT_PUBLIC_PROJECTS_ENABLED (build-time
+  // cosmetic gate — see `Sidebar.projects-flag.dom.test.tsx`, which owns the
+  // on/off gating behaviour itself). This test only needs the flag ON so the
+  // item is present to assert coexistence + click-to-navigate against.
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
   it("Projects coexists with Artifacts and Ideation; clicking it navigates to the 'projects' screen", () => {
+    vi.stubEnv("NEXT_PUBLIC_PROJECTS_ENABLED", "1")
     render(React.createElement(Sidebar))
     expect(screen.getByLabelText("Projects")).toBeTruthy()
     expect(screen.getByLabelText("Artifacts")).toBeTruthy()
