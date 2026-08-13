@@ -36,7 +36,8 @@ import { ChatSuggestionIcon, IconDocument, IconMic, IconSendUp, IconSparkle, Ico
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
-import { ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import {  customArtifactsApi,
+ ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -4343,6 +4344,35 @@ export function ChatScreen() {
           )
           .catch(() => null)
         if (envelope) {
+          if (envelope.intent === "create_artifact") {
+            // "Draft a leadership update on the Q3 reliability work" —
+            // generate a team document and open it in THIS chat's right-hand
+            // panel, beside the conversation it came from.
+            //
+            // The row is created server-side before the multi-minute write
+            // starts, so there is an id to open and poll against immediately;
+            // the panel renders "Writing this document…" until it lands. That
+            // ordering is also what makes a double-send harmless — the client
+            // never posts content back, so there is nothing to write twice.
+            void (async () => {
+              try {
+                const created = await customArtifactsApi.generate({
+                  kind: envelope.artifact_kind || "document",
+                  task: envelope.task?.trim() || trimmed,
+                  conversation_id: activeTab?.dbConvId ?? null,
+                })
+                setContent({ documentId: created.id, documentGenerating: true })
+                openContentPanel("document")
+              } catch {
+                showToast(
+                  "Couldn't start that document",
+                  "Please try again, or create one from Artifacts.",
+                )
+              }
+            })()
+            settlePendingSend()
+            return
+          }
           if (envelope.intent === "generate_tickets") {
             if (docFile) {
               setAttachments([])

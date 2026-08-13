@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useGuestSession } from "../../context/GuestSessionContext"
@@ -12,6 +12,16 @@ import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { HtmlReportView } from "./HtmlReportView"
 import { useCpanelPhase } from "./useCpanelPhase"
 import { EmptyPane } from "./EmptyPane"
+
+// LAZY, and deliberately so. DocumentTab mounts the rich-text editor, which
+// pulls ProseMirror in behind it. A static import here would put that whole
+// dependency in the bundle of every screen that renders the panel — including
+// the overwhelming majority of chats that never write a document — and would
+// force every existing ContentPanel test to resolve TipTap just to render a
+// tab bar. Loaded when the tab is actually opened.
+const DocumentTab = lazy(() =>
+  import("./DocumentTab").then((m) => ({ default: m.DocumentTab })),
+)
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
@@ -58,6 +68,10 @@ const TABS = [
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
   { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
+  // A team document written from this chat ("draft a leadership update"). Same
+  // posture as Reports and for the same reason — it hangs off the THREAD, not
+  // off the PRD — so it sits last and is hidden until one exists.
+  { icon: <IconFileText size={11.5}/> , id: "document", label: "Document" },
 ] as const
 
 // The key is versioned because the bounds below moved: widths stored under the
@@ -394,6 +408,9 @@ export function ContentPanel() {
     // asked for.
     tickets: !pipelineInScope && !standaloneSet,
     reports: reportsHidden,
+    // Hidden until this thread has written one. A tab that is always present
+    // but usually empty teaches people to ignore it.
+    document: content.documentId == null,
   }
   // The tab currently being shown is never pulled out from under the reader —
   // whatever is in the body must stay reachable in the bar above it. Evidence is
@@ -649,6 +666,11 @@ export function ContentPanel() {
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
             <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
+          {activeTab === "document" && content.documentId != null && (
+            <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading document…</div>}>
+              <DocumentTab documentId={content.documentId} />
+            </Suspense>
           )}
         </div>
 

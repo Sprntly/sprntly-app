@@ -441,6 +441,9 @@ def _fallback(reason: str) -> dict:
         "instruction": None,
         "artifact_type": None,
         "artifact_query": None,
+        # Present-and-null rather than absent, so every consumer sees ONE
+        # envelope shape and a missing key can never be mistaken for a kind.
+        "artifact_kind": None,
         "reason": reason,
         "source": "fallback",
     }
@@ -476,6 +479,17 @@ def _fallback(reason: str) -> dict:
 #: to its ask path like any unknown intent.
 _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     "multi_agent", "change_prd_template",
+    # Write a document of any kind into the shared "Others" library.
+    #
+    # THIS SET IS THE WIRE, and leaving an action out of it is a silent
+    # half-feature rather than an error. `ask_planner` could already decide
+    # `create_artifact`, and `/v1/custom-artifacts/generate` could already
+    # execute it — but an action missing here falls through
+    # `_fallback("unknown action")` to a plain `answer`, so the chat REPLIED IN
+    # PROSE and, knowing the product can write documents, told the user it had
+    # made one. Nothing was created and the library stayed empty. Shipped that
+    # way in #1154; found by Apurva asking for a leadership update.
+    "create_artifact",
 }
 
 
@@ -510,6 +524,13 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     intent = plan.action
     if intent == "update_ticket":
         intent = "answer"
+    # A document with no brief is a blank page with a title on it. The planner
+    # already degrades this (`_NEEDS_TASK`), and it is re-applied here for the
+    # same reason the confidence floor is: this envelope is what the CLIENT
+    # acts on, so every condition that must hold before a build starts is
+    # enforced where the build is dispatched from.
+    if intent == "create_artifact" and not (plan.task or "").strip():
+        intent = "answer"
     if intent not in _CLIENT_INTENTS:
         return _fallback("unknown action")
 
@@ -529,6 +550,11 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
             plan.artifact_type
             if plan.artifact_type in NAMEABLE_ARTIFACT_TYPES else None
         ),
+        # `create_artifact` only: WHAT KIND of document, in the user's own
+        # words ("leadership update"). Free text — the executor stores it as a
+        # label and nothing branches on it. None on every other intent, because
+        # the planner's gate clears it there.
+        "artifact_kind": plan.artifact_kind or None,
         "artifact_query": plan.artifact_query,
         # The uploaded format this build must be written into, when the user
         # named one. The client forwards the id to the executor; the NAME is for
