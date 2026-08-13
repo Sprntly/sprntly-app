@@ -185,6 +185,13 @@ async def lifespan(app: FastAPI):
     # than "everything generating", because staging and prod share one Supabase
     # project — see fail_orphan_generating_ask_jobs. The scheduler repeats this
     # every 5m so an interrupted ask heals without waiting for a restart.
+    # Same treatment, same reasoning, for custom artifacts (team documents):
+    # age-gated, because staging and prod share this table too.
+    from app.custom_artifact_generate import sweep_orphan_generating
+
+    doc_orphans = sweep_orphan_generating()
+    if doc_orphans:
+        logger.info("Failed %d orphan generating document(s)", doc_orphans)
     job_ask_orphans = db.fail_orphan_generating_ask_jobs()
     if job_ask_orphans:
         logger.info(

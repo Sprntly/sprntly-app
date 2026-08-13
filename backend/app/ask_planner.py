@@ -192,6 +192,22 @@ _ACTIONS: frozenset[str] = frozenset({
     # decide mode went on for everyone — the planner answers every message, and
     # an action it cannot name is an action nothing can choose.
     "open_artifact",
+    # Write a document of ANY kind — a leadership update, a launch plan, a
+    # postmortem — into the shared "Others" library. Its own action rather than
+    # a shading of `generate_prd`, because the whole point is that the KIND is
+    # not from a list: a PRD generator knows its sections, and this one is told
+    # what to write by the request. Its argument is `artifact_kind` alongside
+    # the usual `task`.
+    #
+    # HIGH PRECISION BY DESIGN, and this is the requirement rather than a
+    # preference: the user must EXPLICITLY ask for a document. A question about
+    # a leadership update ("what would leadership want to know?") is an ANSWER
+    # — with, at most, a suggested prompt offering to write one. Only a request
+    # to create ("draft a leadership update", "write this up as a launch plan")
+    # is this action. The cost is asymmetric: a missed create costs one more
+    # message, while a false create silently fills a shared team library with
+    # documents nobody asked for.
+    "create_artifact",
     # Switch an EXISTING PRD into a different uploaded format and re-write it
     # in place (POST /v1/prd/{id}/change-template). Its own action rather than
     # a shading of `edit_prd`, because the reported failure was exactly that
@@ -217,6 +233,11 @@ _ACTIONS: frozenset[str] = frozenset({
 #: Tickets and prototypes have no such fallback surface, so they keep the rule.
 _NEEDS_TASK: frozenset[str] = frozenset({
     "generate_tickets", "generate_prototype", "multi_agent",
+    # A document with no brief is a blank page with a title. Unlike
+    # `generate_prd` — which has a chat surface that asks "what should it
+    # cover?" and waits — there is no such prompt for an arbitrary document
+    # kind, so an empty task here would produce a generation about nothing.
+    "create_artifact",
 })
 _NEEDS_INSTRUCTION: frozenset[str] = frozenset({"edit_prd", "update_ticket"})
 #: `open_artifact` without a subject to look up is not an open request — the
@@ -292,9 +313,10 @@ _PLANNER_SCHEMA: dict = {
         "task": {
             "type": "string",
             "description": (
-                "generate_prd / generate_tickets / generate_prototype only: a "
-                "self-contained brief for the thing to build, synthesized from "
-                "the WHOLE conversation, not the words of the last message."
+                "generate_prd / generate_tickets / generate_prototype / "
+                "create_artifact only: a self-contained brief for the thing to "
+                "build, synthesized from the WHOLE conversation, not the words "
+                "of the last message."
             ),
         },
         "instruction": {
@@ -308,6 +330,21 @@ _PLANNER_SCHEMA: dict = {
         # so `task` above is already written when this is chosen — the model
         # picks a format for something it has by then described, rather than
         # letting a format name in the message steer what gets built.
+        # AFTER the two argument fields, by the same rule that puts
+        # `artifact_template_id` there: schema order is generation order, so
+        # the SUBJECT is decided before the FORM. Choosing "leadership update"
+        # first would let the document's shape steer what it is about, which is
+        # the failure `artifact_template_id`'s position already guards against.
+        "artifact_kind": {
+            "type": "string",
+            "description": (
+                "create_artifact only: the KIND of document, in the user's own "
+                "words and lower case — 'leadership update', 'launch plan', "
+                "'postmortem', 'customer FAQ'. There is no list to choose "
+                "from; copy what they called it. If they did not name a kind, "
+                "use the plainest description of what they asked for."
+            ),
+        },
         "artifact_template_id": {
             "type": ["string", "null"],
             "description": (
@@ -518,6 +555,19 @@ or wants an answer.
   Sprntly's own default/built-in format rather than an uploaded one, set
   `template_query` to their words — the assistant explains the PRD panel's
   Format control, which handles that switch.
+- create_artifact — write a DOCUMENT OF ANY OTHER KIND and keep it in the
+  team's shared library: a leadership update, a launch plan, a postmortem, a
+  customer FAQ, a board memo, release notes, an onboarding guide. There is no
+  list — if the user asks for a written document that is not a PRD, tickets, a
+  prototype or a spec, this is it. Set `task` (what it should say) and
+  `artifact_kind` (what they called it, their words, lower case).
+  ONLY WHEN THEY ASK FOR THE DOCUMENT ITSELF. "Draft a leadership update on
+  the Q3 reliability work", "write this up as a launch plan", "turn that into
+  a postmortem" are creates. A QUESTION about such a document is `answer`:
+  "what would leadership want to know about this?", "how should we structure
+  a postmortem?" and "what goes in a launch plan?" all want prose in the chat,
+  not a document filed in the shared library. When you are unsure, choose
+  `answer` — the assistant can offer to write it, and the user can say yes.
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -547,7 +597,14 @@ Rules that decide the close calls:
   "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
   "Update the ticket with the PRD details" changes the TICKET → update_ticket.
 - ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
-  auth?" is `answer`.
+  auth?" is `answer`. This applies hardest to create_artifact, where the
+  library is SHARED with the whole team: a document created from a question
+  lands in every colleague's library, so an unrequested create is visible to
+  people who never asked for it. Requesting > describing > asking about.
+- create_artifact vs generate_prd: SUBJECT MATTER, again. A document that
+  specifies a product change is a PRD however the user labels it. A document
+  that REPORTS, UPDATES, EXPLAINS or PLANS for an audience — leadership, a
+  customer, the team — is create_artifact.
 - The task brief must be self-contained and drawn from the WHOLE conversation.
   If the thread spent twenty turns specifying a feature and the last message is
   "draft it up", the brief describes the feature, not the words "draft it up".
@@ -909,6 +966,10 @@ class Plan:
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
     artifact_query: Optional[str] = None
+    #: `create_artifact` only: the KIND of document to write, in the user's own
+    #: words. Free text by design — see the action's note on why there is no
+    #: list. None on every other action.
+    artifact_kind: Optional[str] = None
     #: The uploaded format this build writes into, or None for "whatever the
     #: company has active" — which is what every generator already resolves on
     #: its own, so None changes nothing anywhere.
@@ -1496,6 +1557,16 @@ def apply_gates(
         # noise that downstream would otherwise try to honour.
         _artifact_type = _artifact_query = None
 
+    # `create_artifact`'s own argument. Unlike `artifact_query` above, a MISSING
+    # kind does not degrade the action: the user asked for a document and the
+    # `task` says what it is about, so the generator can write it and take its
+    # title from its own <h1>. Refusing here would turn a real create request
+    # into prose about creating one. Same "belongs to its action" clamp though,
+    # so no other verdict carries a stray kind.
+    _artifact_kind = _clean_str(out.get("artifact_kind")) if action == "create_artifact" else None
+    if _artifact_kind:
+        _artifact_kind = _artifact_kind[:120]
+
     # A format switch with no target is not a switch. `_gate_template` already
     # turns a bad id into a `template_query` (a which-did-you-mean on the chat
     # surface); this catches the plan that carried NEITHER — the model chose
@@ -1544,6 +1615,7 @@ def apply_gates(
         # scope gate: partial output must never produce a canned refusal.
         artifact_type=_artifact_type,
         artifact_query=_artifact_query,
+        artifact_kind=_artifact_kind,
         artifact_template_id=artifact_template_id,
         artifact_template_name=artifact_template_name,
         template_query=template_query,

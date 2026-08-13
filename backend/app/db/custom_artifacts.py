@@ -128,6 +128,15 @@ def create_artifact(
         "status": status if status in STATUSES else "ready",
         "created_by": created_by,
         "updated_by": created_by,
+        # Stamped by the APP rather than left to the column default, matching
+        # `utc_now()` on every other write in this module. The orphan sweep
+        # compares `updated_at` against a cutoff string, so a row whose first
+        # timestamp came from a database default is being compared against a
+        # value written in a different format — which is fine in Postgres (a
+        # real timestamptz comparison) and silently wrong anywhere the column
+        # is text. One writer, one format, both environments.
+        "created_at": utc_now(),
+        "updated_at": utc_now(),
     }
     resp = require_client().table("custom_artifacts").insert(row).execute()
     rows = resp.data or []

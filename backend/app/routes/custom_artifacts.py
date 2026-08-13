@@ -6,10 +6,15 @@
   GET    /v1/custom-artifacts/{id}             -> one document, with its body
   PATCH  /v1/custom-artifacts/{id}             -> save a title / kind / body
   DELETE /v1/custom-artifacts/{id}             -> remove it
+  POST   /v1/custom-artifacts/generate         -> write one with the LLM
 
-Generation is NOT here — that is the chat's job and lands in a later slice.
-These routes are the storage surface underneath it, and the one the editor
-talks to.
+EXPLICIT ASKS ONLY. Nothing reaches `/generate` on a user's behalf. The chat
+gets here through the planner's `create_artifact` action, which fires on a
+request to CREATE a document and never on a question about one, and the
+suggestion strip only ever proposes a prompt the USER then chooses to send.
+That ordering is the requirement, not a nicety: this library is shared with the
+whole team, so a document created from a misread question appears in every
+colleague's library.
 
 TENANT GATE on every route: `require_company` resolves the caller's company
 from the JWT and `db.custom_artifacts` filters `company_id` IN THE QUERY, so a
@@ -35,10 +40,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
+from app.custom_artifact_generate import generate_into
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.conversations import conversation_belongs_to_company
 from app.db.custom_artifacts import (
@@ -80,7 +86,6 @@ _RAW_BODY_LIMIT = MAX_BODY_CHARS * 8
 def _guard_raw_size(body_html: str | None) -> None:
     if body_html is not None and len(body_html) > _RAW_BODY_LIMIT:
         raise HTTPException(413, "Document is too large")
-
 
 def _public(row: dict, *, with_body: bool = True) -> dict:
     """One document as the web reads it.
@@ -238,6 +243,81 @@ def update(
     if row is None:
         # Deleted between the ownership read and the write.
         raise HTTPException(404, "Artifact not found")
+    return _public(row)
+
+
+class GenerateIn(BaseModel):
+    # WHAT KIND of document. Free text, straight from the user's own words
+    # ("leadership update"), never coerced onto a list.
+    kind: str = ""
+    # The self-contained brief for what to write. On the chat path this is the
+    # planner's synthesized `task`, not the raw last message.
+    task: str = ""
+    # Facts the document may assert. Supplied by the caller (the chat turn that
+    # asked), because the thread already established what this is about — see
+    # custom_artifact_generate's note on why there is no retrieval pass here.
+    context: str = ""
+    conversation_id: int | None = None
+
+
+@router.post("/generate")
+def generate(
+    body: GenerateIn,
+    background: BackgroundTasks,
+    company: CompanyContext = Depends(require_company),
+):
+    """Start writing a document. Returns the row immediately, `generating`.
+
+    The row is created BEFORE the multi-minute call so the panel has an id to
+    open and poll against, rather than waiting on an id that only exists once
+    generation finishes — the ticket-sets lifecycle. Creating it up front is
+    also what makes double-generation structurally impossible: the client never
+    posts content back, so a double-click or a StrictMode double-effect has
+    nothing to write with.
+
+    EXPLICIT ASKS ONLY. Nothing calls this on the user's behalf: the chat
+    reaches it through the planner's `create_artifact` action, which fires on a
+    request to CREATE a document and never on a question about one, and the
+    suggestion strip only ever proposes a prompt the user then chooses to send.
+    A document appearing in someone's library because they asked a question is
+    the failure mode this rule exists to prevent.
+    """
+    if body.conversation_id is not None and not conversation_belongs_to_company(
+        body.conversation_id, company.company_id
+    ):
+        raise HTTPException(404, "Conversation not found")
+
+    row = create_artifact(
+        company.company_id,
+        kind=body.kind,
+        # Provisional: the generator replaces it with the document's own <h1>.
+        # A name now means the library row is never blank while it writes.
+        title=(body.kind or "Document").strip()[:300],
+        status="generating",
+        conversation_id=body.conversation_id,
+        created_by=company.user_id,
+    )
+
+    # Scheduled with BackgroundTasks, NOT `asyncio.create_task`.
+    #
+    # This handler is a sync `def`, so FastAPI runs it in a worker thread where
+    # there is no running event loop — `create_task` raises RuntimeError there,
+    # which would have made every generation 500 while looking perfectly correct
+    # in review. BackgroundTasks runs after the response is sent and puts a sync
+    # callable on the threadpool itself, which is exactly the shape of this work
+    # (one long blocking LLM call).
+    #
+    # The DURABLE ROW is the job state — there is no in-memory job store to lose
+    # — so a process death mid-write is recoverable by `sweep_orphan_generating`
+    # rather than invisible.
+    background.add_task(
+        generate_into,
+        company_id=company.company_id,
+        artifact_id=row["id"],
+        kind=body.kind,
+        task=body.task,
+        context=body.context,
+    )
     return _public(row)
 
 
