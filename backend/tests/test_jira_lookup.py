@@ -363,8 +363,11 @@ def test_ac4_sweep_and_pull_records_are_byte_identical_for_a_single_hit(monkeypa
         raise AssertionError(f"unexpected URL in AC4 fixture: {url}")
 
     monkeypatch.setattr(jf.requests, "get", fake_get)
+    # The puller reads the site from the tenant's stored connection row.
+    monkeypatch.setattr(jira_puller, "get_connection",
+                        lambda eid, provider: {"config": {"cloud_id": "cid"}})
 
-    pull_record = next(jira_puller.pull("tok"))
+    pull_record = next(jira_puller.pull("tok", enterprise_id="ent-A"))
 
     monkeypatch.setattr(jf.requests, "get", fake_get)
     text, sweep_records = jira_adapter.dispatch_records(

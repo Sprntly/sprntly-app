@@ -2,8 +2,17 @@
 
 Auth: Bearer access token proxied through api.atlassian.com. Unlike ClickUp,
 Jira Cloud needs the site's `cloud_id` on every REST call — it isn't in the
-token, so the puller resolves it from `/oauth/token/accessible-resources`
-(the puller only carries the access-token string, no stored connection row).
+token.
+
+SITE SCOPE — the stored connection's site only. The connect flow resolves the
+user's accessible sites and stores the chosen one on the connection row
+(`config.cloud_id`); the puller reads THAT, never
+`/oauth/token/accessible-resources` order. An Atlassian account often spans
+several sites (a personal workspace plus employers'), and "first accessible
+site" is an arbitrary pick among them — the same selection-ignored shape as
+the 2026-08-13 GitHub over-collection incident, where the token's visibility
+was trusted over the tenant's stored choice. No stored cloud_id → the
+selection is unknowable → pull nothing.
 
 Issues carry a real type in Jira (Bug/Story/Task/Epic), so we pass it straight
 through as a property; the extractor still classifies downstream, but the native
@@ -16,10 +25,8 @@ from typing import Iterator
 
 import requests
 
-from app.connectors.jira_oauth import (
-    JIRA_API_BASE,
-    first_cloud_id,
-)
+from app.connectors.jira_oauth import JIRA_API_BASE
+from app.db.connections import get_connection
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
@@ -52,16 +59,36 @@ def _plain_text_from_adf(node: object) -> str:
     return " ".join(p for p in out if p)
 
 
-def pull(token: str) -> Iterator[RawRecord]:
-    """Yield every accessible issue across the token's first Jira site.
+def _stored_cloud_id(enterprise_id: str | None) -> str | None:
+    """The site the tenant connected, from the connection row — or None.
+
+    None means "pull nothing": without tenant context, or without a stored
+    site, guessing from the token's accessible-resources order could sync a
+    site the user never picked.
+    """
+    if not enterprise_id:
+        logger.warning("Jira puller: no enterprise_id — site selection unknown, pulling nothing")
+        return None
+    conn = get_connection(enterprise_id, "jira")
+    cloud_id = ((conn or {}).get("config") or {}).get("cloud_id")
+    if not cloud_id:
+        logger.warning(
+            "Jira puller: connection for %s has no stored cloud_id — pulling nothing",
+            enterprise_id,
+        )
+        return None
+    return cloud_id
+
+
+def pull(token: str, *, enterprise_id: str | None = None) -> Iterator[RawRecord]:
+    """Yield every accessible issue on the tenant's connected Jira site.
 
     Uses the enhanced `/search/jql` endpoint with token-based pagination
     (`nextPageToken`), ordering by most-recently-updated so a page cap keeps
     the freshest issues.
     """
-    cloud_id = first_cloud_id(token)
+    cloud_id = _stored_cloud_id(enterprise_id)
     if not cloud_id:
-        logger.warning("Jira puller: no accessible site for token — nothing to pull")
         return
 
     base = f"{JIRA_API_BASE}/{cloud_id}/rest/api/3"
