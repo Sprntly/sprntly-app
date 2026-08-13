@@ -291,3 +291,57 @@ describe("teardown", () => {
     expect(st.seen.length).toBe(before)
   })
 })
+
+// ─── Regressions from review of #1161 ───────────────────────────────────────
+
+describe("the overlap guard holds on the CHAINED path", () => {
+  it("does not let flush start a third write while a chained one is live", async () => {
+    // The subtle break: the old shape chained by calling send() recursively and
+    // returning, which ran the outer `finally` and cleared `inFlight` while the
+    // chained request was still in flight. A flush() arriving then sailed past
+    // the guard and raced two writes on the SAME base version — one of which
+    // came back 409 as a conflict the user never caused.
+    const d = deferredSave()
+    const st = states()
+    const s = createSaveScheduler({ baseVersion: 1, save: d.save, onState: st.onState, debounceMs: 10 })
+
+    s.schedule({ body_html: "<p>1</p>" })
+    await vi.advanceTimersByTimeAsync(10)
+    expect(d.save).toHaveBeenCalledTimes(1)
+
+    s.schedule({ body_html: "<p>2</p>" })   // queues behind the in-flight one
+    d.resolve(2)                             // save 1 lands → chains save 2
+    await vi.advanceTimersByTimeAsync(0)
+    expect(d.save).toHaveBeenCalledTimes(2)
+
+    // Save 2 is still in flight. A blur-driven flush must NOT start a third.
+    void s.flush()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(d.save).toHaveBeenCalledTimes(2)
+    s.dispose()
+  })
+})
+
+describe("flush does not abandon text typed during a request", () => {
+  it("sends what queued behind an in-flight save", async () => {
+    // Type → debounce fires → keep typing during the ~200ms request → click
+    // away. The old flush() returned immediately (inFlight was true) and the
+    // caller then disposed, so those words were never sent and never reported.
+    const d = deferredSave()
+    const st = states()
+    const s = createSaveScheduler({ baseVersion: 1, save: d.save, onState: st.onState, debounceMs: 10 })
+
+    s.schedule({ body_html: "<p>sent</p>" })
+    await vi.advanceTimersByTimeAsync(10)
+    s.schedule({ body_html: "<p>typed during the request</p>" })
+
+    const flushed = s.flush()
+    d.resolve(2)
+    await vi.advanceTimersByTimeAsync(0)
+    d.resolve(3)
+    await flushed
+
+    expect(d.calls.at(-1)?.body_html).toBe("<p>typed during the request</p>")
+    s.dispose()
+  })
+})

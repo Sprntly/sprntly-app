@@ -81,12 +81,22 @@ export function DocumentRoute() {
     return () => clearInterval(t)
   }, [doc?.status, load])
 
-  // One scheduler per document. Rebuilt only when the id changes — not on
-  // every render — so a debounce in flight is never dropped mid-sentence.
+  // One scheduler per document, built ONLY ONCE THE DOCUMENT HAS LOADED.
+  //
+  // Keying this on `docId` alone was a real bug: the effect commits
+  // synchronously on mount while `load()` is still awaiting the GET, so
+  // `baseVersion` captured the initial `useRef(1)` and never moved. Every
+  // generated document is already at version 2 (`finish_artifact` bumps it),
+  // so the FIRST keystroke saved against version 1, matched no row, and raised
+  // "Someone else saved this document while you were editing" — in a document
+  // nobody else had touched. The conflict machinery firing on a user's own
+  // first edit is worse than having none.
   useEffect(() => {
-    if (docId == null) return
+    if (docId == null || doc == null) return
+    if (schedulerRef.current) return
     const scheduler = createSaveScheduler({
-      baseVersion: versionRef.current,
+      // The LOADED version, not a placeholder.
+      baseVersion: doc.version,
       onState: setSaveState,
       save: async (payload) => {
         try {
@@ -111,7 +121,11 @@ export function DocumentRoute() {
       scheduler.dispose()
       schedulerRef.current = null
     }
-  }, [docId])
+    // `doc?.id` rather than `doc`: the poll replaces the object while a
+    // generation runs, and rebuilding the scheduler on each poll would drop a
+    // debounce mid-sentence.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docId, doc?.id])
 
   // A tab close cannot await, so this is best-effort by nature: it flushes the
   // debounce rather than guaranteeing delivery. The debounce is short enough
@@ -141,26 +155,49 @@ export function DocumentRoute() {
     const theirs = saveState.kind === "conflict" ? saveState.theirs : null
     if (keep === "theirs") {
       // Adopt their document wholesale. The editor remounts on the new
-      // `contentKey`, so the user sees what landed.
+      // `contentKey`, so the user sees what landed. Re-based on what the
+      // reload actually returned, NOT on the version in the 409 — see the
+      // matching note below.
       await load()
-      schedulerRef.current?.reset(theirs?.version ?? versionRef.current)
+      bodyDirtyRef.current = false
+      schedulerRef.current?.reset(versionRef.current)
       return
     }
     // Keep mine: re-base onto their version and save over it. This is an
     // explicit, informed overwrite — the user has been shown that someone else
     // saved and has chosen — which is the only kind this product should do.
-    const base = theirs?.version ?? versionRef.current
-    versionRef.current = base
+    // Re-base onto the version we JUST LOADED rather than the one carried in
+    // the 409: a third save landing between the refusal and now would make
+    // `theirs.version` already stale, and the next keystroke would conflict
+    // again immediately.
+    await load()
+    const base = versionRef.current
     schedulerRef.current?.reset(base)
-    schedulerRef.current?.schedule({ title, body_html: currentHtmlRef.current })
+    // `body_html` is sent ONLY if the user actually edited the body. Sending
+    // the ref unconditionally is what made a title-only edit destructive.
+    schedulerRef.current?.schedule(
+      bodyDirtyRef.current ? { title, body_html: currentHtmlRef.current } : { title },
+    )
     await schedulerRef.current?.flush()
   }, [saveState, load, title])
 
   // The editor's latest serialization, kept so "keep mine" can re-send it
   // after a conflict without reaching into the editor instance.
+  //
+  // SEEDED FROM THE LOADED DOCUMENT, and `bodyDirty` tracks whether the user
+  // actually typed. Both matter: this ref used to start as "" and was written
+  // only by the editor's onChange, so a user who renamed the title and never
+  // touched the body — then hit a conflict — sent `body_html: ""` and DELETED
+  // THE ENTIRE DOCUMENT with the button whose whole purpose is to preserve
+  // their work.
   const currentHtmlRef = useRef("")
+  const bodyDirtyRef = useRef(false)
+  useEffect(() => {
+    if (doc) currentHtmlRef.current = doc.body_html
+  }, [doc?.id, doc?.version])
   const handleChange = useCallback((html: string) => {
     currentHtmlRef.current = html
+    bodyDirtyRef.current = true
     onBodyChange(html)
   }, [onBodyChange])
 
@@ -237,6 +274,16 @@ export function DocumentRoute() {
             <ConflictBanner theirs={saveState.theirs} onResolve={resolveConflict} />
           )}
 
+          {doc.status === "ready" && !doc.body_html.trim() && (
+            // Slice 3 had this and slice 4 dropped it, leaving a ready-but-
+            // empty document rendering as a completely blank page — which
+            // reads as broken rather than as new. A cue, not a placeholder
+            // attribute: see the note in DocumentEditor's stylesheet.
+            <p data-doc-empty style={S.muted}>
+              This document is empty. Start typing, or ask in chat for a draft.
+            </p>
+          )}
+
           {doc.status === "generating" ? (
             // Read-only while it writes: an editable buffer over a document
             // being replaced would have every keystroke overwritten by the
@@ -273,7 +320,11 @@ function SaveIndicator({ state }: { state: SaveState }) {
   const text =
     state.kind === "saving" ? "Saving…"
       : state.kind === "saved" ? "Saved"
-      : state.kind === "error" ? "Couldn't save — will retry"
+      // NOT "will retry": nothing schedules one. The scheduler retries on the
+      // next change or flush, so a user who stops typing and leaves the tab
+      // open would be told a save was coming that never came. The wording
+      // names the action that actually works.
+      : state.kind === "error" ? "Not saved — keep typing to retry"
       : state.kind === "conflict" ? "Someone else edited this"
       : ""
   if (!text) return null

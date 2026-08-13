@@ -62,6 +62,16 @@ export function DocumentEditor({
     // Next renders this route on the server first; without this TipTap warns
     // about an SSR/client mismatch and re-mounts the document.
     immediatelyRender: false,
+    // THE TOOLBAR MUST FOLLOW THE CARET. TipTap v3 defaults this to false, so
+    // `useEditor` does not re-render on a transaction — and `Toolbar` reads
+    // `editor.isActive(...)` during render. Without it, clicking into an
+    // existing <h2> left the style select showing "Body"; choosing "Heading 2"
+    // then TOGGLED THE HEADING OFF, turning it into a paragraph — the opposite
+    // of what was asked. The same staleness made a picker unusable in the
+    // other direction: a controlled <select> fires no change event for the
+    // value it already displays, so re-applying a size the toolbar wrongly
+    // believed was active did nothing.
+    shouldRerenderOnTransaction: true,
     editable,
     extensions: [
       StarterKit.configure({
@@ -125,11 +135,13 @@ export function DocumentEditor({
           padding: 12px 14px; overflow-x: auto;
         }
         [data-doc-editor] .tiptap a { color: var(--accent, #179463); }
-        /* The empty-document prompt. A blank page with no cue reads as broken. */
-        [data-doc-editor] .tiptap p.is-editor-empty:first-child::before {
-          content: attr(data-placeholder);
-          color: var(--ink-3, #8C8A84); float: left; height: 0; pointer-events: none;
-        }
+        /* NO placeholder rule here on purpose. The obvious one styles
+           p.is-editor-empty::before with attr(data-placeholder), which only
+           works with @tiptap/extension-placeholder — not installed, so the
+           class and the attribute are never produced and the rule is dead CSS
+           pretending to be an empty state. The route renders a real hint above
+           the editor instead (see DocumentRoute's empty case): no extra
+           dependency, and visible to a test. */
       `}</style>
     </div>
   )

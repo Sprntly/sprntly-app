@@ -102,55 +102,69 @@ export function createSaveScheduler(opts: {
     }
   }
 
-  async function send(): Promise<void> {
-    // Every guard here is a way to lose text if it is missing. In order: a
-    // disposed scheduler has no UI to report to; a conflicted one must not
-    // overwrite the colleague it just refused for; an overlapping write can
-    // land out of order; and an empty payload is a request with nothing in it.
-    if (disposed || conflicted || inFlight) return
-    const keys = Object.keys(pending)
-    if (keys.length === 0) return
+  /** The send currently in flight, so `flush` can WAIT for it rather than
+   *  returning early and letting the caller tear down over queued text. */
+  let inFlightSend: Promise<void> | null = null
 
-    const payload = pending
-    // Cleared BEFORE the await, so a keystroke during the request is queued as
-    // NEW pending text rather than being folded into the write already leaving
-    // — and therefore is not silently marked saved when this one returns.
-    pending = {}
-    inFlight = true
-    opts.onState({ kind: "saving" })
-    try {
-      const { version: next } = await opts.save({ ...payload, base_version: version })
-      version = next
-      if (disposed) return
-      opts.onState({ kind: "saved", at: Date.now() })
-      // Text that arrived mid-flight goes now, rather than waiting for the
-      // next keystroke that may never come.
-      if (Object.keys(pending).length > 0) {
-        inFlight = false
-        void send()
-        return
-      }
-    } catch (err) {
-      if (err instanceof SaveConflict) {
-        conflicted = true
-        // The refused text is put BACK, so "keep mine" still has something to
-        // keep. Dropping it here is the bug that turns a conflict into data
-        // loss on top of a conflict.
+  async function drain(): Promise<void> {
+    // A LOOP, not recursion into `send()`. The previous shape chained by
+    // calling itself and returning — which ran the outer `finally` and cleared
+    // `inFlight` while the chained request was still live, so a concurrent
+    // `flush()` sailed past the overlap guard and raced two writes on the same
+    // base version. One of them then 409'd as a conflict the user never caused.
+    while (true) {
+      if (disposed || conflicted) return
+      const keys = Object.keys(pending)
+      if (keys.length === 0) return
+
+      const payload = pending
+      // Cleared BEFORE the await, so a keystroke during the request is queued
+      // as NEW pending text rather than being folded into the write already
+      // leaving — and therefore is not silently marked saved when this one
+      // returns.
+      pending = {}
+      opts.onState({ kind: "saving" })
+      try {
+        const { version: next } = await opts.save({ ...payload, base_version: version })
+        version = next
+        if (disposed) return
+        opts.onState({ kind: "saved", at: Date.now() })
+        // Loop: text that arrived mid-flight goes now, rather than waiting for
+        // the next keystroke that may never come.
+        continue
+      } catch (err) {
+        if (err instanceof SaveConflict) {
+          conflicted = true
+          // The refused text is put BACK, so "keep mine" still has something to
+          // keep. Dropping it here is the bug that turns a conflict into data
+          // loss on top of a conflict.
+          pending = { ...payload, ...pending }
+          if (!disposed) opts.onState({ kind: "conflict", theirs: err.theirs })
+          return
+        }
+        // Retryable: keep the text and say so. The next change or flush retries.
         pending = { ...payload, ...pending }
-        if (!disposed) opts.onState({ kind: "conflict", theirs: err.theirs })
+        if (!disposed) {
+          opts.onState({
+            kind: "error",
+            message: err instanceof Error ? err.message : "Could not save",
+          })
+        }
         return
       }
-      // Retryable: keep the text and say so. The next change or flush retries.
-      pending = { ...payload, ...pending }
-      if (!disposed) {
-        opts.onState({
-          kind: "error",
-          message: err instanceof Error ? err.message : "Could not save",
-        })
-      }
-    } finally {
-      inFlight = false
     }
+  }
+
+  function send(): Promise<void> {
+    // One drain at a time. A second caller joins the running one instead of
+    // starting a parallel write.
+    if (inFlight) return inFlightSend ?? Promise.resolve()
+    inFlight = true
+    inFlightSend = drain().finally(() => {
+      inFlight = false
+      inFlightSend = null
+    })
+    return inFlightSend
   }
 
   return {
@@ -166,7 +180,13 @@ export function createSaveScheduler(opts: {
     },
     async flush() {
       clearTimer()
+      // Awaited, then repeated: the first call may join a send that is already
+      // running, which by definition cannot carry text queued after it left.
+      // Without the second pass, typing during a request and then navigating
+      // away loses those words — and the caller's teardown comment promises
+      // the opposite.
       await send()
+      if (!disposed && !conflicted && Object.keys(pending).length > 0) await send()
     },
     reset(v) {
       version = v

@@ -52,12 +52,15 @@ async function mount(props: Partial<React.ComponentProps<typeof DocumentEditor>>
   )
   await waitFor(() => expect(utils.container.querySelector(".tiptap")).not.toBeNull())
   await waitFor(() => expect(editor).not.toBeNull())
+  const setCaret = (pos: number) => {
+    editor!.commands.setTextSelection({ from: pos, to: pos })
+  }
   const selectAll = () => {
     const pm = utils.container.querySelector(".tiptap") as HTMLElement
     const len = (pm.textContent ?? "").length
     editor!.commands.setTextSelection({ from: 1, to: len + 1 })
   }
-  return { ...utils, onChange, selectAll }
+  return { ...utils, onChange, selectAll, setCaret }
 }
 
 describe("the editor renders the document it is given", () => {
@@ -203,5 +206,44 @@ describe("changes reach the caller", () => {
     // A string of HTML, not a ProseMirror document — the save layer stores it
     // verbatim.
     expect(typeof onChange.mock.calls.at(-1)![0]).toBe("string")
+  })
+})
+
+// ─── Regression from review of #1161 ────────────────────────────────────────
+
+describe("the toolbar follows the caret", () => {
+  it("reflects the block the cursor is in, without typing", async () => {
+    // THE BUG THIS PINS: TipTap v3's `useEditor` does not re-render on a
+    // transaction by default, and the toolbar reads `editor.isActive(...)`
+    // during render. So moving the caret into an existing <h2> left the style
+    // select showing "Body" — and choosing "Heading 2" then TOGGLED THE
+    // HEADING OFF, turning it into a paragraph. A control that does the
+    // opposite of its label is worse than a missing one.
+    const { getByTestId, setCaret } = await mount({
+      initialHtml: "<h2>a heading</h2><p>a paragraph</p>",
+    })
+    const value = () => (getByTestId("doc-heading") as HTMLSelectElement).value
+
+    // Inside the <h2> (offset 1 is its first text position).
+    setCaret(2)
+    await waitFor(() => expect(value()).toBe("2"))
+
+    // ...and back into the paragraph, which begins after the heading node.
+    setCaret(15)
+    await waitFor(() => expect(value()).toBe("p"))
+  })
+
+  it("shows bold as active when the caret sits in bold text", async () => {
+    const { getByTestId, setCaret } = await mount({
+      initialHtml: "<p><strong>bold</strong> plain</p>",
+    })
+    setCaret(2)
+    await waitFor(() =>
+      expect(getByTestId("doc-bold").getAttribute("data-active")).toBe("true"),
+    )
+    setCaret(8)
+    await waitFor(() =>
+      expect(getByTestId("doc-bold").getAttribute("data-active")).toBe("false"),
+    )
   })
 })
