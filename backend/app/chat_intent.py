@@ -243,7 +243,10 @@ def looks_like_open_request(message: str) -> bool:
 # downgrades to carries the library (the planner forces include_library on the
 # no-target plan), so it can truthfully say what formats exist and where the
 # PRD panel's Format control lives.
-_NEEDS_PRD = frozenset({"edit_prd", "change_prd_template"})
+# assign_tickets joins them: its ticket universe IS the thread's PRD (the
+# tickets generated from it), so with no PRD in context there is nothing to
+# assign and the downgrade-to-answer can say so honestly.
+_NEEDS_PRD = frozenset({"edit_prd", "change_prd_template", "assign_tickets"})
 
 _SCHEMA: dict = {
     "type": "object",
@@ -490,6 +493,13 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # made one. Nothing was created and the library stayed empty. Shipped that
     # way in #1154; found by Apurva asking for a leadership update.
     "create_artifact",
+    # Change who OWNS tickets. The client resolves it against the thread's PRD
+    # (POST /v1/tickets/assign-plan) and asks per-ticket through the question
+    # popup when the mapping is ambiguous; the envelope's `instruction` is the
+    # whole argument. Listed here for exactly the reason create_artifact's
+    # comment records: this set is the wire, and an action missing from it is
+    # a silent half-feature, not an error.
+    "assign_tickets",
 }
 
 
@@ -590,6 +600,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     if envelope["intent"] in _NEEDS_PRD and not prd_id:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
+        envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "assign_tickets" and not envelope["instruction"]:
+        # Same rule as edit_prd: an assignment with nobody named and nothing
+        # targeted is a dispatch with nothing to execute. The planner gates
+        # this too (_NEEDS_INSTRUCTION); re-applied where the client is told
+        # what to do.
         envelope.update(intent="answer", source="no_instruction")
     if envelope["intent"] == "open_artifact" and not envelope["artifact_query"]:
         # The planner already gates this, but the rule is re-applied here for

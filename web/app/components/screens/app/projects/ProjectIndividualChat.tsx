@@ -566,6 +566,10 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // grounded ask rather than silently dropping the message.
             onChangeTemplate: () => void runAsk(),
             onCreateArtifact: () => void runAsk(),
+            // Same reasoning as onOpenArtifact/onChangeTemplate: this thread
+            // has no ticket-assignment surface — fall back to the grounded
+            // ask rather than silently dropping the message.
+            onAssignTickets: () => void runAsk(),
             onAnswer: () => void runAsk(),
           },
         )

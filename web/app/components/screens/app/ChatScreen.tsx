@@ -32,6 +32,7 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
+import { QuestionPopup, type PopupAnswer } from "../../shared/QuestionPopup"
 import { ChatSuggestionIcon, IconDocument, IconSparkle } from "../../shared/app-icons"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
@@ -43,7 +44,7 @@ import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -238,6 +239,19 @@ type ChatTab = {
     /** The thread turn carrying the questions, so whichever path answers them —
      *  the card's submit or a prose reply in the composer — can stamp its
      *  resolution back onto the right turn. */
+    turnId: string
+  }
+  /** Assign-tickets (chat): the plan's OPEN questions while the dock's popup
+   *  steps through them. Picks stay local until the LAST question settles —
+   *  then completeAssign writes every pair (the same PUT the drawer's picker
+   *  makes) and posts the summary. Transient — never persisted; a reload
+   *  drops the open questions and the user re-asks. */
+  pendingAssign?: {
+    questions: TicketAssignQuestion[]
+    /** Human lines for the pairs the PLAN already applied (the explicit ones,
+     *  written before the popup opened) — they lead the final summary. */
+    applied: string[]
+    /** The flow's turn, so the summary lands on the same conversation entry. */
     turnId: string
   }
   /** True from the moment a PRD command is acknowledged until the agent's NEXT
@@ -3154,6 +3168,17 @@ export function ChatScreen() {
   /** Freeze the questions turn into its settled, read-only form. Both answering
    *  paths call this — the card's submit and a prose reply in the composer — so
    *  the batch never reverts to the flattened text the moment it's answered. */
+  // The dock slot lower-priority question batches (the PRD's "User input
+  // needed" items) portal their stepper into. State, not a ref, because the
+  // portal must re-render when the element mounts.
+  const [questionDockEl, setQuestionDockEl] = useState<HTMLDivElement | null>(null)
+
+  // The clarify POPUP's per-batch dismissal, keyed by the questions turn id.
+  // Dismissing (its ×) is "answer somewhere else, not in a stepper": the
+  // inline card comes back as the fallback answering surface, exactly the UI
+  // this popup replaced — so closing the popup can never strand the questions.
+  const [clarifyPopupDismissed, setClarifyPopupDismissed] = useState<Record<string, boolean>>({})
+
   const markClarifyResolved = useCallback(
     (tabId: string, turnId: string, resolution: ClarifyResolution) => {
       setTabs((prev) => prev.map((t) => t.id === tabId
@@ -3447,6 +3472,150 @@ export function ChatScreen() {
       showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+
+  // ── Assign tickets from chat ────────────────────────────────────────────────
+  // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".
+  // POST /v1/tickets/assign-plan resolves the sentence against the thread PRD's
+  // tickets and the team roster. Pairs the request stated OUTRIGHT are applied
+  // here immediately — through the same PUT /fields the drawer's picker makes,
+  // so chat gains no write path of its own. Everything the request left open
+  // comes back as questions and steps through the dock's QuestionPopup; the
+  // picks stay local until the last question settles, then `completeAssign`
+  // writes them all and posts the summary (owner directive: finish all the
+  // questions before anything is sent).
+  const assignTicketsFlow = useCallback(async (
+    query: string, targetTabId: string, prdId: number, instruction: string,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    const asReply = (answer: string) => ({
+      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    try {
+      const plan = await ticketDataApi.assignPlan(prdId, instruction)
+      // Sequential on purpose: a handful of writes at most, and a per-ticket
+      // failure must be attributable to its ticket rather than lost in a race.
+      const applied: string[] = []
+      const failed: string[] = []
+      for (const a of plan.assignments) {
+        try {
+          await ticketDataApi.saveFields(a.ticket_key, { assignee: a.assignee })
+          applied.push(`“${a.ticket_title}” → ${a.assignee.display_name || a.assignee.email || "them"}`)
+        } catch {
+          failed.push(a.ticket_title)
+        }
+      }
+      const noteLine = [
+        plan.note,
+        failed.length
+          ? `I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`
+          : "",
+      ].filter(Boolean).join(" ")
+      if (plan.questions.length) {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, pendingAssign: { questions: plan.questions, applied, turnId: id } }
+          : t))
+        const lead = applied.length
+          ? `Done so far:\n${applied.map((l) => `- ${l}`).join("\n")}\n\n`
+          : ""
+        const qWord = plan.questions.length === 1 ? "one more answer" : `${plan.questions.length} quick answers`
+        finalize(asReply(
+          `${noteLine ? `${noteLine}\n\n` : ""}${lead}I need ${qWord} to finish — pick below; I'll apply everything once you've been through them.`,
+        ))
+      } else if (applied.length || noteLine) {
+        finalize(asReply(
+          `${applied.length ? `Assigned:\n${applied.map((l) => `- ${l}`).join("\n")}` : ""}${applied.length && noteLine ? "\n\n" : ""}${noteLine}`,
+        ))
+      } else {
+        finalize(asReply(
+          "I couldn't work out that assignment — try naming the ticket and the person, e.g. “assign the login ticket to Dave”.",
+        ))
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize(asReply(`I couldn't plan that assignment — ${msg}. No tickets were changed.`))
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation])
+
+  /** The assign batch's ONE landing: the popup collected every pick (owner
+   *  directive — finish all the questions before anything is sent), and only
+   *  now do the writes happen, each through the ordinary fields endpoint. The
+   *  summary posts as its own agent turn on the flow's conversation entry. */
+  const completeAssign = useCallback(async (
+    tabId: string, answers: PopupAnswer[],
+  ) => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    const pa = tab?.pendingAssign
+    if (!pa) return
+    // Close the batch first — the popup is spent; the writes ride the tab's
+    // busy state, not a half-open stepper.
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
+    setBusyTabs((prev) => addToSet(prev, tabId))
+    const applied = [...pa.applied]
+    const failed: string[] = []
+    let skipped = 0
+    try {
+      for (let i = 0; i < pa.questions.length; i++) {
+        const q = pa.questions[i]
+        const a = answers[i]
+        const opt = a && !a.skipped && a.answer
+          ? ((a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
+             q.options.find((o) => o.label === a.answer))
+          : undefined
+        if (!opt) { skipped += 1; continue }
+        const pair = q.fixed.kind === "ticket"
+          ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
+          : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
+        if (!pair.assignee) { skipped += 1; continue }
+        try {
+          await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
+          applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
+        } catch {
+          failed.push(pair.title)
+        }
+      }
+      const lines: string[] = []
+      if (applied.length) lines.push(`All set — assigned:\n${applied.map((l) => `- ${l}`).join("\n")}`)
+      if (skipped) lines.push(`${skipped === 1 ? "One ticket was" : `${skipped} tickets were`} left as they are.`)
+      if (failed.length) lines.push(`I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`)
+      // Nothing landed and nothing broke → everything was skipped; say that
+      // plainly instead of a bare skip count with no verdict.
+      const summary = !applied.length && !failed.length
+        ? "No assignments made — everything was skipped, so the tickets keep their current owners."
+        : lines.join("\n\n")
+      const reply = {
+        answer: summary, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse
+      const noteId =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      setTabs((prev) => prev.map((t) => t.id === tabId
+        ? { ...t, thread: [...t.thread, { id: noteId, query: "", reply }] }
+        : t))
+      finalizeConversationTurn(pa.turnId, { reply }, tabId)
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, tabId))
+    }
+  }, [finalizeConversationTurn])
+
+  /** The assign popup's × — close the stepper. Nothing has been written from
+   *  it (the batch only submits on completion), so there is nothing to report:
+   *  the explicit pairs the plan applied are already in the flow's reply. */
+  const cancelAssign = useCallback((tabId: string) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
+  }, [])
 
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
@@ -4280,10 +4449,19 @@ export function ChatScreen() {
                 documentCommandFlow(trimmed, env)
                 settlePendingSend()
               },
-              // No resolvable edit/format target/instruction, no open lookup,
-              // or answer/low-confidence/unknown/generate_prototype → nothing
-              // to do here; ChatScreen's own grounded-ask code below already
-              // runs unconditionally whenever `result.handled` is false.
+              onAssignTickets: (instruction, prdId) => {
+                // Change who OWNS tickets. dispatchChatIntent's own guard
+                // (ctx.hasEditTarget && envelope.instruction) already ensures
+                // prdId is non-null and an instruction is present before this
+                // executor ever runs.
+                void assignTicketsFlow(trimmed, activeTab!.id, prdId!, instruction)
+                settlePendingSend()
+              },
+              // No resolvable edit/format/assign target/instruction, no open
+              // lookup, or answer/low-confidence/unknown/generate_prototype →
+              // nothing to do here; ChatScreen's own grounded-ask code below
+              // already runs unconditionally whenever `result.handled` is
+              // false.
               onAnswer: () => {},
             },
           )
@@ -4681,7 +4859,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -5767,6 +5945,28 @@ export function ChatScreen() {
   const showChipRow = !hasThread
   const showEmptyStarters = false
 
+  // ── The clarify gate's live batch, as the dock popup's source ───────────────
+  // The turn `pendingClarify` names, while its questions are still open. The
+  // popup renders from this; the thread shows a one-line pointer in its place.
+  // Null once resolved, once the tab's gate clears, or when the thread was
+  // rehydrated without the answering machinery — every case where the popup
+  // would be a dead surface.
+  const pendingClarifyTurn = useMemo(() => {
+    const pending = activeTab?.pendingClarify
+    if (!pending) return null
+    const t = activeTab?.thread.find((tn) => tn.id === pending.turnId)
+    return t && t.clarify?.length && !t.clarifyResolved ? t : null
+  }, [activeTab])
+  const clarifyPopupOpen =
+    !!pendingClarifyTurn && !clarifyPopupDismissed[pendingClarifyTurn.id]
+
+  // The assign batch, when the clarify gate isn't holding the dock. Dock
+  // priority is clarify > assign > PRD input questions: the gate decides
+  // whether a generation even starts, the assign batch is the user's active
+  // command, and the PRD's input items keep until both are done.
+  const pendingAssignState = activeTab?.pendingAssign
+  const assignPopupOpen = !clarifyPopupOpen && !!pendingAssignState?.questions.length
+
   // ── Insight/PRD card + clarifying questions, as reusable nodes ──────────────
   // Same markup, two placements: a HEADER open (brief insight / ideation /
   // backlog load) renders them at the TOP of the thread — the card IS the tab's
@@ -5824,6 +6024,11 @@ export function ChatScreen() {
     <PrdInputQuestions
       prdId={activeTab.prd.prd_id}
       onPrdUpdated={handleInputPrdUpdated}
+      // Popup mode: pending items step through the dock's QuestionPopup, the
+      // thread keeps the ✓ record. The clarify gate and an active assign batch
+      // outrank them for the dock, so while either is up this hands over
+      // `null` and the items hold.
+      popupHost={clarifyPopupOpen || assignPopupOpen ? null : questionDockEl}
     />
   ) : null
   // Command-opened PRD tab with at least one turn → render the card + questions
@@ -6615,13 +6820,25 @@ export function ChatScreen() {
                                 history) can never take a dead answer — it falls
                                 through to the plain text instead. */}
                             {turn.clarify?.length && (turn.clarifyResolved || activeTab?.pendingClarify) ? (
-                              <ClarifyQuestionsCard
-                                questions={turn.clarify}
-                                resolved={turn.clarifyResolved}
-                                busy={busy || !!activeTab?.prdGenerating}
-                                onSubmit={(answers) => submitClarifyAnswers(answers)}
-                                onSkip={() => submitClarifyAnswers([])}
-                              />
+                              // While the batch is OPEN and this turn is the one
+                              // the dock popup is asking from, the thread shows a
+                              // one-line pointer instead of a second copy of the
+                              // questions — one answering surface at a time. The
+                              // popup's × brings this card back (dismissed), and
+                              // resolution always lands here as the record.
+                              clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved ? (
+                                <div className="cqc-popup-note" data-testid="clarify-popup-note">
+                                  Before I write this PRD, {turn.clarify.length === 1 ? "one quick question" : `${turn.clarify.length} quick questions`} — answer in the panel below, or just type your reply here.
+                                </div>
+                              ) : (
+                                <ClarifyQuestionsCard
+                                  questions={turn.clarify}
+                                  resolved={turn.clarifyResolved}
+                                  busy={busy || !!activeTab?.prdGenerating}
+                                  onSubmit={(answers) => submitClarifyAnswers(answers)}
+                                  onSkip={() => submitClarifyAnswers([])}
+                                />
+                              )
                             ) : turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
@@ -6769,6 +6986,64 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
+                {/* The clarify gate's questions as a stepper popup over the
+                    bottom of the chat — one question at a time, click through,
+                    the batch submits on the last answer. Same landing point as
+                    the inline card and the composer (submitClarifyAnswers), so
+                    all three answering surfaces stay interchangeable. */}
+                {clarifyPopupOpen && pendingClarifyTurn?.clarify ? (
+                  <QuestionPopup
+                    questions={pendingClarifyTurn.clarify.map((cq) => ({
+                      header: cq.header ?? null,
+                      prompt: cq.prompt,
+                      options: cq.options.map((o) => ({ label: o })),
+                      skipDefault: cq.skip_default,
+                    }))}
+                    fallbackHeader="PRD details"
+                    busy={busy || !!activeTab?.prdGenerating}
+                    skipAllLabel="Generate now"
+                    onSkipAll={() => void submitClarifyAnswers([])}
+                    onDismiss={() =>
+                      setClarifyPopupDismissed((p) => ({ ...p, [pendingClarifyTurn.id]: true }))
+                    }
+                    onComplete={(answers) => {
+                      const given = answers
+                        .filter((a) => !a.skipped && a.answer)
+                        .map((a) => ({ prompt: a.prompt, answer: a.answer }))
+                      // Everything skipped is a skip in everything but name —
+                      // submitClarifyAnswers([]) resolves it as one, same as the
+                      // card's empty submit.
+                      void submitClarifyAnswers(given)
+                    }}
+                  />
+                ) : null}
+                {/* The assign batch. Picks are LOCAL until the last question
+                    settles — then completeAssign writes every pair through
+                    PUT /fields and posts the summary. Closing early therefore
+                    writes nothing. */}
+                {assignPopupOpen && pendingAssignState && activeTabId ? (
+                  <QuestionPopup
+                    questions={pendingAssignState.questions.map((q) => ({
+                      header: q.header,
+                      prompt: q.prompt,
+                      options: q.options.map((o) => ({
+                        label: o.label,
+                        description: o.description ?? null,
+                        value: o.value,
+                      })),
+                      // Free text can't be validated against the roster — the
+                      // options ARE the answer space here.
+                      allowOther: false,
+                    }))}
+                    fallbackHeader="Assign"
+                    onComplete={(answers) => void completeAssign(activeTabId, answers)}
+                    onDismiss={() => cancelAssign(activeTabId)}
+                  />
+                ) : null}
+                {/* Portal slot for lower-priority question batches (PRD input
+                    questions, assignment questions). Empty div when nothing
+                    portals in — costs no height. */}
+                <div className="bc-question-dock" ref={setQuestionDockEl} />
                 {/* Renders NOTHING when there are no suggestions — no empty
                     container, no reserved height — so a thread Sprntly has
                     nothing to add to looks exactly as it did before this

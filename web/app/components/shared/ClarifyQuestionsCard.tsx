@@ -30,6 +30,10 @@ export type ClarifyQuestion = {
   prompt: string
   options: string[]
   skip_default?: string | null
+  /** 2–3 word category label ("Target users") — worn as the chip when the
+   *  batch renders in the QuestionPopup stepper. Optional: older backends and
+   *  persisted threads predate it. */
+  header?: string | null
 }
 
 /** One resolved answer, paired with the question it answers — the host renders

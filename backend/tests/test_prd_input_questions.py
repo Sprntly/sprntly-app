@@ -428,6 +428,104 @@ def test_answer_route_unknown_question_404(tenant_client, isolated_settings):
     assert resp.status_code == 404
 
 
+def test_answer_batch_route_folds_all_answers_in_one_edit(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The popup submits its whole batch at once (owner directive: finish all
+    the questions first) — one scoped edit, one version snapshot, every
+    question flipped together."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    _, prd_id = _seed_prd(db_mod, dataset="acme", html="<html><body>ORIG</body></html>")
+    import app.db.prd_input_questions as q
+    q.replace_questions(prd_id, [
+        {"tag": "escalate", "prompt": "Ship gated?", "options": [{"label": "Gated"}]},
+        {"tag": "need", "prompt": "Current rate?", "options": []},
+    ])
+    ids = [row["id"] for row in q.list_questions(prd_id)]
+    from app.db.prds import list_prd_versions
+    versions_before = len(list_prd_versions(prd_id))
+
+    seen = {}
+
+    def _fake_batch(prd_html, decisions, enterprise_id):
+        seen["decisions"] = decisions
+        return {
+            "html": "<html><body>BATCHED</body></html>",
+            "sections_changed": ["Requirements", "Goal"],
+            "summary": "Both folded.",
+        }
+
+    monkeypatch.setattr(prd_questions, "apply_answers", _fake_batch)
+
+    resp = t.client.post(
+        f"/v1/prd/{prd_id}/input-questions/answer-batch",
+        json={"answers": [
+            {"question_id": ids[0], "answer": "Gated"},
+            {"question_id": ids[1], "answer": "12%"},
+        ]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # ONE editor call carried both Q/A pairs.
+    assert seen["decisions"] == [("Ship gated?", "Gated"), ("Current rate?", "12%")]
+    assert "BATCHED" in body["prd"]["payload_md"]
+    assert body["sections_changed"] == ["Requirements", "Goal"]
+    assert [x["status"] for x in body["questions"]] == ["answered", "answered"]
+    assert [x["answer"] for x in body["questions"]] == ["Gated", "12%"]
+    # Content updated + exactly ONE undo snapshot for the whole batch.
+    assert "BATCHED" in db_mod.get_prd(prd_id)["payload_md"]
+    assert len(list_prd_versions(prd_id)) == versions_before + 1
+
+
+def test_answer_batch_route_unknown_question_dies_before_any_work(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """All-or-nothing: a batch naming a foreign/unknown question 404s before
+    the editor runs, and NO question is marked answered."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    _, prd_id = _seed_prd(db_mod, dataset="acme")
+    import app.db.prd_input_questions as q
+    q.replace_questions(prd_id, [
+        {"tag": "escalate", "prompt": "Ship gated?", "options": [{"label": "Gated"}]},
+    ])
+    qid = q.list_questions(prd_id)[0]["id"]
+
+    monkeypatch.setattr(
+        prd_questions, "apply_answers",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("editor must not run")),
+    )
+    resp = t.client.post(
+        f"/v1/prd/{prd_id}/input-questions/answer-batch",
+        json={"answers": [
+            {"question_id": qid, "answer": "Gated"},
+            {"question_id": 424242, "answer": "x"},
+        ]},
+    )
+    assert resp.status_code == 404
+    assert q.list_questions(prd_id)[0]["status"] == "pending"
+
+
+def test_apply_answers_renders_every_decision_into_one_prompt(
+    isolated_settings, monkeypatch
+):
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({
+            "html": "<html>ok</html>", "sections_changed": [], "summary": "s",
+        })
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    prd_questions.apply_answers(
+        "<html>o</html>", [("Q1?", "A1"), ("Q2?", "A2")], enterprise_id="co"
+    )
+    assert "QUESTION: Q1?\nANSWER: A1" in seen["input"]
+    assert "QUESTION: Q2?\nANSWER: A2" in seen["input"]
+
+
 # ── apply_chat_edit (free-form chat instruction editor) ──────────────────────
 
 def test_apply_chat_edit_round_trip(isolated_settings, monkeypatch):

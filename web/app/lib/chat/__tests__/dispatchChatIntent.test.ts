@@ -29,6 +29,7 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onOpenArtifact: vi.fn(),
     onChangeTemplate: vi.fn(),
     onCreateArtifact: vi.fn(),
+    onAssignTickets: vi.fn(),
     onAnswer: vi.fn(),
   }
 }
@@ -88,6 +89,15 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
   })
+
+  it("assign_tickets with a resolvable target + instruction hits onAssignTickets with both", () => {
+    const ex = executors()
+    const env = envelope({ intent: "assign_tickets", instruction: "give the login ticket to Dave", prd_id: 77 })
+    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    expect(ex.onAssignTickets).toHaveBeenCalledWith("give the login ticket to Dave", 77)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
 })
 
 describe("dispatchChatIntent — change_prd_template falls through without a resolvable target or format (AC12)", () => {
@@ -130,6 +140,26 @@ describe("dispatchChatIntent — edit_prd falls through without a resolvable tar
   })
 })
 
+describe("dispatchChatIntent — assign_tickets falls through without a resolvable target or instruction (AC12)", () => {
+  it("no resolvable target (hasEditTarget: false) → onAnswer, not onAssignTickets", () => {
+    const ex = executors()
+    const env = envelope({ intent: "assign_tickets", instruction: "assign it to Dave" })
+    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    expect(ex.onAssignTickets).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("empty instruction, even with a resolvable target → onAnswer, not onAssignTickets", () => {
+    const ex = executors()
+    const env = envelope({ intent: "assign_tickets", instruction: null, prd_id: 77 })
+    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    expect(ex.onAssignTickets).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+})
+
 describe("dispatchChatIntent — open_artifact falls through without a lookup (AC12)", () => {
   it("no envelope.open → onAnswer, not onOpenArtifact", () => {
     const ex = executors()
@@ -157,6 +187,7 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
     expect(ex.onOpenArtifact).not.toHaveBeenCalled()
     expect(ex.onChangeTemplate).not.toHaveBeenCalled()
     expect(ex.onCreateArtifact).not.toHaveBeenCalled()
+    expect(ex.onAssignTickets).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
   })

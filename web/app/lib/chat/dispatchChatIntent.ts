@@ -64,9 +64,15 @@ export interface ChatIntentExecutors {
    *  Needs no target PRD — a leadership update stands alone — so unlike
    *  edit_prd/change_prd_template this has no guard beyond the intent match. */
   onCreateArtifact: (envelope: ChatIntentEnvelope) => void
+  /** assign_tickets: change who OWNS one or more tickets. `prdId` mirrors
+   *  `onEditPrd`'s resolved-target parameter — the SAME `ctx.editTargetPrdId`
+   *  a caller resolved for edit_prd, reused here rather than a second
+   *  per-caller resolution path, since an assignment is targeted exactly like
+   *  an edit ("the tab's PRD or the conversation's" owns the tickets). */
+  onAssignTickets: (instruction: string, prdId: number | null) => void
   /** The grounded-ask fall-through — called whenever no structured intent's
-   *  guard held (an unresolvable edit_prd/change_prd_template target, a
-   *  lookup-less open_artifact, or `answer`/low-confidence/unknown/
+   *  guard held (an unresolvable edit_prd/change_prd_template/assign_tickets
+   *  target, a lookup-less open_artifact, or `answer`/low-confidence/unknown/
    *  `generate_prototype`). */
   onAnswer: () => void
 }
@@ -87,6 +93,9 @@ export type DispatchChatIntentResult = { handled: true } | { handled: false }
  *  - `change_prd_template` → `onChangeTemplate` only when `ctx.hasEditTarget`
  *    AND `envelope.artifact_template_id` — else `onAnswer`. Same target guard
  *    as `edit_prd` (a format switch is targeted exactly like an edit).
+ *  - `assign_tickets` → `onAssignTickets` only when `ctx.hasEditTarget` AND a
+ *    non-empty `envelope.instruction` — else `onAnswer`. Same target guard as
+ *    `edit_prd` (an assignment is targeted exactly like an edit).
  *  - anything else (`answer`, low confidence, unknown, `generate_prototype`)
  *    → `onAnswer`.
  *
@@ -135,6 +144,14 @@ export function dispatchChatIntent(
     case "create_artifact":
       executors.onCreateArtifact(envelope)
       return { handled: true }
+
+    case "assign_tickets":
+      if (ctx.hasEditTarget && envelope.instruction) {
+        executors.onAssignTickets(envelope.instruction, ctx.editTargetPrdId)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
 
     default:
       // answer / low_confidence / unknown / generate_prototype — moot

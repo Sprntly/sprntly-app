@@ -386,9 +386,10 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
 
     // The gate ran over the extracted task…
     await waitFor(() => expect(clarifyTask).toHaveBeenCalledWith("dark mode on mobile", undefined))
-    // …questions appear in the tab's chat, and NOTHING generated yet.
+    // …questions appear (in the dock's popup stepper), and NOTHING generated
+    // yet. "Generate now" is the popup's skip-all affordance.
     await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
-    expect(document.body.textContent).toContain("generate now")
+    expect(document.body.textContent).toContain("Generate now")
     // Skips are informed: the stated default rides with its question.
     expect(document.body.textContent).toContain("if skipped, I'll assume: all end users")
     expect(generateFromTask).not.toHaveBeenCalled()

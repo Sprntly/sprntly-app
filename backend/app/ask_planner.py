@@ -151,7 +151,12 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     regardless of the plan. A v7 row's kg flag on a library question is a
 #     contract where a v6 row's was a coincidence, so the two must not be
 #     pooled.
-_PROMPT_VERSION = "ask-planner-v7"
+# v8: the action menu gained `assign_tickets` — "assign this ticket to Dave"
+#     used to land on update_ticket (whose executor rewrites CONTENT, not
+#     ownership) or on a plain answer. Widening on v4's rule: a v8 row answers
+#     a question no v7 row was asked ("who should own these tickets"), so the
+#     two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v8"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -185,6 +190,16 @@ _ACTIONS: frozenset[str] = frozenset({
     "generate_tickets",
     "generate_prototype",
     "update_ticket",
+    # Change WHO OWNS tickets, not what they say: "assign the auth ticket to
+    # Dave", "give these tickets to Priya and Sam", "spread the tickets across
+    # the team". Its own action rather than a shading of `update_ticket`
+    # because the two dispatch to different machinery — update_ticket rewrites
+    # ONE ticket's content through a propose-and-confirm loop, while this one
+    # resolves people against the workspace roster and may need to ASK (which
+    # ticket? which person?) through the chat's question popup before anything
+    # is written. Its argument is `instruction` (the assignment request,
+    # self-contained: who was named, which tickets were meant).
+    "assign_tickets",
     "multi_agent",
     # Retrieval, not authoring: "open the billing PRD" names a document to SHOW.
     # It is a client intent (`chat_intent._CLIENT_INTENTS`), so a planner that
@@ -239,7 +254,13 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     # kind, so an empty task here would produce a generation about nothing.
     "create_artifact",
 })
-_NEEDS_INSTRUCTION: frozenset[str] = frozenset({"edit_prd", "update_ticket"})
+_NEEDS_INSTRUCTION: frozenset[str] = frozenset({
+    "edit_prd", "update_ticket",
+    # An assignment with no instruction has nobody to assign and nothing to
+    # assign them to — same "an action whose ARGUMENT is missing is worse than
+    # no action" rule as the other two.
+    "assign_tickets",
+})
 #: `open_artifact` without a subject to look up is not an open request — the
 #: same "an action whose ARGUMENT is missing is worse than no action" rule the
 #: other two encode. Degrades to `answer`, which is the recoverable landing.
@@ -322,8 +343,8 @@ _PLANNER_SCHEMA: dict = {
         "instruction": {
             "type": "string",
             "description": (
-                "edit_prd / update_ticket only: the change to apply, "
-                "self-contained."
+                "edit_prd / update_ticket / assign_tickets only: the change to "
+                "apply, self-contained."
             ),
         },
         # THE FORM, decided after the SUBJECT. Schema order is generation order,
@@ -573,6 +594,13 @@ or wants an answer.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
 - update_ticket — rewrite an EXISTING ticket from a PRD or from this thread
   ("update the ticket with the PRD details"). Set `instruction`.
+- assign_tickets — change WHO OWNS tickets: "assign the auth ticket to Dave",
+  "give these tickets to Priya and Sam", "assign the tickets to the team",
+  "reassign SPR-3 to Maya". Set `instruction` to the assignment request,
+  self-contained: every person named, and which ticket(s) the thread says they
+  should get. The product resolves names against the workspace roster and asks
+  per-ticket when the message names people but not which ticket each one gets
+  — so an instruction that only names people is still complete.
 - multi_agent — the full multi-agent analysis suite: a PRD, an evidence report
   and four analysis documents (technical design, QA test cases, risk analysis,
   traceability matrix), all cross-referenced. Set `task`.
@@ -596,6 +624,11 @@ Rules that decide the close calls:
 - DIRECTION decides edit_prd vs update_ticket, and the same words run both ways.
   "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
   "Update the ticket with the PRD details" changes the TICKET → update_ticket.
+- WHO vs WHAT decides update_ticket vs assign_tickets. Changing a ticket's
+  CONTENT (description, criteria, scope) → update_ticket. Changing who it
+  BELONGS to → assign_tickets — even when phrased as an update ("update the
+  ticket to Dave", "put Priya on the login ticket"). ASKING about ownership is
+  neither: "who is assigned to the auth ticket?" is `answer`.
 - ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
   auth?" is `answer`. This applies hardest to create_artifact, where the
   library is SHARED with the whole team: a document created from a question

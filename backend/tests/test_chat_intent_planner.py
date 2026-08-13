@@ -263,6 +263,43 @@ def test_edit_prd_with_no_instruction_is_downgraded():
     assert envelope["source"] == "no_instruction"
 
 
+def test_assign_tickets_reaches_the_client_with_its_instruction():
+    """The client resolves the instruction against the thread PRD's tickets
+    (POST /v1/tickets/assign-plan) — both halves must survive the trip."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "assign_tickets", action_confidence=0.9,
+            instruction="assign the login ticket to Dave",
+        ),
+        prd_id=42,
+    )
+    assert envelope["intent"] == "assign_tickets"
+    assert envelope["instruction"] == "assign the login ticket to Dave"
+
+
+def test_assign_tickets_without_a_prd_is_answered_instead():
+    """Its ticket universe IS the thread's PRD: with none in context there is
+    nothing to assign, and the downgrade can say so honestly."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "assign_tickets", action_confidence=0.9,
+            instruction="assign the login ticket to Dave",
+        ),
+        prd_id=None,
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_prd"
+
+
+def test_assign_tickets_with_no_instruction_is_downgraded():
+    """Same rule as edit_prd: a dispatch with nothing to execute."""
+    envelope = ci._plan_to_envelope(
+        _plan("assign_tickets", action_confidence=0.9, instruction=""), prd_id=42
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_instruction"
+
+
 # ── degradation ──────────────────────────────────────────────────────────────
 
 

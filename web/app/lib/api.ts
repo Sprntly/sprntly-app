@@ -954,10 +954,17 @@ export type ChatIntentEnvelope = {
      *  prose and told users it had written a document that was never created.
      *  An intent the client cannot see is an intent that does not exist. */
     | "create_artifact"
+    /** Change who OWNS tickets ("assign the auth ticket to Dave") — the client
+     *  resolves `instruction` against the thread's PRD via
+     *  POST /v1/tickets/assign-plan, applies the explicit pairs, and asks the
+     *  open ones through the question popup. Targeted like edit_prd: the
+     *  backend downgrades a PRD-less or instruction-less request to `answer`
+     *  before it reaches a surface. */
+    | "assign_tickets"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
-  /** edit_prd: the change to apply, self-contained. */
+  /** edit_prd / assign_tickets: the change to apply, self-contained. */
   instruction: string | null
   /** create_artifact: WHAT KIND of document, in the user's own words
    *  ("leadership update"). Free text — the executor stores it as a label and
@@ -2828,7 +2835,7 @@ export const prdApi = {
   clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
     api.post<{
       sufficient: boolean
-      questions: { prompt: string; options: string[]; skip_default?: string | null }[]
+      questions: { prompt: string; header?: string | null; options: string[]; skip_default?: string | null }[]
       missing: string[]
     }>("/v1/prd/clarify-task", {
       task,
@@ -2932,6 +2939,17 @@ export const prdApi = {
       `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
       { answer },
     ),
+  /** Answer SEVERAL input questions in ONE scoped edit — the question popup
+   *  collects its whole batch before submitting. All-or-nothing: a failed
+   *  edit leaves the PRD untouched and no question marked answered. */
+  answerInputQuestionsBatch: (
+    prdId: number,
+    answers: { question_id: number; answer: string }[],
+  ) =>
+    api.post<PrdInputAnswersBatchResponse>(
+      `/v1/prd/${prdId}/input-questions/answer-batch`,
+      { answers },
+    ),
   /** Apply a free-form chat edit instruction to the PRD ("make this PRD
    *  shorter"). Same scoped-editor contract as answerInputQuestion — only the
    *  affected sections change, saved as an undoable version — driven by the
@@ -2992,6 +3010,14 @@ export type PrdInputQuestionsList = {
 export type PrdInputAnswerResponse = {
   prd: PrdRecord
   question: PrdInputQuestion
+  sections_changed: string[]
+  summary: string
+}
+
+/** Response from the batch answer route — same contract, N answered rows. */
+export type PrdInputAnswersBatchResponse = {
+  prd: PrdRecord
+  questions: PrdInputQuestion[]
   sections_changed: string[]
   summary: string
 }
@@ -3746,10 +3772,55 @@ export type TicketDataResponse = {
   comments: { id: number; author: string; body: string; time: string }[]
 }
 
+/** One explicit (ticket, member) pair the assign-plan resolved — the request
+ *  stated it unambiguously, so the client applies it immediately through
+ *  saveFields (the same write the drawer's assignee picker makes). */
+export type TicketAssignment = {
+  ticket_key: string
+  ticket_title: string
+  assignee: TicketAssignee
+}
+
+/** One question the assignment request left open, shaped for the
+ *  QuestionPopup. `fixed` is the side of the pair the request DID settle;
+ *  each option's `value` is the other side (a user_id when fixed is a
+ *  ticket, a ticket_key when fixed is a member), so one click completes a
+ *  pair. Member options also carry the full `assignee` record to write. */
+export type TicketAssignQuestion = {
+  header: string
+  prompt: string
+  fixed:
+    | { kind: "ticket"; ticket_key: string; ticket_title: string }
+    | { kind: "member"; assignee: TicketAssignee }
+  options: {
+    value: string
+    label: string
+    description?: string | null
+    assignee?: TicketAssignee
+  }[]
+}
+
+export type TicketAssignPlan = {
+  assignments: TicketAssignment[]
+  questions: TicketAssignQuestion[]
+  /** One honest line for anything not honoured (unknown name, no tickets).
+   *  Empty when everything resolved. */
+  note: string
+}
+
 export const ticketDataApi = {
   /** Get all saved overrides for a ticket (fields, description, attachments, comments). */
   getData: (ticketKey: string) =>
     api.get<TicketDataResponse>(`/v1/tickets/${encodeURIComponent(ticketKey)}/data`),
+  /** The chat's assign_tickets action: resolve an assignment instruction
+   *  against the PRD's tickets + the team roster. PLAN ONLY — apply each pair
+   *  with saveFields as the user's clicks land (or immediately for the
+   *  explicit ones). */
+  assignPlan: (prdId: number, instruction: string) =>
+    api.post<TicketAssignPlan>("/v1/tickets/assign-plan", {
+      prd_id: prdId,
+      instruction,
+    }),
   /** Save description + acceptance criteria. */
   saveDescription: (ticketKey: string, description: string, acceptanceCriteria: string[]) =>
     api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/description`, {
