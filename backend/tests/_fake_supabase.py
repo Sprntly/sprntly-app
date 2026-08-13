@@ -412,10 +412,32 @@ class _Query:
             where, args = self._where_clause()
             patch = _encode_row(self.table, self._patch)
             set_sql = ", ".join(f"{c} = ?" for c in patch.keys())
-            sql = f"UPDATE {self.table} SET {set_sql}{where}"
-            db.execute(sql, list(patch.values()) + args)
+            # Which rows the UPDATE will hit, resolved BEFORE it runs.
+            #
+            # PostgREST issues `UPDATE ... WHERE ... RETURNING *`, so the rows
+            # it returns are the ones it changed. Re-running the same WHERE
+            # afterwards is NOT the same thing: when the patch writes a column
+            # the filter also tests — a compare-and-set like
+            # `.eq("version", 3).update({"version": 4})` — the post-update
+            # SELECT matches nothing and the caller reads a successful write as
+            # a failed one. That divergence is invisible until some feature
+            # relies on it, and then it fails only under test, where the code is
+            # correct. Pinning the rowids first makes the fake return what
+            # RETURNING would.
+            target_ids = [
+                r[0] for r in db.execute(
+                    f"SELECT rowid FROM {self.table}{where}", args
+                ).fetchall()
+            ]
+            db.execute(f"UPDATE {self.table} SET {set_sql}{where}", list(patch.values()) + args)
             db.commit()
-            rows = db.execute(f"SELECT * FROM {self.table}{where}", args).fetchall()
+            if not target_ids:
+                return SimpleNamespace(data=[], count=None)
+            placeholders = ",".join("?" for _ in target_ids)
+            rows = db.execute(
+                f"SELECT * FROM {self.table} WHERE rowid IN ({placeholders})",
+                target_ids,
+            ).fetchall()
             return SimpleNamespace(data=[_decode_row(self.table, r) for r in rows], count=None)
 
         if self._kind == "delete":

@@ -54,6 +54,7 @@ from app.routes import (
     company,
     connectors,
     conversations,
+    custom_artifacts as custom_artifacts_routes,
     custom_skills as custom_skills_routes,
     datasets as datasets_routes,
     design_agent,
@@ -404,6 +405,11 @@ app.include_router(reports.router)
 # through the same Chromium renderer the report download uses — see
 # routes/documents.py for why the HTML comes from the client.
 app.include_router(documents.router)
+# Team documents of any kind — the "Others" library. Distinct from
+# documents.router above (a stateless HTML->PDF render) and from the
+# document_catalog (pointers into Confluence/Drive); these are documents
+# Sprntly itself stores and edits. See routes/custom_artifacts.py.
+app.include_router(custom_artifacts_routes.router)
 # No-auth share viewer for reports (`/r/<token>`). Registered separately from
 # reports.router so the unauthenticated surface stays visible in this list.
 app.include_router(reports_public.router)

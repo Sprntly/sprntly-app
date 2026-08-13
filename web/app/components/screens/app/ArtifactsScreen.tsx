@@ -53,7 +53,31 @@ const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
 // The four hexes below predate the design tokens and are left as they are —
 // changing them is a visual-consistency pass of its own, not this feature's.
 // The new entry uses the tokens, which is what a new badge should do.
-const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
+type ArtifactBadge = { label: string; bg: string; color: string }
+
+/** The badge for a type the client does not know about.
+ *
+ *  THE LIBRARY MUST NEVER WHITE-SCREEN BECAUSE THE SERVER LEARNED A NEW TRICK.
+ *  `ARTIFACT_BADGE[a.type].bg` was an unguarded dereference on a `Record` with
+ *  a fixed key set, so the first artifact type the backend emitted that this
+ *  bundle had not shipped support for was a TypeError during render — and with
+ *  no ErrorBoundary near this screen, that takes the WHOLE library down:
+ *  PRDs, prototypes, evidence, reports, all of it, for one unknown row.
+ *
+ *  The type union cannot catch it, because the two sides deploy separately: a
+ *  backend that lists a new type is live minutes before the web bundle that
+ *  renders it, and a user on a cached bundle can be behind for longer. So the
+ *  renderer degrades — an unknown row shows as a plain document and stays
+ *  un-openable — instead of failing. */
+const UNKNOWN_BADGE: ArtifactBadge = {
+  label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)",
+}
+
+function badgeFor(type: string): ArtifactBadge {
+  return (ARTIFACT_BADGE as Record<string, ArtifactBadge | undefined>)[type] ?? UNKNOWN_BADGE
+}
+
+const ARTIFACT_BADGE: Record<ArtifactItem["type"], ArtifactBadge> = {
   prd:        { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
   prototype:  { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence:   { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
@@ -89,9 +113,15 @@ function prototypeStatusLabel(
   return a.is_complete ? "Completed" : "Draft"
 }
 
-/** The meta/source line for a row, per the locked design. */
+/** The meta/source line for a row, per the locked design.
+ *
+ *  Every branch below is keyed on a known `type`; an unrecognised one falls
+ *  through to the final `prd | evidence` branch, which reads `a.source` fields
+ *  that may not exist. The guard at the top keeps that from throwing — see
+ *  UNKNOWN_BADGE for why an unknown type is a normal thing to receive. */
 function artifactSourceLine(a: ArtifactItem): string {
   const rel = a.created_at ? relativeTime(a.created_at) : ""
+  if (!(a.type in ARTIFACT_BADGE)) return rel
   if (a.type === "prototype") {
     const parts = [`from PRD ${a.source.prd_title}`]
     parts.push(prototypeStatusLabel(a))
@@ -151,7 +181,7 @@ function artifactTitle(a: ArtifactItem): string {
 }
 
 function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
-  const cfg = ARTIFACT_BADGE[type]
+  const cfg = badgeFor(type)
   const wrap: React.CSSProperties = {
     width: 38, height: 38, borderRadius: "50%", display: "flex",
     alignItems: "center", justifyContent: "center", background: cfg.bg, flexShrink: 0,
@@ -358,7 +388,10 @@ export function ArtifactsView({
         // cursor. Every other row stays clickable.
         const isBuilding =
           (a.type === "prototype" || a.type === "ticket_set") && a.status === "generating"
-        const clickable = !isBuilding
+        // An unknown type has no open handler in this bundle, so it must not
+        // offer a click that would silently do nothing (or throw).
+        const known = a.type in ARTIFACT_BADGE
+        const clickable = !isBuilding && known
         // The row whose panel is open renders selected: green tint + ring so
         // it's obvious which item the side panel belongs to.
         const isActive = activeKey === `${a.type}-${a.id}`
@@ -400,9 +433,9 @@ export function ArtifactsView({
               <span style={{
                 fontSize: 10, fontWeight: 700, textTransform: "uppercase",
                 letterSpacing: "0.04em", padding: "2px 8px", borderRadius: 4,
-                background: ARTIFACT_BADGE[a.type].bg, color: ARTIFACT_BADGE[a.type].color,
+                background: badgeFor(a.type).bg, color: badgeFor(a.type).color,
               }}>
-                {ARTIFACT_BADGE[a.type].label}
+                {badgeFor(a.type).label}
               </span>
               <span style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
                 {artifactSourceLine(a)}
