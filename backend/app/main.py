@@ -187,11 +187,26 @@ async def lifespan(app: FastAPI):
     # every 5m so an interrupted ask heals without waiting for a restart.
     # Same treatment, same reasoning, for custom artifacts (team documents):
     # age-gated, because staging and prod share this table too.
-    from app.custom_artifact_generate import sweep_orphan_generating
+    #
+    # GUARDED, unlike the sweeps above it, and the asymmetry is deliberate.
+    # Those tables have existed for as long as this startup path has, so a
+    # failure there means something is deeply wrong and crashing is honest.
+    # `custom_artifacts` is NEW, which means there is a window — a deploy that
+    # lands before its migration, a rollback to a binary older than the schema,
+    # an environment where the migration failed — in which this table does not
+    # exist. Unguarded, that window turns a housekeeping task into "the API
+    # will not boot", and this repo has a documented history of migrations and
+    # deploys getting out of order. Failing orphaned documents is best-effort
+    # by nature: the scheduler and the next restart both retry it, and the
+    # worst case of skipping it is a spinner on a document nobody is writing.
+    try:
+        from app.custom_artifact_generate import sweep_orphan_generating
 
-    doc_orphans = sweep_orphan_generating()
-    if doc_orphans:
-        logger.info("Failed %d orphan generating document(s)", doc_orphans)
+        doc_orphans = sweep_orphan_generating()
+        if doc_orphans:
+            logger.info("Failed %d orphan generating document(s)", doc_orphans)
+    except Exception:  # noqa: BLE001 — startup must never break on housekeeping
+        logger.exception("Custom-artifact orphan sweep failed; continuing startup")
     job_ask_orphans = db.fail_orphan_generating_ask_jobs()
     if job_ask_orphans:
         logger.info(
