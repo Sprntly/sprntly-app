@@ -177,8 +177,12 @@ export async function resumeEvidenceGeneration(
 export async function loadEvidenceByInsight(
   briefId: number,
   insightIndex: number,
-): Promise<PrdContent | null> {
+): Promise<(PrdContent & { evidenceId: number }) | null> {
   const rec = await evidenceApi.byInsight(briefId, insightIndex)
   if (!rec || rec.status !== "ready" || !rec.payload_md) return null
-  return { ...markdownToEvidenceState(rec.payload_md), question: rec.question }
+  // `evidenceId` rides along so a chat tab can name the document it has open
+  // when it asks a question (POST /v1/ask `evidence_id` — see ChatScreen's
+  // submit path). Purely additive: every existing consumer reads this value
+  // as a plain PrdContent and never notices the extra key.
+  return { ...markdownToEvidenceState(rec.payload_md), question: rec.question, evidenceId: rec.id }
 }

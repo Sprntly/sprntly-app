@@ -142,6 +142,13 @@ def sync_provider(
 
     if records is None:
         records = list(puller(token))
+        # Name every pull as it lands: which connector, for whom, how much.
+        # This plus the fresh/dedup line below make "did provider X's data
+        # reach the KG, and if not where did it stop" answerable from logs.
+        logger.info(
+            "kg-ingest: PULLED %s for %s — %d raw records",
+            provider, enterprise_id, len(records),
+        )
 
     # Ledger gate: drop records whose exact rendering was already extracted
     # for this enterprise, BEFORE any model call. A changed record renders
@@ -154,6 +161,13 @@ def sync_provider(
 
     totals = {"records": len(records), "deduped": len(records) - len(fresh),
               "batches": 0, "signals": 0, "themes": 0, "skipped": 0}
+    # 0 fresh means the extraction below is a no-op by design (everything
+    # already in the ledger), not a connector failure.
+    logger.info(
+        "kg-ingest: %s for %s — %d fresh of %d (dedup skipped %d)",
+        provider, enterprise_id, len(fresh), len(records),
+        totals["deduped"],
+    )
     errors: list[str] = []
     for i, batch in enumerate(_batches(fresh)):
         text = "\n\n".join(r.render() for r in batch)

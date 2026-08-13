@@ -23,20 +23,67 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask, importDoc, extractFile, storiesGenerate } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, importDoc, extractFile, storiesGenerate, resolveIntent } = vi.hoisted(() => ({
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
   importDoc: vi.fn().mockResolvedValue({ prd_id: 42, status: "generating", title: "Imported PRD" }),
   extractFile: vi.fn().mockResolvedValue({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" }),
   storiesGenerate: vi.fn().mockResolvedValue({ job_id: 1, status: "generating" }),
+  // The planner double. Hoisted (unlike this file's other inline stubs) so a
+  // test can push a one-shot verdict for a phrasing the regex double below
+  // cannot parse — the case the real planner exists for.
+  resolveIntent: vi.fn(),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  const { isPrdCommand, isTicketsCommand, prdCommandTask } = await import(
+    "../../../../lib/prd-commands"
+  )
+  const IS_QUESTION = new RegExp(
+    "^\\s*(?:(?:what|why|where|when|who|which|how)\\b"
+    + "|(?:do|does|did|should|shall|is|are|can|could|would|will)"
+    + "\\s+(?:we|i|the|this|that|it|there|a|an|our|my)\\b)",
+    "i",
+  )
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    // The PLANNER decides what a message asks for; this screen only executes the
+    // verdict. These tests stub the verdict with the SAME extraction the client
+    // used to run inline (`lib/prd-commands`), which is what their expectations
+    // were written against — so what they assert is the FLOW ("given
+    // generate_prd with this task, a PRD is generated with it"), unchanged.
+    //
+    // Whether a sentence IS a PRD command, and what its subject is, is now the
+    // planner's judgement and is tested in backend/tests/test_ask_planner.py.
+    // Reusing the old helper here is a test double standing in for a model, not
+    // a rule the product still applies.
+    chatIntentApi: {
+      resolve: resolveIntent.mockImplementation(async (q: string) => ({
+        // An interrogative is a QUESTION, never a request to build — the
+        // planner reads the sentence, so this double must too (the old ladder
+        // needed TICKETS_QUESTION_RE bolted on for the same case).
+        intent: IS_QUESTION.test(q)
+          ? "answer"
+          : isTicketsCommand(q)
+          ? "generate_tickets"
+          : isPrdCommand(q)
+          ? "generate_prd"
+          : "answer",
+        confidence: 0.95,
+        // null for a pointer-not-a-name phrasing ("our top product
+        // opportunity") — the planner leaves `task` empty there too, and the
+        // screen asks what the PRD should cover.
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: {
@@ -261,7 +308,11 @@ describe("ChatScreen — same-tab PRD generation", () => {
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(2))
     // Its own NEW tab, so there is no conversation row to bind yet — and no
     // thread behind it either, so nothing to ground on but the topic itself.
-    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, CONVERSATION_DOC, NO_CONV_ID)
+    // Trailing `undefined` is the uploaded FORMAT the user asked for — none
+    // here, which means the company's active format, exactly as before.
+    expect(generateFromTask).toHaveBeenLastCalledWith(
+      "password reset flows", false, CONVERSATION_DOC, NO_CONV_ID, undefined,
+    )
     await waitFor(() => expect(chatTabCount()).toBe(2))
   })
 
@@ -303,20 +354,30 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
     await typeAndSendInThread("spec this out")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     // Seeded from THIS tab's conversation — and generated right here.
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID, undefined)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
 
-  it("an LLM-fallback phrasing (regex miss, classifier yes) generates in the same tab", async () => {
-    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "checkout revamp", confidence: 0.92 })
+  it("a phrasing only the planner recognizes (regex-unparseable) generates in the same tab", async () => {
     renderChat()
     await typeAndSend("our checkout drops 42% of users at the payment step")
     await waitFor(() => expect(document.body.textContent).toContain("canned"))
 
+    // "let's get a PRD going for…" defeats every pattern the old ladder had and
+    // used to reach its haiku-classifier tier; the planner subsumed that tier.
+    // The regex DOUBLE above can't parse it either, so this test injects the
+    // verdict the real planner returns for it — the classification itself is
+    // locked by backend/tests/test_ask_planner.py, while this test pins what
+    // the screen DOES with it: generate in the same tab, with the planner's
+    // task, not the raw message.
+    resolveIntent.mockResolvedValueOnce({
+      intent: "generate_prd", confidence: 0.92, task: "checkout revamp",
+      instruction: null, reason: "planner", source: "planner", prd_id: null, prd_title: null,
+    })
     await typeAndSendInThread("let's get a PRD going for the checkout revamp")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, CONVERSATION_DOC, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, CONVERSATION_DOC, BOUND_CONV_ID, undefined)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -328,7 +389,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("generate a PRD from this document")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID, undefined))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
@@ -343,7 +404,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("convert this PRD into tickets")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID, undefined))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")

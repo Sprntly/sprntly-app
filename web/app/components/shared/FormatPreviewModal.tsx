@@ -205,8 +205,10 @@ export function FormatPreviewModalView({
   const sections = [...(map.sections ?? [])].sort(
     (a, b) => (a.order ?? 0) - (b.order ?? 0),
   )
-  const unmapped = map.unmapped_house ?? []
-  const extras = map.extra_sections ?? []
+  // `map.unmapped_house` / `map.extra_sections` are deliberately not read: the
+  // two blocks that rendered them are gone (see below the section table). The
+  // API still returns them and the type still declares them — this component
+  // just has nothing to say about them any more.
   const notes = translateCompileNotes(detail?.compile_notes)
 
   return (
@@ -350,50 +352,20 @@ export function FormatPreviewModalView({
                     )}
                   </div>
 
-                  <div className="afmt-preview-block">
-                    <h4 className="afmt-preview-bh">Added by Sprntly</h4>
-                    {unmapped.length > 0 ? (
-                      <>
-                        <p className="afmt-preview-blurb">
-                          Every Sprntly document carries these. Your format has
-                          no section for them, so they go where they fit best.
-                        </p>
-                        <ul className="afmt-preview-list">
-                          {unmapped.map((h) => (
-                            <li key={h}>{h}</li>
-                          ))}
-                        </ul>
-                      </>
-                    ) : (
-                      <p className="afmt-preview-empty">
-                        Nothing extra — your format has a home for everything
-                        Sprntly writes.
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="afmt-preview-block">
-                    <h4 className="afmt-preview-bh">Yours, kept</h4>
-                    {extras.length > 0 ? (
-                      <>
-                        <p className="afmt-preview-blurb">
-                          Sections that are yours alone. Sprntly fills them from
-                          your evidence, and marks anything it can&apos;t ground
-                          with what&apos;s missing and who owns it.
-                        </p>
-                        <ul className="afmt-preview-list">
-                          {extras.map((h) => (
-                            <li key={h}>{h}</li>
-                          ))}
-                        </ul>
-                      </>
-                    ) : (
-                      <p className="afmt-preview-empty">
-                        None — every section in your format lines up with
-                        something Sprntly already writes.
-                      </p>
-                    )}
-                  </div>
+                  {/* The "Added by Sprntly" and "Yours, kept" blocks used to
+                      sit here and are deliberately gone.
+                      "Added by Sprntly" described behaviour that no longer
+                      exists: the compiler stopped grafting house sections into
+                      a format with no slot for them
+                      (prd-template-compile-v2), so the list it rendered was
+                      either empty or a description of something the product
+                      does not do.
+                      "Yours, kept" said that sections with no Sprntly
+                      equivalent are kept — which is now simply what the whole
+                      preview means. Its own block re-stated the section table
+                      above it in prose.
+                      `section_map` still CARRIES both arrays; nothing renders
+                      them, so a future surface that wants them has the data. */}
                 </>
               )}
             </section>

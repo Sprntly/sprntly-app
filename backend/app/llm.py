@@ -305,14 +305,17 @@ def _create_with_retries(
     text) or on the non-streamed path. A transient failure mid-stream restarts
     the stream, so on_delta may re-emit from the beginning; the caller treats
     the persisted final result as authoritative and uses on_delta only for
-    progressive display. Callback exceptions are swallowed.
+    progressive display. Callback exceptions are swallowed. Between attempts a
+    callback exposing `reset()` is rewound (app.graph.token_stream.delta_sink's
+    does), which is how downstream accumulators are told to drop attempt 1
+    rather than glue the two together.
 
     `on_json_delta(partial_json)` — the tool-use counterpart of `on_delta`:
     when given AND streaming, each `input_json` PARTIAL-JSON fragment of the
     forced tool's input is forwarded as it arrives (a caller-side extractor —
     e.g. app.ask_stream — turns those into display text). Same restart caveat
-    as on_delta; between attempts a callback exposing `reset()` is rewound so
-    its incremental parse restarts with the re-emitted stream.
+    and same `reset()` rewind as on_delta, so its incremental parse restarts
+    with the re-emitted stream.
 
     The whole call (including its retries) holds ONE process-wide concurrency
     slot (`_llm_gate`) for its full duration, so the box never runs more
@@ -341,11 +344,23 @@ def _create_with_retries(
             try:
                 # A retry restarts the stream from zero — rewind a stateful
                 # incremental extractor so it re-parses the fresh emission
-                # instead of gluing two attempts together.
-                if attempt and on_json_delta is not None:
-                    reset = getattr(on_json_delta, "reset", None)
-                    if callable(reset):
-                        reset()
+                # instead of gluing two attempts together. BOTH callback shapes
+                # are rewound: the tool-use extractor (on_json_delta) and the
+                # raw-text sink (on_delta) accumulate downstream just the same,
+                # and a `reset()` that publishes a restart frame is what stops
+                # the client rendering attempt 1 + attempt 2 as one document.
+                # Display-only path: a callback that fails to rewind must not
+                # take the retry down with it.
+                if attempt:
+                    for _cb in (on_json_delta, on_delta):
+                        reset = getattr(_cb, "reset", None)
+                        if callable(reset):
+                            try:
+                                reset()
+                            except Exception:  # noqa: BLE001 — display only
+                                logger.exception(
+                                    "stream restart reset failed (continuing)"
+                                )
                 if stream:
                     with client.messages.stream(**kwargs) as s:
                         # Drain the stream so deltas are consumed, then return

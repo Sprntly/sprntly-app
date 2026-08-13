@@ -33,12 +33,52 @@ const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask,
   chatEdit: vi.fn(),
   clarifyTask: vi.fn(),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  const { isPrdCommand, isTicketsCommand, prdCommandTask } = await import(
+    "../../../../lib/prd-commands"
+  )
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    // The PLANNER decides what a message asks for; this screen only executes the
+    // verdict. These tests stub the verdict with the SAME extraction the client
+    // used to run inline (`lib/prd-commands`), which is what their expectations
+    // were written against — so what they assert is the FLOW ("given
+    // generate_prd with this task, a PRD is generated with it"), unchanged.
+    //
+    // Whether a sentence IS a PRD command, and what its subject is, is now the
+    // planner's judgement and is tested in backend/tests/test_ask_planner.py.
+    // Reusing the old helper here is a test double standing in for a model, not
+    // a rule the product still applies.
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string) => ({
+        // An interrogative is a QUESTION, never a request to build. The old
+        // ladder needed TICKETS_QUESTION_RE bolted on for this, because
+        // `isTicketsCommand` is a bare verb-near-noun match; the planner reads
+        // the sentence and does not need the patch. This double has to be at
+        // least as smart, or it would stand in for a planner that is dumber
+        // than the real one.
+        intent: /^\s*(?:what|why|where|when|who|which|how)\b|^\s*(?:do|does|did|should|shall|is|are|can|could|would|will)\s+(?:we|i|the|this|that|it|there|a|an|our|my)\b/i.test(q)
+          ? "answer"
+          : isTicketsCommand(q)
+          ? "generate_tickets"
+          : isPrdCommand(q)
+          ? "generate_prd"
+          : "answer",
+        confidence: 0.95,
+        // null for a pointer-not-a-name phrasing ("our top product
+        // opportunity") — the planner leaves `task` empty there too, and the
+        // screen asks what the PRD should cover.
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: {
@@ -232,7 +272,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     await typeAndSend("Convert this PRD into tickets")
 
     // Uploaded the ORIGINAL file to the import endpoint for the active company…
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     // …polled the already-kicked-off import to ready (third arg = live-preview
     // onPartial callback)…
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
@@ -254,7 +294,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
       const file = await attachDoc(name)
       await typeAndSend("convert this PRD into tickets")
 
-      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
       await waitFor(() => expect(panelTab()).toBe("tickets"))
       expect(runAskGeneration).not.toHaveBeenCalled()
     },
@@ -267,7 +307,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
 
     // Ordering matters: the phrasing matches BOTH command regexes, but the user
     // asked for tickets — it must import + open tickets, not run the brief flow.
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     expect(briefCurrent).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -278,7 +318,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     const file = await attachDoc()
     await typeAndSend("generate a PRD from this")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
     // The panel stays on the PRD tab — the user asked for a PRD, not tickets —
     // and no ticket generation is kicked off.
@@ -392,12 +432,17 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("Import this document as a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     // It must never go to the ask agent — that path answers "no document was
     // attached" because the ask payload is text-only.
     expect(runAskGeneration).not.toHaveBeenCalled()
-    expect(extractFile).not.toHaveBeenCalled()
+    // The doc IS extracted, exactly once — BEFORE the planner call, so the
+    // verdict is made over the document's text rather than a bare "Import this
+    // document" with no subject (submitAsk's early-extraction block). That
+    // read feeds the planner only; the import above still uploads the
+    // ORIGINAL file, never the extraction.
+    expect(extractFile).toHaveBeenCalledTimes(1)
     expect(briefCurrent).not.toHaveBeenCalled()
   })
 
@@ -406,7 +451,7 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("convert this document to a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID, undefined))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -430,12 +475,18 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
   })
 
   it("keeps the attachment and does not send when extraction fails", async () => {
-    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    // Persistent rejection, not `…Once`: extraction now runs twice per send —
+    // an early best-effort read that feeds the planner, then the real gate the
+    // send hangs on. A single rejection only fails the early read, which is
+    // DESIGNED to swallow errors (the planner just sees the bare message), so
+    // the retry would succeed and the send would proceed.
+    extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc()
     await typeAndSend("What does this deck say?")
 
-    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    // Both reads failed: the early planner read, then the real send gate.
+    await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
     // The send is aborted — nothing reaches the ask agent…
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …and the attachment chip is still there for a retry (not silently lost).
@@ -510,12 +561,14 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
   })
 
   it("extraction failure after the optimistic render removes the ghost turn but keeps the attachment", async () => {
-    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    // Persistent, not `…Once` — the early planner read swallows the first
+    // failure by design; only the real gate's failure aborts the send.
+    extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc("Fraznet Enhancements.pptx")
     await typeAndSend("What does this deck say?")
 
-    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
     // The send is aborted — nothing reaches the ask agent…
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …the optimistic turn is rolled back (no stranded "thinking" ghost): no
@@ -735,7 +788,7 @@ describe.skip("ChatScreen — deictic PRD phrasings beside an open PRD tab", () 
 
     await typeAndSendInTab("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID))
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID, undefined))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 

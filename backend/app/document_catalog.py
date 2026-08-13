@@ -56,7 +56,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from pydantic import BaseModel
 
@@ -85,7 +85,7 @@ PROVIDER_SLACK = "slack"
 _INDEX_COLUMNS = (
     "id,company_id,workspace_id,conversation_id,user_id,provider,external_id,"
     "title,source_name,url,doc_date,content_hash,summary,topics,summary_model,"
-    "summary_version,created_at,updated_at"
+    "summary_version,provider_workspace_id,created_at,updated_at"
 )
 
 #: Cap on `body_text` IF it is ever written. No writer populates it today —
@@ -133,6 +133,10 @@ class CatalogDocument(BaseModel):
     topics: list[str] = []
     summary_model: Optional[str] = None
     summary_version: Optional[str] = None
+    #: Provider-side workspace this document came from (Slack team id). NULL
+    #: means UNKNOWN — see `register_document` and the column's own comment.
+    #: Never read a None here as "belongs to no workspace".
+    provider_workspace_id: Optional[str] = None
     workspace_id: Optional[str] = None
     conversation_id: Optional[int] = None
     user_id: Optional[str] = None
@@ -360,7 +364,7 @@ def _summary_embedding(
 def _existing(company_id: str, provider: str, external_id: str) -> Optional[dict]:
     r = (
         require_client().table(_TABLE)
-        .select("id,content_hash,summary")
+        .select("id,content_hash,summary,provider_workspace_id,container_id")
         .eq("company_id", company_id)
         .eq("provider", provider)
         .eq("external_id", external_id)
@@ -369,6 +373,34 @@ def _existing(company_id: str, provider: str, external_id: str) -> Optional[dict
     )
     rows = r.data or []
     return rows[0] if rows else None
+
+
+def _set_container(company_id: str, document_id: str, container_id: str) -> None:
+    """Stamp `container_id` on an already-registered row, and touch NOTHING
+    else — not `updated_at`, not the summary.
+
+    Deliberately not folded into the main upsert: it is called from the
+    unchanged-content short-circuit, whose entire contract is that a document
+    which has not changed pays no re-summarisation and no re-embed. Leaving
+    `updated_at` alone matters for the same reason — a repair is not an edit,
+    and anything reading recency to judge freshness would be misled by one.
+
+    Best-effort: a row missing its container ranks exactly as it does today
+    and is merely skipped by the deselection cleanup until the next pull, so a
+    failure here must never break the ingest that called it."""
+    try:
+        (
+            require_client().table(_TABLE)
+            .update({"container_id": container_id})
+            .eq("company_id", company_id)
+            .eq("id", document_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning(
+            "document catalog: could not stamp container %s on %s",
+            container_id, document_id, exc_info=True,
+        )
 
 
 def _enrich(
@@ -437,9 +469,11 @@ def register_document(
     content_hash: str,
     source_name: str = "",
     description: str = "",
+    container_id: Optional[str] = None,
     url: Optional[str] = None,
     doc_date: Optional[str] = None,
     workspace_id: Optional[str] = None,
+    provider_workspace_id: Optional[str] = None,
     conversation_id: Optional[int] = None,
     user_id: Optional[str] = None,
     body_text: Optional[str] = None,
@@ -458,6 +492,15 @@ def register_document(
     its own hash. A CHANGED hash clears summary, topics and embedding and
     regenerates them from the new text.
 
+    `provider_workspace_id` is the provider-side workspace the document came
+    from (for Slack, the team id). It must come from STORED CONNECTION STATE,
+    never from a display name and never from a fresh API call: its whole
+    purpose is to be compared against the workspace ids on this company's
+    connection rows, and a value taken from anywhere else makes that
+    comparison a guess. Passing None leaves an existing value ALONE rather
+    than clearing it — a caller that does not know the workspace must not be
+    able to erase what a caller that did know recorded.
+
     `body_text` is NOT populated by any current writer and should stay that
     way: the catalog records what a document is about and where to find it,
     not its contents (see the module docstring). The parameter exists for a
@@ -468,6 +511,24 @@ def register_document(
     do. It is a callable so a no-op re-registration never pays to fetch a body
     it will not use — and it must be the untruncated text, because the summary
     and the content hash are both taken from it.
+
+    `container_id` is the PROVIDER-SIDE CONTAINER this document belongs to —
+    the Confluence space id today. It exists so a container the user
+    DESELECTS can have its documents dropped from the catalog by a join on
+    stored, stable data, which is otherwise impossible for Confluence: the
+    row's `external_id` is a page id, the selection is a list of space ids,
+    and `source_name` holds the space's DISPLAY NAME, which joins to neither.
+    (The remaining route — parsing `/spaces/<KEY>/` out of `url` — is
+    rename-fragile and deliberately not used.)
+
+    It is REPAIRED on the unchanged-content short-circuit below, and that is
+    load-bearing rather than tidiness: without it, every row registered before
+    this column existed would keep a NULL container forever, because a quiet
+    document never re-registers. With it, the Confluence pull — which walks
+    and catalogues every page, not only recent ones — fills them in within one
+    sweep, so the deselection cleanup starts working without a data migration.
+    Passing None leaves whatever is stored alone, so a writer that has no
+    container to declare never blanks one set by another.
 
     `background=True` runs summarisation + embedding on a daemon thread and
     returns as soon as the ROW is written. Used by the upload path, where
@@ -486,12 +547,85 @@ def register_document(
     if conversation_id is not None and not user_id:
         raise ValueError("a conversation-scoped document requires user_id")
 
+    container = (container_id or "").strip() or None
+
     existing = _existing(company_id, provider, external_id)
     if (
         existing
         and existing.get("content_hash") == content_hash
         and (existing.get("summary") or "").strip()
     ):
+        # Unchanged document — no rewrite, no model call. But fill in a
+        # MISSING provider_workspace_id before returning, because otherwise
+        # this branch is exactly why the column would never converge: a row
+        # only rewrites when its document CHANGES, so a channel nobody posts
+        # in again would keep NULL forever — and the quiet tenants are
+        # precisely the ones whose catalogs go stale. One cheap column
+        # update, no summary churn, no embedding regeneration.
+        #
+        # Only ever fills a blank. It never overwrites a stored id with a
+        # different one: a workspace id that genuinely changed for the same
+        # (company, provider, external_id) is not a fact this path can
+        # establish, and quietly rewriting it would destroy the evidence the
+        # disconnect rule depends on.
+        if provider_workspace_id and not existing.get("provider_workspace_id"):
+            try:
+                (
+                    require_client().table(_TABLE)
+                    .update({"provider_workspace_id": provider_workspace_id})
+                    .eq("id", existing["id"])
+                    # Redundant by provenance — `existing` came from a
+                    # company-scoped read — and kept anyway, because every
+                    # other write in this module carries the tenant filter and
+                    # a lone `.eq("id", …)` is the shape a later edit copies.
+                    .eq("company_id", company_id)
+                    .execute()
+                )
+            except Exception:  # noqa: BLE001 — a backfill is never worth a sync
+                logger.warning(
+                    "document catalog: could not fill provider_workspace_id "
+                    "for %s/%s", provider, external_id, exc_info=True,
+                )
+        # Unchanged content — no re-summarisation, no re-embed, no row rewrite.
+        # The ONE thing still worth a write is a container that is missing or
+        # has moved, because the deselection cleanup joins on it and a document
+        # that never changes would otherwise never acquire one. Kept off the
+        # common path by the inequality test: a row already carrying the right
+        # container costs the same nothing it costs today.
+        #
+        # REPAIRS NULL *AND* A CHANGED VALUE — and the repair immediately
+        # ABOVE fills a blank only and never overwrites. THAT DIFFERENCE IS
+        # DELIBERATE. Do not tidy the two into one rule; they are opposite on
+        # purpose, and the reason is a property of the identifiers rather than
+        # a matter of style.
+        #
+        # A Confluence page can genuinely be MOVED between spaces, so a
+        # container that disagrees with the pull is new information and the row
+        # must follow it — otherwise the page stays attached to a space it has
+        # left, and is deleted when THAT space is unticked while surviving the
+        # unticking of the space it actually lives in.
+        #
+        # A provider-workspace id cannot legitimately change for a given
+        # (company, provider, external_id), so there an overwrite would destroy
+        # evidence rather than record a move.
+        #
+        # Both directions are pinned by tests, so unifying them fails loudly
+        # rather than silently: `test_a_page_moved_to_another_space_follows_the
+        # _move` dies if this becomes fill-if-blank, and
+        # `test_the_no_op_fill_never_overwrites_a_different_workspace_id` dies
+        # if the one above becomes overwrite-always.
+        #
+        # NOTE FOR THE PLANNER-CACHE RULE BELOW: this early return is described
+        # elsewhere as a path that "wrote nothing", and since this repair landed
+        # that is no longer literally true — `_set_container` writes a column.
+        # It still needs no cache invalidation, and for a checkable reason
+        # rather than an assumption: the planner caches `list_documents`, which
+        # selects `_INDEX_COLUMNS`, and `container_id` is deliberately NOT in
+        # that list (it is written and deleted on, never read back). So this
+        # write cannot change the planner's rendered view. Add `container_id`
+        # to `_INDEX_COLUMNS` and that stops being true — invalidate here then.
+        if container and existing.get("container_id") != container:
+            _set_container(company_id, existing["id"], container)
         return existing["id"]
 
     now = utc_now()
@@ -514,8 +648,22 @@ def register_document(
         "embedding": None,
         "updated_at": now,
     }
+    # Only when the writer declared one — an absent key leaves the stored
+    # value untouched on the upsert's conflict branch, so a provider that
+    # knows no container cannot blank one another writer set.
+    if container:
+        row["container_id"] = container
     if workspace_id:
         row["workspace_id"] = workspace_id
+    # OMITTED, not set to None, when the caller does not know it — same idiom
+    # as `workspace_id` above and the difference that matters: the conflict
+    # update writes only the keys present here, so leaving it out preserves
+    # what an informed caller already recorded, whereas writing None would
+    # CLEAR it on every re-registration by a caller that happens not to know.
+    # A cleared value reads as UNKNOWN forever, which permanently hides a
+    # genuine orphan (`test_a_caller_without_a_team_id_cannot_clear_a_known_one`).
+    if provider_workspace_id:
+        row["provider_workspace_id"] = provider_workspace_id
     if conversation_id is not None:
         row["conversation_id"] = conversation_id
         row["user_id"] = user_id
@@ -548,6 +696,9 @@ def register_document(
         _spawn_enrichment(company_id, document_id, enrich_args)
     else:
         _enrich(company_id, document_id, **enrich_args)
+    # The catalog changed, so the planner's memoised copy is stale. Deliberately
+    # NOT on the unchanged-content early return above — that path wrote nothing.
+    _drop_planner_cache(company_id)
     return document_id
 
 
@@ -588,6 +739,136 @@ def deregister_document(company_id: str, provider: str, external_id: str) -> Non
         .eq("external_id", external_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
+
+
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company is stale.
+
+    The planner renders the document catalog into every prompt and validates the
+    model's picks against it, memoising it in-process until something says
+    otherwise (`ask_planner.invalidate_catalog_cache`). A document registered
+    without this stays unnameable — and a deregistered one stays offerable — for
+    the life of the process.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db layer,
+    so a module-level import here would close a cycle. Never allowed to break a
+    write, and cheap enough to call from a sync registering hundreds of rows in a
+    loop (three dict pops under a lock)."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
+def deregister_documents(
+    company_id: str, provider: str, external_ids: Iterable[str]
+) -> int:
+    """Drop several catalog rows in one round trip. Returns how many ids were
+    asked for (not how many existed — the delete is idempotent and silent).
+
+    EXISTS BECAUSE REGISTRATION HAD NO COUNTERPART. Rows are written from
+    seven places — uploads, the uploads backfill, the Drive backfill, the
+    Slack extractor, the Drive extractor, the Confluence puller and chat
+    attachments — and `deregister_document` was called from exactly ONE, for
+    uploads. Everything a connector registered was therefore immortal: the
+    table recorded what had EVER been synced, not what is configured now.
+
+    That is not merely untidy for anything reading the catalog. A stale row is
+    indexed as an existing document, is rankable, and — since document
+    resolution shipped — can be ASSERTED as the subject of a question. The
+    body fetch then fails and the user is told the contents could not be
+    loaded, which reads as a transient problem when the truth is that the
+    document is no longer connected at all.
+
+    Deliberately takes an EXPLICIT id list rather than reconciling against a
+    sync's results. A sweep of the shape "delete every row this sync did not
+    return" deletes a tenant's whole catalog the first time an API call fails
+    or a token expires mid-enumeration, because a partial result is
+    indistinguishable from a shrunken one. Callers here pass ids that a user
+    action removed, so a transient failure cannot cause a deletion."""
+    if not company_id:
+        raise ValueError("company_id is required to deregister documents")
+    ids = [str(i) for i in external_ids if str(i or "").strip()]
+    if not ids:
+        return 0
+    (
+        require_client().table(_TABLE)
+        .delete()
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .in_("external_id", ids)
+        .execute()
+    )
+    # WITHOUT THIS THE DELETE IS INVISIBLE TO THE PART THAT OFFERS DOCUMENTS.
+    # The Ask Planner memoises this company's catalog in-process and validates
+    # the model's picks against it, so a row deleted here keeps being offered
+    # by name until the process restarts — the body fetch then fails and the
+    # user is told the contents could not be loaded, which is the EXACT symptom
+    # this function exists to remove, reappearing one layer up.
+    #
+    # `deregister_document` (singular) already does this; both BULK paths were
+    # missed, so every connector deselection — Slack's included — was landing
+    # in the database and not in the planner. Placed after the empty-id guard
+    # on purpose, mirroring the same reasoning that keeps it off
+    # `register_document`'s unchanged-content early return: that path writes
+    # nothing, so there is nothing to invalidate.
+    _drop_planner_cache(company_id)
+    return len(ids)
+
+
+def deregister_documents_in_containers(
+    company_id: str, provider: str, container_ids: Iterable[str]
+) -> int:
+    """Drop every catalog row belonging to the named CONTAINERS. Returns how
+    many containers were asked for, not how many rows went (the delete is
+    idempotent and silent, exactly like `deregister_documents`).
+
+    EXISTS BECAUSE SOME SELECTIONS ARE NOT MADE PER DOCUMENT. Slack and Drive
+    are picked file-by-file and channel-by-channel, so what the user removed
+    IS a list of `external_id`s and `deregister_documents` fits. Confluence is
+    picked per SPACE, and a space holds pages nobody enumerated by hand: the
+    selection is a list of space ids, the rows are keyed on page ids, and no
+    stored field joined the two until `container_id`. Enumerating the pages
+    instead would mean calling Confluence during a settings save — which is
+    both a network round trip on a config write and, far worse, exactly the
+    partial-enumeration hazard the design below refuses.
+
+    THE SAFETY PROPERTY IS THE SAME ONE, and it is why this is container-keyed
+    rather than sweep-shaped. The container list must come from a USER ACTION
+    — the stored previous selection minus the incoming one — and never from a
+    sync result. A sweep of the form "delete every row whose container is not
+    in the current selection" would look equivalent and is not: it deletes on
+    a SHORT input, so a truncated picker, a half-loaded settings page or a
+    selection posted by a client that only sent what it had rendered would
+    wipe rows for spaces the user never touched. Naming the removed containers
+    explicitly means the worst case of a wrong input is that too LITTLE is
+    cleaned up, which is the direction that loses no data.
+
+    Rows whose `container_id` is NULL are untouched by construction (SQL `IN`
+    never matches NULL) — that is the pre-repair state of every row written
+    before the column existed, and skipping them is correct: an unknown
+    container is not evidence of a removed one."""
+    if not company_id:
+        raise ValueError("company_id is required to deregister documents")
+    ids = [str(i) for i in container_ids if str(i or "").strip()]
+    if not ids:
+        return 0
+    (
+        require_client().table(_TABLE)
+        .delete()
+        .eq("company_id", company_id)
+        .eq("provider", provider)
+        .in_("container_id", ids)
+        .execute()
+    )
+    # See `deregister_documents` — the planner's memoised catalog must be
+    # dropped or a deselected space's pages stay offerable by name for the
+    # life of the process, which is this function's own bug one layer up.
+    _drop_planner_cache(company_id)
+    return len(ids)
 
 
 # ── Reads ──────────────────────────────────────────────────────────────────

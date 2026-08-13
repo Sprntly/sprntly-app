@@ -171,6 +171,28 @@ def list_active_skill_sources() -> list[dict]:
     return [_decode(r) for r in (resp.data or [])]
 
 
+def list_active_skill_sources_for_installation(installation_id: int) -> list[dict]:
+    """Every ACTIVE source registered under one GitHub App installation — the
+    push-webhook's read.
+
+    Like `list_active_skill_sources`, the caller has no request and therefore no
+    company: the installation id comes off a signature-verified webhook payload,
+    and each returned row still carries the company_id/installation_id its
+    writes are keyed on. Filtering here (rather than sweeping all tenants per
+    push) is what keeps a busy repo's webhook traffic from scaling with the
+    number of OTHER tenants using skill sync.
+    """
+    c = require_client()
+    resp = (
+        c.table("skill_sources")
+        .select("*")
+        .eq("active", True)
+        .eq("installation_id", int(installation_id))
+        .execute()
+    )
+    return [_decode(r) for r in (resp.data or [])]
+
+
 def record_skill_source_sync(
     *,
     source_id: str,

@@ -1,3 +1,5 @@
+
+from app.timing import timed_def
 """Background warmer for the predefined Ask prompts.
 
 The home / Ask-Sprntly screens have a small fixed set of starter chips
@@ -7,6 +9,7 @@ time we make those clicks render instantly — the route just returns a
 cached row.
 """
 import asyncio
+import concurrent.futures as _futures
 import contextvars
 import json
 import logging
@@ -41,6 +44,7 @@ from app.prompts import (
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_LIBRARY_ADDENDUM,
     ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
     connected_sources_line,
     today_line,
@@ -394,8 +398,69 @@ def reset_active_conversation(tokens) -> None:
 # own, whereas None-because-embedding-failed must NOT trigger a second attempt.
 # The sentinel is the tuple's presence, not the vector's value.
 _active_question_embedding: contextvars.ContextVar[
-    tuple[list[float] | None, bool] | None
+    tuple[list[float] | None, bool] | object | None
 ] = contextvars.ContextVar("ask_runner_active_question_embedding", default=None)
+
+
+# A THIRD state for that slot: the ask has scoped it, but nothing has needed a
+# vector yet. It has to stay distinguishable from the other two, which is why
+# it is a sentinel object rather than another None:
+#
+#   * None             — nobody scoped it. A caller computes its own, as before.
+#   * _EMBED_PENDING   — scoped but unresolved. Compute on FIRST USE and memoise
+#                        the result back here, so the ask still pays for exactly
+#                        one embedding no matter how many consumers ask for it.
+#   * (vec, degraded)  — resolved. `(None, True)` means the attempt already
+#                        FAILED and must never be retried within this ask.
+#
+# The eager embed this replaces was pure waste on the two commonest shapes. A
+# tenant with no documents never reaches the topical stage that reads the
+# vector — `document_grounding` returns at its `not refs and not
+# conv_attachments and not connected` branch first — and a PRD-grounded ask
+# skips KG retrieval altogether. Both paid a full embedding round trip for a
+# vector no consumer ever read (measured at 2.8s on a doc-less tenant).
+_EMBED_PENDING: object = object()
+
+
+# ── The documents the PLANNER named, by the same request-scoped route ────────
+# `document_grounding` is reached positionally through
+# `qa_agent._answer_single_shot`, so a plan field cannot be threaded to it
+# without the four edits inside qa_agent.py that this whole mechanism exists to
+# avoid. Same route as the conversation pair, the embedding and the history.
+_active_planned_documents: contextvars.ContextVar[
+    list[str] | None
+] = contextvars.ContextVar("ask_runner_active_planned_documents", default=None)
+
+
+def set_active_planned_documents(external_ids: list[str] | None):
+    """Record the catalog ids THIS ask's plan named. Always undo in a
+    `finally`, exactly like the setters beside it."""
+    return _active_planned_documents.set(list(external_ids or []))
+
+
+def reset_active_planned_documents(token) -> None:
+    """Undo `set_active_planned_documents` — call from a `finally`."""
+    _active_planned_documents.reset(token)
+
+
+def _carried_planned_documents() -> list[str]:
+    """Catalog ids the plan named, or [] when nothing set any."""
+    return _active_planned_documents.get() or []
+
+
+def set_active_question_embedding_pending():
+    """Scope this ask's embedding slot WITHOUT computing the vector.
+
+    The counterpart to `set_active_question_embedding` for the worker path:
+    it reserves the slot so `_resolve_question_embedding` knows it is allowed
+    to memoise into it, but issues no HTTP call. Whichever consumer needs a
+    vector first pays for it; consumers that never need one pay nothing.
+
+    Returns an opaque token for `reset_active_question_embedding` — the same
+    token discipline as the eager setter, so the caller's `finally` is
+    unchanged. `ContextVar.reset` restores whatever was there before THIS set,
+    so a value memoised into the slot afterwards is still correctly unwound."""
+    return _active_question_embedding.set(_EMBED_PENDING)
 
 
 def set_active_question_embedding(embedding: list[float] | None, degraded: bool):
@@ -418,8 +483,17 @@ def reset_active_question_embedding(token) -> None:
 
 def _carried_question_embedding() -> tuple[list[float] | None, bool] | None:
     """This ask's already-computed `(vector, degraded)`, or None if nothing set
-    one. Never computes — see `_resolve_question_embedding`."""
-    return _active_question_embedding.get()
+    one. Never computes — see `_resolve_question_embedding`.
+
+    A slot left at `_EMBED_PENDING` reads as None here on purpose: to a caller
+    that only wants an already-resolved vector, "scoped but not yet computed"
+    and "nobody scoped one" are the same answer. Only
+    `_resolve_question_embedding` distinguishes them, because only it is
+    allowed to do the work and write the result back."""
+    carried = _active_question_embedding.get()
+    if carried is _EMBED_PENDING:
+        return None
+    return carried  # type: ignore[return-value]
 
 
 # ── The conversation history, by the same request-scoped route ──────────────
@@ -886,6 +960,43 @@ def document_grounding(
         chosen.key: ("named", None) for chosen in selected
     }
 
+    # ── Stage P: documents the PLANNER named.
+    #
+    # The planner is shown the catalog (ids, titles, one-line summaries) and can
+    # say which document a question is about. It sees the whole thread and the
+    # inlined attachment text, so it resolves the deictic case Stage N cannot —
+    # "what does it say about pricing?" has no title to substring-match.
+    #
+    # AFTER Stage N, never before: a title the user spelled out is an
+    # unambiguous request and a model's opinion must not displace it.
+    #
+    # LABELLED "topic", NOT "named", and that is the safety property rather than
+    # an oversight. `document_referent` exists because an earlier attempt at
+    # exactly this pinned a Confluence page onto "what's our pricing strategy?"
+    # and the model answered AS that page; its rule is that a FALSE REFERENT IS
+    # WORSE THAN NO REFERENT. "named" asserts the user asked for this document.
+    # "topic" says it was selected automatically — which is the honest claim for
+    # a model's pick, and which prompts.py rule 6 already tells the answering
+    # model it may ignore. So a wrong pick here costs prompt budget, exactly
+    # like a wrong Stage T pick, instead of hijacking the answer's voice.
+    #
+    # Filling slots here is also what lets Stage T's fused-rank RPC be skipped
+    # entirely (`topical_ran` below is `len(selected) < MAX_SELECTED_DOCUMENTS`)
+    # — measured at 8.67s on a live ask, and the single slowest query in it.
+    for _planned_id in _carried_planned_documents():
+        if len(selected) >= MAX_SELECTED_DOCUMENTS:
+            break
+        _doc = connected_by_external_id.get(_planned_id)
+        if _doc is None:
+            continue  # not visible to this caller — the gate already tenant-scoped it
+        _key = _connected_key(_doc)
+        if _key in match_by_id:
+            continue
+        selected.append(_Chosen(
+            key=_key, name=_doc.title, provider=_doc.provider, catalog_doc=_doc
+        ))
+        match_by_id[_key] = ("topic", None)
+
     # ── Stage T: fill whatever slots remain by fused rank.
     #
     # `match: "topic"` is set ONLY inside the loop below, once per candidate
@@ -899,6 +1010,21 @@ def document_grounding(
     topical_ran = len(selected) < MAX_SELECTED_DOCUMENTS
     topical_candidates: list[dict] = []
     if topical_ran:
+        # Stage T's semantic channel is the first thing in an ask that actually
+        # READS the vector, so this is where the ask pays for it. Nothing above
+        # needs one — the index read, the ownership checks and Stage N's
+        # substring match are all lexical — and the `not refs and not
+        # conv_attachments and not connected` return further up means a
+        # workspace with no documents at all exits before reaching here and now
+        # embeds nothing whatsoever.
+        #
+        # Guarded on `is None` so a caller that threaded its own vector in still
+        # wins, and `embedding_degraded` keeps its documented meaning: it is set
+        # only on the branch where this ask computed the vector itself.
+        if question_embedding is None:
+            question_embedding, embedding_degraded = _resolve_question_embedding(
+                enterprise_id, question
+            )
         topical_candidates = _topical_candidates(
             enterprise_id,
             question,
@@ -1476,23 +1602,39 @@ def _question_embedding(
     return vec, False
 
 
+@timed_def("qa:embedding")
 def _resolve_question_embedding(
     enterprise_id: str | None, question: str
 ) -> tuple[list[float] | None, bool]:
     """This ask's `(vector, degraded)`, computing it only if nothing already
     has.
 
-    `ask_job_runner._run_sync` embeds once per ask and publishes the result on
-    the request-scoped ContextVar, so on the worker path this returns that
-    value and issues no call. It falls through to `_question_embedding` for
-    callers that reach `compose_ask_answer` without the worker in front of them
-    — direct invocation, and the tests that do the same — which is what keeps
-    the embedding count at exactly one per ask on every path rather than one
-    per consumer."""
-    carried = _carried_question_embedding()
-    if carried is not None:
-        return carried
-    return _question_embedding(enterprise_id, question)
+    `ask_job_runner._run_sync` SCOPES the slot before `answer()` picks a path
+    but no longer fills it, so the first consumer that genuinely needs a vector
+    computes it here and memoises it back — every later consumer then reads
+    that one value and issues no call. An ask whose path never needs a vector
+    (a doc-less tenant, or a PRD-grounded ask that skips KG retrieval) now
+    issues none at all, where the old eager embed always paid for one.
+
+    It still falls through to a plain `_question_embedding` for callers that
+    reach `compose_ask_answer` without the worker in front of them — direct
+    invocation, and the tests that do the same. Those have no scoped slot, so
+    nothing is memoised and their behaviour is byte-for-byte what it was.
+
+    Read the ContextVar directly rather than through
+    `_carried_question_embedding`: that helper collapses `_EMBED_PENDING` to
+    None, and the whole decision here turns on telling those two apart."""
+    slot = _active_question_embedding.get()
+    if slot is not None and slot is not _EMBED_PENDING:
+        return slot  # type: ignore[return-value]
+    resolved = _question_embedding(enterprise_id, question)
+    if slot is _EMBED_PENDING:
+        # Memoise onto the slot the worker scoped for us. Writing only in this
+        # branch is what keeps the unscoped path leak-free: with no token to
+        # unwind it, a write there would outlive the request on this pooled
+        # thread — the exact hazard `ask_job_runner`'s `finally` exists to close.
+        _active_question_embedding.set(resolved)
+    return resolved
 
 
 def _retrieve_kg_bundle(
@@ -1535,6 +1677,100 @@ def _retrieve_kg_bundle(
     return bundle
 
 
+# How long the whole gather may take before we give up waiting on it. A
+# BACKSTOP, not a tuning knob: every leg already owns a timeout of its own
+# (`live_read.BUDGET_S` is 8s across all connectors, the embedding has an HTTP
+# timeout, the pgvector reads have theirs), so in normal operation this never
+# fires. It exists for the one case those cannot cover — a leg that hangs on
+# something with no timeout at all — and it is set well above their sum so it
+# cannot silently start policing them.
+#
+# Deliberately NOT tight. A short deadline here would convert a visible latency
+# problem into an invisible quality one: dropping the KG bundle or the document
+# block does not degrade an answer gracefully, it produces a confident answer
+# built on less, and nothing downstream can tell. The connector leg is the only
+# one whose loss is already contracted for (an unread source is reported as
+# unread), and it polices itself. So when this DOES fire it is a bug report —
+# hence the warning naming exactly which legs were still outstanding.
+_GATHER_DEADLINE_S = 25.0
+
+
+def _gather(tasks: dict, deadline_s: float = _GATHER_DEADLINE_S) -> dict:
+    """Run independent retrievals concurrently; return {name: result}.
+
+    Each task runs on a COPY of the calling thread's context
+    (`contextvars.copy_context`), which is load-bearing rather than tidy:
+    `document_grounding` resolves conversation-scoped documents through
+    `_active_conversation_id` / `_active_conversation_user_id`, and a bare
+    `ThreadPoolExecutor.submit` does NOT carry those across (only
+    `asyncio.to_thread` copies context for free — see this module's note on
+    request-scoped ContextVars). Without the copy, a conversation's own
+    documents would vanish from grounding with no error and no log: a quietly
+    worse answer, which is the worst failure this change could have.
+
+    NOTHING here may memoise back into a ContextVar. A write inside a copied
+    context dies with it, so `_resolve_question_embedding` — which memoises the
+    vector it computes — is deliberately resolved by the CALLER on this thread
+    and passed in explicitly, not run as a task. Doing it here would have every
+    consumer recompute, reintroducing the double-embed the pending-slot
+    mechanism exists to prevent.
+
+    A task that raises yields None for its slot rather than taking the others
+    down: each retrieval already has its own fail-open contract (live_read
+    "never raises", KG is best-effort) and this preserves them under fan-out.
+    """
+    if not tasks:
+        return {}
+    results: dict = {name: None for name in tasks}
+    # NOT a `with` block. ThreadPoolExecutor.__exit__ calls shutdown(wait=True),
+    # which blocks until every thread finishes — so a leg that blew the deadline
+    # would still hold the ask for as long as it hung, and the deadline would
+    # bound nothing at all. Shut down without waiting instead (below).
+    pool = _futures.ThreadPoolExecutor(
+        max_workers=len(tasks), thread_name_prefix="ask-gather"
+    )
+    try:
+        # ONE COPY PER TASK. A `Context` can only be entered once at a time, so
+        # sharing a single copy across concurrent tasks raises "cannot enter
+        # context: ... is already entered" on whichever starts second — and this
+        # function catches it, so every leg after the first degraded to None and
+        # the answer was composed with no grounding while still reporting
+        # success. Copies are taken HERE, on the calling thread, so each carries
+        # the request's ContextVars.
+        from app.timing import timed_fn
+
+        # Each leg reports its own [timing] block under its dict name, so a
+        # single grep reconstructs where a gather's wall-clock actually went.
+        submitted = {
+            pool.submit(
+                contextvars.copy_context().run, timed_fn(f"gather:{name}", fn)
+            ): name
+            for name, fn in tasks.items()
+        }
+        done, not_done = _futures.wait(submitted, timeout=deadline_s)
+        for fut in not_done:
+            logger.warning(
+                "ask gather: %r did not finish within %.1fs — composing without it",
+                submitted[fut], deadline_s,
+            )
+            fut.cancel()
+        for fut in done:
+            name = submitted[fut]
+            try:
+                results[name] = fut.result()
+            except Exception:  # noqa: BLE001 — one leg failing never loses the ask
+                logger.warning(
+                    "ask gather: %r failed; composing without it", name, exc_info=True
+                )
+    finally:
+        # A thread that overran is abandoned rather than waited on: its result is
+        # already discarded, and the user's answer must not queue behind it. It
+        # finishes on its own and the pool is collected once it does.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return results
+
+
+@timed_def("qa:compose")
 def compose_ask_answer(
     dataset: str,
     question: str,
@@ -1543,6 +1779,9 @@ def compose_ask_answer(
     prd_context: str = "",
     history: list[dict] | None = None,
     live_context: str = "",
+    live_context_fn=None,
+    library_context_fn=None,
+    library_only: bool = False,
     on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
@@ -1593,6 +1832,16 @@ def compose_ask_answer(
     exists for — and it never reaches the PRD-grounded branch, which skips
     corpus and KG retrieval by design and would lose that saving.
 
+    `library_context_fn`, when given, is a thunk producing the company's own
+    SKILLS AND FORMATS block (app/library_context.py), asked for by the planner
+    when the question is about that library rather than about the product. It is
+    a separate parameter from `live_context` rather than folded into it because
+    the two need OPPOSITE instructions: the live-sweep addendum tells the model
+    its section is a keyword probe whose silence proves nothing, and attaching
+    that hedge to an exhaustive list of the company's own uploads is precisely
+    the wrong answer to "what skills do I have". Same slot, same wave, its own
+    section and its own addendum — the shape every other block here already has.
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -1613,32 +1862,111 @@ def compose_ask_answer(
             enterprise_id, exc_info=True,
         )
         history_block = ""
-    facts = company_facts_block(enterprise_id)
-    # ONE embedding per ask, computed before either consumer and shared by
-    # both. Document grounding runs first and the PRD branch skips KG
-    # retrieval entirely, so there is no existing vector either could inherit
-    # — computing it here is what stops this being two calls (or, on the PRD
-    # branch, no semantic channel at all).
+    # ── Gather, in two waves ────────────────────────────────────────────────
     #
-    # The Ask worker now embeds one step earlier still (so the skill-routed
-    # path gets a semantic channel too), so this RESOLVES rather than computes:
-    # when the worker already published a vector this reuses it, and the ask
-    # pays for one embedding, not two.
-    question_embedding, embedding_degraded = _resolve_question_embedding(
-        enterprise_id, question
+    # These retrievals used to run one after another — connectors, then the
+    # embedding, then document grounding, then the corpus, then the KG — and
+    # measured ~21s between the planner's verdict and the first answer token.
+    # None of them feeds another. The only real ordering is that BOTH document
+    # grounding and KG retrieval consume the question vector, so the shape is
+    # two waves with the embedding as the barrier between them, and the cost
+    # becomes the slowest leg instead of the sum.
+    #
+    # THE BRANCH IS DECIDED FIRST, deliberately. The PRD-grounded path skips the
+    # corpus load and KG retrieval for cost reasons; starting either eagerly
+    # "because it might be needed" would spend exactly what that branch exists
+    # to save. Document grounding runs on BOTH branches — a PRD-tab chat must
+    # not go blind to uploads.
+    # LIBRARY-ONLY ASKS ARE ANSWERED FROM THE LIBRARY. `library_only` is the
+    # planner's own verdict, relayed by the caller: the question is about the
+    # company's uploaded skills/templates (include_library) and the plan named
+    # NO other grounding (no KG, no documents, no sources). Corpus, KG and —
+    # crucially — document grounding are all skipped: the reported failure was
+    # "can you list the templates i have" answered from the DOCUMENT INDEX,
+    # whose catalog is full of Confluence pages titled "Template - …" with
+    # summaries that read exactly like format descriptions. The library block
+    # already tells the model those pages are not templates, but an index
+    # sitting beside it in the same prompt kept winning; not composing the
+    # index for these asks is what settles it.
+    wants_corpus_and_kg = not prd_context and not library_only
+
+    # WAVE 1 — everything that needs nothing.
+    #
+    # The embedding is resolved on THIS thread rather than as a task: it
+    # memoises the vector it computes back into a ContextVar, and a write inside
+    # a copied context would be lost (see `_gather`). Running it here keeps that
+    # memoisation real AND still overlaps it with the pool's work.
+    wave1: dict = {"facts": lambda: company_facts_block(enterprise_id)}
+    if live_context_fn is not None:
+        wave1["live"] = live_context_fn
+    if library_context_fn is not None:
+        wave1["library"] = library_context_fn
+    if wants_corpus_and_kg:
+        wave1["corpus"] = lambda: load_corpus(dataset)
+
+    # Not a `with` block, for the reason `_gather` gives: shutdown(wait=True)
+    # would make the deadline bound nothing.
+    pool = _futures.ThreadPoolExecutor(
+        max_workers=max(1, len(wave1)), thread_name_prefix="ask-gather-1"
     )
-    # Computed once, beside `facts`, so it rides EVERY branch's cacheable
-    # prefix — including the PRD-grounded branch below, which skips corpus +
-    # KG for cost reasons but must not go blind to uploads (that would
-    # reintroduce the false-denial bug inside PRD-tab chat).
+    try:
+        # One copy per task — see `_gather` for why sharing one is a bug.
+        w1 = {
+            pool.submit(contextvars.copy_context().run, fn): name
+            for name, fn in wave1.items()
+        }
+        # The barrier that wave 2 genuinely needs, computed while wave 1 runs.
+        question_embedding, embedding_degraded = _resolve_question_embedding(
+            enterprise_id, question
+        )
+        done1, pending1 = _futures.wait(w1, timeout=_GATHER_DEADLINE_S)
+        gathered: dict = {name: None for name in wave1}
+        for fut in pending1:
+            logger.warning(
+                "ask gather: %r did not finish within %.1fs — composing without it",
+                w1[fut], _GATHER_DEADLINE_S,
+            )
+            fut.cancel()
+        for fut in done1:
+            try:
+                gathered[w1[fut]] = fut.result()
+            except Exception:  # noqa: BLE001 — one leg never loses the ask
+                logger.warning(
+                    "ask gather: %r failed; composing without it", w1[fut], exc_info=True
+                )
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+    facts = gathered.get("facts") or ""
+    # A caller that pre-computed the block still wins; `live_context_fn` is the
+    # concurrent route and only qa_agent's planned path uses it.
+    live_context = live_context or (gathered.get("live") or "")
+    library_context = gathered.get("library") or ""
+    corpus = gathered.get("corpus") if wants_corpus_and_kg else None
+
+    # WAVE 2 — the two consumers of the vector, which do not feed each other.
+    #
     # `history` threads in explicitly here because this call site HAS it as a
     # parameter — the ContextVar route exists for `qa_agent._answer_single_shot`,
     # which does not. Passed to RESOLUTION only: `question` stays bare, so the
     # name and topic stages still see what the user typed, not the thread.
-    docs_block, documents = document_grounding(
-        enterprise_id, question,
-        question_embedding=question_embedding, history=history,
-    )
+    wave2: dict = {}
+    if not library_only:
+        # Document grounding runs on BOTH branches (a PRD-tab chat must not go
+        # blind to uploads) — except on a library-only ask, where the index is
+        # the exact contamination being excluded (see `wants_corpus_and_kg`).
+        wave2["docs"] = lambda: document_grounding(
+            enterprise_id, question,
+            question_embedding=question_embedding, history=history,
+        )
+    if wants_corpus_and_kg:
+        wave2["kg"] = lambda: _retrieve_kg_bundle(
+            enterprise_id, question, question_embedding=question_embedding,
+            embedding_unavailable=embedding_degraded,
+        )
+    w2 = _gather(wave2) if wave2 else {}
+    docs_block, documents = w2.get("docs") or ("", [])
+    kg_bundle = w2.get("kg")
 
     if prd_context:
         # PRD-grounded ask (PRD-tab chat): the PRD context block (PRD + insight
@@ -1659,18 +1987,33 @@ def compose_ask_answer(
         from app.prompts import ASK_SYSTEM_PRD_ADDENDUM
 
         bundle = None
-        system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM + today_line()
-                  + connected_sources_line(enterprise_id))
-        user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        system = (ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM
+                  # The library rides PRD-tab asks too. The reported failure:
+                  # "can you list the templates i have", asked from a PRD tab,
+                  # never received the block the planner asked for — the old
+                  # wiring built the thunk only on the no-PRD branch — so the
+                  # model answered "your templates" from the document index's
+                  # Confluence pages instead.
+                  + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                  + today_line() + connected_sources_line(enterprise_id))
+        if library_context:
+            # The block is per-company and self-invalidating (uploads change
+            # it), so it rides the uncached user turn — the per-PRD cacheable
+            # prefix below must stay byte-stable across the conversation.
+            user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
+                kg_context=library_context, question=question
+            )
+        else:
+            user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
         cacheable = prd_context
     else:
-        corpus = load_corpus(dataset)
-        cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
-
-        bundle = _retrieve_kg_bundle(
-            enterprise_id, question, question_embedding=question_embedding,
-            embedding_unavailable=embedding_degraded,
+        # Both were gathered above (wave 1 / wave 2) — read, don't re-fetch.
+        cacheable = (
+            f"Source material:\n\n{corpus.joined()}"
+            if corpus is not None and corpus.docs
+            else None
         )
+        bundle = kg_bundle
 
         # The KG bundle and the live sweep share one "connected sources" slot.
         # Keeping them in ONE section (rather than adding a second template)
@@ -1685,6 +2028,11 @@ def compose_ask_answer(
             context_sections.append(render_context_section(bundle))
         if live_context:
             context_sections.append(live_context)
+        # LAST, deliberately. A question about the company's own library is
+        # answered from this section and usually from nothing else, and the
+        # nearest section to the question is the one a model weighs hardest.
+        if library_context:
+            context_sections.append(library_context)
 
         if context_sections:
             # Each addendum is gated on ITS OWN section being present. The KG
@@ -1695,6 +2043,7 @@ def compose_ask_answer(
             system = (ASK_SYSTEM
                       + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
                       + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
+                      + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
                       + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question
@@ -1780,6 +2129,14 @@ def compose_ask_answer(
                     "live_sweep": bool(live_context),
                     "live_sweep_chars": len(live_context),
                     "prd_grounded": bool(prd_context),
+                    # Whether the company-library block was composed, and
+                    # whether it was the WHOLE grounding (corpus/KG/document
+                    # index all skipped). A library answer that stops carrying
+                    # its block — or one that quietly regains the index —
+                    # looks fine from the outside; these are what distinguish
+                    # them after the fact.
+                    "library": bool(library_context),
+                    "library_only": library_only,
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
                     # Counts only — never filenames or document text.

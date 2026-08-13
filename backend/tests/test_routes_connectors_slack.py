@@ -1503,3 +1503,74 @@ def test_unchecking_is_admin_gated_like_the_rest_of_the_route(
     assert r.status_code == 403
     assert calls["leave"] == []
     assert "Ticket 42 reopened" in corpus.read_text(encoding="utf-8")
+
+
+def test_unchecking_also_drops_the_channel_from_the_document_catalog(
+    slack_env, monkeypatch
+):
+    """The catalog half of the same teardown, and the half that was missing.
+
+    `register_slack_catalog` upserts a row per synced channel and nothing ever
+    removed one, so a deselected channel stayed catalogued forever: still
+    listed to the model as a document this workspace HAS, still rankable, and
+    — since document resolution shipped — still eligible to be asserted as the
+    subject of a question, whereupon its body fetch fails and the user is told
+    the contents "could not be loaded". That reads as a transient problem when
+    the channel is simply not connected any more.
+
+    Measured on the shared database 2026-08-07: one such row across six Slack
+    tenants (#cerebro-agent-escalations, three days staler than its siblings).
+
+    The kept channel must survive — a teardown that took the whole provider
+    with it would be the other failure.
+    """
+    from app import document_catalog
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+    for cid, name in (("C1", "#cf"), ("C2", "#support")):
+        document_catalog.register_document(
+            ctx.company_id,
+            provider=document_catalog.PROVIDER_SLACK,
+            external_id=cid,
+            title=name,
+            source_name="Slack",
+            content_hash=f"h-{cid}",
+            get_text=lambda: "",
+        )
+
+    _save_channels(ctx, [CF, SUP])
+    _save_channels(ctx, [CF])            # untick #support
+
+    remaining = {
+        d.external_id for d in document_catalog.list_documents(ctx.company_id)
+        if d.provider == document_catalog.PROVIDER_SLACK
+    }
+    assert "C2" not in remaining, (
+        "the deselected channel is still catalogued — it will keep being "
+        "offered as a document the workspace has"
+    )
+    assert "C1" in remaining, "the kept channel was swept up in the teardown"
+
+
+def test_a_catalog_deregistration_failure_never_fails_the_save(
+    slack_env, monkeypatch
+):
+    """Cleanup behind a save that has already committed, exactly like the
+    corpus purge beside it. If the catalog delete throws, the user's selection
+    must still be saved and the response must still be a success — a stale
+    catalog row is a much smaller problem than a selection that silently did
+    not persist."""
+    from app import document_catalog
+
+    ctx, calls, corpus = _slack_uncheck_harness(monkeypatch)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("postgrest down")
+
+    monkeypatch.setattr(document_catalog, "deregister_documents", _boom)
+
+    _save_channels(ctx, [CF, SUP])
+    body = _save_channels(ctx, [CF])
+
+    assert body["ok"] is True
+    assert body["config"]["sync_channel_ids"] == ["C1"]

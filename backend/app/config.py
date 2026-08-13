@@ -463,9 +463,31 @@ class Settings(BaseSettings):
     # scheduler cycle; the UI read path (/current,/status,/{id}) is unchanged.
     brief_engine: str = "synthesis"
 
+    # Live connector reads on the ANSWER path — the planner-directed
+    # live_read fan-out and the keyword sweep that runs when no plan exists.
+    # OFF by owner decision (2026-08-11): with the connector refresh at a
+    # 10-minute cadence, connector data is near-live in the knowledge graph
+    # already, so paying per-question third-party I/O (up to 8s wall-clock)
+    # re-reads what the sync just wrote. NOT dead code: the whole execution
+    # layer (app/live_read.py, connector_lookup/sweep.py, their tests) is kept
+    # intact and this flag is the only thing standing it down — flip
+    # LIVE_CONNECTOR_READS_ENABLED=true to bring it back without a revert.
+    # What this flag does NOT touch: explicitly-named tool lookups ("show me
+    # PR #42", tracker reads), the document catalog's targeted per-document
+    # pulls, and the dedicated report pipelines (VoC calls, competitive
+    # intel's web sweep) — those stay live.
+    live_connector_reads_enabled: bool = False
+
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
+    # Connector-refresh cadence, in MINUTES (owner decision 2026-08-12: 20 —
+    # relaxed from the 10 chosen 2026-08-11, halving third-party API traffic
+    # while staying far below the original 6h pipeline ride-along). Split from
+    # pipeline_interval_hours deliberately — that setting also scopes the
+    # connector-sweep persist dedup window (connector_lookup/sweep_persist.py),
+    # which must NOT shrink to minutes just because the refresh cadence did.
+    connector_refresh_interval_minutes: int = 20
     # Top-Insights brief scheduler (v0 checklist 2.4): the brief fires Monday
     # 09:00 in each company's configured timezone
     # (companies.notification_settings.timezone, default UTC). The scheduler
@@ -572,6 +594,16 @@ class Settings(BaseSettings):
     # How many of an enterprise+skill's most recent signals one eval pass
     # samples.
     extraction_eval_sample_size: int = 25
+
+    # KG-extraction recency window, in months. Sweep connectors (Confluence
+    # first; Jira / Drive / Slack are the intended future adopters) catalog
+    # EVERY walked document so it stays findable forever, but only yield
+    # documents modified within this window for KG extraction — the graph is a
+    # current-state store, not an archive. The initial deep scan uses this as
+    # its "everything recent" boundary; the 6-hour periodic sync stays free via
+    # the content-hash ledger. <= 0 disables the window (extract everything).
+    # Env-overridable via KG_EXTRACTION_WINDOW_MONTHS.
+    kg_extraction_window_months: int = 18
 
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 

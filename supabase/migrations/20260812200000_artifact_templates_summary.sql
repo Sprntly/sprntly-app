@@ -1,0 +1,27 @@
+-- A short LLM-written description of each uploaded format — what sections it
+-- has, what kind of document it produces, what it emphasizes — generated right
+-- after a successful compile (app/artifact_templates/summarize.py, gateway
+-- purpose="summarize_template") and re-generated whenever the source is
+-- replaced and recompiled.
+--
+-- WHY. The Ask planner and the library answer block list each format as
+-- nothing more than "name [kind] — state", so "what's in the Acme format" and
+-- "how do I use templates" have had nothing true to answer from — the reported
+-- failure was the assistant reaching for Confluence pages instead. The planner
+-- renders this column into its per-company COMPANY FORMATS input block
+-- (ask_planner._template_block) and library_context does the same for the
+-- answer path, so a question about a format is answered from the format.
+--
+-- '' means "no summary yet": every pre-existing row, and any row whose summary
+-- call failed (a summary failure never fails a compile — the format is usable
+-- without it). Backfill is self-healing rather than a data migration: a library
+-- read that finds a ready row with an empty summary schedules one in the
+-- background (summarize.schedule_missing_summaries), so legacy rows heal on
+-- first use and this migration stays a single additive statement.
+--
+-- Purely additive; nothing is dropped or narrowed. RLS on this table is
+-- already service-role-only (20260812170000, srv_artifact_templates FOR ALL TO
+-- service_role) and is deliberately not restated here — recreating that policy
+-- without its TO clause is the exact defect 20260812170000 fixed.
+alter table artifact_templates
+    add column if not exists summary text not null default '';

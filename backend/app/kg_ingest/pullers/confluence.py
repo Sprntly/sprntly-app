@@ -48,7 +48,9 @@ from app.connectors.confluence_oauth import (
     sync_context,
 )
 from app import document_catalog
+from app.config import settings
 from app.ingest import html_to_md
+from app.kg_ingest.recency import within_extraction_window
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
@@ -59,18 +61,22 @@ _MAX_SPACES = 25
 #: these responses carry BODIES: 100 long pages is a multi-megabyte payload and
 #: a fat unit against Atlassian's points-based rate budget.
 _PAGE_SIZE = 50
-#: Content pages per space per kind — 5 x 50 = 250 pages, freshest first.
-_MAX_PAGES_PER_SPACE = 5
 #: Per-record extraction budget. Under the runner's 6000-char batch budget so
 #: one record always fits in one batch. Long specs are truncated rather than
 #: chunked in v1; pullers/uploads.py::_chunks is the ready-made follow-up.
 _TEXT_CHARS = 4000
-#: Global safety valve. The content-hash ledger makes RE-syncs free, but the
-#: FIRST sync pays the LLM for everything: 25 spaces x 250 pages x 2 kinds is
-#: ~12,500 records, i.e. thousands of extraction batches on day one. This
-#: bounds that blast radius while the space picker teaches people to select a
-#: handful of spaces.
-_MAX_RECORDS = 500
+#: KG-extraction yield budget PER (space, kind). Once a (space, kind) walk has
+#: yielded this many in-window records it stops YIELDING but keeps walking +
+#: cataloguing, so a large space cannot spend a later space's extraction budget
+#: (the starvation the old flat global cap caused). The 18-month window is the
+#: real extraction boundary; this is the fairness backstop under it.
+_MAX_EXTRACT_RECORDS_PER_SPACE = 200
+#: First-scan volume guardrail: DOCUMENTS catalogued per (space, kind) before
+#: the deep walk is bounded and LOGGED (never silently truncated). A DOCUMENT
+#: count, decoupled from _PAGE_SIZE — this replaces the old 5-results-pages
+#: ceiling with a higher-but-bounded one so "a map of everything" is more fully
+#: catalogued while a pathologically huge tenant's first scan stays bounded.
+_MAX_CATALOG_DOCS_PER_SPACE = 1000
 
 #: kind → (v2 collection path, space filter param). Both listings accept the
 #: same sort/body-format/cursor vocabulary.
@@ -153,9 +159,24 @@ def _select_spaces(ctx: ConfluenceContext, spaces: list[dict]) -> list[dict]:
 def _content_records(
     ctx: ConfluenceContext, space: dict, kind: str, path: str
 ) -> Iterator[RawRecord]:
-    """Yield one RawRecord per page (or blog post) in `space`, newest first."""
+    """Walk one (space, kind) newest-first, cataloguing EVERY page and yielding
+    only the recent ones for KG extraction.
+
+    Two jobs, decoupled. `_to_record` registers EVERY walked page to the
+    document catalog (Tier 3 — findable forever) and returns its RawRecord.
+    This walk then yields that record for KG extraction ONLY when the page is
+    inside the recency window AND the per-(space, kind) extraction budget is not
+    yet spent; out-of-window / over-budget pages are catalogued then skipped
+    (`continue`), never `break`, so cataloguing keeps going.
+
+    The walk itself is bounded by `_MAX_CATALOG_DOCS_PER_SPACE` DOCUMENTS (not a
+    results-page count): on hitting that ceiling it emits exactly one WARNING and
+    stops — a bounded, LOGGED first-scan guardrail, never a silent truncation."""
     cursor: str | None = None
-    for _ in range(_MAX_PAGES_PER_SPACE):
+    catalogued = 0
+    extracted = 0
+    window_months = settings.kg_extraction_window_months
+    while True:
         params: dict[str, Any] = {
             "space-id": space["id"],
             "sort": "-modified-date",
@@ -171,8 +192,26 @@ def _content_records(
         results = body.get("results") or []
         for item in results:
             record = _to_record(ctx, space, kind, item)
-            if record is not None:
+            if record is None:
+                # Nothing to catalog or extract (no id, or empty title+body).
+                continue
+            catalogued += 1
+            if (
+                extracted < _MAX_EXTRACT_RECORDS_PER_SPACE
+                and within_extraction_window(record.timestamp, window_months)
+            ):
+                extracted += 1
                 yield record
+            if catalogued >= _MAX_CATALOG_DOCS_PER_SPACE:
+                logger.warning(
+                    "confluence: catalog walk hit the %d-document ceiling for "
+                    "company %s space %s (kind=%s) — deep scan bounded, not "
+                    "truncated silently; narrow the space selection to cover "
+                    "the rest",
+                    _MAX_CATALOG_DOCS_PER_SPACE, ctx.company_id,
+                    space.get("key") or space.get("id"), kind,
+                )
+                return
         cursor = next_cursor(body)
         if not cursor or not results:
             break
@@ -226,6 +265,14 @@ def _to_record(
             external_id=str(page_id),
             title=title,
             source_name=space.get("name") or space.get("key") or "",
+            # The SPACE ID, and specifically not the key or the name. This is
+            # what makes a deselected space's pages removable from the
+            # catalog: the selection stored by POST /connectors/confluence/
+            # spaces is a list of space IDS, so a stored id joins to it
+            # directly. `source_name` above is the display name and joins to
+            # nothing; the key is renameable and so is the site URL the key
+            # could be parsed back out of. Only the id survives a rename.
+            container_id=str(space.get("id") or "") or None,
             url=url,
             doc_date=version.get("createdAt") or item.get("createdAt"),
             # Over the FULL body, and this is the part that must not regress
@@ -285,21 +332,15 @@ def pull(company_id: str) -> Iterator[RawRecord]:
         logger.info("confluence puller: no readable spaces for %s", company_id)
         return
 
-    emitted = 0
     yielded = False
     last_error: Exception | None = None
     for space in spaces[:_MAX_SPACES]:
         try:
             for kind, path in _CONTENT_KINDS:
+                # Per-(space, kind) fairness + catalog ceiling live inside the
+                # walk; no space starves a later one and there is no global
+                # list-order cap to end the sync early.
                 for record in _content_records(ctx, space, kind, path):
-                    if emitted >= _MAX_RECORDS:
-                        logger.warning(
-                            "confluence: hit the %d-record cap for %s — narrow "
-                            "the space selection to cover the rest",
-                            _MAX_RECORDS, company_id,
-                        )
-                        return
-                    emitted += 1
                     yielded = True
                     yield record
         except ConfluenceAuthExpiredError:

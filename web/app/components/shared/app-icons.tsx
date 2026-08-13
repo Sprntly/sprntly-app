@@ -67,6 +67,18 @@ export function IconStop({ size = 18 }: { size?: number }) {
   )
 }
 
+export function IconMic({ size = 16 }: { size?: number }) {
+  // The capsule-on-a-stand microphone, matching the one BriefChat's composer
+  // already drew — the affordance was designed there before anything was wired
+  // to it, so the chat composer uses the same shape rather than a second idiom.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect x="9" y="3" width="6" height="11" rx="3" {...stroke} />
+      <path d="M5 11a7 7 0 0 0 14 0M12 18v3" {...stroke} />
+    </svg>
+  )
+}
+
 export function IconMessage({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>

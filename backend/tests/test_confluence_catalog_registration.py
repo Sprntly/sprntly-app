@@ -20,9 +20,32 @@ those two implementations apart.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.kg_ingest.pullers import confluence
+
+
+def _iso_ago(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+
+
+def _stub_pull(monkeypatch, pages):
+    """Wire the puller's fetch seams so pull() walks one space returning
+    `pages`. Leaves register_document alone so the `registered` fixture (or a
+    test's own patch) captures what the walk catalogues."""
+    monkeypatch.setattr(confluence, "sync_context", lambda cid: _Ctx())
+    monkeypatch.setattr(confluence, "list_spaces", lambda tok, cloud, **kw: [_SPACE])
+
+    def fake_api_get(token, url, params=None, *, what="read"):
+        if url.endswith("/api/v2/pages"):
+            return {"results": list(pages)}
+        return {}
+
+    monkeypatch.setattr(confluence, "api_get", fake_api_get)
 
 
 class _Ctx:
@@ -205,3 +228,348 @@ def test_no_page_body_is_stored_at_rest(registered):
     # ...while the summary and hash still come from the whole page.
     assert len(call["get_text"]()) > confluence._TEXT_CHARS
     assert call["content_hash"]
+
+
+# ────────────── Decoupling: catalog coverage vs extraction coverage ──────────
+
+
+def test_old_page_is_catalogued_but_not_yielded(registered, monkeypatch):
+    """AC5/AC6/AC7, the load-bearing decouple: a space holding one in-window and
+    one out-of-window page must catalog BOTH (findable forever) yet yield only
+    the in-window one for KG extraction.
+
+    This is what unblocks answering from an old page that was never extracted:
+    the catalog row exists regardless of age; the graph only carries the recent
+    facts."""
+    recent = _page("Recent decision.", page_id="recent")
+    recent["version"]["createdAt"] = _iso_ago(15)
+    old = _page("Old decision.", page_id="old")
+    old["version"]["createdAt"] = "2020-01-01T00:00:00Z"
+    _stub_pull(monkeypatch, [recent, old])
+
+    recs = list(confluence.pull("co-conf"))
+
+    # BOTH pages are catalogued — coverage does not depend on the window.
+    assert {c["external_id"] for c in registered} == {"recent", "old"}
+    # Only the in-window page is yielded for extraction.
+    assert [r.external_id for r in recs] == ["recent"]
+
+
+def test_registration_uses_version_modified_date(registered):
+    """AC5: the catalog doc_date is the page's MODIFIED date —
+    version.createdAt — falling back to item.createdAt only when the version
+    carries none (the same value the window keys off, so catalog and window can
+    never disagree about a page's age)."""
+    page = _page("Body.", page_id="p-mod")
+    page["version"]["createdAt"] = "2026-05-01T00:00:00Z"
+    page["createdAt"] = "2020-01-01T00:00:00Z"        # the CREATED date — ignored
+    confluence._to_record(_Ctx(), _SPACE, "page", page)
+    assert registered[-1]["doc_date"] == "2026-05-01T00:00:00Z"
+
+    # version present but without createdAt → fall back to the item's createdAt.
+    fallback = _page("Body.", page_id="p-fallback")
+    fallback["version"] = {"number": 1}
+    fallback["createdAt"] = "2026-06-01T00:00:00Z"
+    confluence._to_record(_Ctx(), _SPACE, "page", fallback)
+    assert registered[-1]["doc_date"] == "2026-06-01T00:00:00Z"
+
+
+def test_registration_failure_still_continues_pull(monkeypatch, caplog):
+    """AC15 through pull(): a catalog write that raises for one page logs a
+    WARNING naming the page id and the pull keeps going — the in-window record
+    is still yielded. (Extends test_registration_failure_does_not_break_the_pull,
+    which pins the same guarantee at the _to_record seam.)"""
+    import logging as _logging
+
+    def _boom(company_id, **kw):
+        raise RuntimeError("catalog down")
+
+    monkeypatch.setattr(confluence.document_catalog, "register_document", _boom)
+    page = _page("Body.", page_id="still-here")
+    page["version"]["createdAt"] = _iso_ago(10)
+    _stub_pull(monkeypatch, [page])
+
+    with caplog.at_level(_logging.WARNING, logger="app.kg_ingest.pullers.confluence"):
+        recs = list(confluence.pull("co-conf"))
+
+    assert [r.external_id for r in recs] == ["still-here"]
+    warnings = [
+        r for r in caplog.records
+        if r.levelno == _logging.WARNING and "still-here" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+
+
+# ───────── the space id on the row, and why it is the id and not the key ────
+#
+# A catalog row for Confluence is keyed on a PAGE id. The selection the admin
+# saves is a list of SPACE ids. Until `container_id` there was no stored field
+# joining the two, so unticking a space could not remove its pages and they
+# stayed catalogued — offered to the model as documents the workspace has,
+# rankable, assertable as the subject of a question, and then failing their
+# body fetch with "the contents could not be loaded".
+
+
+def test_the_space_id_is_stored_as_the_container(registered):
+    """The join key, written at registration. `source_name` beside it is the
+    space's DISPLAY NAME and joins to nothing the picker stores."""
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Short body."))
+
+    assert registered[0]["container_id"] == "s1"
+    assert registered[0]["source_name"] == "Engineering", (
+        "the display name is still what a reader sees — the container is an "
+        "additional field, not a replacement for it"
+    )
+
+
+def test_the_container_survives_a_space_rename(registered):
+    """WHY THE ID AND NOT THE KEY, as a test rather than a comment.
+
+    The other two candidate joins both live on the row already and both break
+    here: `source_name` is the display name, and the space KEY can be read out
+    of the page URL. Confluence lets an admin change both — a rename rewrites
+    the name, and a space-key change rewrites every page URL — while the space
+    id is immutable. A join through either would silently stop matching, and
+    the failure is invisible: the deselection returns 200 and quietly removes
+    nothing.
+    """
+    renamed = {"id": "s1", "key": "PLATFORM", "name": "Platform Engineering"}
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body.", page_id="a"))
+    confluence._to_record(_Ctx(), renamed, "page", _page("Body.", page_id="b"))
+
+    assert registered[0]["container_id"] == registered[1]["container_id"] == "s1"
+    # The two fields a naive join would have used DID move underneath it.
+    assert registered[0]["source_name"] != registered[1]["source_name"]
+
+
+def test_a_space_with_no_id_registers_without_a_container(registered):
+    """A listing entry missing its id must not write the empty string as a
+    container — `""` is a value that IN can match, so a later deregistration
+    naming it would sweep up every page that had one missing."""
+    confluence._to_record(
+        _Ctx(), {"key": "ENG", "name": "Engineering"}, "page", _page("Body.")
+    )
+
+    assert registered[0]["container_id"] is None
+
+
+def test_an_unchanged_page_still_acquires_a_missing_container(
+    isolated_settings, monkeypatch
+):
+    """THE LAZY REPAIR, and the reason the change needs no data migration.
+
+    `register_document` short-circuits on an unchanged content hash — no
+    re-summarise, no re-embed, no row write. Every page catalogued before
+    `container_id` existed is in exactly that state and would keep a NULL
+    container forever, because a page nobody edits never re-registers. The
+    deselection cleanup would then be inert for precisely the tenants that
+    already have a catalog worth cleaning.
+
+    So the short-circuit stamps a missing container on its way out. The
+    Confluence pull walks and catalogues EVERY page in a selected space, not
+    just recent ones, so one sweep fills them in."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
+    ).execute()
+    calls: list = []
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: calls.append(k) or type(
+            "R", (), {"output": {"summary": "A summary.", "topics": ["t"]}}
+        )(),
+    )
+    monkeypatch.setattr(document_catalog, "embed_texts",
+                        lambda texts, **k: [[0.1] * 1536])
+
+    # A row exactly as a pre-`container_id` pull left it.
+    confluence._to_record(
+        _Ctx(), {"key": "ENG", "name": "Engineering"}, "page", _page("Body.")
+    )
+    rows = db.table("document_catalog").select("*").execute().data
+    assert len(rows) == 1 and rows[0]["container_id"] is None
+    assert len(calls) == 1
+
+    # The next pull, byte-identical page, now knowing the space id.
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body."))
+
+    rows = db.table("document_catalog").select("*").execute().data
+    assert len(rows) == 1, "the repair inserted a second row"
+    assert rows[0]["container_id"] == "s1", (
+        "an unchanged page kept a NULL container — every row written before "
+        "this column existed would stay invisible to the deselection cleanup"
+    )
+    assert len(calls) == 1, (
+        "the repair re-summarised an unchanged page — it must cost no model "
+        "call, or a pull over a large space becomes an LLM bill"
+    )
+
+
+def test_the_repair_does_not_look_like_an_edit(isolated_settings, monkeypatch):
+    """Stamping a container must not move `updated_at`.
+
+    Recency on this table means "the document changed", and a repair is not a
+    change. #1119's audit found a stale row precisely BY its lagging
+    `updated_at`; a repair that touched it would have hidden that row, and
+    would make a quiet, fully-connected source indistinguishable from one that
+    had just re-synced."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
+    ).execute()
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: type("R", (), {"output": {"summary": "A summary.",
+                                              "topics": ["t"]}})(),
+    )
+    monkeypatch.setattr(document_catalog, "embed_texts",
+                        lambda texts, **k: [[0.1] * 1536])
+
+    confluence._to_record(
+        _Ctx(), {"key": "ENG", "name": "Engineering"}, "page", _page("Body.")
+    )
+    before = db.table("document_catalog").select("*").execute().data[0]
+    db.table("document_catalog").update(
+        {"updated_at": "2026-01-01T00:00:00+00:00"}
+    ).eq("id", before["id"]).execute()
+
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body."))
+
+    after = db.table("document_catalog").select("*").execute().data[0]
+    assert after["container_id"] == "s1"
+    assert after["updated_at"] == "2026-01-01T00:00:00+00:00", (
+        "the container repair touched updated_at — a repair is not an edit, "
+        "and anything reading recency to spot a stale row is now blind to it"
+    )
+
+
+def test_a_writer_with_no_container_never_blanks_a_stored_one(
+    isolated_settings, monkeypatch
+):
+    """The upsert must omit the column rather than send NULL for it.
+
+    Writers that know no container (uploads, chat attachments, and Drive
+    today) call `register_document` without one. If that sent an explicit
+    NULL, any such writer touching a row would erase a container another
+    writer had set — and the row would drop out of the deselection cleanup
+    with nothing to indicate it had."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
+    ).execute()
+    calls: list = []
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: calls.append(k) or type(
+            "R", (), {"output": {"summary": "A summary.", "topics": ["t"]}}
+        )(),
+    )
+    monkeypatch.setattr(document_catalog, "embed_texts",
+                        lambda texts, **k: [[0.1] * 1536])
+
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body."))
+    assert db.table("document_catalog").select("*").execute().data[0][
+        "container_id"
+    ] == "s1"
+    assert len(calls) == 1
+
+    # A CHANGED body, re-registered by a writer that declares no container —
+    # the full upsert path, not the short-circuit.
+    document_catalog.register_document(
+        "co-conf",
+        provider=document_catalog.PROVIDER_CONFLUENCE,
+        external_id="page-1",
+        title="Search ranking spec",
+        content_hash="a-different-hash",
+        get_text=lambda: "New body.",
+    )
+
+    # PROVE THE PATH, because the claim above is only about the UPSERT branch.
+    # Take the short-circuit instead — which is one fixture edit away, since
+    # all it needs is a matching content_hash — and this test passes for the
+    # wrong reason: that branch calls `_set_container` only when a container
+    # was PASSED, so a container-less caller leaves the row alone and the
+    # assertion below holds without the upsert's omit-the-column behaviour
+    # ever being exercised. A re-summarisation is what marks the upsert.
+    assert len(calls) == 2, (
+        "the re-registration did not re-summarise, so it took the "
+        "short-circuit and this is no longer testing the upsert's handling "
+        "of an absent container — check the fixture's content_hash differs"
+    )
+
+    assert db.table("document_catalog").select("*").execute().data[0][
+        "container_id"
+    ] == "s1", "a container-less re-registration blanked the stored space id"
+
+
+def test_a_page_moved_to_another_space_follows_the_move(
+    isolated_settings, monkeypatch
+):
+    """The repair overwrites a CHANGED container, not only a blank one — and
+    that is the half a blank-only rule would get wrong.
+
+    Confluence lets a page be moved between spaces, and moving it changes
+    nothing about its body, so the content hash is identical and registration
+    takes the short-circuit. A repair that only filled blanks would leave the
+    row pointing at the space the page LEFT. Two failures follow, both silent:
+    unticking the old space deletes a page that is still connected, and
+    unticking the new one leaves it catalogued.
+
+    A sibling column may legitimately want the opposite rule — a
+    provider-workspace id cannot change for a given (company, provider,
+    external_id), so overwriting one there would destroy evidence rather than
+    record a move. The rules differ because the identifiers differ; see the
+    comment at the repair site before unifying them."""
+    from app import document_catalog
+
+    db = isolated_settings["supabase"]
+    db.table("companies").insert(
+        {"id": "co-conf", "slug": "co-conf", "display_name": "C"}
+    ).execute()
+    calls: list = []
+    monkeypatch.setattr(
+        document_catalog, "llm_call",
+        lambda **k: calls.append(k) or type(
+            "R", (), {"output": {"summary": "A summary.", "topics": ["t"]}}
+        )(),
+    )
+    monkeypatch.setattr(document_catalog, "embed_texts",
+                        lambda texts, **k: [[0.1] * 1536])
+
+    confluence._to_record(_Ctx(), _SPACE, "page", _page("Body."))
+    assert db.table("document_catalog").select("*").execute().data[0][
+        "container_id"
+    ] == "s1"
+    assert len(calls) == 1
+
+    # The SAME page (same id, same company, byte-identical body — a move
+    # changes none of them), now walked as part of a different space. The
+    # space is the ONLY thing that differs between the two calls.
+    moved_to = {"id": "s2", "key": "PROD", "name": "Product"}
+    confluence._to_record(_Ctx(), moved_to, "page", _page("Body."))
+
+    # PROVE THE PATH, don't assume it. Everything below is only meaningful if
+    # this second registration took the unchanged-content SHORT-CIRCUIT — that
+    # is the path the repair lives on. Had the body differed by so much as a
+    # character it would have taken the full upsert instead, which writes the
+    # container unconditionally, and the test would be re-pinning "the
+    # argument I passed is the argument I got back" while looking identical.
+    # A model call is the observable that tells the two paths apart.
+    assert len(calls) == 1, (
+        "the move re-summarised, so this took the full upsert path and is no "
+        "longer testing the repair — check the fixture's body is unchanged"
+    )
+
+    rows = db.table("document_catalog").select("*").execute().data
+    assert len(rows) == 1, "the move created a second row"
+    assert rows[0]["container_id"] == "s2", (
+        "a page moved to another space still points at the space it left — "
+        "unticking the old space would delete a connected page, and "
+        "unticking the new one would leave it catalogued"
+    )

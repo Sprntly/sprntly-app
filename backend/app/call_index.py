@@ -287,6 +287,10 @@ def sync_all_sources(
     """
     written: Optional[int] = None
     first_error: Optional[BaseException] = None
+    logger.info(
+        "call-index: sweep START for %s (sources=%s)",
+        company_id, list(CALL_PROVIDERS),
+    )
     for provider in CALL_PROVIDERS:
         try:
             count = sync_company(
@@ -299,6 +303,14 @@ def sync_all_sources(
             )
             first_error = first_error or exc
             continue
+        # None = provider not connected, 0 = connected but nothing new,
+        # N = rows written to the index — sync_company's distinction, made
+        # visible so a silent index is attributable to the right cause.
+        logger.info(
+            "call-index: %s for %s — rows=%s",
+            provider, company_id,
+            "not connected" if count is None else count,
+        )
         if count is not None:
             written = (written or 0) + count
     if written is None and first_error is not None:

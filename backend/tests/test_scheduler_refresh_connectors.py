@@ -207,6 +207,51 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     sched_mod.shutdown_scheduler()
 
 
+def test_connector_refresh_runs_every_twenty_minutes(monkeypatch):
+    """Owner decision (2026-08-12): connector data refreshes every 20 MINUTES —
+    relaxed from the 10 chosen a day earlier, halving third-party API traffic
+    while chat, brief and KG still read near-live data. The cadence has its own
+    setting rather than riding pipeline_interval_hours, which still scopes the
+    sweep-persist dedup window and must not shrink to minutes as a side
+    effect."""
+    from datetime import timedelta
+
+    from app import scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod.settings, "scheduler_enabled", True)
+    monkeypatch.setattr(sched_mod.settings, "weekly_brief_tick_minutes", 15)
+    # The default, spelled explicitly so this test pins the shipped cadence
+    # rather than whatever a developer's .env happens to hold.
+    monkeypatch.setattr(
+        sched_mod.settings, "connector_refresh_interval_minutes", 20, raising=False
+    )
+
+    class _FakeScheduler:
+        def __init__(self, job_defaults=None):
+            self.jobs: list[dict] = []
+
+        def add_job(self, func, *, trigger=None, id=None, name=None, replace_existing=False):
+            self.jobs.append({"id": id, "trigger": trigger, "name": name})
+
+        def start(self):
+            pass
+
+        def shutdown(self, wait=False):
+            pass
+
+    fake = _FakeScheduler()
+    monkeypatch.setattr(sched_mod, "AsyncIOScheduler",
+                        lambda **kw: (fake.__init__(**kw), fake)[1])
+
+    sched_mod.start_scheduler()
+    try:
+        refresh = next(j for j in fake.jobs if j["id"] == "refresh_connectors")
+        assert refresh["trigger"].interval == timedelta(minutes=20)
+        assert "20m" in (refresh["name"] or "")
+    finally:
+        sched_mod.shutdown_scheduler()
+
+
 def test_scheduler_grants_grace_so_a_late_firing_still_runs(monkeypatch):
     """APScheduler defaults misfire_grace_time to 1 SECOND, which silently
     DISCARDED 22 of 41 connector-refresh firings on prod over 14 days (`was

@@ -47,6 +47,15 @@ export function usePipelineStatus(company: string): PipelineHookResult {
     if (cancelledRef.current) return
     const slug = companyRef.current
 
+    // No company yet (auth/workspaces still loading, or an anonymous mount
+    // like the always-on sidebar). Don't hit /v1/pipeline//status — park on
+    // the slow cadence and re-check; the company-change effect restarts the
+    // loop immediately once a slug exists.
+    if (!slug) {
+      schedulePoll(IDLE_POLL_MS, poll)
+      return
+    }
+
     let status: PipelineRunStatus | null = null
     try {
       // The backend may return { status: "no_runs" } which doesn't match the
@@ -111,7 +120,7 @@ export function usePipelineStatus(company: string): PipelineHookResult {
   }, [company, poll])
 
   const triggerRun = useCallback(async () => {
-    if (isTriggering) return
+    if (isTriggering || !company) return
     setIsTriggering(true)
     try {
       await pipelineApi.run(company)

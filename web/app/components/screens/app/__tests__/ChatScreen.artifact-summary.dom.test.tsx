@@ -27,12 +27,55 @@ const { generateFromTask, classifyCommand, clarifyTask, chatSummary } = vi.hoist
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
   chatSummary: vi.fn().mockResolvedValue({ summary: "Targets mobile users; anchored on a system-follow default." }),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  const { isPrdCommand, isTicketsCommand, prdCommandTask } = await import(
+    "../../../../lib/prd-commands"
+  )
+  const IS_QUESTION = new RegExp(
+    "^\\s*(?:(?:what|why|where|when|who|which|how)\\b"
+    + "|(?:do|does|did|should|shall|is|are|can|could|would|will)"
+    + "\\s+(?:we|i|the|this|that|it|there|a|an|our|my)\\b)",
+    "i",
+  )
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    // The PLANNER decides what a message asks for; this screen only executes the
+    // verdict. These tests stub the verdict with the SAME extraction the client
+    // used to run inline (`lib/prd-commands`), which is what their expectations
+    // were written against — so what they assert is the FLOW ("given
+    // generate_prd with this task, a PRD is generated with it"), unchanged.
+    //
+    // Whether a sentence IS a PRD command, and what its subject is, is now the
+    // planner's judgement and is tested in backend/tests/test_ask_planner.py.
+    // Reusing the old helper here is a test double standing in for a model, not
+    // a rule the product still applies.
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string) => ({
+        // An interrogative is a QUESTION, never a request to build — the
+        // planner reads the sentence, so this double must too (the old ladder
+        // needed TICKETS_QUESTION_RE bolted on for the same case).
+        intent: IS_QUESTION.test(q)
+          ? "answer"
+          : isTicketsCommand(q)
+          ? "generate_tickets"
+          : isPrdCommand(q)
+          ? "generate_prd"
+          : "answer",
+        confidence: 0.95,
+        // null for a pointer-not-a-name phrasing ("our top product
+        // opportunity") — the planner leaves `task` empty there too, and the
+        // screen asks what the PRD should cover.
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
@@ -130,6 +173,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
 describe("ChatScreen — artifact chat summary on fresh PRD generation", () => {
+
   it("posts the summary as an agent-only turn once generation completes", async () => {
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")

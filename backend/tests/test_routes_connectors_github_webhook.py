@@ -481,6 +481,68 @@ def test_webhook_push_marks_codebase_design_system_stale(client, monkeypatch):
     assert calls == ["owner/repo"]
 
 
+def _push(client, payload: dict):
+    body = json.dumps(payload).encode("utf-8")
+    return client.post(
+        "/v1/connectors/github/webhook",
+        content=body,
+        headers={
+            "X-GitHub-Event": "push",
+            "X-Hub-Signature-256": _sign(body),
+            "Content-Type": "application/json",
+        },
+    )
+
+
+def test_webhook_push_fires_the_skill_folder_sync(client, monkeypatch):
+    """A branch push hands (installation, repo, branch, default branch) to the
+    skill-folder sync — including a NON-default branch, because a synced folder
+    may be pinned to any branch (unlike the codebase-map pre-warm, which only
+    the default branch deserves)."""
+    import app.routes.connectors as connectors_mod
+
+    monkeypatch.setattr(
+        connectors_mod.db, "mark_github_design_systems_stale", lambda repo: 0
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        connectors_mod, "_sync_skill_folders_on_push",
+        lambda *a: calls.append(a),
+    )
+
+    r = _push(client, {
+        "repository": {"full_name": "owner/repo", "default_branch": "main"},
+        "installation": {"id": 4242},
+        "ref": "refs/heads/methods-wip",
+        "after": "abc123sha",
+    })
+    assert r.status_code == 200, r.text
+    assert calls == [(4242, "owner/repo", "methods-wip", "main")]
+
+
+def test_webhook_push_of_a_tag_does_not_fire_the_skill_folder_sync(client, monkeypatch):
+    """A tag push moves no branch head, so no synced folder became stale."""
+    import app.routes.connectors as connectors_mod
+
+    monkeypatch.setattr(
+        connectors_mod.db, "mark_github_design_systems_stale", lambda repo: 0
+    )
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        connectors_mod, "_sync_skill_folders_on_push",
+        lambda *a: calls.append(a),
+    )
+
+    r = _push(client, {
+        "repository": {"full_name": "owner/repo", "default_branch": "main"},
+        "installation": {"id": 4242},
+        "ref": "refs/tags/v1.2.3",
+        "after": "abc123sha",
+    })
+    assert r.status_code == 200, r.text
+    assert calls == []
+
+
 # ─────────────────────── list endpoints ───────────────────────
 
 

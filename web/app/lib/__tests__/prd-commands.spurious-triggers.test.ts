@@ -193,13 +193,25 @@ describe("source invariants", () => {
     return fs.readFileSync(path.join(here, ...parts), "utf8")
   }
 
-  it("AIBar has no private PRD-command regex — it imports the shared rules", async () => {
+  it("AIBar detects NOTHING — every message goes to the planner", async () => {
+    // This invariant got stronger. It used to assert that AIBar imported the
+    // SHARED rules rather than keeping a private regex, because a private copy
+    // drifted from the guards everyone else had. AIBar now runs no detection at
+    // all: it calls POST /v1/chat/intent and executes the verdict.
+    //
+    // That matters most for the multi-agent trigger it used to own. That regex
+    // gated the heaviest thing the product does — seven cross-referenced
+    // artifacts — on a bare pattern match, and its own comment recorded the near
+    // miss ("how do I generate a PRD first?" once kicked off the whole run).
     const src = await readSource("..", "..", "components", "shared", "AIBar.tsx")
-    expect(src).toMatch(
-      /import\s*\{[^}]*isPrdCommand[^}]*\}\s*from\s*"\.\.\/\.\.\/lib\/prd-commands"/,
-    )
-    // The exact shape of the old private detector.
-    expect(src).not.toMatch(/\.\*\\?b?prd/i)
+
+    expect(src).toContain("chatIntentApi")
+    // No detector, shared or private.
+    expect(src).not.toMatch(/isPrdCommand\s*\(/)
+    expect(src).not.toMatch(/isMultiAgentCommand/)
+    expect(src).not.toMatch(/prdCommandTask\s*\(/)
+    // …and nothing resembling the old private detector's shape.
+    expect(src).not.toMatch(/\.\*\?b?prd/i)
     expect(src).not.toContain("const isPrdCommand =")
   })
 

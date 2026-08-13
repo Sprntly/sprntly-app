@@ -37,6 +37,7 @@ import logging
 
 from app import db
 from app.artifact_templates.store import normalize_compile_notes
+from app.artifact_templates.summarize import generate_summary
 from app.artifact_templates.validate import validate_impl_spec_skeleton
 from app.graph.gateway import llm_call
 from app.skills.loader import get_skill
@@ -224,6 +225,15 @@ def compile_impl_spec_template(company_id: str, template_id: str) -> dict | None
     # preview is its primary diagnostic, and nobody can fix what they can't see.
     store_skeleton = None if verdict.status == "failed" else skeleton
 
+    # Rides where the skeleton does, for the PRD leg's reason: a stored skeleton
+    # means THIS source now governs the row, so its description is (re)written.
+    # `generate_summary` returns '' on any failure, never raises.
+    summary = None
+    if store_skeleton is not None:
+        summary = generate_summary(
+            company_id, artifact_type="impl_spec", source_md=source_md
+        )
+
     logger.info(
         "impl_spec_template_compiled company_present=%s status=%s notes=%s",
         bool(company_id), verdict.status, len(notes),
@@ -234,4 +244,5 @@ def compile_impl_spec_template(company_id: str, template_id: str) -> dict | None
         compile_status=verdict.status,
         compiled=store_skeleton,
         compile_notes=notes,
+        summary=summary,
     )

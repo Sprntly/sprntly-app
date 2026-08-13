@@ -459,19 +459,23 @@ def test_cycle_stops_when_expired(ir_cycle, monkeypatch):
     assert client.table("invite_reminder_sends").select("id").execute().data == []
 
 
-def test_cycle_records_skipped_when_send_fails(isolated_settings, monkeypatch):
-    import app.db.invite_reminders as inv_db
-    importlib.reload(inv_db)
-    ir = importlib.import_module("app.invite_reminders")
-    importlib.reload(ir)
-    monkeypatch.setattr(ir, "send_reminder_email", lambda **kw: False)
+def test_cycle_records_skipped_when_send_fails(ir_cycle, monkeypatch):
+    # `ir_cycle`, sender overridden to fail — NOT a hand-rolled reload. This
+    # test used to rebuild the module itself to install the failing sender and
+    # forgot the fixture's frozen clock, so its seeds were _FROZEN_NOW-relative
+    # while the cycle read the REAL now. The gap between the two grew a day per
+    # calendar day until 2026-08-11 12:00 UTC, when the "10-day-old" invite
+    # crossed the 30-day expiry and this test started failing everywhere at
+    # once. The fixture is the one place that knows everything a cycle test
+    # must pin (clock, expiry, sender); override the one thing that differs.
+    monkeypatch.setattr(ir_cycle, "send_reminder_email", lambda **kw: False)
 
     client = require_client()
     _seed_company(client)
     _seed_inviter(client)
     _seed_invite(client, created_days_ago=10)
 
-    summary = ir.run_invite_reminder_cycle()
+    summary = ir_cycle.run_invite_reminder_cycle()
     assert summary["skipped"] == 1
     assert summary["sent"] == 0
     rows = client.table("invite_reminder_sends").select("status").eq(
@@ -479,7 +483,7 @@ def test_cycle_records_skipped_when_send_fails(isolated_settings, monkeypatch):
     ).execute().data
     assert rows[0]["status"] == "skipped"
     # A later cycle does not retry the skipped step.
-    assert ir.run_invite_reminder_cycle()["steps_considered"] == 0
+    assert ir_cycle.run_invite_reminder_cycle()["steps_considered"] == 0
 
 
 def test_cycle_no_invites_is_noop(ir_cycle):

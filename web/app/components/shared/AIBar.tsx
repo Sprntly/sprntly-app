@@ -7,11 +7,10 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { prototypePath } from "../../lib/routes"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
-import { ApiError, briefApi, prdApi, type AskResponse } from "../../lib/api"
+import { ApiError, briefApi, chatIntentApi, prdApi, type AskResponse } from "../../lib/api"
 import { runAskGeneration } from "../../lib/runAskGeneration"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { runPrdGenerationFromTask } from "../../lib/runPrdGeneration"
-import { isPrdCommand, prdCommandTask } from "../../lib/prd-commands"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
@@ -228,17 +227,6 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
   }
 
   /**
-   * Multi-agent command: "generate PRD first" / "multi-agent" / "aggressive
-   * analysis". Gated on the shared `isPrdCommand` so it inherits every guard —
-   * without it, "how do I generate a PRD first?" kicked off the heaviest
-   * generation in the product.
-   */
-  const isMultiAgentCommand = (q: string) =>
-    (isPrdCommand(q) && /\bprd\s+first\b/i.test(q)) ||
-    /\bmulti[- ]?agent\b/i.test(q) ||
-    /\baggressive\s+(analysis|mode)\b/i.test(q)
-
-  /**
    * Generate a PRD from the task the USER named.
    *
    * This handler used to ignore the message entirely and generate from
@@ -342,32 +330,46 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       return
     }
 
-    // Detect agent commands — multi-agent FIRST (more specific match).
-    // Both gates run the SHARED rules (web/app/lib/prd-commands.ts), which is
-    // where the tickets guard, the question guard and the existing-document
-    // reference guard live. A tickets phrasing ("convert this PRD into
-    // tickets") is never a PRD command there, so it falls through to the ask
-    // agent instead of silently generating a document.
-    if (isMultiAgentCommand(q)) {
+    // THE PLANNER DECIDES. This bar used to run its own regexes over the
+    // message — `isMultiAgentCommand` and `isPrdCommand` — the third copy of a
+    // cascade that also lived in ChatScreen and BriefChat. All three are gone.
+    //
+    // It mattered most HERE. `isMultiAgentCommand` gates the heaviest thing the
+    // product does — seven cross-referenced artifacts, minutes of work — and it
+    // fired on a bare pattern match. Its own comment records the near miss:
+    // "how do I generate a PRD first?" once kicked off that whole run. A regex
+    // is the wrong instrument for a decision that expensive.
+    //
+    // FAILURE MODE ON PURPOSE: a failed call falls through to the ask panel and
+    // ANSWERS the question. It never falls back to guessing.
+    const envelope = await chatIntentApi
+      .resolve(q, { prdId: null })
+      .catch(() => null)
+
+    if (envelope?.intent === "multi_agent") {
       setLastSubmittedQuestion(q)
       void handleMultiAgentCommand()
       return
     }
-    if (isPrdCommand(q)) {
-      const task = prdCommandTask(q)
+    if (envelope?.intent === "generate_prd") {
       setLastSubmittedQuestion(q)
-      if (!task) {
-        // Generic command, no topic, and no conversation thread to resolve it
-        // against — ask rather than generate a PRD about a guess.
+      if (!envelope.task?.trim()) {
+        // The planner recognised a PRD request but found no subject to build
+        // from — in the message or anywhere else. Ask rather than generate a
+        // document about a guess. (The bar threads no conversation, so unlike
+        // chat there is nothing here to resolve a bare "generate a PRD"
+        // against.)
         showToast(
           "What should the PRD cover?",
           "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\".",
         )
         return
       }
-      void handlePrdCommand(task)
+      void handlePrdCommand(envelope.task.trim())
       return
     }
+    // Every other verdict — answer, and the intents this surface has no flow
+    // for (tickets, prototype, edit) — falls through to the ask panel below.
 
     expandAiPanel()
     setSubmitting(true)

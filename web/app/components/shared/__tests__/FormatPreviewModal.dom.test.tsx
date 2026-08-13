@@ -143,21 +143,22 @@ describe("the dialog", () => {
 })
 
 describe("the mapping panel", () => {
-  it("renders all three blocks' EMPTY copy when every array is empty", async () => {
+  it("says so plainly when there is no section map, and shows nothing else", async () => {
     mount()
     await waitFor(() =>
       expect(
         screen.getByText(/We don't have a section-by-section map for this format\./),
       ).toBeTruthy(),
     )
-    expect(
-      screen.getByText(/Nothing extra — your format has a home for everything Sprntly writes\./),
-    ).toBeTruthy()
-    expect(
-      screen.getByText(/None — every section in your format lines up with something Sprntly already writes\./),
-    ).toBeTruthy()
     // And never an empty table under a confident heading.
     expect(document.querySelector(".afmt-map")).toBeNull()
+    // The panel ENDS at the section table. The "Added by Sprntly" and
+    // "Yours, kept" blocks that used to follow it are gone: the first
+    // described grafting that the compiler no longer does, and the second
+    // re-stated the table above it in prose.
+    expect(screen.queryByText(/Added by Sprntly/)).toBeNull()
+    expect(screen.queryByText(/Yours, kept/)).toBeNull()
+    expect(screen.queryByText(/Sections that are yours alone/)).toBeNull()
   })
 
   it("orders the section map by `order` and labels the form in plain words", async () => {
@@ -187,9 +188,12 @@ describe("the mapping panel", () => {
     // The horizontal scroller is keyboard-reachable.
     const region = screen.getByRole("region", { name: "Section mapping" })
     expect(region.getAttribute("tabindex")).toBe("0")
-    // The two list blocks render their blurbs when they have content.
-    expect(screen.getByText(/Every Sprntly document carries these\./)).toBeTruthy()
-    expect(screen.getByText(/Sections that are yours alone\./)).toBeTruthy()
+    // Nothing renders below the table, even when the payload HAS the arrays
+    // those blocks used to read — `section_map` still carries
+    // `unmapped_house` / `extra_sections`, and this panel deliberately says
+    // nothing about them.
+    expect(screen.queryByText(/Added by Sprntly/)).toBeNull()
+    expect(screen.queryByText(/Yours, kept/)).toBeNull()
   })
 
   it("shows EVERY note, translated, never truncated and never raw", async () => {

@@ -1,6 +1,6 @@
 /** Privacy policy copy — update dates here when the policy changes. */
 export const PRIVACY_EFFECTIVE = "May 20, 2026"
-export const PRIVACY_LAST_UPDATED = "May 20, 2026"
+export const PRIVACY_LAST_UPDATED = "August 12, 2026"
 
 export type PolicySection = {
   id: string
@@ -58,7 +58,8 @@ export const PRIVACY_SECTIONS: PolicySection[] = [
     id: "customer-data",
     title: "3. How we handle Customer Data",
     blocks: [
-      "When a Customer organization connects tools to Sprntly — such as Amplitude, Mixpanel, Sentry, Salesforce, HubSpot, Zendesk, Intercom, Gong, Linear, Figma, GitHub, Google Drive, Google Analytics, Gmail, or similar systems — Sprntly ingests and processes the data those tools contain so the Service can generate insights, briefs, PRDs, prototypes, and recommendations for the Customer.",
+      "When a Customer organization connects tools to Sprntly — such as Zoom, Google Meet, Slack, Fireflies, HubSpot, Jira, Confluence, ClickUp, Asana, GitHub, Figma, Google Drive, Sprinklr, Superset, Amplitude, Mixpanel, Sentry, Salesforce, Zendesk, Intercom, Gong, Linear, Google Analytics, Gmail, or similar systems — Sprntly ingests and processes the data those tools contain so the Service can generate insights, briefs, PRDs, prototypes, and recommendations for the Customer.",
+      "Meeting and call data. When a Customer connects a meeting or call platform (such as Zoom, Google Meet, or Fireflies), Sprntly accesses the text transcripts and meeting details (topic, host, start time, duration, and participant names as they appear in the transcript) of the cloud-recorded meetings the Customer authorizes. Sprntly does not download, store, or process the video or audio files themselves — only the transcript text and metadata. The authorization credentials (OAuth tokens) for these connections are stored encrypted. When a Customer disconnects such an integration, Sprntly revokes its authorization with the provider, deletes the stored credentials, and stops all further collection from that source.",
       "We commit to the following:",
       "We process Customer Data only as instructed by the Customer, in accordance with our agreement with them. We do not use Customer Data to advertise, sell to third parties, or for any purpose outside the Service that is not authorized by the Customer.",
       "We may use Customer Data to operate, secure, monitor, and improve the Service for that Customer, including to generate the Customer's own insights, briefs, recommendations, and outputs.",

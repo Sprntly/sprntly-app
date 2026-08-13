@@ -67,6 +67,27 @@ def _decode(row: dict) -> dict:
     return out
 
 
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company is stale.
+
+    The planner renders the custom-skill block into every prompt and memoises it
+    in-process until something says otherwise
+    (`ask_planner.invalidate_catalog_cache`). A skill written without this stays
+    invisible to the planner — or, worse, a deleted one stays offerable — for the
+    life of the process.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db layer,
+    so a module-level import here would close a cycle. Never allowed to break a
+    write: a cache that failed to clear is a stale prompt, which the next write
+    or a restart fixes; a skill that failed to save is not."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
 def insert_custom_skill(
     *,
     company_id: str,
@@ -117,6 +138,7 @@ def insert_custom_skill(
         if _is_unique_violation(exc):
             raise DuplicateSkillSlug(slug) from exc
         raise
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else row)
 
 
@@ -249,6 +271,7 @@ def update_custom_skill(
     # already read merged with the patch rather than reporting a failed update
     # (the caller reads None as "the row is gone" and would then create a
     # second entry under the same name — exactly what this path prevents).
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, **patch})
 
 
@@ -290,6 +313,7 @@ def detach_skills_from_source(company_id: str, source_id: str) -> int:
         .eq("source_id", source_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return count
 
 
@@ -310,4 +334,5 @@ def delete_custom_skill(company_id: str, skill_id: str) -> dict | None:
         .eq("id", skill_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return row

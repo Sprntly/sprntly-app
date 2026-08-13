@@ -152,6 +152,7 @@ from app.db.artifact_templates import (
     insert_template,
     list_templates,
     set_compile_result,
+    set_template_summary,
     update_template,
 )
 
@@ -173,6 +174,7 @@ from app.db.skill_sources import (
     get_skill_source,
     get_skill_source_for_folder,
     list_active_skill_sources,
+    list_active_skill_sources_for_installation,
     list_skill_sources,
     record_skill_source_sync,
     upsert_skill_source,
@@ -357,6 +359,7 @@ __all__ = [
     "get_skill_source",
     "get_skill_source_for_folder",
     "list_active_skill_sources",
+    "list_active_skill_sources_for_installation",
     "list_skill_sources",
     "record_skill_source_sync",
     "upsert_skill_source",

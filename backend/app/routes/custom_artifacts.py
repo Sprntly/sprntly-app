@@ -1,0 +1,332 @@
+"""Custom artifacts — team documents of any kind (the "Others" library).
+
+  POST   /v1/custom-artifacts                  -> create a document
+  GET    /v1/custom-artifacts                  -> this company's documents
+  GET    /v1/custom-artifacts/by-conversation/{cid} -> the ones born in a chat
+  GET    /v1/custom-artifacts/{id}             -> one document, with its body
+  PATCH  /v1/custom-artifacts/{id}             -> save a title / kind / body
+  DELETE /v1/custom-artifacts/{id}             -> remove it
+  POST   /v1/custom-artifacts/generate         -> write one with the LLM
+
+EXPLICIT ASKS ONLY. Nothing reaches `/generate` on a user's behalf. The chat
+gets here through the planner's `create_artifact` action, which fires on a
+request to CREATE a document and never on a question about one, and the
+suggestion strip only ever proposes a prompt the USER then chooses to send.
+That ordering is the requirement, not a nicety: this library is shared with the
+whole team, so a document created from a misread question appears in every
+colleague's library.
+
+TENANT GATE on every route: `require_company` resolves the caller's company
+from the JWT and `db.custom_artifacts` filters `company_id` IN THE QUERY, so a
+document belonging to another company reads as absent. Both cases raise 404,
+never 403 — a foreign tenant must not be able to tell "exists but not yours"
+from "doesn't exist". RLS is bypassed (service-role key), so this is the ONLY
+tenant boundary these routes have.
+
+NO PER-USER GATE, deliberately. Any member of the company can read and write
+any document in it: that is what "shared within the team" means, and it is the
+same posture reports and ticket sets already have. `created_by`/`updated_by`
+are attribution only. Explicit per-person sharing is a later slice; when it
+arrives it adds a check here, and until then a route that filtered on
+`created_by` would silently make the library private — the exact bug #1061
+fixed on the share-link path.
+
+THE BODY IS SANITIZED ON EVERY WRITE (app/custom_artifact_html.py), not on
+read. Sanitizing on write means the stored document is the safe one, so every
+consumer — this API, the PDF renderer, a future export, a future share link —
+is covered without each having to remember. Read paths return what is stored.
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from app.auth import CompanyContext, require_company
+from app.custom_artifact_generate import generate_into
+from app.custom_artifact_html import sanitize_artifact_html
+from app.db.conversations import conversation_belongs_to_company
+from app.db.custom_artifacts import (
+    MAX_BODY_CHARS,
+    BodyTooLarge,
+    VersionConflict,
+    create_artifact,
+    delete_artifact,
+    get_artifact,
+    list_artifacts_for_company,
+    list_artifacts_for_conversation,
+    update_artifact,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/v1/custom-artifacts", tags=["custom-artifacts"])
+
+# The ceiling is the db module's (imported, not redeclared, so the two cannot
+# drift). It is enforced there — this route only turns the resulting error into
+# a 413 with a reason.
+#
+# THE CHECK CANNOT HAPPEN ON THE RAW INPUT, which is what it used to do.
+# Sanitizing ESCAPES `&`, `<` and `>`, so a body can grow ~5x on the way
+# through: 399,007 bytes of `&` passed a raw 400,000 check and sanitized to
+# 1,995,035, which the storage layer then sliced back to 400,000 — 80% of the
+# document silently discarded behind a 200 OK. The size that matters is the
+# size that gets STORED, so both writers below measure the sanitized string.
+#
+# A GENEROUS RAW GUARD STILL RUNS FIRST, though, because "measure after
+# sanitizing" means the parser sees the input before anything bounds it: a
+# 100MB body would be buffered by FastAPI, built into a full BeautifulSoup
+# tree and re-serialised before the real ceiling could refuse it. The multiple
+# is deliberately loose (escaping expands by at most ~5x) so it can only ever
+# catch input that could not have fit anyway.
+_RAW_BODY_LIMIT = MAX_BODY_CHARS * 8
+
+
+def _guard_raw_size(body_html: str | None) -> None:
+    if body_html is not None and len(body_html) > _RAW_BODY_LIMIT:
+        raise HTTPException(413, "Document is too large")
+
+def _public(row: dict, *, with_body: bool = True) -> dict:
+    """One document as the web reads it.
+
+    Empty strings are returned rather than omitted: the editor renders every
+    field and decides its own placeholder copy, so the API never decides that a
+    blank title should disappear.
+    """
+    out = {
+        "id": row["id"],
+        "kind": row.get("kind") or "",
+        "title": row.get("title") or "",
+        "status": row.get("status") or "ready",
+        "version": int(row.get("version") or 1),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "conversation_id": row.get("conversation_id"),
+        "created_by": row.get("created_by"),
+        "updated_by": row.get("updated_by"),
+    }
+    if with_body:
+        out["body_html"] = row.get("body_html") or ""
+    return out
+
+
+def _require_owned(artifact_id: int, company_id: str) -> dict:
+    """The document, or 404. The company filter lives in the query."""
+    row = get_artifact(company_id, artifact_id)
+    if row is None:
+        raise HTTPException(404, "Artifact not found")
+    return row
+
+
+class CreateIn(BaseModel):
+    # Every field is optional: "New document" from the library creates an empty
+    # one and the user names it by typing, exactly as a new Google Doc behaves.
+    kind: str = ""
+    title: str = ""
+    body_html: str = ""
+    conversation_id: int | None = None
+
+
+@router.post("")
+def create(
+    body: CreateIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Create a document. Returns the full row, including its id and version."""
+    # `conversation_id` is the ONE id on this surface the CLIENT chooses, which
+    # makes it the one that has to be checked. Conversation ids are sequential
+    # integers, and the artifacts listing resolves a document's conversation
+    # into a TITLE — so an unchecked id lets a caller attach their own document
+    # to another tenant's chat and read that chat's title back out of their own
+    # library. Storing only ids the caller owns closes it at the source, which
+    # also covers every future reader of the column.
+    _guard_raw_size(body.body_html)
+    if body.conversation_id is not None and not conversation_belongs_to_company(
+        body.conversation_id, company.company_id
+    ):
+        raise HTTPException(404, "Conversation not found")
+    try:
+        row = create_artifact(
+            company.company_id,
+            kind=body.kind,
+            title=body.title,
+            body_html=sanitize_artifact_html(body.body_html),
+            conversation_id=body.conversation_id,
+            created_by=company.user_id,
+        )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large")
+    return _public(row)
+
+
+@router.get("")
+def list_all(company: CompanyContext = Depends(require_company)):
+    """This company's documents, newest first, WITHOUT their bodies."""
+    rows = list_artifacts_for_company(company.company_id)
+    return {"artifacts": [_public(r, with_body=False) for r in rows]}
+
+
+@router.get("/by-conversation/{conversation_id}")
+def list_for_conversation(
+    conversation_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """The documents born in one chat, newest first (the thread-resume read)."""
+    rows = list_artifacts_for_conversation(company.company_id, conversation_id)
+    return {"artifacts": [_public(r, with_body=False) for r in rows]}
+
+
+@router.get("/{artifact_id}")
+def get_one(
+    artifact_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """One document with its body."""
+    return _public(_require_owned(artifact_id, company.company_id))
+
+
+class UpdateIn(BaseModel):
+    # None means "don't touch this field", so a body autosave never clobbers a
+    # title someone renamed in another tab, and vice versa.
+    title: str | None = None
+    kind: str | None = None
+    body_html: str | None = None
+    # The version the editor started from. Optional: omitting it accepts
+    # last-write-wins, which is what a rename from the library row does.
+    base_version: int | None = Field(default=None, ge=1)
+
+
+@router.patch("/{artifact_id}")
+def update(
+    artifact_id: int,
+    body: UpdateIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save an edit.
+
+    409 when `base_version` no longer matches — someone else saved first. The
+    response carries THEIR version of the document so the editor can say who
+    moved it and offer the current text, rather than dropping the user's work
+    on the floor with a bare error.
+    """
+    _guard_raw_size(body.body_html)
+    # No ownership pre-read here: `update_artifact` resolves the row
+    # company-filtered and returns None for one that is absent OR foreign,
+    # which becomes the same 404 below. A pre-read would be a second round trip
+    # buying a boundary the writer already enforces.
+    try:
+        row = update_artifact(
+            company.company_id,
+            artifact_id,
+            title=body.title,
+            kind=body.kind,
+            body_html=(
+                sanitize_artifact_html(body.body_html)
+                if body.body_html is not None
+                else None
+            ),
+            base_version=body.base_version,
+            updated_by=company.user_id,
+        )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large")
+    except VersionConflict as exc:
+        current = exc.current
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "version_conflict",
+                "current": _public(current) if current else None,
+            },
+        )
+    if row is None:
+        # Deleted between the ownership read and the write.
+        raise HTTPException(404, "Artifact not found")
+    return _public(row)
+
+
+class GenerateIn(BaseModel):
+    # WHAT KIND of document. Free text, straight from the user's own words
+    # ("leadership update"), never coerced onto a list.
+    kind: str = ""
+    # The self-contained brief for what to write. On the chat path this is the
+    # planner's synthesized `task`, not the raw last message.
+    task: str = ""
+    # Facts the document may assert. Supplied by the caller (the chat turn that
+    # asked), because the thread already established what this is about — see
+    # custom_artifact_generate's note on why there is no retrieval pass here.
+    context: str = ""
+    conversation_id: int | None = None
+
+
+@router.post("/generate")
+def generate(
+    body: GenerateIn,
+    background: BackgroundTasks,
+    company: CompanyContext = Depends(require_company),
+):
+    """Start writing a document. Returns the row immediately, `generating`.
+
+    The row is created BEFORE the multi-minute call so the panel has an id to
+    open and poll against, rather than waiting on an id that only exists once
+    generation finishes — the ticket-sets lifecycle. Creating it up front is
+    also what makes double-generation structurally impossible: the client never
+    posts content back, so a double-click or a StrictMode double-effect has
+    nothing to write with.
+
+    EXPLICIT ASKS ONLY. Nothing calls this on the user's behalf: the chat
+    reaches it through the planner's `create_artifact` action, which fires on a
+    request to CREATE a document and never on a question about one, and the
+    suggestion strip only ever proposes a prompt the user then chooses to send.
+    A document appearing in someone's library because they asked a question is
+    the failure mode this rule exists to prevent.
+    """
+    if body.conversation_id is not None and not conversation_belongs_to_company(
+        body.conversation_id, company.company_id
+    ):
+        raise HTTPException(404, "Conversation not found")
+
+    row = create_artifact(
+        company.company_id,
+        kind=body.kind,
+        # Provisional: the generator replaces it with the document's own <h1>.
+        # A name now means the library row is never blank while it writes.
+        title=(body.kind or "Document").strip()[:300],
+        status="generating",
+        conversation_id=body.conversation_id,
+        created_by=company.user_id,
+    )
+
+    # Scheduled with BackgroundTasks, NOT `asyncio.create_task`.
+    #
+    # This handler is a sync `def`, so FastAPI runs it in a worker thread where
+    # there is no running event loop — `create_task` raises RuntimeError there,
+    # which would have made every generation 500 while looking perfectly correct
+    # in review. BackgroundTasks runs after the response is sent and puts a sync
+    # callable on the threadpool itself, which is exactly the shape of this work
+    # (one long blocking LLM call).
+    #
+    # The DURABLE ROW is the job state — there is no in-memory job store to lose
+    # — so a process death mid-write is recoverable by `sweep_orphan_generating`
+    # rather than invisible.
+    background.add_task(
+        generate_into,
+        company_id=company.company_id,
+        artifact_id=row["id"],
+        kind=body.kind,
+        task=body.task,
+        context=body.context,
+    )
+    return _public(row)
+
+
+@router.delete("/{artifact_id}")
+def remove(
+    artifact_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Delete a document. 404 when absent or foreign."""
+    if not delete_artifact(company.company_id, artifact_id):
+        raise HTTPException(404, "Artifact not found")
+    return {"deleted": True}

@@ -279,6 +279,27 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Team documents of any kind — the "Others" library (mirrors
+-- 20260813120000_custom_artifacts.sql). Present in the BASE schema, not only in
+-- the suites that exercise it, because the startup lifespan sweeps this table
+-- for orphaned generations — so every test that boots the app touches it.
+CREATE TABLE custom_artifacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    kind            TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    body_html       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'ready',
+    error           TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    updated_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Fire-and-forget Ask job rows (mirrors 20260617120000_ask_jobs.sql). Status
 -- walks generating → ready (or error); `response` holds the citation-stripped
 -- answer JSON. Per-request + per-tenant — distinct from cached_asks/ask_log.
@@ -1190,6 +1211,12 @@ CREATE TABLE document_catalog (
     user_id         TEXT,
     provider        TEXT NOT NULL,
     external_id     TEXT NOT NULL,
+    -- The provider-side CONTAINER (Confluence space id today). Nullable, and
+    -- the null-ness carries meaning that tests depend on: `IN` never matches
+    -- NULL in either engine, so a row registered before this column existed
+    -- is skipped by the container-keyed deregistration rather than swept up
+    -- by it.
+    container_id    TEXT,
     title           TEXT NOT NULL,
     source_name     TEXT NOT NULL DEFAULT '',
     url             TEXT,
@@ -1199,6 +1226,11 @@ CREATE TABLE document_catalog (
     topics          TEXT NOT NULL DEFAULT '[]',
     summary_model   TEXT,
     summary_version TEXT,
+    -- Mirrors 20260811120000_document_catalog_provider_workspace.sql. NULLABLE
+    -- and NULL-by-default on purpose: NULL means UNKNOWN, never "belongs to no
+    -- workspace", and the tests below pin that a caller who does not know the
+    -- workspace can neither clear nor invent one.
+    provider_workspace_id TEXT,
     embedding       TEXT,
     body_text       TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1292,6 +1324,9 @@ CREATE TABLE artifact_templates (
                      CHECK (compile_status IN
                             ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
     compile_notes  TEXT NOT NULL DEFAULT '[]',
+    -- Mirrors 20260812200000_artifact_templates_summary.sql: the LLM-written
+    -- description a successful compile stores; '' = "no summary yet".
+    summary        TEXT NOT NULL DEFAULT '',
     content_hash   TEXT NOT NULL DEFAULT '',
     is_active      INTEGER NOT NULL DEFAULT 0,
     uploader_id    TEXT NOT NULL,
@@ -1485,6 +1520,20 @@ CREATE TABLE artifact_share_joins (
     joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (share_id, joined_user_id)
 );
+
+-- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
+-- bigint identity / jsonb / timestamptz are INTEGER / TEXT here). The persisted
+-- call transcripts the VoC digest reads instead of live-fetching per question.
+create table if not exists call_transcripts (
+    id            integer primary key autoincrement,
+    company_id    text not null,
+    provider      text not null,
+    external_id   text not null,
+    call_date     text,
+    payload       text not null,
+    fetched_at    text not null default '',
+    unique (company_id, provider, external_id)
+);
 """
 
 
@@ -1672,6 +1721,27 @@ def _no_background_template_compile(request, monkeypatch):
         if hasattr(mod, "schedule_compile"):
             monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
                                 raising=False)
+
+    # The summary self-heal is the same hazard through a different door: the
+    # templates LIST route (and the planner's catalog read) schedules a
+    # background summarize for any ready row with an empty summary — which is
+    # every ready row a test seeds — and that call is a gateway `llm_call` too.
+    # 0 = "nothing scheduled", which is the function's no-work return, so list
+    # responses keep their shape under the patch. Same two-module patching,
+    # same reason. The summarize suite opts out with the marker above and
+    # drives the gateway with its own stub.
+    def _noop_summaries(company_id, rows):  # noqa: ARG001
+        return 0
+
+    for mod_name in ("app.artifact_templates.summarize",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_missing_summaries"):
+            monkeypatch.setattr(mod, "schedule_missing_summaries",
+                                _noop_summaries, raising=False)
     yield
 
 

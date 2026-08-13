@@ -15,6 +15,7 @@ import pytest
 
 from app.db.artifact_shares import (
     auto_join_company_on_domain_match,
+    get_or_mint_canonical_share,
     get_share_by_token,
     mint_share,
     owning_company_domain,
@@ -354,6 +355,136 @@ def test_resolve_invalid_token_returns_not_found_outcome(isolated_settings):
         token=str(uuid.uuid4()), user_id="whoever", user_email=None
     )
     assert result == {"outcome": "not_found"}
+
+
+# ── get_or_mint_canonical_share (canonical single-link primitive) ───────
+
+
+def test_get_or_mint_canonical_share_mints_when_absent(isolated_settings):
+    row = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=100, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+    assert row["token"]
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "prd").eq("artifact_id", 100).execute().data
+    )
+    assert len(rows) == 1
+    assert rows[0]["token"] == row["token"]
+
+
+def test_get_or_mint_canonical_share_returns_existing_without_minting(isolated_settings):
+    seeded = mint_share(
+        artifact_type="prd", artifact_id=101, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    row = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=101, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    assert row["token"] == seeded["token"]
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "prd").eq("artifact_id", 101).execute().data
+    )
+    assert len(rows) == 1  # no new row minted
+
+
+def test_get_or_mint_canonical_share_is_idempotent(isolated_settings):
+    first = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=102, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+    second = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=102, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+    third = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=102, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    assert first["token"] == second["token"] == third["token"]
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "prd").eq("artifact_id", 102).execute().data
+    )
+    assert len(rows) == 1
+
+
+def test_get_or_mint_canonical_share_returns_earliest_of_multiple(isolated_settings):
+    first = mint_share(
+        artifact_type="prd", artifact_id=103, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+    mint_share(
+        artifact_type="prd", artifact_id=103, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    row = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=103, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    assert row["id"] == first["id"]
+    assert row["token"] == first["token"]
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "prd").eq("artifact_id", 103).execute().data
+    )
+    assert len(rows) == 2  # nothing minted by the get-or-create call
+
+
+def test_get_or_mint_canonical_share_ignores_other_company_share(isolated_settings):
+    other_company_share = mint_share(
+        artifact_type="prd", artifact_id=104, owner_company_id="co-A",
+        owner_workspace_id="ws-A", created_by_user_id="user-A",
+    )
+
+    row = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=104, owner_company_id="co-B",
+        owner_workspace_id="ws-B", created_by_user_id="user-B",
+    )
+
+    assert row["token"] != other_company_share["token"]
+    assert row["owner_company_id"] == "co-B"
+    rows = (
+        require_client().table("artifact_shares").select("*")
+        .eq("artifact_type", "prd").eq("artifact_id", 104).execute().data
+    )
+    assert len(rows) == 2  # A's original share plus a fresh one minted for B
+
+
+def test_canonical_helper_never_writes_revoked_at():
+    """Mutation-proofed guard, scoped to the new helper itself: no `.update`
+    node anywhere inside `get_or_mint_canonical_share`'s body ever sets
+    `revoked_at`. Adding such a call turns this RED. `test_revoked_at_never_
+    written` above already scans the whole module (and the route file); this
+    test isolates the assertion to the new function so the mutation-proof
+    holds even if the module grows other functions later."""
+    backend_app = pathlib.Path(__file__).resolve().parent.parent / "app"
+    tree = ast.parse((backend_app / "db" / "artifact_shares.py").read_text())
+    func = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "get_or_mint_canonical_share"
+    )
+    for node in ast.walk(func):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+        ):
+            for arg in node.args:
+                if isinstance(arg, ast.Dict):
+                    keys = [k.value for k in arg.keys if isinstance(k, ast.Constant)]
+                    assert "revoked_at" not in keys, (
+                        "get_or_mint_canonical_share contains an .update() call "
+                        "setting revoked_at"
+                    )
 
 
 # ── Non-disclosure guard (AC17) ──────────────────────────────────────────

@@ -33,6 +33,7 @@ from app.db import (
     get_prd_rendered,
     start_prd,
 )
+from app.db.artifact_shares import get_or_mint_canonical_share
 from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
 from app.db.conversations import bind_conversation_to_prd
@@ -51,6 +52,7 @@ from app.db.prds import (
     latest_prd_for_dataset,
     list_prd_generations,
     list_prd_versions,
+    mark_prd_generating,
     resolve_prd_id_by_public_id,
     restore_prd_version,
     save_prd_version,
@@ -60,7 +62,7 @@ from app.deps.ownership import require_owned_brief, require_owned_dataset, requi
 from app.prd_command import classify_prd_command
 from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
-    generate_prd_and_warm,
+    generate_prd_and_warm, regenerate_prd_into_template,
 )
 from app.prompts import (
     EVIDENCE_TEMPLATE_VERSION,
@@ -153,6 +155,21 @@ async def generate(
     # carried in the saved brief payload; enterprise_id == company_id (same
     # convention convergence/finding_state use).
     _record_prd_action(company.company_id, insight)
+
+    # Best-effort eager mint of the canonical share token — the PRD Share
+    # dropdown reads a pre-existing token rather than minting on open, so
+    # the token should exist by the time the panel first renders. Must NEVER
+    # break PRD creation: the GET-time lazy fallback (see get()/latest()
+    # below) backfills a token on first read if this fails or is skipped.
+    try:
+        get_or_mint_canonical_share(
+            artifact_type="prd", artifact_id=prd_id,
+            owner_company_id=company.company_id,
+            owner_workspace_id=company.workspace_id,
+            created_by_user_id=company.user_id,
+        )
+    except Exception:  # noqa: BLE001 — eager mint is best-effort, never fatal
+        logger.warning("eager canonical share mint failed for prd_id=%s", prd_id)
 
     task = asyncio.create_task(
         generate_prd_and_warm(
@@ -274,12 +291,58 @@ _CHAT_TASK_INSIGHT_INDEX = 0
 _CHAT_TASK_TITLE_MAX = 90
 
 
-def _chat_task_theme_id(task: str) -> str:
+def _chat_task_theme_id(task: str, artifact_template_id: str | None = None) -> str:
     """Deterministic dedup key for a chat task ('chat:<sha1[:16]>' of the
     whitespace-collapsed, lowercased text). Same precedent as ideation's
-    'manual:%' synthetic theme ids — never resolves in the KG."""
+    'manual:%' synthetic theme ids — never resolves in the KG.
+
+    THE FORMAT IS PART OF THE KEY, when one was asked for. Without this, asking
+    for the same PRD in a different format returns the FIRST one unchanged
+    (find-or-create matches on the task text alone) — so "regenerate this in our
+    Acme format" would hand back the document in the old format and report
+    success, which is the exact silent-substitution failure the rest of this
+    feature exists to prevent. Same task in a different format is a different
+    document.
+
+    The no-format key is byte-identical to what this function has always
+    returned, deliberately: every chat PRD ever generated is keyed on it, and
+    changing it would make find-or-create miss on all of them and quietly
+    regenerate duplicates of documents that already exist."""
     norm = " ".join(task.lower().split())
+    if artifact_template_id:
+        norm = f"{norm}|tpl:{artifact_template_id}"
     return "chat:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _requested_template_id(
+    company_id: str, template_id: str | None, artifact_type: str = "prd"
+) -> str | None:
+    """Validate a format the caller asked for, or None when they asked for none.
+
+    Refused HERE, at the route, rather than at generation time — see
+    `artifact_templates.store.require_usable_template` for why that placement is
+    the whole point: once a generation is running, its only options are to
+    substitute a different format silently or to fail the document, and the user
+    is no longer in a position to pick.
+
+    404 for a missing-or-foreign id (indistinguishable, like every other
+    ownership check here); 409 for a format that exists but cannot write this
+    kind of document, or has never compiled cleanly."""
+    if not template_id or not template_id.strip():
+        return None
+    from app.artifact_templates.store import (
+        TemplateNotFound,
+        TemplateStoreError,
+        require_usable_template,
+    )
+
+    try:
+        row = require_usable_template(company_id, template_id.strip(), artifact_type)
+    except TemplateNotFound as exc:
+        raise HTTPException(404, str(exc))
+    except TemplateStoreError as exc:
+        raise HTTPException(409, str(exc))
+    return row["id"]
 
 
 def _chat_task_title(task: str) -> str:
@@ -311,6 +374,11 @@ class TaskGenerateIn(BaseModel):
     # the PRD server-side so navigating away mid-generation can't orphan the
     # chat from its document. Optional — older clients omit it.
     conversation_id: int | None = None
+    # The uploaded format this PRD must be written into, when the user named one
+    # ("generate a PRD using our Acme format" — the Ask planner resolves the name
+    # to an id). Omitted means the company's ACTIVE format, which is what every
+    # request got before this existed and what most still get.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
 
 
 def _render_source_docs(docs: list[TaskSourceDoc]) -> str:
@@ -351,7 +419,12 @@ async def generate_from_task(
     brief_id = brief["id"] if brief else ensure_uploads_brief(slug)
 
     task_text = body.task.strip()
-    theme_id = _chat_task_theme_id(task_text)
+    # Validated BEFORE anything is created: a format the caller cannot use must
+    # be a refusal they can act on, not a PRD quietly written in another one.
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id
+    )
+    theme_id = _chat_task_theme_id(task_text, template_id)
     title = _chat_task_title(task_text)
 
     if not body.force:
@@ -418,6 +491,7 @@ async def generate_from_task(
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
             extra_source_md=extra_source_md,
+            artifact_template_id=template_id,
         )
     )
     _inflight_tasks.add(task)
@@ -531,6 +605,17 @@ async def import_prd(
     # never orphan the chat from the document it produced. Optional: other
     # callers (and older clients) simply omit it.
     conversation_id: int | None = Form(None),
+    # The uploaded format this import must be re-laid-out into, when the user
+    # named one ("import this as a PRD using our Acme format"). A FORM field
+    # rather than JSON because this endpoint is multipart — the file is the
+    # body. Omitted means the company's active format, as before.
+    #
+    # This path needs it as much as generate-from-task does, and is easy to
+    # miss: attaching a document to a chat message dispatches an IMPORT, not a
+    # generate, so "create a PRD using Template 1" with a file attached lands
+    # here. That is exactly how the requested format was first observed being
+    # ignored.
+    artifact_template_id: str | None = Form(None),
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
@@ -547,6 +632,10 @@ async def import_prd(
     """
     # Tenant gate: the dataset (company slug) must belong to the caller (404).
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+
+    # Before the file is even read: a refusal the caller can act on beats a
+    # 25 MB upload that produces a document in the wrong format.
+    template_id = _requested_template_id(company.company_id, artifact_template_id)
 
     data = await file.read()
     if not data:
@@ -598,6 +687,7 @@ async def import_prd(
             import_source_md=extracted,
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
+            artifact_template_id=template_id,
         )
     )
     _inflight_tasks.add(task)
@@ -625,7 +715,17 @@ def latest(
     if not row:
         raise HTTPException(404, "No PRD found for this workspace")
     rendered = get_prd_rendered(row["id"])
-    return rendered or row
+    result = rendered or row
+    # Canonical share token: read-mostly get-or-create. Backfills exactly
+    # once for a legacy PRD with no pre-existing share; every later call
+    # returns the same token (see get_or_mint_canonical_share).
+    result["share_token"] = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=row["id"],
+        owner_company_id=company.company_id,
+        owner_workspace_id=company.workspace_id,
+        created_by_user_id=company.user_id,
+    )["token"]
+    return result
 
 
 @router.get("/{prd_id}")
@@ -638,6 +738,33 @@ def get(
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
+    # Canonical share token: read-mostly get-or-create (see the /latest
+    # handler's identical comment above).
+    row["share_token"] = get_or_mint_canonical_share(
+        artifact_type="prd", artifact_id=row["id"],
+        owner_company_id=company.company_id,
+        owner_workspace_id=company.workspace_id,
+        created_by_user_id=company.user_id,
+    )["token"]
+    # The stamp's NAME, resolved server-side so the PRD panel's "Format: {name}"
+    # label needs no second fetch — the id alone is a uuid nobody recognises.
+    # None both for an unstamped row (the built-in; the client renders its own
+    # label) and for a stamped one whose format was since deleted (the id
+    # survives deletion by design — see 20260806160000's header). Best-effort:
+    # a lookup hiccup costs the label, never the document.
+    name = None
+    template_id = row.get("artifact_template_id")
+    if template_id:
+        try:
+            from app.db.artifact_templates import get_template_by_id
+
+            t = get_template_by_id(company.company_id, template_id)
+            name = t.get("name") if t else None
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "format-name lookup failed for prd_id=%s", prd_id, exc_info=True
+            )
+    row["artifact_template_name"] = name
     return row
 
 
@@ -1001,4 +1128,111 @@ def chat_edit(
         "prd": get_prd_rendered(prd_id),
         "sections_changed": edit["sections_changed"],
         "summary": edit["summary"],
+    }
+
+
+class ChangeTemplateIn(BaseModel):
+    # The target format's id — or null for Sprntly's built-in format, which is
+    # a real choice here (a stamped PRD switching BACK), not the "no
+    # preference" it means on the generate routes.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/{prd_id}/change-template")
+async def change_template(
+    prd_id: int,
+    body: ChangeTemplateIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Re-write an existing PRD into a different format, in place.
+
+    Not a relabel: the document's CONTENT is regenerated into the target
+    format's structure, via the import path's faithful re-layout mode — the
+    current document (the user's edits included) is the only source material,
+    so nothing is invented and nothing re-grounds. The current version is
+    snapshotted to history first, so the switch is always undoable.
+
+    Ordered gates, every one answered before anything is written:
+    ownership (404, indistinguishable from missing, like every check here) →
+    `ready` only (409 — a generating row is already someone's job, a failed one
+    has nothing trustworthy to re-lay-out) → the target format must be usable
+    (`_requested_template_id`: 404 foreign / 409 wrong-type-or-uncompiled; null
+    passes through as the built-in) → already in that format is a no-op the
+    response states rather than an error, because the user's intent is already
+    true.
+
+    Fire-and-forget like /generate: the row goes back to `generating` and the
+    existing poll (GET /v1/prd/{id}) and token stream (`prd:<id>`) carry the
+    regeneration exactly as they carry a first generation. A failed
+    regeneration restores the previous document's `ready` status with its
+    content untouched — the caller detects the failed switch by the row's
+    `artifact_template_id` still holding its old value."""
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    if row.get("status") != "ready":
+        raise HTTPException(
+            409,
+            "This PRD is still being worked on — try again when it's ready.",
+        )
+
+    # Validated BEFORE the snapshot and the status flip: a format the caller
+    # cannot use must be a refusal they can act on, not a PRD stuck generating.
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id
+    )
+
+    current = row.get("artifact_template_id") or None
+    if (template_id or None) == current:
+        # Already true — the no-op case. Stated, not 409'd: "make it X" when it
+        # is X is a satisfied request, and the client reads `unchanged` to skip
+        # the regenerating state entirely.
+        return {
+            "prd_id": prd_id,
+            "status": "ready",
+            "unchanged": True,
+            "artifact_template_id": current,
+        }
+
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "This PRD has no content to re-write yet.")
+
+    # The undo point, taken from the RAW payload_md — same discipline as the
+    # chat-edit and input-answer paths: design-agent 'applied' patches fold on
+    # read (get_prd_rendered), so snapshotting and re-laying-out the raw doc
+    # keeps them folding exactly once.
+    try:
+        save_prd_version(
+            prd_id, row.get("title", ""), prd_html, saved_by=_actor(company)
+        )
+    except Exception:  # noqa: BLE001 — losing the undo point must not lose the switch
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before change-template "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
+
+    mark_prd_generating(prd_id)
+
+    task = asyncio.create_task(
+        regenerate_prd_into_template(
+            prd_id,
+            source_md=prd_html,
+            brief_id=row["brief_id"],
+            insight_index=row.get("insight_index") or 0,
+            title=row.get("title") or "PRD",
+            artifact_template_id=template_id,
+            company_id=company.company_id,
+            user_id=company.user_id,
+            author=company.user_name,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": row.get("title") or "PRD",
+        "artifact_template_id": template_id,
+        "variant": PRD_VARIANT,
     }

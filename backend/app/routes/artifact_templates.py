@@ -79,6 +79,7 @@ from app.artifact_templates.store import (
     store_template,
 )
 from app.artifact_templates.compile_prd import schedule_compile
+from app.artifact_templates.summarize import schedule_missing_summaries
 from app.auth import WorkspaceContext, require_workspace
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 # The same ingest path the PRD importer uses, reused rather than re-derived so
@@ -152,6 +153,11 @@ def _list_item(row: dict) -> dict:
         # fallback if a code arrives that the client's table doesn't know.
         "compile_summary": (first or {}).get("message") if isinstance(first, dict) else None,
         "compile_note_count": len(notes),
+        # What the format CONTAINS — the LLM-written description a successful
+        # compile stores (summarize.py). '' until one exists (fresh upload,
+        # legacy row the self-heal hasn't reached); the card renders its
+        # summary slot either way, per the house every-field rule.
+        "summary": row.get("summary") or "",
     }
 
 
@@ -461,6 +467,11 @@ def list_templates_route(
             422, "Unknown format type. Use prd, tickets, or impl_spec."
         )
     rows = db.list_templates(company.company_id, type)
+    # SELF-HEALING SUMMARIES: a ready row with no summary predates the summary
+    # column (20260812200000); seeing one on the library screen is the other
+    # natural moment to describe it (the planner's catalog read is the first).
+    # Background + single-flighted + never raises, so the list stays a read.
+    schedule_missing_summaries(company.company_id, rows)
     return {
         "templates": [_list_item(r) for r in rows],
         "generation_enabled": dict(GENERATION_ENABLED),

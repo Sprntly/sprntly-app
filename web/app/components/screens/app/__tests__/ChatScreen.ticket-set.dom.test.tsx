@@ -9,9 +9,11 @@
 //     second send while a run is in flight must not start a second one.
 //  2. No markdown wall. The request never reaches the ask agent, and the ticket
 //     bodies never appear in a chat bubble — the whole point of the artifact.
-//  3. Both dispatch paths behave identically. The envelope is behind
-//     `chat_intent_envelope`; a tenant with the kill switch on lands on the
-//     legacy regex ladder and must get the same feature.
+//  3. The PLANNER is the only dispatcher, and its failure mode is deliberate:
+//     a failed /v1/chat/intent call degrades the message to a grounded ANSWER,
+//     never to a client-side guess that bills a multi-minute generation. (The
+//     `chat_intent_envelope` kill switch and the legacy regex ladder it fell
+//     back to are gone.)
 //  4. Reopening a thread SHOWS what it produced — a live run on its progress, a
 //     finished set on its tickets. Never a stale "Writing tickets…", never a
 //     blank Tickets tab over a set that exists.
@@ -47,10 +49,8 @@ const STORY_B = {
 }
 
 const {
-  flags, resolveIntent, chatSummary, byConversation, getSet, runTicketSetGeneration,
+  resolveIntent, chatSummary, byConversation, getSet, runTicketSetGeneration,
 } = vi.hoisted(() => ({
-  // Mutable so one file can exercise the envelope path AND the legacy ladder.
-  flags: { value: undefined as unknown },
   resolveIntent: vi.fn(),
   chatSummary: vi.fn(),
   byConversation: vi.fn(),
@@ -124,7 +124,9 @@ vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
   useWorkspace: () => ({
     loading: false, profile: null,
-    workspace: { feature_flags: flags.value }, refresh: async () => {},
+    // No feature_flags: planner dispatch is unconditional — there is no flag
+    // left for a workspace to carry.
+    workspace: { feature_flags: undefined }, refresh: async () => {},
   }),
 }))
 vi.mock("../../../../context/CompanyContext", () => ({
@@ -230,7 +232,6 @@ beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   vi.clearAllMocks()
-  flags.value = undefined // envelope DEFAULT ON
   resolveIntent.mockResolvedValue({ intent: "generate_tickets", task: "webhook retry failures" })
   chatSummary.mockResolvedValue({ summary: "Six tickets covering retry, backoff and audit." })
   byConversation.mockResolvedValue({ ticket_sets: [] })
@@ -325,21 +326,24 @@ describe("ChatScreen — asking a PRD-less chat for tickets", () => {
       expect(document.body.textContent).toContain("Six tickets covering retry, backoff and audit."))
   })
 
-  it("runs the same flow on the LEGACY ladder when the envelope is switched off", async () => {
-    // A tenant with `chat_intent_envelope: false` never calls /v1/chat/intent.
-    // Without the mirrored branch the flag would decide whether tickets are a
-    // durable artifact or a markdown wall.
-    flags.value = { chat_intent_envelope: false }
+  it("a planner failure degrades to an ANSWER, never to a guessed artifact", async () => {
+    // This slot used to lock the legacy regex ladder behind the
+    // `chat_intent_envelope` kill switch. Both are gone: the planner is the
+    // only dispatcher, and when its call fails the message falls through to
+    // the grounded ask path. That degradation is chosen, not accidental — the
+    // worst case is a genuine tickets request being answered as a question and
+    // asked again; a client-side guess restores the accidental multi-minute
+    // generation the ladder's removal exists to prevent.
+    resolveIntent.mockRejectedValue(new Error("planner down"))
     seedThreadTab()
     await act(async () => { renderChat() })
     await typeAndSend("break this into tickets")
 
-    await waitFor(() => expect(runTicketSetGeneration).toHaveBeenCalledTimes(1))
-    expect(resolveIntent).not.toHaveBeenCalled()
-    // No envelope means no composed task — the user's own words are the insight.
-    expect(runTicketSetGeneration.mock.calls[0][0]).toBe("break this into tickets")
-    await waitFor(() => expect(panelTab()).toBe("tickets"))
-    expect(runAskGeneration).not.toHaveBeenCalled()
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    expect(resolveIntent).toHaveBeenCalledTimes(1)
+    // No artifact ran, no panel yanked open over an answer.
+    expect(runTicketSetGeneration).not.toHaveBeenCalled()
+    expect(panelTab()).not.toBe("tickets")
   })
 })
 

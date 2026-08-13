@@ -671,27 +671,66 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     fireflies_calls: list[CallTranscript] = []
     zoom_calls: list[CallTranscript] = []
 
+    # ── stored-first (owner decision 2026-08-12) ────────────────────────────
+    # Transcripts persist in `call_transcripts` now, so a provider whose window
+    # is already covered there is answered from the store — no third-party
+    # fetch. The live fetch remains the per-provider FALLBACK (empty store =
+    # exactly the old behaviour), and whatever it returns is written through,
+    # so the first ask over a window warms every later one. Staleness bound:
+    # the newest call can lag by up to one sync cycle (~10 minutes) plus
+    # whatever the provider itself takes to transcribe — accepted when the
+    # decision was made, in trade for the ~28s the live leg cost per question.
+    from app.db.call_transcripts import load_call_transcripts, store_call_transcripts
+
+    stored = load_call_transcripts(
+        company_id, window.since.isoformat(), window.until.isoformat()
+    )
+
+    def _revive(payloads: list[dict]) -> list[CallTranscript]:
+        out = []
+        for p in payloads:
+            try:
+                out.append(CallTranscript(**{
+                    k: p.get(k, v) for k, v in (
+                        ("external_id", ""), ("title", ""), ("date", ""),
+                        ("participants", []), ("overview", ""),
+                        ("action_items", ""), ("keywords", []), ("quotes", []),
+                        ("provider", "fireflies"), ("note", ""),
+                    )
+                }))
+            except Exception:  # noqa: BLE001 — one bad row must not cost the corpus
+                logger.warning("call-digest: unreadable stored transcript row skipped")
+        return out
+
     if api_key:
         sources.append(_SOURCE_LABELS["fireflies"])
-        try:
-            fireflies_calls = fetch_calls(
-                api_key, since=window.since, until=window.until
-            )
-        except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
-            logger.warning(
-                "call-digest: fireflies fetch failed for %s: %s", company_id, e
-            )
-            failed.append(_SOURCE_LABELS["fireflies"])
-            errors.append(f"Fireflies: {e}")
+        if stored.get("fireflies"):
+            fireflies_calls = _revive(stored["fireflies"])
+        else:
+            try:
+                fireflies_calls = fetch_calls(
+                    api_key, since=window.since, until=window.until
+                )
+                store_call_transcripts(company_id, fireflies_calls)
+            except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
+                logger.warning(
+                    "call-digest: fireflies fetch failed for %s: %s", company_id, e
+                )
+                failed.append(_SOURCE_LABELS["fireflies"])
+                errors.append(f"Fireflies: {e}")
 
     if zoom_ctx is not None:
         sources.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-        try:
-            zoom_calls = fetch_zoom_calls(zoom_ctx, window)
-        except Exception as e:  # noqa: BLE001 — same contract as Fireflies above
-            logger.warning("call-digest: zoom fetch failed for %s: %s", company_id, e)
-            failed.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-            errors.append(f"Zoom: {e}")
+        if stored.get(_ZOOM_PROVIDER):
+            zoom_calls = _revive(stored[_ZOOM_PROVIDER])
+        else:
+            try:
+                zoom_calls = fetch_zoom_calls(zoom_ctx, window)
+                store_call_transcripts(company_id, zoom_calls)
+            except Exception as e:  # noqa: BLE001 — same contract as Fireflies above
+                logger.warning("call-digest: zoom fetch failed for %s: %s", company_id, e)
+                failed.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
+                errors.append(f"Zoom: {e}")
 
     calls = fireflies_calls + zoom_calls
     if fireflies_calls and zoom_calls:
@@ -1381,8 +1420,20 @@ def _slack_voc_read(enterprise_id: str, window: Window) -> "slack_voc.VocRead":
         return slack_voc.VocRead(unavailable="the Slack read could not be run")
 
 
-def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict:
+def answer(
+    *,
+    enterprise_id: str,
+    question: str,
+    history: list[dict] | None = None,
+    on_delta=None,
+) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
+
+    `on_delta`, when given, is the Ask worker's token sink (see
+    `app.ask_stream.AnswerFieldExtractor`): the report call below publishes its
+    answer text as it generates instead of landing all at once. Optional and
+    advisory — every caller that omits it behaves exactly as before, and the
+    returned payload is the authoritative answer either way.
 
     Parses the window, fetches the calls live, retrieves the knowledge graph's
     stored signal for the same question, MERGES the two, and then either runs
@@ -1536,6 +1587,18 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # rule — so a merge wired only into the report pass would have left the
     # reported bug exactly where it was.
     if query_mode:
+        # DELIBERATELY NOT STREAMED, unlike the report path below.
+        #
+        # This call is followed by `except -> fall through to the report`, so a
+        # mid-generation failure here runs a SECOND full generation. Streaming
+        # both would publish the abandoned attempt's partial text and then
+        # append the report's text to it — one garbled preview out of two
+        # coherent answers. The extractor's `reset()` covers the gateway's own
+        # retry, not an outer fallback that changes prompt AND schema budget.
+        #
+        # The trade is cheap: this path is `max_tokens=3000` and pointed, while
+        # the report below is 12000 and is where the measured 76.8s sits. We
+        # stream the answer that needs it and leave the fast one alone.
         try:
             return _answer_query(
                 enterprise_id=enterprise_id, question=question,
@@ -1580,6 +1643,12 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             # answer exceeds the default per-request timeout — stream on the
             # long read timeout, as the template build did.
             long_output=True,
+            # This call ALREADY streams from the transport (`long_output=True`);
+            # until now nothing forwarded the fragments to the client, so the
+            # slowest answer in the product was also the only one with no live
+            # preview. Measured on staging 2026-08-11: 76.8s of an 83.6s turn
+            # spent here with the UI showing a static spinner throughout.
+            on_delta=on_delta,
         )
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("call-digest: VoC run failed for %s", enterprise_id)
