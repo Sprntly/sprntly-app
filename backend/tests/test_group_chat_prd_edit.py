@@ -232,7 +232,10 @@ def test_group_edit_prd_persists_and_broadcasts(tenant_client, isolated_settings
     turns = _group_turns(project_id)
     assistant_turns = [row for row in turns if row["role"] == "assistant"]
     assert len(assistant_turns) == 1
-    assert assistant_turns[0]["content"] == "Updated X."
+    # B2 no-fabrication: a completed edit narrates as a past-tense "Done"
+    # ONLY because `sections_changed` came back truthy — the fixture below
+    # sets it to ["X"].
+    assert assistant_turns[0]["content"] == "Done — I've updated the PRD. Updated X."
 
     assert broadcasts[-1][0] == f"project:{project_id}"
     assert broadcasts[-1][1] == "turn.created"
@@ -434,7 +437,8 @@ def test_group_edit_own_project_in_place_versioned_broadcast(
     turns = _group_turns(project_id)
     assistant_turns = [row for row in turns if row["role"] == "assistant"]
     assert len(assistant_turns) == 1
-    assert assistant_turns[0]["content"] == "Tightened requirements."
+    # B2 no-fabrication: same completed-edit narration guard as above.
+    assert assistant_turns[0]["content"] == "Done — I've updated the PRD. Tightened requirements."
 
 
 # ── AC8 — target resolved server-side; ambiguous/none → no write ─────────────

@@ -191,6 +191,27 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the group "
+        "smart-trigger port: proves the REAL classifier's continuation/"
+        "ambiguous-work-request judgment (the AD-P10 posture shift) AND "
+        "the B2 no-fabrication narration — that a 'Done' claim only ever "
+        "follows an actual prd_versions write — end to end. A stubbed "
+        "classifier/editor can prove wiring only, not that the model "
+        "actually honors the new prompt rules or that the narration guard "
+        "holds against a real editor response. Deterministic backstop: "
+        "test_group_trigger_and_no_fabrication.py covers the "
+        "agent_spoke_last/trigger_kind derivation, the _GroupEditOutcome "
+        "three cases, the narration branch, the edit_note fallback, the "
+        "addressing-note selection, and the DRY source-scans in the fast "
+        "lane; this suite is the real-DB/real-LLM proof, run locally "
+        "against the dev rig when touching this trigger surface."
+    ),
+    ("test_group_trigger_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_GROUP_TRIGGER_LIVE above — both variables "
+        "gate the identical tests, so this is the other half of that same "
+        "exemption. See that entry for the deterministic backstop."
+    ),
     ("test_project_delegations.py", "RUN_PROJECT_DELEGATIONS_ROUNDTRIP"): (
         "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
         "project_delegations migration's FK cascade/set-null behaviour, its "
@@ -779,3 +800,13 @@ def test_ci_lane_registry_has_project_prd_content_live():
         "test_project_prd_content_live.py",
         "RUN_PROJECT_PRD_CONTENT_LIVE",
     ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_group_trigger_live():
+    """AC backstop: the group smart-trigger live suite is registered in
+    `_KNOWN_UNRUNNABLE` under both env vars that gate it. Removing either
+    entry reddens this test (and `test_no_test_is_gated_on_an_env_var_no_
+    workflow_provides` above) — the live no-fabrication proof must never
+    silently drop out of the accounted set."""
+    assert ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE") in _KNOWN_UNRUNNABLE
+    assert ("test_group_trigger_live.py", "ANTHROPIC_API_KEY") in _KNOWN_UNRUNNABLE

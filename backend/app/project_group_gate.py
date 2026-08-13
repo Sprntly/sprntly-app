@@ -50,18 +50,38 @@ teammate embedded in a team's group chat. You are NOT replying — you are \
 deciding whether Sprntly should interject on the LATEST turn below, which \
 was posted with no explicit @Sprntly mention. Each line of the transcript \
 is "Name (job role): message", oldest first; the latest line is the turn \
-to decide on.
+to decide on. Sprntly's own prior turns appear as "Sprntly: message".
 
 Respond true when the latest turn is a question or request addressed to no \
 specific human, or is clearly directed at Sprntly / the agent even without \
 the @ handle (for example: "can someone automate this?", "what's the \
 status on the integration?", "is anyone tracking this bug?").
 
+AMBIGUOUS WORK REQUEST — respond true when the latest turn is a task or \
+assignment request about the project's work with NO named human addressee, \
+even if it is genuinely ambiguous whether it is meant for Sprntly or for a \
+human teammate (for example: "can you handle the export section?", "who's \
+picking up the API docs?", "someone needs to own the migration"). Sprntly \
+will ASK to confirm who it is for rather than silently assume, so engaging \
+here is safe — a brief clarifying question is the correct move, not \
+uninvited chatter. This does NOT apply when the request names a human \
+("Alexis, can you..."), which stays false.
+
+CONTINUATION — respond true when the immediately preceding line is \
+Sprntly's own message AND the latest turn is a direct reply or follow-up \
+to it: answering a question Sprntly just asked, telling Sprntly to proceed \
+("ok do that", "yes go ahead", "sounds good, go for it"), or continuing \
+the same task Sprntly was just engaged on. In a clear continuation the \
+missing @Sprntly handle does not matter — the human is plainly still \
+talking to Sprntly.
+
 Respond false — stay out — when NOT to respond: ordinary human-to-human \
-back-and-forth, a message @-addressed to another named human, \
-acknowledgements ("thanks", "sounds good", "got it"), or ambiguous chatter \
-with nothing concrete for Sprntly to act on. When genuinely unsure, the \
-conservative default is false: stay out rather than interject uninvited.
+back-and-forth (including humans replying to each OTHER after a Sprntly \
+turn), a message @-addressed to another named human, acknowledgements \
+("thanks", "sounds good", "got it") that expect no further action from \
+Sprntly, or ambiguous chatter with nothing concrete for Sprntly to act on. \
+When genuinely unsure, the conservative default is false: stay out rather \
+than interject uninvited.
 """
 
 _GATE_SCHEMA = {
@@ -152,6 +172,8 @@ def should_respond(
     conversation_id: int,
     recent_turns: list[dict[str, Any]],
     latest_content: str,
+    *,
+    agent_spoke_last: bool = False,
 ) -> bool:
     """Whether the group agent should interject on a non-mention group
     turn. Never raises (AD-P7/AD-P10) — any pre-filter, classifier, or
@@ -165,8 +187,20 @@ def should_respond(
     `conversations_db.list_group_turns` — which itself refuses a
     non-`kind='group'` conversation id, R4/AD-P2 isolation backstop). This
     function does not requery the DB.
+
+    `agent_spoke_last` — server-derived only (the caller computes it from
+    `recent_turns`, never a client-supplied field): the immediately
+    preceding turn (before this human turn) was Sprntly's own. When set,
+    the cheap trivial-chatter pre-filter is BYPASSED so a short direct
+    continuation of the agent's own thread ("ok do that", "yes go ahead")
+    still reaches the classifier instead of being dropped as chatter — the
+    classifier's CONTINUATION rule then decides: a genuine follow-up
+    responds, a thread-closing ack or a human-to-human aside still stays
+    out. When the agent did NOT just speak (the default), the pre-filter
+    is unchanged, so ambient chatter still short-circuits free with no
+    classifier call.
     """
-    if _obviously_human_chatter(latest_content):
+    if not agent_spoke_last and _obviously_human_chatter(latest_content):
         logger.info(
             "group_gate_decision project_id=%s conversation_id=%s "
             "respond=False reason=prefilter",

@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -127,6 +127,15 @@ Rules:
 - You have a delegate_task tool: when someone asks you to hand a specific
   task to a teammate, call it (pick the assignee from the roster below).
   Do not call it for a plain question, an FYI, or human-to-human chatter.
+- You have NO PRD-editing tool in THIS reply. A PRD edit, when it can be
+  made, is applied by a separate step BEFORE you are asked to reply — so
+  if you are being asked to reply here, no edit was applied on this turn.
+  Therefore you must NEVER claim you edited the document: do not say you
+  "added", "updated", "changed", "removed", or "appended" anything to the
+  PRD, and never report a change as "done". If the latest turn is asking
+  for a PRD change, either discuss it or say what you need to make it (for
+  example, which PRD to edit) — but do NOT state the change as already
+  made. Reporting an edit that did not happen misleads the team.
 
 You KNOW this project. The PROJECT CONTEXT block below gives you the
 project's shared memory, its members (the roster), its open tasks (the
@@ -1041,11 +1050,25 @@ def post_group_turn_route(
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
-        _respond_as_group_agent(project_id, conversation["id"], ctx)
+        _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind="mention")
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
-        if should_respond(project_id, conversation["id"], recent, payload.content):
-            _respond_as_group_agent(project_id, conversation["id"], ctx)
+        # The turn just posted is `recent[-1]`; `recent[-2]` (if any) is the
+        # immediately preceding turn. Sprntly authored it (role ==
+        # "assistant") ⇒ this human turn may be a direct continuation of
+        # the agent's own thread, so the gate bypasses its trivial-chatter
+        # pre-filter and a short follow-up ("ok do that") can still trigger
+        # a reply. A True decision in that state is a continuation (clear
+        # addressee, no disambiguation needed); a True decision with no
+        # prior agent turn is an ambiguous gate interjection that may ask
+        # who it's for.
+        agent_spoke_last = len(recent) >= 2 and (recent[-2].get("role") == "assistant")
+        if should_respond(
+            project_id, conversation["id"], recent, payload.content,
+            agent_spoke_last=agent_spoke_last,
+        ):
+            trigger_kind = "continuation" if agent_spoke_last else "gate"
+            _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind=trigger_kind)
     return turn
 
 
@@ -1096,7 +1119,7 @@ def project_chat_intent(
     _require_project_member(project_id, ctx)
     dataset = _dataset_for(ctx)
     history = _load_history(body.conversation_id, ctx.company_id, ctx.user_id)
-    envelope, prd_id = resolve_project_chat_intent(
+    envelope, prd_id, _refusal = resolve_project_chat_intent(
         project_id, body.message, history, dataset, ctx
     )
     envelope["prd_id"] = prd_id
@@ -1110,23 +1133,53 @@ def resolve_project_chat_intent(
     history: list[dict],
     dataset: str,
     ctx: WorkspaceContext,
-) -> tuple[dict, int | None]:
+) -> tuple[dict, int | None, str | None]:
     """The single-sourced resolve+classify pair BOTH project chat surfaces
     run: resolve the edit target server-side over THIS project's own PRDs
     (`_resolve_prd_id` — never a client/model-supplied id) then classify
     with that target threaded in (`resolve_chat_intent(..., prd_id=prd_id)`)
     so an `edit_prd` verdict survives the `_NEEDS_PRD` downgrade whenever a
-    target actually resolves. Returns `(envelope, prd_id)` — callers decide
-    what to do with each (the private route echoes both onto the response;
-    the group classifier gates its own edit-apply on both).
+    target actually resolves. Returns `(envelope, prd_id, refusal)` —
+    callers decide what to do with each (the private route echoes envelope+
+    prd_id onto the response; the group classifier gates its own edit-apply
+    on prd_id and threads refusal into its no-fabrication fallback note).
 
     Extracted from what was, pre-refactor, duplicated inline in both the
     private route above and `_classify_and_maybe_edit_group_prd` below —
     this is the ONE place either surface's target resolution can live, so
-    they cannot silently diverge."""
-    prd_id, _refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    they cannot silently diverge.
+
+    `refusal` is `_resolve_prd_id`'s human-readable reason a target did NOT
+    resolve (no PRD / more than one PRD on the project) — `None` when a
+    target resolved. The group caller uses it to tell an UN-applied edit
+    request apart from a plain answer so its fallback reply can ask which
+    PRD instead of silently generating a confirmation it never made."""
+    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
     envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
-    return envelope, prd_id
+    return envelope, prd_id, refusal
+
+
+class _GroupEditOutcome(NamedTuple):
+    """What one classify-then-maybe-edit pass produced, so the caller can
+    tell three cases apart WITHOUT re-classifying or forking a second reply
+    path (the single classify-and-edit path stays authoritative for every
+    trigger kind — mention, continuation, gate):
+
+    - `applied_turn` not None → a real edit was written in place
+      (`apply_chat_edit_scoped` + `prd_versions` snapshot) and the
+      completed-past-tense assistant turn is already posted/broadcast; the
+      caller returns immediately and never reaches `run_tool_loop`.
+    - `applied_turn` None AND `was_edit_request` True → the latest turn WAS
+      an edit request but nothing was written (flag off, or the target
+      would not resolve — zero/ambiguous PRD, `refusal` says which when
+      set). The caller falls through to `run_tool_loop` and MUST NOT let
+      the reply claim an edit happened; `refusal`, when set, lets it ask
+      which PRD instead.
+    - `applied_turn` None AND `was_edit_request` False → not an edit at all
+      (answer/discussion); ordinary `run_tool_loop` reply."""
+    applied_turn: dict | None
+    was_edit_request: bool
+    refusal: str | None
 
 
 def _classify_and_maybe_edit_group_prd(
@@ -1136,7 +1189,7 @@ def _classify_and_maybe_edit_group_prd(
     message: str,
     history: list[dict],
     dataset: str,
-) -> dict | None:
+) -> _GroupEditOutcome:
     """Classify one group turn via `resolve_chat_intent` (reused verbatim,
     spec §Composition — group) and, when the envelope comes back `edit_prd`
     with `PROJECT_PRD_EDIT_ENABLED` on AND a target actually resolves, apply
@@ -1144,12 +1197,18 @@ def _classify_and_maybe_edit_group_prd(
     calls (`project_chat_edit` route) — the ★ IDOR gate (`assert_prd_on_project`
     then `require_owned_prd`) fires exactly as it does there. On success,
     persists the result as an assistant turn, broadcasts it via
-    `_publish_group_turn_created`, and returns that turn.
+    `_publish_group_turn_created`, and returns a `_GroupEditOutcome` with
+    `applied_turn` set.
 
-    Returns `None` for every outcome that should fall through to the
-    existing `run_tool_loop` instead: a non-`edit_prd` envelope, the flag
-    off, or an unresolved/ambiguous target (`_resolve_prd_id` — NEVER a
-    client/model-supplied id — over THIS project's own artifacts).
+    Returns a `_GroupEditOutcome` with `applied_turn=None` for every
+    outcome that should fall through to the existing `run_tool_loop`
+    instead — a non-`edit_prd` envelope, the flag off, or an
+    unresolved/ambiguous target (`_resolve_prd_id` — NEVER a client/model-
+    supplied id — over THIS project's own artifacts) — but ALWAYS reports
+    `was_edit_request` truthfully (the latest turn's own intent, independent
+    of why nothing got written) so the caller's fallback reply can tell a
+    genuine non-edit turn apart from a requested-but-unwritten edit and
+    never fabricate a completed change for the latter (B2 no-fabrication).
 
     `ProjectPrdWriteDenied` (cross-project) and the cross-tenant
     `HTTPException(404)` (from `require_owned_prd`, inside
@@ -1158,35 +1217,90 @@ def _classify_and_maybe_edit_group_prd(
     caller (`_respond_as_group_agent`) is the one wrapping this in a
     best-effort try/except (AD-P7); this function itself does not swallow."""
     allow_prd_edit = project_prd_edit_enabled()
-    envelope, prd_id = resolve_project_chat_intent(project_id, message, history, dataset, ctx)
-    if envelope["intent"] != "edit_prd" or not allow_prd_edit or prd_id is None:
-        return None
+    envelope, prd_id, refusal = resolve_project_chat_intent(
+        project_id, message, history, dataset, ctx
+    )
+    was_edit_request = envelope["intent"] == "edit_prd"
+    if not was_edit_request or not allow_prd_edit or prd_id is None:
+        # Nothing is written on this pass. Report WHETHER the latest turn
+        # WAS an edit request (regardless of WHY it didn't apply) so the
+        # caller's `run_tool_loop` fallback can ask/answer honestly rather
+        # than fabricate a "done" (B2 no-fabrication).
+        return _GroupEditOutcome(applied_turn=None, was_edit_request=was_edit_request, refusal=refusal)
 
     result = apply_chat_edit_scoped(
         prd_id, envelope["instruction"], ctx, project_id=project_id, dataset=dataset,
     )
-    summary = result.get("summary") or "I've updated the PRD."
+    # The edit was written to `prds.payload_md` in place, versioned, right
+    # here — there is no propose/queue/accept step. Word the assistant turn
+    # as a COMPLETED, past-tense update ONLY when the editor actually
+    # changed something (`sections_changed`); otherwise say plainly that
+    # nothing was changed rather than claiming an update (B2 no-fabrication
+    # — never misreport an edit as done when it wasn't). `summary` is the
+    # editor's own one-line description of WHAT changed; if the model
+    # returned nothing usable we fall back to a plain done-message.
+    summary = (result.get("summary") or "").strip()
+    if result.get("sections_changed"):
+        narration = f"Done — I've updated the PRD. {summary}".strip() if summary \
+            else "Done — I've updated the PRD."
+    else:
+        narration = summary or "I didn't find anything in the PRD to change for that."
     assistant_turn = conversations_db.post_group_turn(
-        conversation_id, None, summary, role="assistant"
+        conversation_id, None, narration, role="assistant"
     )
     _publish_group_turn_created(project_id, conversation_id, assistant_turn)
-    return assistant_turn
+    return _GroupEditOutcome(applied_turn=assistant_turn, was_edit_request=True, refusal=None)
+
+
+# Addressing notes appended to the group agent's reply system prompt, keyed
+# by how the turn triggered a reply. Only the ambiguous `gate` case invites
+# the "are you assigning this to me?" disambiguation; a literal @Sprntly or
+# a clear continuation of the agent's own thread is unambiguously for the
+# agent, so those explicitly SUPPRESS the question.
+_ADDRESSING_NOTES = {
+    "mention": (
+        "ADDRESSING: The latest turn tagged you with @Sprntly — it is "
+        "clearly directed at you. Answer it directly; do NOT ask whether "
+        "it is meant for you."
+    ),
+    "continuation": (
+        "ADDRESSING: The latest turn is a direct continuation of your own "
+        "last message (a reply or follow-up to what you just said) — it is "
+        "clearly directed at you. Answer it directly; do NOT ask whether "
+        "it is meant for you."
+    ),
+    "gate": (
+        "ADDRESSING: The latest turn did not tag you with @Sprntly and is "
+        "not a direct reply to your own last message. If it is genuinely "
+        "ambiguous whether it is directed at you or at a human teammate "
+        "(for example \"can you handle the export section?\" in a thread "
+        "with several members and no clear addressee), do NOT assume it is "
+        "for you and do NOT act or delegate — reply by briefly asking to "
+        "confirm, e.g. \"Are you assigning this to me?\". Only answer or "
+        "act normally if it is clearly meant for you."
+    ),
+}
 
 
 def _respond_as_group_agent(
-    project_id: int, conversation_id: int, ctx: WorkspaceContext
+    project_id: int, conversation_id: int, ctx: WorkspaceContext,
+    trigger_kind: str = "mention",
 ) -> None:
     """Called on an `@Sprntly` mention OR a `should_respond=True`
-    smart-interjection decision (`post_group_turn_route` decides which;
-    this function's own body is unchanged either way): classify the
-    triggering turn via `_classify_and_maybe_edit_group_prd` — an `edit_prd`
-    envelope applies in place and returns, everything else (including
-    `answer` and any generate/open phrasing — group generate/open is
-    DEFERRED, spec ⭐) falls through to assemble recent group-turn context
-    (each speaker tagged with their `author_name`/`author_job_role`) and
-    produce ONE assistant turn (`role='assistant', author_user_id=NULL`) via
-    the EXISTING `run_tool_loop`. Never raises (AD-P7 best-effort contract)
-    — a failure (including a refused edit) yields no assistant turn and the
+    smart-interjection decision (`post_group_turn_route` decides which,
+    and derives `trigger_kind` — "mention" / "continuation" / "gate" — for
+    THIS call; this function's own body runs the SAME single classify-and-
+    edit path first regardless of `trigger_kind`): classify the triggering
+    turn via `_classify_and_maybe_edit_group_prd` — a real edit applies in
+    place and returns; a requested-but-unwritten edit steers the fallback
+    reply with an `edit_note` so it never fabricates a completed change
+    (B2 no-fabrication); everything else (including `answer` and any
+    generate/open phrasing — group generate/open is DEFERRED, spec ⭐)
+    falls through to assemble recent group-turn context (each speaker
+    tagged with their `author_name`/`author_job_role`) and produce ONE
+    assistant turn (`role='assistant', author_user_id=NULL`) via the
+    EXISTING `run_tool_loop`. Never raises (AD-P7 best-effort contract) —
+    a failure (including a refused edit) yields no assistant turn and the
     human turn that triggered this already persisted, so the chat is never
     blocked. Meters ONLY the `run_tool_loop` path (the structured
     cost-summary log line — never emitted for a human-to-human turn or a
@@ -1217,17 +1331,37 @@ def _respond_as_group_agent(
         source_turn_id = trigger["id"] if trigger else None
         dataset = _dataset_for(ctx)
 
+        # Every trigger kind (mention, continuation, gate) runs the ONE
+        # classify-then-edit path first — an applicable edit is applied in
+        # place here and we return; anything else falls through to the SAME
+        # `run_tool_loop` reply below. `edit_note` carries forward whether
+        # this turn was an un-applied edit request so the fallback reply can
+        # ask/answer honestly instead of fabricating a completed edit (B2
+        # no-fabrication).
+        edit_note = ""
         if trigger is not None:
             history = [
                 {"role": t.get("role") or "user", "content": t.get("content") or ""}
                 for t in recent
                 if t is not trigger
             ]
-            edit_turn = _classify_and_maybe_edit_group_prd(
+            edit = _classify_and_maybe_edit_group_prd(
                 project_id, conversation_id, ctx, trigger["content"], history, dataset,
             )
-            if edit_turn is not None:
+            if edit.applied_turn is not None:
                 return
+            if edit.was_edit_request:
+                # An edit was asked for but NOT written (flag off, or the
+                # target didn't resolve). The reply has no edit tool, so it
+                # must not claim a change was made; steer it to ask/explain.
+                reason = (edit.refusal or "the edit could not be applied").rstrip(".")
+                edit_note = (
+                    "EDIT STATUS: The latest turn asked to change the PRD, but "
+                    f"NO edit was made on this turn ({reason}). You cannot edit "
+                    "the PRD in this reply. Do NOT say you added, updated, or "
+                    "changed anything. If more than one PRD could be meant, ask "
+                    "which PRD to edit; otherwise explain briefly what's needed."
+                )
 
         roster = projects_db.list_members(project_id)
         meta: dict = {}
@@ -1261,7 +1395,12 @@ def _respond_as_group_agent(
         context_block = project_group_context.assemble_group_agent_context(
             project_id, dataset, ctx.company_id
         )
-        system = f"{_group_system_with_roster(roster)}\n\n{context_block}"
+        addressing = _ADDRESSING_NOTES.get(trigger_kind, _ADDRESSING_NOTES["mention"])
+        parts = [_group_system_with_roster(roster), addressing]
+        if edit_note:
+            parts.append(edit_note)
+        parts.append(context_block)
+        system = "\n\n".join(parts)
         tools = [project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()]
         reply = run_tool_loop(
             system=system,

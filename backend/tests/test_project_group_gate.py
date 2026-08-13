@@ -312,6 +312,75 @@ def test_gate_emits_single_cost_line(isolated_settings, monkeypatch, caplog):
     assert mention_reply_lines == []
 
 
+# ── `agent_spoke_last` pre-filter bypass (continuation, Part A) ──────────
+
+
+def test_agent_spoke_last_bypasses_prefilter(isolated_settings, monkeypatch):
+    """A short, question-free, agent-cue-free turn (`_obviously_human_
+    chatter` would return True for it) with `agent_spoke_last=True` REACHES
+    the classifier instead of being pre-filtered — the CONTINUATION rule
+    then decides."""
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+    assert project_group_gate._obviously_human_chatter("ok do that") is True
+
+    result = project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="ok do that", agent_spoke_last=True,
+    )
+    assert result is True
+    assert len(gate_calls) == 1, "agent_spoke_last=True must reach the classifier"
+
+
+def test_agent_spoke_last_false_prefilter_unchanged(isolated_settings, monkeypatch, caplog):
+    """The SAME short content with `agent_spoke_last=False` (the default)
+    short-circuits to False with NO classifier call — base behaviour
+    unchanged."""
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.project_group_gate"):
+        result = project_group_gate.should_respond(
+            1, 2, recent_turns=[], latest_content="ok do that",
+        )
+    assert result is False
+    assert gate_calls == []
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert any("reason=prefilter" in line for line in lines)
+
+
+def test_should_respond_never_raises_under_both_modes(isolated_settings, monkeypatch):
+    """A forced classifier exception must still default to False whether
+    or not the pre-filter was bypassed."""
+    def _boom(**kwargs):  # noqa: ARG001
+        raise RuntimeError("simulated classifier failure")
+
+    monkeypatch.setattr(project_group_gate, "call_json", _boom)
+
+    # agent_spoke_last=True: bypasses pre-filter, reaches (and survives) the
+    # exploding classifier.
+    assert project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="ok do that", agent_spoke_last=True,
+    ) is False
+    # agent_spoke_last=False: short content still pre-filtered, never even
+    # reaches the classifier, so the exploding stub is never exercised —
+    # still returns False either way.
+    assert project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="ok do that",
+    ) is False
+    # A longer/questioning turn that reaches the classifier even with the
+    # default agent_spoke_last=False must also default False on failure.
+    assert project_group_gate.should_respond(
+        1, 2, recent_turns=[],
+        latest_content="does anyone know the current status of the migration?",
+    ) is False
+
+
 def test_gate_cost_log_no_body_text(isolated_settings, monkeypatch, caplog):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
@@ -351,6 +420,57 @@ def test_gate_schema_forces_boolean_respond():
     assert project_group_gate._GATE_SCHEMA["required"] == ["respond"]
     assert project_group_gate._GATE_SCHEMA["properties"]["respond"]["type"] == "boolean"
     assert project_group_gate._GATE_SCHEMA["additionalProperties"] is False
+
+
+def test_gate_prompt_has_continuation_rule():
+    """CONTINUATION rule: respond=true on a direct reply/follow-up to
+    Sprntly's own immediately-preceding turn, missing @handle notwithstanding."""
+    system = project_group_gate._GATE_SYSTEM
+    assert "CONTINUATION" in system
+    assert "immediately preceding line is" in system
+    assert "Sprntly's own" in system
+    assert "ok do that" in system
+
+    weak_prompt = "Decide whether Sprntly should reply to the latest message."
+    assert "CONTINUATION" not in weak_prompt
+
+
+def test_gate_prompt_has_ambiguous_work_request_rule():
+    """AMBIGUOUS WORK REQUEST rule: respond=true on an unaddressed task
+    request even when ambiguous — EXCEPT when it names a human, which
+    stays false."""
+    system = project_group_gate._GATE_SYSTEM
+    assert "AMBIGUOUS WORK REQUEST" in system
+    assert "does NOT apply when the request names a human" in system
+    assert "who's picking up the API docs" in system
+
+    weak_prompt = "Decide whether Sprntly should reply to the latest message."
+    assert "AMBIGUOUS WORK REQUEST" not in weak_prompt
+
+
+def test_gate_prompt_labels_sprntly_own_turns():
+    """Sprntly's own prior turns are labeled distinctly in the transcript
+    so the classifier can recognize the immediately-preceding-agent case
+    the CONTINUATION rule depends on."""
+    system = project_group_gate._GATE_SYSTEM
+    assert '"Sprntly: message"' in system
+
+    weak_prompt = "Each line of the transcript is a turn."
+    assert '"Sprntly: message"' not in weak_prompt
+
+
+def test_gate_prompt_retains_conservative_floor_and_named_human_exclusion():
+    """The port must not weaken the base AD-P10 floor: the conservative
+    stay-out default and the human-to-human/named-human exclusions stay
+    present verbatim-equivalent alongside the new rules."""
+    system = project_group_gate._GATE_SYSTEM.lower()
+    assert "conservative default is false" in system
+    assert "human-to-human" in system
+    assert "acknowledgements" in system
+    assert "@-addressed to another named human" in system
+
+    weak_prompt = "respond true sometimes."
+    assert "conservative default is false" not in weak_prompt
 
 
 # ── Isolation (AC7) ──────────────────────────────────────────────────────
@@ -419,12 +539,16 @@ def test_should_respond_signature_has_no_mode_param():
     """`should_respond` takes no client-controllable mode/toggle
     parameter — every input is server-derived (project/conversation id,
     the already-persisted turn list, the already-persisted latest turn's
-    content). The decision is entirely the classifier's, not a caller
-    setting."""
+    content, and `agent_spoke_last` — itself derived server-side from
+    whether the prior turn's role was 'assistant', never a client field).
+    The decision is entirely the classifier's, not a caller setting."""
     import inspect
 
     params = list(inspect.signature(project_group_gate.should_respond).parameters)
-    assert params == ["project_id", "conversation_id", "recent_turns", "latest_content"]
+    assert params == [
+        "project_id", "conversation_id", "recent_turns", "latest_content",
+        "agent_spoke_last",
+    ]
 
 
 def test_no_interjection_toggle_request_field():
