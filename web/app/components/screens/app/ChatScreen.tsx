@@ -37,6 +37,7 @@ import { ChatSuggestionIcon, IconDocument, IconMic, IconSendUp, IconSparkle, Ico
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
 import {  customArtifactsApi,
+  type ChatIntentEnvelope,
  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -2774,8 +2775,49 @@ export function ChatScreen() {
     const changed = prevConvForFocusRef.current !== activeConvId
     prevConvForFocusRef.current = activeConvId
     setContent(changed
-      ? { conversationId: activeConvId, reportFocusId: null, reportFocusStandalone: false }
+      ? {
+          conversationId: activeConvId,
+          reportFocusId: null,
+          reportFocusStandalone: false,
+          // Cleared with the rest, and for exactly the same reason: a document
+          // belongs to the thread that wrote it. Leaving it set meant switching
+          // to another chat (or starting a new one) still showed a Document tab
+          // rendering the PREVIOUS thread's document.
+          documentId: null,
+          documentGenerating: false,
+        }
       : { conversationId: activeConvId })
+  }, [activeConvId, setContent])
+
+  // Mirrors `content.documentId` for the async reads below, which cannot see
+  // React state at resolution time and must not clobber a newer document.
+  const documentIdRef = useRef<number | null>(null)
+  useEffect(() => { documentIdRef.current = content.documentId ?? null }, [content.documentId])
+
+  // Re-attach this thread's own document after a switch or a reload.
+  //
+  // `documentId` is in-memory only, so without this a document the thread DOES
+  // own disappears from the panel the moment you reload — the row is still
+  // there, the tab just forgets it. Newest first, matching how the thread's
+  // reports re-attach.
+  useEffect(() => {
+    if (activeConvId == null) return
+    let cancelled = false
+    void customArtifactsApi
+      .listForConversation(activeConvId)
+      .then((rows) => {
+        // Guarded on the id AND on nothing having been set meanwhile: a
+        // generation started while this was in flight must win over a stale
+        // list read for the same thread.
+        // A generation that started while this was in flight MUST win: it is
+        // the document the user just asked for, and this list is a stale read
+        // of the same thread. `setContent` takes a patch rather than an
+        // updater, so the current value is tracked in a ref.
+        if (cancelled || rows.length === 0 || documentIdRef.current != null) return
+        setContent({ documentId: rows[0].id })
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
   }, [activeConvId, setContent])
 
   // This thread's captured reports, newest first — fetched once by
@@ -3788,6 +3830,25 @@ export function ChatScreen() {
    *  Optimistic-first, the same rule the PRD command flows follow: the ack turn
    *  renders on THIS commit and every network call happens after it, so the
    *  composer never clears into a void. */
+  /** A compact transcript of a tab's thread, for grounding a generated
+   *  document. Newest turns last and the whole thing bounded, because this is
+   *  prompt input: an unbounded thread would push the actual request out of
+   *  the model's attention, and the oldest turns are the least likely to be
+   *  what "this" refers to. */
+  const threadContextFor = useCallback((tabId: string): string => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab) return ""
+    const parts: string[] = []
+    for (const turn of tab.thread) {
+      if (turn.query) parts.push(`Q: ${turn.query}`)
+      const answer = turn.reply?.answer
+      if (answer) parts.push(`A: ${answer}`)
+    }
+    const joined = parts.join("\n\n")
+    const MAX = 12_000
+    return joined.length <= MAX ? joined : `…\n\n${joined.slice(-MAX)}`
+  }, [])
+
   const ticketSetCommandFlow = useCallback((
     seedQuery: string,
     task: string,
@@ -3832,6 +3893,74 @@ export function ChatScreen() {
   }, [
     reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
     startTicketSetRun,
+  ])
+
+  /** Write a team document from this chat and open it in the right panel.
+   *
+   *  Mirrors `ticketSetCommandFlow`: seed a turn with an acknowledgement, put
+   *  it on the rail and in Supabase, THEN start the work — so the exchange
+   *  survives a reload and reads like every other command. */
+  const documentCommandFlow = useCallback((
+    seedQuery: string,
+    envelope: ChatIntentEnvelope,
+  ) => {
+    const inTab = reusableActiveTab()
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const kind = envelope.artifact_kind?.trim() || "document"
+    const ack: AskResponse = {
+      answer: `Writing your ${kind} — it will open in the panel on the right.`,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+    let tabId: string
+    let convId: number | null = null
+    if (inTab) {
+      tabId = inTab.id
+      convId = inTab.dbConvId ?? null
+      setTabs((prev) => prev.map((t) => t.id === inTab.id
+        ? {
+            ...t,
+            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+            thread: [...t.thread, seedTurn],
+          }
+        : t))
+      setDraft("")
+    } else {
+      // Sent from the landing or a PRD/insight tab whose binding must not be
+      // disturbed → the command opens its own chat tab, rather than writing a
+      // document that belongs to no thread at all.
+      tabId = openTab(handle, [seedTurn])
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
+    void finalizeConversationTurn(turnId, { reply: ack }, tabId)
+
+    void (async () => {
+      try {
+        const created = await customArtifactsApi.generate({
+          kind,
+          task: envelope.task?.trim() || seedQuery,
+          // THE GROUNDING. Without this the generator takes its
+          // "CONTEXT: none was supplied" branch and writes a structural
+          // skeleton that lists what it does not know — for a request whose
+          // whole subject was discussed in the thread above it. The planner's
+          // `task` is a brief, not the evidence behind it.
+          context: threadContextFor(tabId),
+          conversation_id: convId,
+        })
+        setContent({ documentId: created.id, documentGenerating: true })
+        openContentPanel("document")
+      } catch {
+        showToast(
+          "Couldn't start that document",
+          "Please try again, or create one from Artifacts.",
+        )
+      }
+    })()
+  }, [
+    reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
+    setContent, openContentPanel, showToast, threadContextFor,
   ])
 
   /** The reply-footer button: reopen a finished set, or re-run a failed one. */
@@ -4346,30 +4475,15 @@ export function ChatScreen() {
         if (envelope) {
           if (envelope.intent === "create_artifact") {
             // "Draft a leadership update on the Q3 reliability work" —
-            // generate a team document and open it in THIS chat's right-hand
-            // panel, beside the conversation it came from.
+            // write a team document and open it in THIS chat's right panel.
             //
-            // The row is created server-side before the multi-minute write
-            // starts, so there is an id to open and poll against immediately;
-            // the panel renders "Writing this document…" until it lands. That
-            // ordering is also what makes a double-send harmless — the client
-            // never posts content back, so there is nothing to write twice.
-            void (async () => {
-              try {
-                const created = await customArtifactsApi.generate({
-                  kind: envelope.artifact_kind || "document",
-                  task: envelope.task?.trim() || trimmed,
-                  conversation_id: activeTab?.dbConvId ?? null,
-                })
-                setContent({ documentId: created.id, documentGenerating: true })
-                openContentPanel("document")
-              } catch {
-                showToast(
-                  "Couldn't start that document",
-                  "Please try again, or create one from Artifacts.",
-                )
-              }
-            })()
+            // SEEDS A REAL TURN, like every other command flow here. The first
+            // cut just fired the request and returned: the composer cleared,
+            // the optimistic bubble vanished, and the thread showed nothing —
+            // no question, no acknowledgement, nothing persisted. From the
+            // user's side that is indistinguishable from the message being
+            // swallowed, which is the very complaint this PR exists to fix.
+            documentCommandFlow(trimmed, envelope)
             settlePendingSend()
             return
           }

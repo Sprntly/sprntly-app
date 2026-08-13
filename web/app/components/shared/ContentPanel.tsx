@@ -633,6 +633,11 @@ export function ContentPanel() {
             <span className="cpanel-main-name">
               {activeTab === "reports"
                 ? "Reports"
+                // Same rule, one tab over: a leadership update is not a PRD,
+                // and letting the line fall through to the literal "PRD" put
+                // the wrong document's name over the right one's body.
+                : activeTab === "document"
+                  ? "Document"
                 // A standalone set has no PRD to name, and naming one anyway
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
@@ -646,7 +651,11 @@ export function ContentPanel() {
                 meaning on Reports — a report carries its OWN share/PDF actions,
                 on the open document (ReportsTab). Force-disabled in guest mode —
                 a guest has no edit/export entitlement (AC15). */}
-            {activeTab !== "reports" && (
+            {/* Document is excluded for the same reason as Reports: this menu
+                exports the Evidence + PRD pair, which has nothing to do with a
+                team document — and on a thread with no PRD it would export
+                nothing at all. */}
+            {activeTab !== "reports" && activeTab !== "document" && (
               <ShareMenu
                 prd={actionablePrd}
                 evidence={content.evidence}
@@ -669,7 +678,12 @@ export function ContentPanel() {
           )}
           {activeTab === "document" && content.documentId != null && (
             <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading document…</div>}>
-              <DocumentTab documentId={content.documentId} />
+              {/* Keyed on the id: a second "draft a …" in the same thread
+                  swaps this prop, and every ref in that component (the base
+                  version, the user's unsaved text, the dirty flag) belongs to
+                  the document it was mounted for. Remounting is the only way
+                  none of it leaks into the next one. */}
+              <DocumentTab key={content.documentId} documentId={content.documentId} />
             </Suspense>
           )}
         </div>

@@ -43,11 +43,30 @@ export function DocumentTab({ documentId }: { documentId: number }) {
 
   const load = useCallback(async () => {
     try {
+      // Nothing here resets `loading`, deliberately — a poll must not blank the
+      // document it is refreshing. A CHANGED id is handled by the effect below,
+      // which tears the whole tab down.
       const fresh = await customArtifactsApi.get(documentId)
       setDoc(fresh)
       versionRef.current = fresh.version
-      currentHtmlRef.current = fresh.body_html
+      // The user's in-progress text is NOT clobbered by a reload. Overwriting
+      // it here made "Keep mine" send the SERVER's body back — saving theirs
+      // and destroying the edits the button exists to preserve, every time.
+      // Only seeded when the user has not typed.
+      if (!bodyDirtyRef.current) currentHtmlRef.current = fresh.body_html
       setFailed(false)
+
+      // Re-base the scheduler onto the version we just read, but ONLY when
+      // nothing is queued — otherwise a poll would silently drop pending text.
+      //
+      // This is what makes the generating -> ready transition safe: the tab
+      // opens while the row is still being written (version 1), and
+      // `finish_artifact` bumps it to 2 on completion. Without this, the first
+      // keystroke after the document lands saves against version 1, matches no
+      // row, and raises "Someone else saved this document while you were
+      // editing" on a document nobody else has touched.
+      const sched = schedulerRef.current
+      if (sched && sched.pendingKeys().length === 0) sched.reset(fresh.version)
     } catch {
       setFailed(true)
     } finally {
@@ -69,8 +88,14 @@ export function DocumentTab({ documentId }: { documentId: number }) {
   // version. Creating it on mount captures a placeholder and makes the user's
   // own first keystroke look like someone else's edit — the defect fixed on
   // the page surface, not repeated here.
+  // Rebuilt per DOCUMENT. `documentId` is in the deps because a second
+  // "draft a …" in the same thread swaps the prop on a mounted tab: without
+  // this, the scheduler's save closure targets the NEW id while holding the
+  // OLD document's version, and a keystroke writes A's body into B. Both
+  // freshly generated documents sit at version 2, so the compare-and-set can
+  // match and the overwrite lands.
   useEffect(() => {
-    if (doc == null || schedulerRef.current) return
+    if (doc == null || doc.id !== documentId || schedulerRef.current) return
     const scheduler = createSaveScheduler({
       baseVersion: doc.version,
       onState: setSaveState,
@@ -101,16 +126,25 @@ export function DocumentTab({ documentId }: { documentId: number }) {
   }, [])
 
   const resolveConflict = useCallback(async (keep: "theirs" | "mine") => {
-    await load()
-    schedulerRef.current?.reset(versionRef.current)
+    // CAPTURED BEFORE THE RELOAD. `load()` may seed `currentHtmlRef` from the
+    // server, so reading it afterwards is reading THEIR document — which is
+    // how "Keep mine" came to save their version over the user's.
+    const mine = currentHtmlRef.current
+    const hadEdits = bodyDirtyRef.current
+
     if (keep === "theirs") {
       bodyDirtyRef.current = false
+      await load()
+      schedulerRef.current?.reset(versionRef.current)
       return
     }
+    await load()
+    schedulerRef.current?.reset(versionRef.current)
     // Only re-send the body when it was actually edited: sending a ref that was
     // never written is how "keep mine" ends up storing an empty document.
-    if (bodyDirtyRef.current) {
-      schedulerRef.current?.schedule({ body_html: currentHtmlRef.current })
+    if (hadEdits) {
+      currentHtmlRef.current = mine
+      schedulerRef.current?.schedule({ body_html: mine })
       await schedulerRef.current?.flush()
     }
   }, [load])

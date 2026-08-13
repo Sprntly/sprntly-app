@@ -45,6 +45,11 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # are None on the ones they do not belong to.
         "artifact_type": None,
         "artifact_query": None,
+        # `create_artifact`'s KIND rides along on the same terms: present on
+        # every verdict, None on the ones it does not belong to. This exact
+        # assertion is what caught the key being added — which is the job it
+        # exists to do, so it is updated rather than loosened.
+        "artifact_kind": None,
         # Likewise the requested FORMAT: present on every verdict, None when the
         # message named none — which is the normal case and means the executor
         # resolves the company's active format exactly as it always has.

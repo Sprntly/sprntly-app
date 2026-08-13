@@ -5095,6 +5095,15 @@ export const customArtifactsApi = {
       .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
       .then((r) => r.artifacts),
   get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** The documents born in one chat, newest first — what re-attaches a thread's
+   *  document to its panel after a reload. Bodies omitted; opening one fetches
+   *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
+  listForConversation: (conversationId: number) =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>(
+        `/v1/custom-artifacts/by-conversation/${conversationId}`,
+      )
+      .then((r) => r.artifacts),
   create: (body: {
     kind?: string
     title?: string
