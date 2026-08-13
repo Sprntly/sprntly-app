@@ -68,7 +68,6 @@ import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
   projectsApi,
-  chatIntentApi,
   storiesApi,
   type AskResponse,
   type ChatIntentEnvelope,
@@ -500,8 +499,19 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       }
     }
 
-    chatIntentApi
-      .resolve(question, {})
+    // Classify SERVER-side, project-scoped (`projectsApi.resolveIntent`) —
+    // NOT `chatIntentApi.resolve(question, {})`, which sends no target and
+    // makes `resolve_chat_intent`'s `_NEEDS_PRD` downgrade rewrite every
+    // `edit_prd` verdict to `answer` (the private-chat classify bug). The
+    // project route resolves the edit target server-side over this
+    // project's own PRDs, mirroring how the group surface already
+    // classifies. Sequenced through `ensureConversationId()` (same
+    // get-or-create `runAsk` uses) so a deictic message resolves against
+    // this caller's own thread.
+    ensureConversationId()
+      .then((conversationId) =>
+        projectsApi.resolveIntent(projectId, question, { conversationId }),
+      )
       .then((envelope: ChatIntentEnvelope) => {
         dispatchChatIntent(
           envelope,

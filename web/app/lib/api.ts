@@ -5421,6 +5421,26 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
       { instruction },
     ),
+  /** Classify one private-chat message via the project-scoped counterpart
+   *  of `chatIntentApi.resolve` (`POST /v1/projects/{id}/chat/intent`).
+   *  The backend resolves the edit target SERVER-side over THIS project's
+   *  own PRDs — never a client-supplied id — so an `edit_prd` verdict
+   *  survives the `_NEEDS_PRD` downgrade for a project-attached PRD.
+   *  Same contract as `chatIntentApi.resolve`: fail-open BY THE CALLER,
+   *  any network/HTTP failure should fall back to the ask path, never
+   *  block the send. */
+  resolveIntent: (
+    id: number | string,
+    message: string,
+    opts?: { conversationId?: number | null },
+  ) =>
+    api.post<ChatIntentEnvelope>(
+      `/v1/projects/${encodeURIComponent(String(id))}/chat/intent`,
+      {
+        message,
+        ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
+      },
+    ),
   /** Save a chat output as a first-class project artifact
    *  (`POST /v1/projects/{id}/artifacts/from-chat`, item-14 substrate).
    *  `content` is required (whitespace-only throws `ApiError` `.status` 400);

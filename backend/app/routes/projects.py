@@ -56,6 +56,7 @@ from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
+from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
 
 logger = logging.getLogger(__name__)
@@ -985,6 +986,86 @@ def post_group_turn_route(
     return turn
 
 
+class ProjectChatIntentIn(BaseModel):
+    message: str = Field(..., min_length=1, max_length=120_000)
+    # When set, prior turns are loaded (ownership-scoped, this caller's OWN
+    # individual conversation) so deictic messages ("make it shorter")
+    # resolve against the thread — same reason `/v1/chat/intent` takes one.
+    conversation_id: int | None = None
+
+
+@router.post("/{project_id}/chat/intent")
+def project_chat_intent(
+    project_id: int,
+    body: ProjectChatIntentIn,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """The PRIVATE project chat's classify decision — the project-scoped
+    counterpart to `POST /v1/chat/intent` (`routes/chat.py`), giving the
+    private surface the same server-side target resolution the GROUP
+    surface already has via `_classify_and_maybe_edit_group_prd` below —
+    both now share ONE resolve+classify sequence, `resolve_project_chat_
+    intent` (single-sourced so the two surfaces can never drift on how a
+    project's edit target is found).
+
+    Without this route the private client classified with an EMPTY target
+    (`prd_id=None`), so `resolve_chat_intent`'s `_NEEDS_PRD` downgrade
+    rewrote every `edit_prd` verdict to `answer` and a project-attached
+    PRD edit never reached `POST /{project_id}/prd/chat-edit`. Resolving
+    the target here, server-side, fixes that without touching the shared
+    `/v1/chat/intent` route or `resolve_chat_intent` itself.
+
+    Membership-gated (`_require_project_member`). The target is resolved
+    via `_resolve_prd_id` over THIS project's own PRDs — never a client-
+    supplied id, so there is nothing here for a caller to spoof, and the
+    classify target always agrees with the write route's own resolution.
+    History is loaded ownership-scoped for the caller's own conversation
+    via the SAME reader `/v1/chat/intent` uses (`_load_history`); a
+    missing/absent `conversation_id` degrades to no-history classification,
+    never an error.
+
+    Returns the envelope in the SAME shape `/v1/chat/intent` returns, so
+    the client's `dispatchChatIntent` needs no project-specific branch.
+    No `open_artifact` lookup leg here — the private thread has no
+    artifact viewer to open into; the client already falls that intent
+    through to `onAnswer`.
+    """
+    _require_project_member(project_id, ctx)
+    dataset = _dataset_for(ctx)
+    history = _load_history(body.conversation_id, ctx.company_id, ctx.user_id)
+    envelope, prd_id = resolve_project_chat_intent(
+        project_id, body.message, history, dataset, ctx
+    )
+    envelope["prd_id"] = prd_id
+    envelope["prd_title"] = None
+    return envelope
+
+
+def resolve_project_chat_intent(
+    project_id: int,
+    message: str,
+    history: list[dict],
+    dataset: str,
+    ctx: WorkspaceContext,
+) -> tuple[dict, int | None]:
+    """The single-sourced resolve+classify pair BOTH project chat surfaces
+    run: resolve the edit target server-side over THIS project's own PRDs
+    (`_resolve_prd_id` — never a client/model-supplied id) then classify
+    with that target threaded in (`resolve_chat_intent(..., prd_id=prd_id)`)
+    so an `edit_prd` verdict survives the `_NEEDS_PRD` downgrade whenever a
+    target actually resolves. Returns `(envelope, prd_id)` — callers decide
+    what to do with each (the private route echoes both onto the response;
+    the group classifier gates its own edit-apply on both).
+
+    Extracted from what was, pre-refactor, duplicated inline in both the
+    private route above and `_classify_and_maybe_edit_group_prd` below —
+    this is the ONE place either surface's target resolution can live, so
+    they cannot silently diverge."""
+    prd_id, _refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
+    return envelope, prd_id
+
+
 def _classify_and_maybe_edit_group_prd(
     project_id: int,
     conversation_id: int,
@@ -1014,8 +1095,7 @@ def _classify_and_maybe_edit_group_prd(
     caller (`_respond_as_group_agent`) is the one wrapping this in a
     best-effort try/except (AD-P7); this function itself does not swallow."""
     allow_prd_edit = project_prd_edit_enabled()
-    prd_id, _refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
-    envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
+    envelope, prd_id = resolve_project_chat_intent(project_id, message, history, dataset, ctx)
     if envelope["intent"] != "edit_prd" or not allow_prd_edit or prd_id is None:
         return None
 

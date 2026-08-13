@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 //
 // ProjectIndividualChat — private classify→dispatch (AD-P13a / AC14). With
-// the classifier flag ON, a send classifies via `chatIntentApi.resolve` and
-// routes through the SHARED `dispatchChatIntent` primitive: `edit_prd` hits
-// the new project route, `generate_prd`/`generate_tickets` hit the generate
-// routes THEN auto-attach, `answer` (and any classify failure) falls open to
-// the prior `/v1/ask`-only send — see `ProjectIndividualChat.test.tsx` for
-// the flag-OFF / byte-identical-send suite.
+// the classifier flag ON, a send classifies via the project-scoped
+// `projectsApi.resolveIntent` (server-resolves the edit target over this
+// project's own PRDs — NOT `chatIntentApi.resolve(question, {})`, which
+// sends no target and lets the `_NEEDS_PRD` downgrade rewrite `edit_prd` to
+// `answer`) and routes through the SHARED `dispatchChatIntent` primitive:
+// `edit_prd` hits the project chat-edit route, `generate_prd`/
+// `generate_tickets` hit the generate routes THEN auto-attach, `answer`
+// (and any classify failure) falls open to the prior `/v1/ask`-only send —
+// see `ProjectIndividualChat.test.tsx` for the flag-OFF / byte-identical-
+// send suite.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -69,8 +73,12 @@ vi.mock("../../../../../lib/api", async () => {
       ledger: (...a: unknown[]) => ledgerMock(...a),
       prdChatEdit: (...a: unknown[]) => prdChatEditMock(...a),
       addArtifact: (...a: unknown[]) => addArtifactMock(...a),
+      // Same `resolveIntentMock` the pre-fix suite mounted on
+      // `chatIntentApi.resolve` — re-mounted here because the component
+      // now classifies via the project-scoped resolver instead. Mock-
+      // target rename only; the 5 cases below are unmodified.
+      resolveIntent: (...a: unknown[]) => resolveIntentMock(...a),
     },
-    chatIntentApi: { resolve: (...a: unknown[]) => resolveIntentMock(...a) },
     storiesApi: {
       ...actual.storiesApi,
       generateFromInsight: (...a: unknown[]) => generateFromInsightMock(...a),
@@ -219,5 +227,25 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(1))
     expect(prdChatEditMock).not.toHaveBeenCalled()
     expect(addArtifactMock).not.toHaveBeenCalled()
+  })
+
+  it("send classifies via the project-scoped resolver, not chatIntentApi.resolve(_, {})", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "question", source: "llm", prd_id: null, prd_title: null,
+    })
+    runAskGenerationMock.mockResolvedValue({
+      answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
+    })
+
+    await sendMessage("what's the status?")
+
+    await waitFor(() => expect(resolveIntentMock).toHaveBeenCalledTimes(1))
+    // Project-scoped call shape: (projectId, message, { conversationId }) —
+    // never the old empty-opts call (`chatIntentApi.resolve(question, {})`)
+    // that carried no target and triggered the `_NEEDS_PRD` downgrade.
+    expect(resolveIntentMock).toHaveBeenCalledWith(
+      202, "what's the status?", { conversationId: 9001 },
+    )
   })
 })
