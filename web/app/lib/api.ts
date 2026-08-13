@@ -1030,6 +1030,11 @@ export type PrdStartResponse = {
   /** Storage variant — `v2` for new rows; historical `v1` rows in prod
    *  remain readable. Implementation detail; UI shouldn't switch on it. */
   variant?: string
+  /** The project this PRD's originating chat was auto-forked into (new or
+   *  pre-existing), so the client can land the user in that project's
+   *  private chat after generation. `null`/absent when nothing forked (an
+   *  unbound generate, or an older backend) — additive-optional. */
+  project_id?: number | null
 }
 
 export type PrdRecord = {

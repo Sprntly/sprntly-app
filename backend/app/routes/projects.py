@@ -49,6 +49,7 @@ from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
+from app import project_join_greeting
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
@@ -347,6 +348,11 @@ def add_member(
     if tier in (projects_db.TIER_WORKSPACE, projects_db.TIER_COMPANY):
         member = projects_db.add_member(project_id, res["user_id"])
         logger.info("project_member_added project_id=%s user_id=%s", project_id, res["user_id"])
+        # NEW-membership only (the TIER_MEMBER re-add branch returned above):
+        # drop a grounding greeting into this member's private project chat so
+        # they land with context, not a blank thread. Best-effort/non-blocking
+        # (AD-P7) — a greeting failure never breaks or delays the add.
+        project_join_greeting.post_join_greeting(project_id, res["user_id"])
         return member
     # t_newuser / t_refuse (foreign company, or no in-tenant account) — no add,
     # no disclosure of which reason applied.

@@ -431,6 +431,13 @@
   background: var(--accent-muted);
 }
 
+/* The first-class @Sprntly agent row — a distinct tint from a human
+ * "Member" row, tokens only. */
+.pickerKind[data-kind="agent"] {
+  color: var(--info);
+  background: var(--info-soft);
+}
+
 .pickerInvite {
   font-weight: 600;
   color: var(--accent-ink);

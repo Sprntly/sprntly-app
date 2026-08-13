@@ -228,7 +228,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onOpenArtifactInPlace: noop,
     openArtifact: null,
     onCloseArtifactDrawer: noop,
-    onCreateArtifact: noop,
+    onAddExistingArtifact: noop,
     onOpenMemory: noop,
     onAddMemory: noop,
     onOpenTasks: noop,
@@ -356,13 +356,22 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(onRemoveMember.mock.calls[0][0]).toMatchObject({ user_id: "u2", name: "Shristi" })
   })
 
-  it("renders one compact card per artifact type present, sourced from the artifacts list, plus a Create-new card", () => {
+  it("renders one compact card per artifact type present, sourced from the artifacts list, plus an Add-existing card", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
     expect(screen.getByTestId("artifact-card-prd-sub").textContent).toContain("1 item")
     expect(screen.getByTestId("artifact-card-evidence-sub").textContent).toContain("2 items")
     expect(screen.queryByTestId("artifact-card-prototype")).toBeNull()
     expect(screen.queryByTestId("artifact-card-report")).toBeNull()
-    expect(screen.getByTestId("artifact-create")).toBeTruthy()
+    const addExisting = screen.getByTestId("artifact-add-existing")
+    expect(addExisting).toBeTruthy()
+    expect(addExisting.textContent).toContain("Add existing artifact")
+  })
+
+  it("clicking Add existing artifact invokes onAddExistingArtifact (opens the company-library picker)", () => {
+    const onAddExistingArtifact = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onAddExistingArtifact })))
+    fireEvent.click(screen.getByTestId("artifact-add-existing"))
+    expect(onAddExistingArtifact).toHaveBeenCalledTimes(1)
   })
 
   it("clicking a MULTI-item artifact card's ↗ opens the browse modal for that type", () => {
@@ -407,39 +416,41 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(onAddMemory).toHaveBeenCalledTimes(1)
   })
 
-  it("test_rail_card_shows_live_counts — the Task ledger card shows live counts, no Fast-follow badge / 'not wired yet' copy", () => {
+  it("the task-ledger rail card is un-mounted from the rail (non-destructive — see the source-scan test below)", () => {
     render(
       React.createElement(
         ProjectDetailView,
         viewProps({ ledgerCounts: { assigned_to_me_open: 3, waiting_on_open: 2 } }),
       ),
     )
-    const card = screen.getByTestId("task-ledger-card")
-    expect(within(card).queryByTestId("task-ledger-fastfollow")).toBeNull()
-    expect(card.textContent).not.toContain("Fast-follow")
-    expect(card.textContent).not.toContain("not wired yet")
-    const counts = within(card).getByTestId("task-ledger-counts")
-    expect(counts.textContent).toContain("3 assigned to you")
-    expect(counts.textContent).toContain("2 you're waiting on")
+    expect(screen.queryByTestId("task-ledger-card")).toBeNull()
+    expect(screen.queryByTestId("task-ledger-view-all")).toBeNull()
+  })
+})
+
+describe("ProjectDetailScreen — task-ledger substrate intact after the rail un-mount (AC-12)", () => {
+  it("projectsApi.ledger*/TaskModal/ledgerCounts/ledgerRows/onOpenTasks remain imported/defined/importable", () => {
+    const src = readFileSync(
+      join(__dirname, "../ProjectDetailScreen.tsx"),
+      "utf8",
+    )
+    expect(src).toContain('from "./TaskModal"')
+    expect(src).toMatch(/<TaskModal\b/)
+    expect(src).toMatch(/railModal\?\.kind === "tasks"/)
+    expect(src).toContain("ledgerCounts")
+    expect(src).toContain("ledgerRows")
+    expect(src).toContain("onOpenTasks")
+    expect(src).toContain("ledgerVersion")
   })
 
-  it("test_view_all_opens_real_modal_with_projectId — View all tasks opens the real TaskModal, threading projectId into its ledger reads", async () => {
-    getMock.mockResolvedValue(PROJECT)
-    artifactsMock.mockResolvedValue(ARTIFACTS)
-    memorySummaryMock.mockResolvedValue(MEMORY)
-    memoryInsightMock.mockResolvedValue(null)
-    await act(async () => {
-      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
-    })
-    await waitFor(() => expect(screen.getByTestId("task-ledger-view-all")).toBeTruthy())
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("task-ledger-view-all"))
-    })
-    await waitFor(() => expect(screen.getByTestId("task-modal-title")).toBeTruthy())
-    // The modal's reads carry the container's projectId ("101") — proving the
-    // prop was threaded through, not a hard-coded stub.
-    await waitFor(() => expect(ledgerMock).toHaveBeenCalledWith("101", "assigned_to_me"))
-    expect(ledgerMock).toHaveBeenCalledWith("101", "waiting_on")
+  it("the ledger read calls (projectsApi.ledgerCounts/.ledger) are still present in source, not deleted", () => {
+    const src = readFileSync(
+      join(__dirname, "../ProjectDetailScreen.tsx"),
+      "utf8",
+    )
+    expect(src).toMatch(/projectsApi\s*\.ledgerCounts\(/)
+    expect(src).toMatch(/projectsApi\.ledger\(projectId, "assigned_to_me"\)/)
+    expect(src).toMatch(/projectsApi\.ledger\(projectId, "waiting_on"\)/)
   })
 })
 

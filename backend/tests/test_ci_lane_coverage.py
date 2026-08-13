@@ -507,6 +507,22 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "proof, run locally against the dev rig when touching this route or "
         "`app/project_prd_gate.py`."
     ),
+    ("test_project_join_greeting_live.py", "RUN_PROJECT_JOIN_GREETING_LIVE"): (
+        "Real local-Supabase round-trip for the on-join greeting: a genuinely "
+        "new membership, added through the real client, gets exactly one "
+        "get-or-created individual conversation and one posted assistant "
+        "turn — the fake Supabase client's insert/select stand-ins cannot "
+        "prove the get-or-create idempotency or the write against real "
+        "`conversations`/`conversation_turns` FKs. No ANTHROPIC_API_KEY "
+        "dependency — the greeting reuses the cached "
+        "project_memory_summary and makes no fresh LLM call. Deterministic "
+        "backstop: test_project_join_greeting.py covers the compose/split "
+        "helpers, the best-effort/never-raises contract, the new-only/"
+        "no-duplicate rule, and the no-LLM-call proof against monkeypatched "
+        "stand-ins in the fast lane; this suite is the real-DB proof, run "
+        "locally against the dev rig when touching this module or "
+        "`db/conversations.py`."
+    ),
 }
 
 
@@ -808,6 +824,18 @@ def test_ci_lane_registry_has_tag_and_invite_live():
     assert (
         "test_invite_project_association.py",
         "RUN_INVITE_PROJECT_ASSOCIATION_LIVE",
+    ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_join_greeting_live():
+    """AC backstop: the on-join greeting's env-gated real-DB round trip is
+    registered in `_KNOWN_UNRUNNABLE` with the env var that gates it.
+    Removing this entry reddens this test (and `test_no_test_is_gated_on_
+    an_env_var_no_workflow_provides` above) — the live proof must never
+    silently drop out of the accounted set."""
+    assert (
+        "test_project_join_greeting_live.py",
+        "RUN_PROJECT_JOIN_GREETING_LIVE",
     ) in _KNOWN_UNRUNNABLE
 
 

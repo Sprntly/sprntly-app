@@ -360,12 +360,13 @@ async def generate_from_task(
         if existing:
             # Re-issuing the command resolves the SAME PRD — the new chat still
             # needs to point at it, or reopening that chat shows no PRD at all.
+            auto_project_id = None
             if body.conversation_id is not None:
                 bind_conversation_to_prd(
                     body.conversation_id, existing["id"],
                     company.company_id, company.user_id,
                 )
-                maybe_auto_create_project_for_prd(
+                auto_project_id = maybe_auto_create_project_for_prd(
                     company_id=company.company_id, workspace_id=company.workspace_id,
                     user_id=company.user_id, prd_id=existing["id"],
                     prd_title=existing["title"], conversation_id=body.conversation_id,
@@ -375,6 +376,10 @@ async def generate_from_task(
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                # The project this PRD's originating chat was forked into (new
+                # or pre-existing), so the client can land the user in that
+                # project's private chat. None when nothing was forked.
+                "project_id": auto_project_id,
             }
 
     # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
@@ -407,11 +412,12 @@ async def generate_from_task(
 
     # Link the commanding chat to this PRD NOW — before the (multi-second)
     # generation runs and before the client could navigate away.
+    auto_project_id = None
     if body.conversation_id is not None:
         bind_conversation_to_prd(
             body.conversation_id, prd_id, company.company_id, company.user_id
         )
-        maybe_auto_create_project_for_prd(
+        auto_project_id = maybe_auto_create_project_for_prd(
             company_id=company.company_id, workspace_id=company.workspace_id,
             user_id=company.user_id, prd_id=prd_id,
             prd_title=title, conversation_id=body.conversation_id,
@@ -455,6 +461,10 @@ async def generate_from_task(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        # The project this PRD's originating chat was forked into (new or
+        # pre-existing), so the client can land the user in that project's
+        # private chat. None when nothing was forked.
+        "project_id": auto_project_id,
     }
 
 

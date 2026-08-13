@@ -228,6 +228,107 @@ describe("ProjectGroupChat — send + refetch", () => {
     })
   })
 
+  it("test_composer_clears_optimistically_on_send — the draft empties the instant send starts, BEFORE the POST resolves", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let resolvePost: (v: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePost = resolve
+      }),
+    )
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    // Cleared IMMEDIATELY — postGroupTurn has not resolved yet.
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
+    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team")
+
+    await act(async () => {
+      resolvePost(turn({ id: 5, content: "hi team" }))
+      await Promise.resolve()
+    })
+  })
+
+  it("test_composer_restores_only_if_still_empty_on_fail — a failed send restores the text; a message typed during the wait is NOT clobbered", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let rejectPost: (e: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectPost = reject
+      }),
+    )
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
+
+    await act(async () => {
+      rejectPost(new Error("network blip"))
+      await Promise.resolve()
+    })
+    // Box was empty at the moment the failure landed → restored.
+    await waitFor(() =>
+      expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("hi team"),
+    )
+    expect(screen.getByTestId("gc-error")).toBeTruthy()
+  })
+
+  it("a message typed during the wait is not clobbered by a failed-send restore", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let rejectPost: (e: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectPost = reject
+      }),
+    )
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "original message" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
+
+    // The user starts typing something new WHILE the first send is in flight.
+    await act(async () => {
+      fireEvent.change(document.querySelector(".cx-input") as HTMLTextAreaElement, {
+        target: { value: "a different message I'm typing now" },
+      })
+    })
+
+    await act(async () => {
+      rejectPost(new Error("network blip"))
+      await Promise.resolve()
+    })
+
+    // The restore must NOT clobber what the user is now typing.
+    expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe(
+      "a different message I'm typing now",
+    )
+  })
+
   it("the composer carries the group-chat placeholder, not the individual-chat one", async () => {
     groupTurnsMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))

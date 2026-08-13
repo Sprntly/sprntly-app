@@ -38,6 +38,7 @@ import {
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
 import { useRealtimeChannel } from "./useRealtimeChannel"
+import { personAvatarStyle } from "./avatarColor"
 import {
   detectMentionQuery,
   insertMentionChip,
@@ -110,11 +111,14 @@ type CandidateRow = Awaited<ReturnType<typeof projectsApi.candidateSearch>>[numb
  *  a copy-link affordance (AD-TNM6). */
 type TagResult = Awaited<ReturnType<typeof projectsApi.tagCandidate>>
 
-/** A row in the people picker: a directory candidate, or the invite-by-email
- *  affordance row. `needle` is what `tagCandidate` is called with on select. */
+/** A row in the people picker: a directory candidate, the invite-by-email
+ *  affordance row, or the first-class `@Sprntly` agent row. `needle` is what
+ *  `tagCandidate` is called with on select (agent/candidate-member rows
+ *  never call it — see `handleMentionSelect`). */
 type MentionMenuItem =
   | { row: "candidate"; kind: CandidateRow["kind"]; label: string; sublabel: string; needle: string }
   | { row: "invite"; label: string; needle: string }
+  | { row: "agent"; label: string; needle: string }
 
 /** The post-action affordance (AD-TNM6: degrade to copy, never throw/block). */
 type MentionAffordance = { tone: "ok" | "error"; text: string }
@@ -334,13 +338,24 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const mentionItems = useMemo<MentionMenuItem[]>(() => {
     if (mentionQuery === null) return []
     const q = mentionQuery.query
-    const items: MentionMenuItem[] = candidates.map((c) => ({
-      row: "candidate" as const,
-      kind: c.kind,
-      label: c.name ?? c.email ?? "Unknown",
-      sublabel: c.email ?? "",
-      needle: c.email ?? c.name ?? "",
-    }))
+    const items: MentionMenuItem[] = []
+    // @Sprntly as a first-class mention target: leads the list whenever the
+    // typed token is a case-insensitive PREFIX of the agent's name (empty
+    // token included) — the complete word "@sprntly" never reaches here at
+    // all (detectMentionQuery routes it to the agent-invoke path, no
+    // picker), so this only ever fires on a genuine partial-prefix query.
+    if (AGENT_NAME.toLowerCase().startsWith(q.toLowerCase())) {
+      items.push({ row: "agent", label: AGENT_NAME, needle: AGENT_NAME })
+    }
+    items.push(
+      ...candidates.map((c) => ({
+        row: "candidate" as const,
+        kind: c.kind,
+        label: c.name ?? c.email ?? "Unknown",
+        sublabel: c.email ?? "",
+        needle: c.email ?? c.name ?? "",
+      })),
+    )
     const emailLike = isEmailNeedle(q)
     if (emailLike || (!candLoading && !candError && candidates.length === 0)) {
       items.push({
@@ -361,6 +376,17 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     (item: MentionMenuItem | undefined) => {
       if (!item || mentionQuery === null) return
       setAffordance(null)
+
+      // The agent row: insert the literal `@Sprntly` token, NO network write
+      // — the existing BACKEND `_MENTION_RE` recognizes it on send, identical
+      // to a hand-typed `@Sprntly` (no second mention/trigger path).
+      if (item.row === "agent") {
+        const { text, caret } = insertMentionChip(draft, mentionQuery.end, item.label)
+        setDraft(text)
+        pendingCaretRef.current = caret
+        closeMentionPicker()
+        return
+      }
 
       // A member: insert the mention chip into the draft, NO network write —
       // the live "mentioned" notify is a later change (AC-3).
@@ -489,10 +515,15 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     if (content.length < DRAFT_MIN_CHARS || posting) return
     setPosting(true)
     setError(null)
+    // Optimistic clear: empty the composer the INSTANT the send starts, not
+    // after the POST resolves — which only happens once a best-effort
+    // mention reply completes (backend/app/routes/projects.py's
+    // post_group_turn_route), so waiting that long left the box holding
+    // stale text through the whole round trip.
+    setDraft("")
     projectsApi
       .postGroupTurn(projectId, content)
       .then(() => {
-        setDraft("")
         // The POST resolves only after a best-effort mention reply completes
         // (backend/app/routes/projects.py's post_group_turn_route), so a poll
         // right after it reliably picks up both the human turn and any agent
@@ -502,6 +533,9 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .then(applyTurns)
       .catch(() => {
         setError("Couldn't send that. Try again.")
+        // Restore ONLY if the box is still empty — a message typed during
+        // the wait must never be clobbered by the restore.
+        setDraft((cur) => (cur === "" ? content : cur))
       })
       .finally(() => {
         setPosting(false)
@@ -574,18 +608,33 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         ) : (
           mentionItems.map((item, i) => (
             <button
-              key={item.row === "invite" ? `invite:${item.needle}` : `${item.kind}:${item.needle}:${i}`}
+              key={
+                item.row === "invite" ? `invite:${item.needle}`
+                : item.row === "agent" ? "agent"
+                : `${item.kind}:${item.needle}:${i}`
+              }
               type="button"
               role="option"
               aria-selected={i === mentionActiveIndex}
               className={`${styles.pickerRow}${i === mentionActiveIndex ? " " + styles.pickerRowActive : ""}`}
-              data-testid={item.row === "invite" ? "gc-mention-invite" : "gc-mention-candidate"}
+              data-testid={
+                item.row === "invite" ? "gc-mention-invite"
+                : item.row === "agent" ? "gc-mention-agent"
+                : "gc-mention-candidate"
+              }
               onMouseEnter={() => setMentionActiveIndex(i)}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => handleMentionSelect(item)}
             >
               {item.row === "invite" ? (
                 <span className={styles.pickerInvite}>{item.label}</span>
+              ) : item.row === "agent" ? (
+                <>
+                  <span className={styles.pickerName}>{item.label}</span>
+                  <span className={styles.pickerKind} data-kind="agent">
+                    Agent
+                  </span>
+                </>
               ) : (
                 <>
                   <span className={styles.pickerName}>{item.label}</span>
@@ -606,7 +655,13 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       {presenceMembers.length > 0 ? (
         <div className={styles.roster} data-testid="gc-presence">
           {presenceMembers.map((member) => (
-            <span key={member.userId} className={styles.rosterMember} data-testid="gc-presence-member" title={member.name}>
+            <span
+              key={member.userId}
+              className={styles.rosterMember}
+              data-testid="gc-presence-member"
+              title={member.name}
+              style={personAvatarStyle(member.userId, member.name)}
+            >
               <span className={styles.rosterDot} aria-hidden="true" />
               {initials(member.name)}
             </span>
@@ -675,7 +730,11 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                         <MentionBubble content={turn.content} />
                       </div>
                     </div>
-                    <span className={styles.av} aria-hidden="true">
+                    <span
+                      className={styles.av}
+                      aria-hidden="true"
+                      style={personAvatarStyle(turn.author_user_id, turn.author_name)}
+                    >
                       {initials(turn.author_name)}
                     </span>
                   </div>
@@ -683,7 +742,11 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
               }
               return (
                 <div key={turn.id} className={`gc-msg gc-msg--other ${styles.msg} ${styles.msgOther}`} data-testid="gc-msg-other">
-                  <span className={styles.av} aria-hidden="true">
+                  <span
+                    className={styles.av}
+                    aria-hidden="true"
+                    style={personAvatarStyle(turn.author_user_id, turn.author_name)}
+                  >
                     {initials(turn.author_name)}
                   </span>
                   <div className={styles.body}>

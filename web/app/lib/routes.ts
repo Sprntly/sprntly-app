@@ -47,12 +47,20 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 export const PROJECTS_PATH = "/projects"
 
 /** Build the projects path, threading a project id as `?id=<id>` when
- *  present (opens the detail view, a follow-up ticket). With no id it
- *  returns the bare `/projects` list route. Pure → unit-testable. */
-export function projectPath(projectId?: number | string | null): string {
-  return projectId == null || projectId === ""
-    ? PROJECTS_PATH
-    : `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+ *  present (opens the detail view). With no id it returns the bare
+ *  `/projects` list route. `opts.chat` additionally appends `&chat=` —
+ *  which chat tab to land on (`"individual"` for the fork-to-private-chat
+ *  nav; `"group"` for parity) — but ONLY when a project id is present; with
+ *  no id, `chat` is ignored (there is no detail view to select a tab on).
+ *  The no-`opts` call is byte-identical to the base single-arg form — every
+ *  existing caller is unaffected. Pure → unit-testable. */
+export function projectPath(
+  projectId?: number | string | null,
+  opts?: { chat?: "group" | "individual" },
+): string {
+  if (projectId == null || projectId === "") return PROJECTS_PATH
+  const base = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+  return opts?.chat ? `${base}&chat=${opts.chat}` : base
 }
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */

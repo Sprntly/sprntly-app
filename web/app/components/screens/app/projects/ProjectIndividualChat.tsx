@@ -80,6 +80,39 @@ import styles from "./ProjectIndividualChat.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
 
+/** The on-join greeting's short/expandable-body split marker — mirrors
+ *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an HTML
+ *  comment, inert if ever rendered raw). */
+const MORE_MARKER = "<!--more-->"
+
+/** An assistant turn's body: with `MORE_MARKER` present, renders the lead
+ *  inline plus the rest behind a Show more/less toggle; without it, renders
+ *  byte-identically to before (the same `ReactMarkdown`+`remarkGfm` call
+ *  every other assistant turn already uses — REUSE, no new component). */
+function AgentTurnBody({ content }: { content: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const idx = content.indexOf(MORE_MARKER)
+  if (idx === -1) {
+    return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+  }
+  const lead = content.slice(0, idx)
+  const rest = content.slice(idx + MORE_MARKER.length)
+  return (
+    <>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{lead}</ReactMarkdown>
+      {expanded ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{rest}</ReactMarkdown> : null}
+      <button
+        type="button"
+        className={styles.showMore}
+        onClick={() => setExpanded((v) => !v)}
+        data-testid="ic-agent-show-more"
+      >
+        {expanded ? "Show less" : "Show more"}
+      </button>
+    </>
+  )
+}
+
 /** One question+answer pair in this private thread. Purely client-side and
  *  in-memory — the individual chat has no group-turn table to poll; each
  *  send is one `/v1/ask` job (build spec §5.3/§5.4 draw the same line: a
@@ -559,7 +592,7 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
                   <span className={styles.agentName}>{AGENT_NAME}</span>
                   <span className={styles.time}>{formatTime(new Date(h.created_at).getTime())}</span>
                 </div>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>
+                <AgentTurnBody content={h.content} />
                 {delegationsByTurn.has(h.id) ? (
                   <div className={styles.delegationActions} data-testid="ic-brief-delegation-actions">
                     <DelegationActions

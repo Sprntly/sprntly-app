@@ -1,0 +1,182 @@
+/* AddArtifactModal — component-scoped styles (globals.css is never edited
+ * for this ticket). Every value below resolves to an existing
+ * `web/app/globals.css` custom property — the artifact-type badge hexes
+ * live in `AddArtifactModal.tsx` (copied verbatim from `ArtifactsScreen.tsx`'s
+ * `ARTIFACT_BADGE`, the documented ArtifactsModal exception), not here. */
+
+.panel {
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+.panel :global(.modal-body) {
+  overflow-y: auto;
+}
+
+.stateWrap {
+  padding: 24px 4px;
+  font-size: 13px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+.search {
+  width: 100%;
+  font-size: 13px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.search:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ── Filter chips (mirrors ArtifactsModal.module.css) ── */
+
+.chips {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 16px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 13px;
+  border-radius: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  border-color: var(--ink-4);
+}
+
+.chipOn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.chipN {
+  font-size: 10.5px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.chip:not(.chipOn) .chipN {
+  color: var(--ink-4);
+}
+
+/* ── Artifact list ── */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+
+.row:hover:not(:disabled) {
+  background: var(--surface-3);
+}
+
+.rowSel {
+  background: var(--accent-alpha-10);
+  box-shadow: inset 0 0 0 1px var(--accent-alpha-18);
+}
+
+.rowExisting {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rowTitle {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.onProject {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ink-4);
+}
+
+.checkbox {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface);
+}
+
+.checkbox[data-checked="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+
+.error {
+  margin-top: 10px;
+  font-size: 12.5px;
+  color: var(--danger);
+}

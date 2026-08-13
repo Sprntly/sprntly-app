@@ -84,7 +84,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onOpenArtifactInPlace: noop,
     openArtifact: null,
     onCloseArtifactDrawer: noop,
-    onCreateArtifact: noop,
+    onAddExistingArtifact: noop,
     onOpenMemory: noop,
     onAddMemory: noop,
     onOpenTasks: noop,

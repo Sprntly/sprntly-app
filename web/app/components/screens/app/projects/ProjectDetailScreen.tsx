@@ -49,9 +49,11 @@ import {
 import { ProjectMainThread } from "./ProjectMainThread"
 import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
+import { AddArtifactModal } from "./AddArtifactModal"
 import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
+import { personAvatarStyle } from "./avatarColor"
 import styles from "./ProjectDetailScreen.module.css"
 
 // Focus-gated FALLBACK poll interval for the unread badge (AD-P22) — same
@@ -277,7 +279,10 @@ export type ProjectDetailViewProps = {
   openArtifact: ArtifactItem | null
   /** Closes the in-place drawer and restores the rail. */
   onCloseArtifactDrawer: () => void
-  onCreateArtifact: () => void
+  /** Opens the "Add existing artifact" company-library picker
+   *  (`AddArtifactModal`) — the rail's create button now attaches an
+   *  existing artifact rather than generating a new one (Deliverables). */
+  onAddExistingArtifact: () => void
   onOpenMemory: () => void
   onAddMemory: () => void
   onOpenTasks: () => void
@@ -319,7 +324,7 @@ export function ProjectDetailView({
   onOpenArtifactInPlace,
   openArtifact,
   onCloseArtifactDrawer,
-  onCreateArtifact,
+  onAddExistingArtifact,
   onOpenMemory,
   onAddMemory,
   onOpenTasks,
@@ -353,7 +358,13 @@ export function ProjectDetailView({
         {humans.length > 0 ? (
           <span className={styles.topAvatars} data-testid="topbar-avatars" aria-label={`${humans.length} member${humans.length === 1 ? "" : "s"}`}>
             {humans.slice(0, 4).map((m) => (
-              <span key={m.user_id} className={styles.topAv} title={m.name ?? "Member"} aria-hidden="true">
+              <span
+                key={m.user_id}
+                className={styles.topAv}
+                title={m.name ?? "Member"}
+                aria-hidden="true"
+                style={personAvatarStyle(m.user_id, m.name)}
+              >
                 {initials(m.name)}
               </span>
             ))}
@@ -491,13 +502,13 @@ export function ProjectDetailView({
             <button
               type="button"
               className={`${styles.artifactCard} ${styles.artifactCreate}`}
-              onClick={onCreateArtifact}
-              data-testid="artifact-create"
+              onClick={onAddExistingArtifact}
+              data-testid="artifact-add-existing"
             >
               <span className={styles.artifactPlus} aria-hidden="true">
                 <PlusIcon />
               </span>
-              Create new artifact — PRD, ticket, evidence or prototype
+              Add existing artifact — from your company's library
             </button>
 
             <div className={styles.railSectionLabel} data-testid="rail-section-label">
@@ -525,52 +536,11 @@ export function ProjectDetailView({
               </div>
             </div>
 
-            <div className={styles.card} data-testid="task-ledger-card">
-              <div className={styles.cardHead}>
-                <h4>
-                  <ChecklistIcon />
-                  Task ledger
-                </h4>
-                {ledgerCounts && ledgerCounts.assigned_to_me_open > 0 ? (
-                  <span className={styles.cardCount}>{ledgerCounts.assigned_to_me_open} for you</span>
-                ) : null}
-              </div>
-              {ledgerRows.length > 0 ? (
-                <div className={styles.taskList} data-testid="task-ledger-rows">
-                  {ledgerRows.slice(0, 4).map((row) => (
-                    <div className={styles.taskRow} key={row.delegation_id} data-testid="task-ledger-row">
-                      <span className={styles.taskBox} aria-hidden="true" />
-                      <span className={styles.taskSummary} title={row.task_summary}>
-                        {row.task_summary}
-                      </span>
-                      <span
-                        className={styles.taskAssignee}
-                        title={row.other_party_name ?? "Assignee"}
-                        aria-hidden="true"
-                      >
-                        {initials(row.other_party_name)}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p
-                  style={{ margin: "0 0 4px", fontSize: 11.5, color: "var(--ink-3)", lineHeight: 1.45 }}
-                  data-testid="task-ledger-counts"
-                >
-                  {ledgerCounts
-                    ? `${ledgerCounts.assigned_to_me_open} assigned to you · ${ledgerCounts.waiting_on_open} you're waiting on`
-                    : "Who owes what across the project — open it to see."}
-                </p>
-              )}
-              <div className={styles.cardActions}>
-                <button type="button" className={styles.viewAllBtn} onClick={onOpenTasks} data-testid="task-ledger-view-all">
-                  View all{" "}
-                  {ledgerCounts ? ledgerCounts.assigned_to_me_open + ledgerCounts.waiting_on_open : ledgerRows.length}{" "}
-                  tasks
-                </button>
-              </div>
-            </div>
+            {/* Task-ledger rail card UN-MOUNTED from this location (non-
+                destructive — task work returns later). `ledgerCounts`/
+                `ledgerRows`/`onOpenTasks`/`ledgerVersion`/`projectsApi.ledger*`/
+                `TaskModal` (still mounted below for `railModal?.kind ===
+                "tasks"`) all remain imported/defined/importable. */}
 
             <div className={styles.railSectionLabel} data-testid="rail-section-label">
               Members
@@ -583,7 +553,7 @@ export function ProjectDetailView({
               const removable = m.user_id !== project.created_by && m.user_id !== currentUserId
               return (
                 <div className={styles.memberRow} key={m.user_id} data-testid="member-row-human">
-                  <span className={styles.memberAv} aria-hidden="true">
+                  <span className={styles.memberAv} aria-hidden="true" style={personAvatarStyle(m.user_id, m.name)}>
                     {initials(m.name)}
                   </span>
                   <div className={styles.memberMain}>
@@ -670,15 +640,29 @@ type LoadState =
  *  carries the type the rail card/inline chip was opened FOR (or `undefined`
  *  for the generic "View all"/chip-less opens) — the modal itself owns the
  *  filter-chip state from there. */
-type OpenModal = { kind: "memory" } | { kind: "artifacts"; type?: ProjectArtifactType } | { kind: "tasks" } | null
+type OpenModal =
+  | { kind: "memory" }
+  | { kind: "artifacts"; type?: ProjectArtifactType }
+  | { kind: "tasks" }
+  | { kind: "add-artifact" }
+  | null
 
-export function ProjectDetailScreen({ projectId }: { projectId: string }) {
+export function ProjectDetailScreen({
+  projectId,
+  initialChat,
+}: {
+  projectId: string
+  /** Which chat tab to land on when the shell first mounts — set by the
+   *  main-chat PRD fork nav via `?chat=individual` (`ProjectsRoute.tsx`).
+   *  Defaults to the shell's own `"group"` default when absent. */
+  initialChat?: ActiveChat
+}) {
   const { openModal } = useNavigation()
   const auth = useAuth()
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railCollapsed, setRailCollapsed] = useState(false)
-  const [activeChat, setActiveChat] = useState<ActiveChat>("group")
+  const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
   const [railModal, setRailModal] = useState<OpenModal>(null)
   const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
@@ -914,15 +898,30 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
 
   const onToggleRail = useCallback(() => setRailCollapsed((v) => !v), [])
   const onInvite = useCallback(() => openModal("invite"), [openModal])
-  // The memory/artifacts/task modals below are this ticket's bodies for
-  // these rail-card triggers. `onCreateArtifact` ("+ Create new artifact")
-  // stays a no-op — that flow routes into the app's EXISTING generation
-  // surfaces (per the ticket's explicit scope boundary), not a new modal.
+  // The memory/artifacts/task/add-artifact modals below are this ticket's
+  // bodies for these rail-card triggers.
   const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
-  const onCreateArtifact = useCallback(() => {}, [])
+  const onAddExistingArtifact = useCallback(() => setRailModal({ kind: "add-artifact" }), [])
   const onOpenMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onAddMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
+  // Re-fetches ONLY the project's artifact list — the AddArtifactModal's
+  // `onAdded` callback (a pick just wrote `project_artifacts` rows
+  // server-side). Deliberately narrower than `load()` (which would flash the
+  // whole shell back to "loading" and drop the active thread), mirroring
+  // `refetchProject`'s own posture just above.
+  const refetchArtifacts = useCallback(() => {
+    projectsApi
+      .artifacts(projectId)
+      .then((artifacts) => {
+        setState((prev) => (prev.status === "ready" ? { ...prev, artifacts } : prev))
+      })
+      .catch(() => {
+        // Best-effort: the add itself already succeeded; a transient
+        // refetch failure just leaves the pre-add artifact list showing
+        // until the next real load.
+      })
+  }, [projectId])
   const onCloseRailModal = useCallback(() => {
     setRailModal(null)
     // Acting on tasks inside the modal changes the open counts; refresh the
@@ -1038,7 +1037,7 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         onOpenArtifactInPlace={onOpenArtifactInPlace}
         openArtifact={openArtifact}
         onCloseArtifactDrawer={onCloseArtifactDrawer}
-        onCreateArtifact={onCreateArtifact}
+        onAddExistingArtifact={onAddExistingArtifact}
         onOpenMemory={onOpenMemory}
         onAddMemory={onAddMemory}
         onOpenTasks={onOpenTasks}
@@ -1075,6 +1074,13 @@ export function ProjectDetailScreen({ projectId }: { projectId: string }) {
         projectId={projectId}
         onClose={onCloseRailModal}
         ledgerVersion={ledgerVersion}
+      />
+      <AddArtifactModal
+        projectId={projectId}
+        open={railModal?.kind === "add-artifact"}
+        existingKeys={new Set(state.artifacts.map((a) => `${a.type}-${a.id}`))}
+        onClose={onCloseRailModal}
+        onAdded={refetchArtifacts}
       />
     </AppLayout>
   )

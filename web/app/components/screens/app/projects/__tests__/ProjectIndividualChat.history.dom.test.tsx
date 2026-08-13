@@ -62,6 +62,20 @@ vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
 
+// Pre-existing fixture gap fixed in passing (blocked EVERY test in this
+// file, including the ones this ticket adds below): the component reads
+// `useWorkspace()` for the classifier flag, and this file was missing the
+// mock `ProjectIndividualChat.test.tsx` already carries — mirrored verbatim
+// here (flag OFF keeps every existing assertion in this file
+// byte-identical: plain `/v1/ask`-only sends).
+vi.mock("../../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false, profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
+}))
+
 // New on this ticket: the component now subscribes to the caller's own
 // per-user realtime channel, which needs a resolvable user id — mock
 // `useAuth` so mount doesn't throw for lack of a real `AuthProvider`. The
@@ -198,5 +212,47 @@ describe("ProjectIndividualChat — empty state (AC9)", () => {
     render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
     expect(screen.getByTestId("individual-chat-empty")).toBeTruthy()
+  })
+})
+
+describe("ProjectIndividualChat — on-join greeting <!--more--> split (AC-6)", () => {
+  it("test_more_marker_renders_lead_and_toggle — a <!--more--> turn renders the lead inline plus a working Show more/less toggle", async () => {
+    individualTurnsMock.mockResolvedValue([
+      {
+        id: 9,
+        role: "assistant",
+        content: "Hey — you're on Dark Mode Launch now. Here's what I know so far:\n\nThe lead gist.<!--more-->\n\nThe rest of the summary, hidden until expanded.",
+        created_at: "2026-08-13T00:00:00Z",
+      },
+    ])
+
+    render(React.createElement(ProjectIndividualChat, { projectId: 505 }))
+    const agent = await screen.findByTestId("ic-history-agent")
+    expect(agent.textContent).toContain("The lead gist.")
+    expect(agent.textContent).not.toContain("The rest of the summary")
+
+    const toggle = screen.getByTestId("ic-agent-show-more")
+    expect(toggle.textContent).toBe("Show more")
+    await act(async () => {
+      fireEvent.click(toggle)
+    })
+    expect(screen.getByTestId("ic-history-agent").textContent).toContain("The rest of the summary")
+    expect(screen.getByTestId("ic-agent-show-more").textContent).toBe("Show less")
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("ic-agent-show-more"))
+    })
+    expect(screen.getByTestId("ic-history-agent").textContent).not.toContain("The rest of the summary")
+    expect(screen.getByTestId("ic-agent-show-more").textContent).toBe("Show more")
+  })
+
+  it("test_no_marker_renders_unchanged — a plain assistant turn (no marker) renders byte-identically to before, no toggle", async () => {
+    individualTurnsMock.mockResolvedValue([
+      { id: 2, role: "assistant", content: "Flat $49/mo, decided last week.", created_at: "2026-08-10T10:01:00Z" },
+    ])
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    const agent = await screen.findByTestId("ic-history-agent")
+    expect(agent.textContent).toContain("Flat $49/mo, decided last week.")
+    expect(screen.queryByTestId("ic-agent-show-more")).toBeNull()
   })
 })

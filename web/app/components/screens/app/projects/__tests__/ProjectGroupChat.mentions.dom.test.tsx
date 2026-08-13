@@ -294,6 +294,83 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     expect(others[0].textContent).toContain("take a look")
   })
 
+  it("test_agent_row_leads_and_inserts_token_no_write — a partial-prefix query leads with the Agent row; selecting it inserts @Sprntly with NO network call", async () => {
+    candidateSearchMock.mockResolvedValue([
+      { kind: "member", user_id: "u2", name: "Sprocket", email: "sprocket@acme.com" },
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByTestId("group-chat-scroll")
+
+    // "spr" is a partial prefix of BOTH "Sprntly" (the agent) and "Sprocket"
+    // (a real candidate) — the agent row must lead the list.
+    await typeDraft("@spr")
+    const picker = await screen.findByTestId("gc-mention-picker")
+    const agentRow = await within(picker).findByTestId("gc-mention-agent")
+    const rows = within(picker).getAllByRole("option")
+    expect(rows[0].getAttribute("data-testid")).toBe("gc-mention-agent")
+    expect(rows[0].textContent).toContain("Sprntly")
+    expect(within(agentRow).getByText("Agent")).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(agentRow)
+    })
+
+    const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+    expect(ta.value).toContain("@Sprntly")
+    expect(candidateSearchMock).toHaveBeenCalled() // the debounced search still ran…
+    expect(tagCandidateMock).not.toHaveBeenCalled() // …but selecting the agent NEVER calls tagCandidate
+    expect(screen.queryByTestId("gc-mention-picker")).toBeNull()
+  })
+
+  it("an empty '@' query (no typed prefix yet) still leads with the Agent row", async () => {
+    candidateSearchMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByTestId("group-chat-scroll")
+
+    await typeDraft("@")
+    const picker = await screen.findByTestId("gc-mention-picker")
+    expect(await within(picker).findByTestId("gc-mention-agent")).toBeTruthy()
+  })
+
+  it("regression guard: does NOT regress the base @sprntly-invokes-agent-no-picker guard even with the agent row wired", async () => {
+    candidateSearchMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByTestId("group-chat-scroll")
+
+    // The COMPLETE word "@sprntly" still routes to the agent-invoke path —
+    // detectMentionQuery returns null for it, so mentionItems (and the new
+    // agent row) never even compute; no picker opens.
+    await typeDraft("@sprntly")
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200))
+    })
+    expect(screen.queryByTestId("gc-mention-picker")).toBeNull()
+    expect(candidateSearchMock).not.toHaveBeenCalled()
+  })
+
+  it("the sent draft, when it carries @Sprntly, is recognized by the backend's _MENTION_RE shape (word-boundary, case-insensitive)", async () => {
+    candidateSearchMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByTestId("group-chat-scroll")
+    await typeDraft("@spr")
+    const agentRow = await screen.findByTestId("gc-mention-agent")
+    await act(async () => {
+      fireEvent.click(agentRow)
+    })
+    const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+    // The backend's `_MENTION_RE = re.compile(r"@sprntly\b", re.I)` — the
+    // inserted token satisfies the same shape a hand-typed one would.
+    expect(/@sprntly\b/i.test(ta.value)).toBe(true)
+    const draftBeforeSend = ta.value.trim()
+
+    postGroupTurnMock.mockResolvedValue({ id: 9, role: "user", content: draftBeforeSend } as never)
+    groupTurnsMock.mockResolvedValueOnce([])
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, draftBeforeSend))
+  })
+
   it("test_existing_group_chat_behaviour_unchanged", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "my reply" }),
