@@ -7,6 +7,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import {
   artifactsApi,
+  customArtifactsApi,
   prdApi,
   evidenceApi,
   type ArtifactItem,
@@ -15,6 +16,7 @@ import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
 import { evidenceOpenScopePatch } from "../../../lib/panelPrdScope"
 import { loadTicketSet } from "../../../lib/runTicketSetGeneration"
 import { prototypePath } from "../../../lib/routes"
+import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -26,7 +28,9 @@ import { EmptyPane } from "../../shared/EmptyPane"
 // History holds only chats and Artifacts is the browsable library of durable
 // outputs (PRDs, prototypes, evidence).
 
-type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report" | "ticket_set"
+type ArtifactFilter =
+  | "all" | "prd" | "prototype" | "evidence" | "report" | "ticket_set"
+  | "custom_artifact"
 
 // "Tickets", not "Non-PRD tickets": a PRD's tickets are not in this library at
 // all (they belong to the PRD row, which is), so the qualifier would send
@@ -38,6 +42,12 @@ const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
+  // "Others", not "Documents": these are the artifacts that are not one of the
+  // named kinds above, and the label has to keep meaning that as the list
+  // grows. A user looking for a leadership update finds it by elimination —
+  // it is not a PRD, not a report, not tickets — which is exactly what the
+  // word says.
+  { id: "custom_artifact", label: "Others" },
 ]
 
 // The "+ New report" picker is GONE, not hidden. It was already dark behind
@@ -83,6 +93,12 @@ const ARTIFACT_BADGE: Record<ArtifactItem["type"], ArtifactBadge> = {
   evidence:   { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
   report:     { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS",   bg: "var(--info-soft)", color: "var(--info)" },
+  // A generic badge for a non-generic thing: the document's OWN kind
+  // ("leadership update") is free text, so it cannot be a badge — badges are a
+  // closed set with fixed colours. The kind leads the source line underneath
+  // instead, where an unknown string renders as itself without breaking the
+  // row's colour vocabulary.
+  custom_artifact: { label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
@@ -162,6 +178,22 @@ function artifactSourceLine(a: ArtifactItem): string {
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
+  if (a.type === "custom_artifact") {
+    // The KIND leads, because it is the only thing distinguishing one document
+    // from another at a glance — "leadership update" vs "postmortem" is the
+    // real type here, while the badge just says DOC. Title-cased for display
+    // only; the stored value stays the user's own words.
+    const parts: string[] = []
+    if (a.kind.trim()) parts.push(a.kind.trim())
+    if (a.status === "generating") parts.push("Writing")
+    // Same rule as the report and ticket-set rows: a deleted chat leaves the
+    // id but no title, and the row omits the clause rather than inventing one.
+    if (a.source.conversation_title) parts.push(`from ${a.source.conversation_title}`)
+    // "Edited", not a bare timestamp: this row's time is the LAST EDIT, and an
+    // unlabelled date next to a document reads as when it was created.
+    if (rel) parts.push(`Edited ${rel}`)
+    return parts.join(" · ")
+  }
   // prd | evidence
   const week = a.source.week_label || "brief"
   const parts = [`from Brief ${week}`]
@@ -177,6 +209,10 @@ function artifactSourceLine(a: ArtifactItem): string {
  *  a per-surface invention. */
 function artifactTitle(a: ArtifactItem): string {
   if (a.type === "ticket_set") return a.title.trim() || "Tickets from this conversation"
+  // A document is named by being typed in, so it is legitimately untitled for
+  // as long as the user leaves it that way — the same state a new Google Doc
+  // sits in. The row says so rather than rendering a blank line.
+  if (a.type === "custom_artifact") return a.title.trim() || "Untitled document"
   return a.title
 }
 
@@ -225,6 +261,22 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
       <div style={wrap}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <rect x="3" y="6" width="18" height="12" rx="2" /><path d="M9 6v12" />
+        </svg>
+      </div>
+    )
+  }
+  if (type === "custom_artifact") {
+    // A page with lines: the plainest "written document" glyph there is, which
+    // is right for the section whose whole meaning is "not one of the named
+    // kinds". Deliberately unlike the PRD page-glyph below (no folded corner)
+    // so the two do not read as the same thing at 16px.
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <rect x="4" y="3" width="16" height="18" rx="2" />
+          <line x1="8" y1="8" x2="16" y2="8" />
+          <line x1="8" y1="12" x2="16" y2="12" />
+          <line x1="8" y1="16" x2="13" y2="16" />
         </svg>
       </div>
     )
@@ -387,9 +439,12 @@ export function ArtifactsView({
         // placeholder, not yet openable: no nav, no hover affordance, default
         // cursor. Every other row stays clickable.
         const isBuilding =
-          (a.type === "prototype" || a.type === "ticket_set") && a.status === "generating"
+          (a.type === "prototype" || a.type === "ticket_set" ||
+            a.type === "custom_artifact") && a.status === "generating"
         // An unknown type has no open handler in this bundle, so it must not
-        // offer a click that would silently do nothing (or throw).
+        // offer a click that would silently do nothing (or throw). This stays
+        // even now that `custom_artifact` IS known — the guard is about the
+        // NEXT type, not this one.
         const known = a.type in ARTIFACT_BADGE
         const clickable = !isBuilding && known
         // The row whose panel is open renders selected: green tint + ring so
@@ -636,6 +691,14 @@ export function ArtifactsScreen() {
         void loadTicketSet(a.open.ticket_set_id, setContent)
         return
       }
+      if (a.type === "custom_artifact") {
+        // A document opens its own PAGE, not the chat's right-hand rail. The
+        // other artifacts here open in that rail because they are read
+        // alongside a conversation; a leadership update is WRITTEN, and
+        // writing wants the full measure of a page.
+        router.push(documentPath(a.open.custom_artifact_id))
+        return
+      }
       // prototype — open the in-tab canvas for its parent PRD.
       router.push(prototypePath(a.open.prd_id))
     } catch {
@@ -645,6 +708,27 @@ export function ArtifactsScreen() {
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
   }, [setContent, openContentPanel, openPrdTab, openReportTab, openTicketSetTab, router, showToast])
+
+  // A blank document, created and opened straight away.
+  //
+  // No naming dialog, deliberately: a new document is named by being typed
+  // into, exactly as a new Google Doc is. Asking for a title before there is
+  // any content puts a decision in front of the user at the moment they have
+  // least information — and the generation path does not ask either, because
+  // it titles the document from its own <h1>.
+  const [creatingDoc, setCreatingDoc] = useState(false)
+  const handleNewDocument = useCallback(async () => {
+    if (!activeCompany || creatingDoc) return
+    setCreatingDoc(true)
+    try {
+      const doc = await customArtifactsApi.create({})
+      router.push(documentPath(doc.id))
+    } catch {
+      showToast("Couldn't create document", "Please try again.")
+    } finally {
+      setCreatingDoc(false)
+    }
+  }, [activeCompany, creatingDoc, router, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning
@@ -687,6 +771,22 @@ export function ArtifactsScreen() {
               if (f) void handleImport(f)
             }}
           />
+          <button
+            type="button"
+            data-testid="new-document-button"
+            onClick={() => void handleNewDocument()}
+            disabled={creatingDoc || !activeCompany}
+            style={{
+              fontSize: 13, fontWeight: 600, padding: "7px 16px", borderRadius: 8,
+              whiteSpace: "nowrap",
+              cursor: creatingDoc || !activeCompany ? "default" : "pointer",
+              border: "1px solid var(--line, #E8E6E0)",
+              background: "var(--surface, #fff)", color: "var(--ink, #1A1A17)",
+              opacity: creatingDoc || !activeCompany ? 0.6 : 1,
+            }}
+          >
+            {creatingDoc ? "Creating…" : "+ New document"}
+          </button>
           <button
             type="button"
             data-testid="prd-import-button"
