@@ -523,6 +523,42 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "locally against the dev rig when touching this module or "
         "`db/conversations.py`."
     ),
+    ("test_group_chat_turns_live.py", "RUN_GROUP_CHAT_LIVE"): (
+        "Real local-Supabase round-trip for the group-chat surface: "
+        "`db/conversations.py`'s create_group_chat/get_group_chat/"
+        "list_group_turns/post_group_turn helpers AND the /v1/projects/{id}/"
+        "group* routes, driven over real HTTP through PostgREST against a "
+        "real local Postgres — the fake Supabase client cannot enforce the "
+        "uq_one_group_chat_per_project partial unique index, seed a real "
+        "project_chat_members roster, or prove the membership gate against "
+        "genuine rows. The one @Sprntly-triggered LLM call is stubbed here "
+        "too (app.routes.projects.run_tool_loop monkeypatched), so no "
+        "ANTHROPIC_API_KEY dependency. Deterministic backstop: "
+        "test_group_chat_turns.py covers the same create/idempotent-create, "
+        "human-vs-mention turn shape, roster/author fields, since-cursor "
+        "polling, foreign-tenant 404, same-tenant non-member 403, and the "
+        "individual-conversation isolation logic against FakeSupabaseClient "
+        "in the fast lane; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching this surface."
+    ),
+    ("test_project_from_prd.py", "RUN_PROJECT_FROM_PRD_LIVE"): (
+        "Real local-Supabase round-trip for the auto-create-from-PRD hook "
+        "(app/project_from_prd.py, AD-P9): the Creation assertions "
+        "(prd_auto project + membership + single project_artifacts row + "
+        "conversation<->project bind) re-run against a real Postgres, "
+        "proving the writes actually persist and the FKs hold — the fake "
+        "Supabase client's in-memory stand-in cannot prove that. No LLM "
+        "call anywhere in this hook, so no ANTHROPIC_API_KEY dependency. "
+        "Deterministic backstop: this SAME file's unmarked fake-DB tests "
+        "(the majority of it, above this section) already cover creation, "
+        "idempotent first-write-wins, the no-conversation skip, "
+        "mutation-proofed failure swallowing at both the route and helper "
+        "level, all three routes/prd.py hook call sites staying wired "
+        "(AC5/AC6), and the reverse find_existing_prd_auto_project dedup "
+        "lookup (hook-forked, modal-forked, cross-origin, cross-artifact-"
+        "type, cross-company) in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this hook."
+    ),
 }
 
 
