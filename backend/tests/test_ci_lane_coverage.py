@@ -447,6 +447,24 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "fast-lane backstop; the DB-fixture test in this same file already "
         "proves the read path without a model."
     ),
+    ("test_project_prd_content_live.py", "RUN_PROJECT_PRD_CONTENT_LIVE"): (
+        "Real local-Supabase round-trip for POST /v1/projects/{id}/prd/content "
+        "across TWO real tenants: a genuine cross-project prd_id and a "
+        "genuine cross-tenant prd_id both refused through the REAL route with "
+        "zero writes, and a real in-tenant on-project save updating "
+        "prds.payload_md plus inserting exactly one prd_versions row — the "
+        "fake Supabase client cannot prove the tenancy fail-closed "
+        "re-assertion holds against a genuine second company/workspace row. "
+        "No LLM call on this route, so no ANTHROPIC_API_KEY dependency. "
+        "Deterministic backstop: test_project_prd_content_route.py covers "
+        "the gate order (call-order spies), per-path mutation proofs "
+        "(zero-write), the fail-closed bypass proof, the valid-save "
+        "snapshot-then-update sequence, snapshot-failure swallowing, and the "
+        "no-body-content/no-cost-line observability contract against "
+        "FakeSupabaseClient in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this route or "
+        "`app/project_prd_gate.py`."
+    ),
 }
 
 
@@ -748,4 +766,16 @@ def test_ci_lane_registry_has_tag_and_invite_live():
     assert (
         "test_invite_project_association.py",
         "RUN_INVITE_PROJECT_ASSOCIATION_LIVE",
+    ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_project_prd_content_live():
+    """AC backstop: the project PRD-content route's env-gated two-tenant live
+    round-trip is registered in `_KNOWN_UNRUNNABLE` with the env var that
+    gates it. Removing this entry reddens this test (and `test_no_test_is_
+    gated_on_an_env_var_no_workflow_provides` above) — the cross-tenant IDOR
+    live proof must never silently drop out of the accounted set."""
+    assert (
+        "test_project_prd_content_live.py",
+        "RUN_PROJECT_PRD_CONTENT_LIVE",
     ) in _KNOWN_UNRUNNABLE

@@ -42,6 +42,7 @@ from app.db import team as team_db
 from app.db import workspaces as workspaces_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
 from app.db.companies import get_seat_limit
+from app.db.prds import save_prd_version, update_prd_content
 from app.team_email import send_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app.llm import DEFAULT_MODEL, run_tool_loop
@@ -49,7 +50,7 @@ from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
 from app.project_chat_edit import apply_chat_edit_scoped
-from app.project_prd_gate import ProjectPrdWriteDenied
+from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
@@ -689,6 +690,68 @@ def project_chat_edit(
         }
 
     return {"edited": True, **result}
+
+
+class ProjectPrdContentIn(BaseModel):
+    """Full-document PRD save from a project surface — the direct-edit
+    counterpart to the chat-edit route above. `html` is the whole serialized
+    `<!DOCTYPE html>…` document the drawer's inline editor round-trips (the
+    SAME shape `PUT /v1/prd/{id}` stores in `payload_md`)."""
+    prd_id: int = Field(..., ge=1)
+    title: str = Field(..., min_length=1)
+    html: str = Field(...)
+
+
+@router.post("/{project_id}/prd/content")
+def project_prd_content_save(
+    project_id: int,
+    body: ProjectPrdContentIn,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Persist a full-HTML PRD edit made in THIS project's artifact drawer —
+    the project-scoped, IDOR-gated equivalent of `PUT /v1/prd/{id}` (which is
+    cross-TENANT-gated only and has no project concept).
+
+    ★ Security: unlike the main-chat `PUT /{id}`, the `prd_id` here is
+    client-supplied, so the ★ cross-PROJECT gate (`assert_prd_on_project`,
+    `project_prd_gate.py`) runs FIRST — before any read or write — proving the
+    PRD is on THIS project's tenant-scoped manifest. It is fail-closed by
+    construction (a manifest read error propagates). The cross-TENANT
+    `require_owned_prd` then runs as the SAME second gate `PUT /{id}` keeps.
+    Neither gate may be bypassed: a cross-project id is denied 403, a
+    cross-tenant id 404. The write NEVER goes through the global cross-tenant-
+    only path.
+
+    Membership-gated (`_require_project_member`, AD-P11) like every other
+    project route. Auto-snapshots the pre-edit content to `prd_versions` (the
+    caller's undo point), mirroring `PUT /{id}`.
+    """
+    _require_project_member(project_id, ctx)
+
+    dataset = _dataset_for(ctx)
+    # ★ cross-PROJECT gate — BEFORE any payload_md read or write.
+    try:
+        assert_prd_on_project(
+            prd_id=body.prd_id, project_id=project_id,
+            dataset=dataset, company_id=ctx.company_id,
+        )
+    except ProjectPrdWriteDenied:
+        raise HTTPException(403, "This PRD isn't attached to this project.")
+
+    # ★ cross-TENANT gate (the same check PUT /{id} keeps) — returns the row so
+    # the pre-edit content can be snapshotted as an undo point.
+    row = require_owned_prd(body.prd_id, ctx.company_id, ctx.workspace_id)
+    try:
+        save_prd_version(
+            body.prd_id, row.get("title", ""), row.get("payload_md", ""),
+            saved_by=(getattr(ctx, "user_email", None) or getattr(ctx, "user_id", None) or "auto"),
+        )
+    except Exception:
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before project drawer "
+            "save (undo point not captured)", body.prd_id, exc_info=True,
+        )
+    return update_prd_content(body.prd_id, body.title, body.html)
 
 
 @router.post("/{project_id}/artifacts/from-chat")

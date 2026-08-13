@@ -5599,4 +5599,19 @@ export const projectsApi = {
     api.get<DelegationCounts>(
       `/v1/projects/${encodeURIComponent(String(id))}/delegations/counts`,
     ),
+  /** Persist a full-HTML PRD edit made in THIS project's artifact drawer
+   *  (`POST /v1/projects/{id}/prd/content`) — the project-scoped, ★
+   *  cross-project-IDOR-gated equivalent of `prdApi.update` (`PUT /v1/prd/{id}`,
+   *  which is cross-TENANT-gated only and has no project concept). The
+   *  drawer's inline editor injects THIS as its save handler so a project edit
+   *  NEVER writes through the global cross-tenant-only path: the route runs
+   *  `assert_prd_on_project` (403 for a cross-project id) BEFORE `require_owned_prd`
+   *  (404 cross-tenant), and auto-snapshots the pre-edit content to
+   *  `prd_versions`. `html` is the full serialized `<!DOCTYPE html>…` document
+   *  the editor round-trips (same shape `prdApi.update` stores). */
+  savePrdContent: (id: number | string, prdId: number, title: string, html: string) =>
+    api.post<{ id: number; title: string; payload_md: string }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/content`,
+      { prd_id: prdId, title, html },
+    ),
 }

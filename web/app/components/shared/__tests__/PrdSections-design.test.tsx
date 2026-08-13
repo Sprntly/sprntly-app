@@ -28,6 +28,14 @@ const PRD_SECTIONS_SRC = readFileSync(join(HERE, "..", "PrdSections.tsx"), "utf8
 // shared/__tests__ → shared → PrdPanelContent.tsx — the right-rail PRD host
 // (the standalone PrdScreen page was removed; the rail is the sole PRD surface).
 const PRD_SCREEN_SRC = readFileSync(join(HERE, "..", "PrdPanelContent.tsx"), "utf8")
+// The markdown PRD editor's contenteditable body (className/contentEditable/
+// spellCheck/suppressContentEditableWarning) was extracted OUT of
+// PrdPanelContent.tsx into this shared primitive (AD-P13b DRY consolidation —
+// one editor, two consumers: the main-chat panel below AND, in a follow-up
+// ticket, the project artifact drawer). The invariant this file locks
+// (test_content_editable_region_untouched) now lives here, not in
+// PrdPanelContent.tsx — it is migrated below, not dropped.
+const PRD_MARKDOWN_EDITOR_SRC = readFileSync(join(HERE, "..", "PrdMarkdownEditor.tsx"), "utf8")
 
 const OLD_EMPTY_COPY = "No prototype yet — use the Design Agent to generate one"
 
@@ -204,14 +212,21 @@ describe("PrdSections — prd-design generate-trigger relocation + hot-file exce
     // `true` for every existing caller) with a boolean expression instead of the
     // bare shorthand — the invariant permits that value shape while still locking
     // the attribute order/set and rejecting an actual reorder or removal.
-    // PrdScreen needs an app-router-backed NavigationProvider to render in this node
-    // env, so the invariant is asserted on the on-disk source (NEVER `git show
-    // <rev>` — CI shallow clones lack historical objects).
-    expect(PRD_SCREEN_SRC).toMatch(
+    //
+    // AD-P13b DRY consolidation moved this literal element OUT of
+    // PrdPanelContent.tsx into the shared PrdMarkdownEditor.tsx primitive it
+    // now consumes (one editor, two consumers) — the invariant is asserted
+    // against that new home, not deleted or weakened. PrdScreen needs an
+    // app-router-backed NavigationProvider to render in this node env, so the
+    // invariant is asserted on the on-disk source (NEVER `git show <rev>` —
+    // CI shallow clones lack historical objects).
+    expect(PRD_MARKDOWN_EDITOR_SRC).toMatch(
       /<div\s+className="prd-body"\s+contentEditable(?:=\{[^}]+\})?\s+spellCheck=\{false\}\s+suppressContentEditableWarning\b/,
     )
-    // The PrdSections mount still lives INSIDE that editable region; the
-    // prdMetaLine prop was removed (PRD content no longer threaded to the canvas).
+    // The PrdSections mount still lives INSIDE that editable region (now as
+    // PrdMarkdownEditor's `children`, rendered inside its contenteditable
+    // div) — the prdMetaLine prop was removed (PRD content no longer
+    // threaded to the canvas).
     expect(PRD_SCREEN_SRC).toContain("<PrdSections sections={prd.sections}")
     expect(PRD_SCREEN_SRC).toContain("prdTitle={prd.title}")
     expect(PRD_SCREEN_SRC).not.toContain("prdMetaLine={prd.metaLine}")
