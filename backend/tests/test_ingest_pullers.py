@@ -190,8 +190,10 @@ def test_jira_puller_yields_issues(monkeypatch):
     from app.connectors import jira_oauth
     from app.kg_ingest.pullers import jira
 
-    # cloud_id resolution is a separate call — stub it so the test targets pull().
-    monkeypatch.setattr(jira, "first_cloud_id", lambda tok: "cloud-1")
+    # The site comes from the tenant's stored connection row — stub it so the
+    # test targets pull(). Never from the token's accessible-resources order.
+    monkeypatch.setattr(jira, "get_connection",
+                        lambda eid, provider: {"config": {"cloud_id": "cloud-1"}})
 
     search_body = {
         "issues": [{
@@ -224,7 +226,7 @@ def test_jira_puller_yields_issues(monkeypatch):
         return resp
     monkeypatch.setattr(jira.requests, "get", fake_get)
 
-    recs = list(jira.pull("tok"))
+    recs = list(jira.pull("tok", enterprise_id="ent-A"))
     assert len(recs) == 1
     r = recs[0]
     assert (r.provider, r.kind, r.external_id) == ("jira", "issue", "PROJ-1")
@@ -240,9 +242,26 @@ def test_jira_puller_yields_issues(monkeypatch):
     assert jira_oauth  # imported for symmetry / ensures module loads
 
 
-def test_jira_puller_no_site_yields_nothing(monkeypatch):
+def test_jira_puller_no_stored_site_yields_nothing(monkeypatch):
+    """No stored cloud_id (or no tenant context) → pull nothing — never fall
+    back to the token's accessible-resources order, which may name a site the
+    tenant never selected."""
     from app.kg_ingest.pullers import jira
-    monkeypatch.setattr(jira, "first_cloud_id", lambda tok: None)
+
+    def _forbidden(*a, **k):
+        raise AssertionError("must not hit the Jira API without a stored site")
+    monkeypatch.setattr(jira.requests, "get", _forbidden)
+
+    # Connection row exists but carries no cloud_id.
+    monkeypatch.setattr(jira, "get_connection",
+                        lambda eid, provider: {"config": {}})
+    assert list(jira.pull("tok", enterprise_id="ent-A")) == []
+
+    # No connection row at all.
+    monkeypatch.setattr(jira, "get_connection", lambda eid, provider: None)
+    assert list(jira.pull("tok", enterprise_id="ent-A")) == []
+
+    # No tenant context.
     assert list(jira.pull("tok")) == []
 
 
