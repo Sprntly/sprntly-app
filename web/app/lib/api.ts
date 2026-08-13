@@ -4980,6 +4980,65 @@ export type ArtifactItem =
       }
       open: { ticket_set_id: number }
     }
+  | {
+      /** A CUSTOM ARTIFACT — a document of any kind the team wrote and keeps:
+       *  a leadership update, a launch plan, a postmortem. The "Others"
+       *  section of the library. Shared company-wide, like reports and ticket
+       *  sets, so any member can open and edit any of them. */
+      type: "custom_artifact"
+      id: number
+      /** "" until the document is named (a generation titles it from its own
+       *  <h1>). The row renders its own fallback rather than a fabricated
+       *  title stored on the record. */
+      title: string
+      /** Lifecycle. Aggregation filters to generating|ready — a `failed`
+       *  generation produced nothing and is not an artifact. */
+      status: "generating" | "ready"
+      /** LAST EDIT, not birth. A library of living documents is browsed by
+       *  last touch, and this is the key the unified listing sorts on. The
+       *  birth date is `born_at` below — the two are separate precisely so a
+       *  row edited today does not read as created today. */
+      created_at: string
+      updated_at: string
+      born_at: string
+      /** The document's own free-text label ("leadership update"). Shown in
+       *  the row's source line. NEVER dispatched on — there is no list of
+       *  kinds, so any string must render as itself. */
+      kind: string
+      source: {
+        kind: string
+        conversation_id: number | null
+        conversation_title: string | null
+      }
+      open: { custom_artifact_id: number }
+    }
+
+/** One team document, body included (GET /v1/custom-artifacts/{id}). */
+export type CustomArtifactDoc = {
+  id: number
+  kind: string
+  title: string
+  status: "generating" | "ready" | "failed"
+  /** The sanitized HTML body. Rendered inline by the editor, which is why the
+   *  server sanitizes it on every WRITE — see app/custom_artifact_html.py. */
+  body_html: string
+  /** Optimistic-concurrency counter. Send it back as `base_version` on save
+   *  and a colleague who saved first turns your write into a 409 carrying
+   *  THEIR document, instead of silently losing one of the two. */
+  version: number
+  created_at: string
+  updated_at: string
+  conversation_id: number | null
+  created_by: string | null
+  updated_by: string | null
+}
+
+/** A save refused because someone else saved first. `current` is their
+ *  document, so the editor can say who moved it and offer the live text. */
+export type CustomArtifactConflict = {
+  error: "version_conflict"
+  current: CustomArtifactDoc | null
+}
 
 /** One captured report, body included (GET /v1/reports/{id}). */
 export type ReportDoc = {
@@ -5010,6 +5069,45 @@ export const artifactsApi = {
    *  (never an error), and callers skip posting in that case. */
   chatSummary: (kind: "prd" | "evidence" | "prototype" | "ticket_set", id: number) =>
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
+}
+
+/** Team documents of any kind — the "Others" library.
+ *
+ *  Every call is company-scoped server-side; there is no per-user filter and
+ *  deliberately so, because the library is shared with the whole team. */
+export const customArtifactsApi = {
+  list: () =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
+      .then((r) => r.artifacts),
+  get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  create: (body: {
+    kind?: string
+    title?: string
+    body_html?: string
+    conversation_id?: number | null
+  }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts", body),
+  /** Save. Pass `base_version` (the version you opened) to be told about a
+   *  colleague's concurrent save instead of overwriting it; omit it to accept
+   *  last-write-wins, which is right for a rename that cannot lose anything. */
+  update: (
+    id: number,
+    body: {
+      title?: string
+      kind?: string
+      body_html?: string
+      base_version?: number
+    },
+  ) => api.patch<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`, body),
+  remove: (id: number) => api.delete<{ deleted: boolean }>(`/v1/custom-artifacts/${id}`),
+  /** Start an LLM generation. Returns immediately with a `generating` row to
+   *  open and poll — the document lands on that same row. */
+  generate: (body: {
+    kind: string
+    task: string
+    context?: string
+    conversation_id?: number | null
+  }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts/generate", body),
 }
 
 /** One row in a thread's report list (GET /v1/reports?conversation_id=…) — the
