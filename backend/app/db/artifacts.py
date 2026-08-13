@@ -1,8 +1,8 @@
 """Aggregated artifact listing for the All-Chats "Artifacts" tab.
 
-A read-only fan-out over the five generated-artifact tables — PRDs, prototypes,
-evidence, reports, and standalone ticket sets — unified into one recency-sorted
-list for a single company.
+A read-only fan-out over the six artifact tables — PRDs, prototypes, evidence,
+reports, standalone ticket sets, and custom artifacts (team documents of any
+kind) — unified into one recency-sorted list for a single company.
 
 Tenant scoping is split because the surfaces key off the tenant differently
 (verified against the existing queries):
@@ -22,6 +22,10 @@ Tenant scoping is split because the surfaces key off the tenant differently
 
   - Ticket sets are scoped by `company_id` too, for the same reason and by the
     same decision (see supabase/migrations/20260806120000_ticket_sets.sql).
+
+  - Custom artifacts are scoped by `company_id` for that same reason — one
+    shared library per company, editable by any member
+    (supabase/migrations/20260813120000_custom_artifacts.sql).
 
 The route passes BOTH (the slug for PRDs/evidence, the UUID for prototypes and
 reports) so each surface is scoped the way its own writers scoped it. Joins are
@@ -443,6 +447,81 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                     "question": r.get("source_text") or "",
                 },
                 "open": {"ticket_set_id": r["id"]},
+            })
+
+    # ── Custom artifacts (company_id = company UUID). Team documents of any
+    #    kind — the "Others" section. Scoped like reports and ticket sets, so
+    #    every workspace in a company shares one library.
+    #
+    #    `body_html` is NOT selected, for the reason the reports block gives
+    #    about `html`: a listing must not carry N full documents. The editor
+    #    fetches the body by id (GET /v1/custom-artifacts/{id}).
+    #
+    #    'generating' rows ARE listed — a document the user just asked for
+    #    should appear immediately, marked as writing and not yet clickable,
+    #    the same treatment building prototypes and ticket sets get. 'failed'
+    #    ones are excluded: a run that produced nothing is not an artifact.
+    doc_rows = (
+        c.table("custom_artifacts")
+        .select(
+            "id, kind, title, status, created_at, updated_at, conversation_id"
+        )
+        .eq("company_id", company_id)
+        .in_("status", ["generating", "ready"])
+        .order("id", desc=True)
+        .limit(_LIST_CAP)
+        .execute()
+        .data
+        or []
+    )
+    if doc_rows:
+        # Same conversation-title lookup the two blocks above share, filled in
+        # for any ids they didn't already need.
+        doc_convo_ids = sorted(
+            {
+                r["conversation_id"] for r in doc_rows
+                if r.get("conversation_id") is not None
+                and r["conversation_id"] not in convo_title_by_id
+            }
+        )
+        if doc_convo_ids:
+            for r in (
+                c.table("conversations")
+                .select("id, title")
+                .in_("id", doc_convo_ids)
+                .execute()
+                .data
+                or []
+            ):
+                convo_title_by_id[r["id"]] = r.get("title")
+        for r in doc_rows:
+            cid = r.get("conversation_id")
+            items.append({
+                "type": "custom_artifact",
+                "id": r["id"],
+                # Empty until the user names it (or a generation does); the web
+                # renders its own "Untitled document" rather than a fabricated
+                # title stored on the row.
+                "title": r.get("title") or "",
+                "status": r.get("status") or "",
+                # The document's own free-text label ('leadership update'),
+                # shown in the row's source line. Never dispatched on — see the
+                # migration's note on why `kind` is not an enum.
+                "kind": r.get("kind") or "",
+                # A document is EDITED after it is created, so the listing sorts
+                # and labels by last touch rather than birth — the ordering a
+                # library of living documents needs. `created_at` still rides
+                # along for anything that wants the birth date.
+                "created_at": r.get("updated_at") or r.get("created_at"),
+                "source": {
+                    "kind": r.get("kind") or "",
+                    "conversation_id": cid,
+                    # None when the chat was deleted (`on delete set null`); the
+                    # row omits the "from <chat>" clause rather than inventing
+                    # a label for a thread that no longer exists.
+                    "conversation_title": convo_title_by_id.get(cid) if cid else None,
+                },
+                "open": {"custom_artifact_id": r["id"]},
             })
 
     # Recency sort (newest first). created_at is an ISO-8601 string; lexical

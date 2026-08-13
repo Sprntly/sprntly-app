@@ -54,11 +54,35 @@ CREATE TABLE IF NOT EXISTS prototypes (
 """
 
 
+# SQLite translation of supabase/migrations/20260813120000_custom_artifacts.sql
+# (the columns this route reads). Team documents of any kind — the "Others"
+# section of the library.
+_CUSTOM_ARTIFACT_DDL = """
+CREATE TABLE IF NOT EXISTS custom_artifacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    kind            TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    body_html       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'ready',
+    error           TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    updated_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
 @pytest.fixture
 def artifacts_env(isolated_settings):
     """Add the prototypes table to conftest's already-reset fake DB. briefs /
     prds / evidences are present in the base schema, so no extra DDL for them."""
     _fake_supabase.get_fake_db().executescript(_PROTOTYPE_DDL)
+    _fake_supabase.get_fake_db().executescript(_CUSTOM_ARTIFACT_DDL)
     yield
 
 
@@ -188,6 +212,29 @@ def _seed_ticket_set(*, company_id: str, title: str = "", stories: list | None =
     if created_at is not None:
         row["created_at"] = created_at
     resp = require_client().table("ticket_sets").insert(row).execute()
+    return resp.data[0]["id"]
+
+
+def _seed_custom_artifact(*, company_id: str, title: str = "", kind: str = "",
+                          body_html: str = "", status: str = "ready",
+                          conversation_id: int | None = None,
+                          created_at: str | None = None,
+                          updated_at: str | None = None) -> int:
+    """Seed a custom artifact (a team document — the "Others" section)."""
+    from app.db.client import require_client
+    row = {
+        "company_id": company_id,
+        "title": title,
+        "kind": kind,
+        "body_html": body_html,
+        "status": status,
+        "conversation_id": conversation_id,
+    }
+    if created_at is not None:
+        row["created_at"] = created_at
+    if updated_at is not None:
+        row["updated_at"] = updated_at
+    resp = require_client().table("custom_artifacts").insert(row).execute()
     return resp.data[0]["id"]
 
 
@@ -680,3 +727,89 @@ def test_one_conversation_lookup_serves_reports_and_ticket_sets(artifacts_env, m
     by_type = {a["type"]: a for a in r.json()["artifacts"]}
     assert by_type["report"]["source"]["conversation_title"] == "Shared thread"
     assert by_type["ticket_set"]["source"]["conversation_title"] == "Shared thread"
+
+
+# ─── Custom artifacts: the "Others" section of the library ──────────────────
+
+
+def test_custom_artifact_lists_with_its_kind_and_no_body(artifacts_env, monkeypatch):
+    """A team document appears in the unified list, carrying the free-text
+    `kind` its row shows and NOT its body — the listing must not ship N full
+    documents (the same rule that keeps report `html` out)."""
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(
+        company_id=ctx.company_id,
+        title="Q3 leadership update",
+        kind="leadership update",
+        body_html="<p>" + "x" * 5000 + "</p>",
+    )
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert len(items) == 1
+    it = items[0]
+    assert it["type"] == "custom_artifact"
+    assert it["title"] == "Q3 leadership update"
+    assert it["kind"] == "leadership update"
+    assert "body_html" not in it
+    assert it["open"] == {"custom_artifact_id": it["id"]}
+
+
+def test_custom_artifact_is_company_scoped_not_dataset_scoped(artifacts_env, monkeypatch):
+    """It hangs off the company, like reports and ticket sets — so it lists
+    even for a company whose briefs (the PRD/evidence scope) are empty."""
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(company_id=ctx.company_id, title="standalone")
+    # No briefs seeded at all: a dataset-scoped read would return nothing.
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert [i["title"] for i in items] == ["standalone"]
+
+
+def test_another_companys_document_never_lists(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(company_id="some-other-company-uuid", title="theirs")
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert items == []
+
+
+def test_generating_document_lists_and_failed_one_does_not(artifacts_env, monkeypatch):
+    """A document the user just asked for should appear immediately (marked as
+    writing), the treatment building prototypes and ticket sets already get. A
+    run that produced nothing is not an artifact."""
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(company_id=ctx.company_id, title="being written",
+                          status="generating")
+    _seed_custom_artifact(company_id=ctx.company_id, title="died", status="failed")
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert [i["title"] for i in items] == ["being written"]
+    assert items[0]["status"] == "generating"
+
+
+def test_custom_artifact_sorts_by_last_edit_not_birth(artifacts_env, monkeypatch):
+    """A library of LIVING documents orders by last touch: a doc created last
+    week and edited today belongs above one created today and untouched since.
+    Sorting on `created_at` would bury it."""
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(company_id=ctx.company_id, title="old but just edited",
+                          created_at="2026-08-01T00:00:00Z",
+                          updated_at="2026-08-13T12:00:00Z")
+    _seed_custom_artifact(company_id=ctx.company_id, title="newer but untouched",
+                          created_at="2026-08-12T00:00:00Z",
+                          updated_at="2026-08-12T00:00:00Z")
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert [i["title"] for i in items] == ["old but just edited", "newer but untouched"]
+
+
+def test_custom_artifact_names_the_chat_it_was_born_in(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    cid = _seed_conversation(company_id=ctx.company_id, title="Board prep")
+    _seed_custom_artifact(company_id=ctx.company_id, title="Memo", conversation_id=cid)
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert items[0]["source"]["conversation_title"] == "Board prep"
+
+
+def test_custom_artifact_with_a_deleted_chat_omits_the_label(artifacts_env, monkeypatch):
+    """`on delete set null` leaves the id but no row. The listing must degrade
+    to no label rather than inventing one for a thread that is gone."""
+    ctx = _client(monkeypatch)
+    _seed_custom_artifact(company_id=ctx.company_id, title="Orphan", conversation_id=99999)
+    items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
+    assert items[0]["source"]["conversation_title"] is None
