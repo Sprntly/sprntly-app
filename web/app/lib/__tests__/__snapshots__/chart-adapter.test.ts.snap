@@ -1,0 +1,292 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`kindToVegaLite > bar spec snapshot 1`] = `
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "data": {
+    "values": [
+      {
+        "display": "42",
+        "label": "Checkout",
+        "value": 42,
+      },
+      {
+        "display": "17",
+        "label": "Search",
+        "value": 17,
+      },
+      {
+        "display": "9%",
+        "label": "Onboarding (Day 7)",
+        "value": 9,
+      },
+    ],
+  },
+  "encoding": {
+    "color": {
+      "field": "label",
+      "legend": null,
+      "scale": {
+        "range": [
+          "#5B7FFF",
+          "#6FCF97",
+          "#F2994A",
+          "#BB6BD9",
+          "#56CCF2",
+          "#EB5757",
+          "#F2C94C",
+          "#27AE60",
+        ],
+      },
+      "sort": null,
+      "type": "nominal",
+    },
+    "tooltip": [
+      {
+        "field": "label",
+        "title": "Label",
+        "type": "nominal",
+      },
+      {
+        "field": "display",
+        "title": "Value",
+        "type": "nominal",
+      },
+    ],
+    "x": {
+      "axis": {
+        "grid": true,
+        "tickCount": 4,
+        "title": null,
+      },
+      "field": "value",
+      "type": "quantitative",
+    },
+    "y": {
+      "axis": {
+        "labelLimit": 160,
+        "title": null,
+      },
+      "field": "label",
+      "sort": null,
+      "type": "nominal",
+    },
+  },
+  "mark": {
+    "cornerRadiusEnd": 3,
+    "height": {
+      "band": 0.7,
+    },
+    "type": "bar",
+  },
+  "title": "Top areas",
+}
+`;
+
+exports[`kindToVegaLite > donut spec snapshot 1`] = `
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "data": {
+    "values": [
+      {
+        "display": "42",
+        "label": "Checkout",
+        "value": 42,
+      },
+      {
+        "display": "17",
+        "label": "Search",
+        "value": 17,
+      },
+      {
+        "display": "9%",
+        "label": "Onboarding (Day 7)",
+        "value": 9,
+      },
+    ],
+  },
+  "encoding": {
+    "color": {
+      "field": "label",
+      "legend": {
+        "title": null,
+      },
+      "scale": {
+        "range": [
+          "#5B7FFF",
+          "#6FCF97",
+          "#F2994A",
+          "#BB6BD9",
+          "#56CCF2",
+          "#EB5757",
+          "#F2C94C",
+          "#27AE60",
+        ],
+      },
+      "sort": null,
+      "type": "nominal",
+    },
+    "theta": {
+      "field": "value",
+      "stack": true,
+      "type": "quantitative",
+    },
+    "tooltip": [
+      {
+        "field": "label",
+        "title": "Label",
+        "type": "nominal",
+      },
+      {
+        "field": "display",
+        "title": "Value",
+        "type": "nominal",
+      },
+    ],
+  },
+  "mark": {
+    "innerRadius": 44,
+    "outerRadius": 80,
+    "type": "arc",
+  },
+  "title": "Share",
+}
+`;
+
+exports[`kindToVegaLite > line spec snapshot 1`] = `
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "data": {
+    "values": [
+      {
+        "display": "42",
+        "label": "Checkout",
+        "value": 42,
+      },
+      {
+        "display": "17",
+        "label": "Search",
+        "value": 17,
+      },
+      {
+        "display": "9%",
+        "label": "Onboarding (Day 7)",
+        "value": 9,
+      },
+    ],
+  },
+  "encoding": {
+    "tooltip": [
+      {
+        "field": "label",
+        "title": "Label",
+        "type": "nominal",
+      },
+      {
+        "field": "display",
+        "title": "Value",
+        "type": "nominal",
+      },
+    ],
+    "x": {
+      "axis": {
+        "labelAngle": 0,
+        "labelLimit": 120,
+        "title": null,
+      },
+      "field": "label",
+      "sort": null,
+      "type": "ordinal",
+    },
+    "y": {
+      "axis": {
+        "grid": true,
+        "tickCount": 4,
+        "title": null,
+      },
+      "field": "value",
+      "type": "quantitative",
+    },
+  },
+  "mark": {
+    "color": "#5B7FFF",
+    "point": {
+      "color": "#5B7FFF",
+      "filled": true,
+      "size": 40,
+    },
+    "strokeWidth": 2.5,
+    "type": "line",
+  },
+  "title": "Trend",
+}
+`;
+
+exports[`kindToVegaLite > pie spec snapshot 1`] = `
+{
+  "$schema": "https://vega.github.io/schema/vega-lite/v6.json",
+  "data": {
+    "values": [
+      {
+        "display": "42",
+        "label": "Checkout",
+        "value": 42,
+      },
+      {
+        "display": "17",
+        "label": "Search",
+        "value": 17,
+      },
+      {
+        "display": "9%",
+        "label": "Onboarding (Day 7)",
+        "value": 9,
+      },
+    ],
+  },
+  "encoding": {
+    "color": {
+      "field": "label",
+      "legend": {
+        "title": null,
+      },
+      "scale": {
+        "range": [
+          "#5B7FFF",
+          "#6FCF97",
+          "#F2994A",
+          "#BB6BD9",
+          "#56CCF2",
+          "#EB5757",
+          "#F2C94C",
+          "#27AE60",
+        ],
+      },
+      "sort": null,
+      "type": "nominal",
+    },
+    "theta": {
+      "field": "value",
+      "stack": true,
+      "type": "quantitative",
+    },
+    "tooltip": [
+      {
+        "field": "label",
+        "title": "Label",
+        "type": "nominal",
+      },
+      {
+        "field": "display",
+        "title": "Value",
+        "type": "nominal",
+      },
+    ],
+  },
+  "mark": {
+    "outerRadius": 80,
+    "type": "arc",
+  },
+  "title": "Share",
+}
+`;

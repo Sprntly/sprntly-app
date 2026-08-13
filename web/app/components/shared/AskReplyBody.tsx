@@ -44,14 +44,19 @@ const askMarkdownComponents: Components = {
   code({ className, children, ...rest }) {
     const lang = /language-([\w-]+)/.exec(className || "")?.[1]
     if (lang === "chart") {
-      const spec = parseChartBody(flattenText(children))
-      if (spec) {
+      // `block` is the parsed chart block, which may carry a Vega-Lite `spec`
+      // (additive) or only the legacy `kind`/`data` pair. InlineChart picks
+      // the renderer; this surface is native React, never a sandboxed iframe,
+      // so the Vega path is available here.
+      const block = parseChartBody(flattenText(children))
+      if (block) {
         return (
           <InlineChart
-            kind={spec.kind}
-            title={spec.title}
-            subtitle={spec.subtitle}
-            data={spec.data}
+            kind={block.kind}
+            title={block.title}
+            subtitle={block.subtitle}
+            data={block.data}
+            spec={block.spec}
           />
         )
       }
