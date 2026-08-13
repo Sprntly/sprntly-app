@@ -42,6 +42,8 @@ from app.auth import CompanyContext, require_company
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.conversations import conversation_belongs_to_company
 from app.db.custom_artifacts import (
+    MAX_BODY_CHARS,
+    BodyTooLarge,
     VersionConflict,
     create_artifact,
     delete_artifact,
@@ -55,10 +57,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/custom-artifacts", tags=["custom-artifacts"])
 
-# Same ceiling the db module enforces on the stored column. Checked here too so
-# an oversized body is a 413 with a reason, rather than a silent truncation the
-# user only discovers when the end of their document is missing.
-MAX_BODY_CHARS = 400_000
+# The ceiling is the db module's (imported, not redeclared, so the two cannot
+# drift). It is enforced there — this route only turns the resulting error into
+# a 413 with a reason.
+#
+# THE CHECK CANNOT HAPPEN ON THE RAW INPUT, which is what it used to do.
+# Sanitizing ESCAPES `&`, `<` and `>`, so a body can grow ~5x on the way
+# through: 399,007 bytes of `&` passed a raw 400,000 check and sanitized to
+# 1,995,035, which the storage layer then sliced back to 400,000 — 80% of the
+# document silently discarded behind a 200 OK. The size that matters is the
+# size that gets STORED, so both writers below measure the sanitized string.
 
 
 def _public(row: dict, *, with_body: bool = True) -> dict:
@@ -108,8 +116,6 @@ def create(
     company: CompanyContext = Depends(require_company),
 ):
     """Create a document. Returns the full row, including its id and version."""
-    if len(body.body_html or "") > MAX_BODY_CHARS:
-        raise HTTPException(413, "Document is too large")
     # `conversation_id` is the ONE id on this surface the CLIENT chooses, which
     # makes it the one that has to be checked. Conversation ids are sequential
     # integers, and the artifacts listing resolves a document's conversation
@@ -121,14 +127,17 @@ def create(
         body.conversation_id, company.company_id
     ):
         raise HTTPException(404, "Conversation not found")
-    row = create_artifact(
-        company.company_id,
-        kind=body.kind,
-        title=body.title,
-        body_html=sanitize_artifact_html(body.body_html),
-        conversation_id=body.conversation_id,
-        created_by=company.user_id,
-    )
+    try:
+        row = create_artifact(
+            company.company_id,
+            kind=body.kind,
+            title=body.title,
+            body_html=sanitize_artifact_html(body.body_html),
+            conversation_id=body.conversation_id,
+            created_by=company.user_id,
+        )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large")
     return _public(row)
 
 
@@ -182,8 +191,6 @@ def update(
     moved it and offer the current text, rather than dropping the user's work
     on the floor with a bare error.
     """
-    if body.body_html is not None and len(body.body_html) > MAX_BODY_CHARS:
-        raise HTTPException(413, "Document is too large")
     # No ownership pre-read here: `update_artifact` resolves the row
     # company-filtered and returns None for one that is absent OR foreign,
     # which becomes the same 404 below. A pre-read would be a second round trip
@@ -202,6 +209,8 @@ def update(
             base_version=body.base_version,
             updated_by=company.user_id,
         )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large")
     except VersionConflict as exc:
         current = exc.current
         raise HTTPException(

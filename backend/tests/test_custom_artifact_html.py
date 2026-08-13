@@ -177,3 +177,56 @@ def test_html_to_text_separates_blocks():
 
 def test_html_to_text_drops_non_content():
     assert "alert" not in html_to_text("<p>a</p><script>alert(1)</script>")
+
+
+# ─── Regressions from review of #1153 ───────────────────────────────────────
+#
+# The vectors above are all TAG-shaped, and that shared shape is what hid the
+# bypass below: every one of them exercised the tag loop, and none reached the
+# node types bs4 stores as PreformattedString and re-emits raw.
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # CDATA. `html.parser` ends the section at `]]>`, but HTML5 has no
+        # CDATA in HTML content — a browser enters the BOGUS COMMENT state and
+        # ends it at the first `>`, so everything after that `>` is live markup.
+        "<p>hi</p><![CDATA[x><img src=x onerror=alert(1)>]]>",
+        "<![CDATA[x><script>alert(1)</script>]]>",
+        # Processing instruction — same bogus-comment treatment in a browser.
+        '<?php echo "<img src=x onerror=alert(1)>" ?>',
+        "<?xml version='1.0'?><p>a</p>",
+    ],
+)
+def test_preformatted_nodes_cannot_smuggle_markup(payload):
+    """THE BYPASS: these are not tags, so the tag loop never saw them, and
+    `str(soup)` re-emits them RAW AND UNESCAPED.
+
+    Asserting on the raw markers rather than on a rendered result, because the
+    whole point is that our parser and the browser disagree about where these
+    nodes end — so the only safe outcome is that they are not in the output at
+    all.
+    """
+    out = sanitize_artifact_html(payload)
+    assert "<![CDATA[" not in out
+    assert "<?" not in out
+    assert "onerror" not in out
+    assert "<script" not in out
+    assert "alert(1)" not in out
+
+
+def test_doctype_and_declarations_are_dropped():
+    out = sanitize_artifact_html("<!DOCTYPE html><p>a</p>")
+    assert "DOCTYPE" not in out
+    assert "a" in out
+
+
+def test_a_named_target_still_gets_noopener():
+    """Browsers imply `noopener` for `_blank` and NOTHING else, so a named
+    target opens a page holding a live `window.opener` that can navigate the
+    Sprntly tab to a phishing page."""
+    out = sanitize_artifact_html('<p><a href="https://evil.test" target="x">go</a></p>')
+    assert 'rel="noopener noreferrer"' in out
+    # A named window has no use in a document; it is only a way to keep a handle.
+    assert 'target="x"' not in out

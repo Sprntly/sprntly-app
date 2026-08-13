@@ -468,7 +468,14 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
         )
         .eq("company_id", company_id)
         .in_("status", ["generating", "ready"])
-        .order("id", desc=True)
+        # ORDERED BY LAST EDIT, not by id, because the CAP is applied here and
+        # the sort below cannot rescue a row the query already dropped. With
+        # `id desc` the 200 most recently CREATED documents were selected and
+        # only then reordered by last edit — so for a company past the cap, a
+        # document created last month and edited this morning was cut before
+        # the sort ever saw it, and vanished from the library instead of
+        # appearing at the top. That is exactly the case this listing sorts for.
+        .order("updated_at", desc=True)
         .limit(_LIST_CAP)
         .execute()
         .data
@@ -508,11 +515,17 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 # shown in the row's source line. Never dispatched on — see the
                 # migration's note on why `kind` is not an enum.
                 "kind": r.get("kind") or "",
-                # A document is EDITED after it is created, so the listing sorts
-                # and labels by last touch rather than birth — the ordering a
-                # library of living documents needs. `created_at` still rides
-                # along for anything that wants the birth date.
+                # A document is EDITED after it is created, so the library
+                # sorts by last touch rather than birth. The shared listing key
+                # `created_at` is what every consumer sorts on, so it carries
+                # the last-edit time — and the BIRTH date is emitted beside it
+                # under its own name rather than being silently discarded, so a
+                # surface that wants to say "Created 3 Aug" still can. (The two
+                # were previously collapsed into one key, which made a document
+                # edited today read as created today.)
                 "created_at": r.get("updated_at") or r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+                "born_at": r.get("created_at"),
                 "source": {
                     "kind": r.get("kind") or "",
                     "conversation_id": cid,

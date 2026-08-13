@@ -796,6 +796,11 @@ def test_custom_artifact_sorts_by_last_edit_not_birth(artifacts_env, monkeypatch
                           updated_at="2026-08-12T00:00:00Z")
     items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
     assert [i["title"] for i in items] == ["old but just edited", "newer but untouched"]
+    # The BIRTH date survives under its own name rather than being overwritten
+    # by the sort key. Collapsing the two made a document edited today read as
+    # created today, wherever a surface labels a row "Created <date>".
+    assert items[0]["born_at"].startswith("2026-08-01")
+    assert items[0]["updated_at"].startswith("2026-08-13")
 
 
 def test_custom_artifact_names_the_chat_it_was_born_in(artifacts_env, monkeypatch):

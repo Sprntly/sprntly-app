@@ -81,9 +81,13 @@ create table if not exists custom_artifacts (
     updated_at      timestamptz not null default now()
 );
 
--- The artifacts listing: newest-first per company.
-create index if not exists custom_artifacts_company_idx
-    on custom_artifacts (company_id, id desc);
+-- The artifacts listing: most-recently-EDITED first per company. Ordered on
+-- `updated_at` rather than `id` because a library of living documents is
+-- browsed by last touch, and the listing applies its 200-row cap in the query —
+-- so ordering by id would drop an old-but-recently-edited document before the
+-- sort could raise it.
+create index if not exists custom_artifacts_company_updated_idx
+    on custom_artifacts (company_id, updated_at desc);
 
 -- "which documents hang off this chat" — the thread-resume read.
 create index if not exists custom_artifacts_conversation_idx

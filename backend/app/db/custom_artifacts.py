@@ -50,8 +50,26 @@ STATUSES = ("generating", "ready", "failed")
 # it (a long leadership update is ~10-20KB of HTML) and small enough that a
 # runaway paste or a looping generation cannot write a megabyte row into the
 # shared database. Enforced here rather than in the route so every writer —
-# HTTP save, LLM generation, future importers — is covered by one rule.
+# HTTP save, LLM generation, future importers — is covered by one rule, and the
+# route imports THIS constant rather than declaring its own so the two ceilings
+# cannot drift apart.
 MAX_BODY_CHARS = 400_000
+
+
+class BodyTooLarge(ValueError):
+    """A body exceeded `MAX_BODY_CHARS`.
+
+    RAISED, never truncated. Slicing an over-long document to fit is the worst
+    available outcome: the write succeeds, the user is told nothing, and they
+    discover later that the end of their document is gone. Callers turn this
+    into a 413.
+    """
+
+
+def _checked_body(body_html: str) -> str:
+    if len(body_html) > MAX_BODY_CHARS:
+        raise BodyTooLarge(f"body is {len(body_html)} chars (max {MAX_BODY_CHARS})")
+    return body_html
 
 
 class VersionConflict(RuntimeError):
@@ -91,7 +109,7 @@ def create_artifact(
         "conversation_id": conversation_id,
         "kind": (kind or "").strip()[:120],
         "title": (title or "").strip()[:300],
-        "body_html": (body_html or "")[:MAX_BODY_CHARS],
+        "body_html": _checked_body(body_html or ""),
         "status": status if status in STATUSES else "ready",
         "created_by": created_by,
         "updated_by": created_by,
@@ -186,7 +204,7 @@ def update_artifact(
     if kind is not None:
         patch["kind"] = kind.strip()[:120]
     if body_html is not None:
-        patch["body_html"] = body_html[:MAX_BODY_CHARS]
+        patch["body_html"] = _checked_body(body_html)
 
     # A pure-metadata write (nothing but updated_at/updated_by) must not burn a
     # version — the counter exists to detect CONTENT divergence, and bumping it
@@ -231,12 +249,23 @@ def finish_artifact(
     and a version check here would fail the generation rather than protect
     anything.
     """
+    current = get_artifact(company_id, artifact_id)
+    if current is None:
+        return
     require_client().table("custom_artifacts").update(
         {
             "title": (title or "").strip()[:300],
-            "body_html": (body_html or "")[:MAX_BODY_CHARS],
+            "body_html": _checked_body(body_html or ""),
             "status": "ready",
             "error": None,
+            # THE VERSION MOVES, and it has to. An editor that opened the row
+            # while it was still `generating` holds version 1 and an empty
+            # buffer; PATCH is not gated on status, so without this bump that
+            # editor's next autosave passes the compare-and-set and replaces
+            # the freshly written document with its empty buffer — precisely
+            # the lost update the counter exists to catch. Bumping makes that
+            # save 409 and offer the generated text instead.
+            "version": int(current.get("version") or 1) + 1,
             "updated_at": utc_now(),
         }
     ).eq("company_id", company_id).eq("id", artifact_id).execute()

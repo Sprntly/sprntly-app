@@ -250,6 +250,33 @@ def test_oversized_body_is_refused_not_truncated(docs_env, monkeypatch):
     assert r.status_code == 413
 
 
+def test_a_body_that_grows_past_the_ceiling_WHILE_SANITIZING_is_refused(
+    docs_env, monkeypatch
+):
+    """The size that matters is the size that gets STORED.
+
+    Sanitizing ESCAPES `&`, `<` and `>`, so a body can grow ~5x on the way
+    through. A ceiling checked on the RAW input therefore passes a document
+    that the storage layer then has to cut: 399,007 chars of `&` sanitize to
+    1,995,035, and the user gets a 200 OK with ~80% of their document gone.
+    The `"x" * 400_001` case above cannot catch this, because `x` does not
+    expand — which is exactly why it passed while the bug was live.
+    """
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx).json()["id"]
+    r = ctx.client.patch(
+        f"/v1/custom-artifacts/{doc_id}", json={"body_html": "&" * 399_007}
+    )
+    assert r.status_code == 413
+    # And nothing was written — a refused save must not half-land.
+    assert ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()["body_html"] == ""
+
+
+def test_create_with_an_expanding_oversized_body_is_refused_too(docs_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    assert _create(ctx, body_html="&" * 399_007).status_code == 413
+
+
 # ─── Delete ──────────────────────────────────────────────────────────────────
 
 def test_delete_removes_it(docs_env, monkeypatch):
@@ -380,3 +407,31 @@ def test_unauthenticated_requests_are_rejected(docs_env, monkeypatch):
     doc_id = _create(ctx).json()["id"]
     r = ctx.client.get(f"/v1/custom-artifacts/{doc_id}", headers={"Authorization": ""})
     assert r.status_code in (401, 403)
+
+
+def test_finishing_a_generation_bumps_the_version(docs_env, monkeypatch):
+    """A completed generation must invalidate an editor that opened the row
+    while it was still writing.
+
+    PATCH is not gated on `status`, so that editor holds version 1 and an EMPTY
+    buffer. If `finish_artifact` left the version alone, its next autosave would
+    pass the compare-and-set and replace the freshly generated document with
+    nothing — the exact lost update the counter exists to catch.
+    """
+    from app.db.custom_artifacts import create_artifact, finish_artifact
+
+    ctx = company_client(monkeypatch)
+    row = create_artifact(ctx.company_id, kind="memo", status="generating")
+    assert row["version"] == 1
+
+    finish_artifact(ctx.company_id, row["id"], title="Q3", body_html="<p>generated</p>")
+
+    # The stale editor's save is now refused instead of silently winning.
+    stale = ctx.client.patch(
+        f"/v1/custom-artifacts/{row['id']}",
+        json={"body_html": "", "base_version": 1},
+    )
+    assert stale.status_code == 409
+    assert ctx.client.get(
+        f"/v1/custom-artifacts/{row['id']}"
+    ).json()["body_html"] == "<p>generated</p>"

@@ -40,7 +40,14 @@ from __future__ import annotations
 import logging
 import re
 
-from bs4 import BeautifulSoup, Comment, NavigableString
+from bs4 import BeautifulSoup, NavigableString
+
+# From `bs4.element`, not the package root: `PreformattedString` is not
+# re-exported by `bs4/__init__.py` (checked against the pinned beautifulsoup4),
+# so the top-level import raises ImportError at startup.
+# Its subclasses are exactly the node types this module must drop:
+# CData, ProcessingInstruction, Comment, Declaration, Doctype.
+from bs4.element import PreformattedString
 
 logger = logging.getLogger(__name__)
 
@@ -123,8 +130,24 @@ def sanitize_artifact_html(html: str) -> str:
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Comments can carry conditional-comment payloads and are never content.
-    for node in soup.find_all(string=lambda s: isinstance(s, Comment)):
+    # EVERY node bs4 stores as a PreformattedString goes: comments, CDATA
+    # sections, processing instructions, declarations and doctypes.
+    #
+    # This is a sanitizer BYPASS, not tidiness, and it is the sharpest edge in
+    # this module. `str(soup)` re-emits all of these RAW AND UNESCAPED, and the
+    # parser's idea of where they end is not the browser's. Python's
+    # `html.parser` ends a CDATA section at `]]>`, but HTML5 has no CDATA in
+    # HTML content: a browser enters the *bogus comment* state and ends it at
+    # the FIRST `>`. So this survived sanitization untouched —
+    #
+    #     <p>hi</p><![CDATA[x><img src=x onerror=alert(1)>]]>
+    #
+    # — and the browser reads `<![CDATA[x>` as a comment and the `<img>` after
+    # it as a live element with a live `onerror`. `<?php … ?>` smuggles a tag
+    # through the same way. Extracting the whole class rather than naming
+    # `Comment` alone is the fix, and matches this module's stated posture:
+    # allowlist what is understood, drop what is not.
+    for node in soup.find_all(string=lambda s: isinstance(s, PreformattedString)):
         node.extract()
 
     for tag in soup.find_all(True):
@@ -168,9 +191,17 @@ def sanitize_artifact_html(html: str) -> str:
 
         # Any surviving link opens out of the app, so it must not hand the
         # opener a window handle back into it.
-        if name == "a" and tag.attrs.get("href"):
-            if tag.attrs.get("target") == "_blank":
-                tag.attrs["rel"] = "noopener noreferrer"
+        #
+        # `rel` is attached whenever a target is present AT ALL, not only for
+        # `_blank`. Browsers imply `noopener` for `_blank` and for nothing else,
+        # so `<a href="https://evil.test" target="x">` would otherwise open with
+        # a working `window.opener` that can navigate the Sprntly tab to a
+        # phishing page. Any target other than `_blank` is also rewritten to it:
+        # a named window has no use in a document and is only a way to keep a
+        # handle.
+        if name == "a" and tag.attrs.get("href") and tag.attrs.get("target"):
+            tag.attrs["target"] = "_blank"
+            tag.attrs["rel"] = "noopener noreferrer"
 
     return str(soup)
 
