@@ -1939,6 +1939,14 @@
     display: none;
   }
 
+  /* Collapsed rail shows ONLY the sync button in the user row (product call
+     2026-08-13): the avatar is pure identity chrome and earns no rail slot,
+     while sync is an action that must stay reachable in both modes. Expanded
+     brings the avatar + name back. */
+  .sidebar--collapsed .sb-rail-avatar {
+    display: none;
+  }
+
   /* ── Rail layout (collapsed) ── */
   .sb-rail-header {
     display: flex;
@@ -2218,6 +2226,61 @@
     display: flex;
     align-items: center;
     justify-content: center;
+  }
+
+  /* Sync-your-data button (2026-08-13). Lives in the user row: expanded, the
+     username's ellipsis (flex: 1 1 auto; min-width: 0) squeezes so this stays
+     pinned on the right whatever the name length; collapsed, the avatar and
+     name are hidden (see .sidebar--collapsed .sb-rail-avatar) and this is the
+     row's only visible element — a lone rail icon. */
+  .sb-sync-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--nav-text);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-sync-btn:hover {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-sync-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .sb-sync-btn:hover .nav-tooltip {
+    opacity: 1;
+    transform: translate(4px, -50%);
+  }
+
+  .sb-sync-btn--running svg {
+    animation: sb-sync-spin 0.9s linear infinite;
+  }
+
+  /* Done/failed tints: raw hex like the rest of the nav palette (the nav's
+     dark-green surface has its own little world of colors up in :root; the
+     app-wide --green/--danger tokens are tuned for light surfaces). */
+  .sb-sync-btn--done {
+    color: #8fe0b0;
+  }
+
+  .sb-sync-btn--failed {
+    color: #f0a3a3;
+  }
+
+  @keyframes sb-sync-spin {
+    to { transform: rotate(360deg); }
   }
 
   /* Hide expanded-only elements when collapsed */

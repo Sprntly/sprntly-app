@@ -7,7 +7,8 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser, IconRefresh, IconCheck } from "@tabler/icons-react"
+import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 import { publicPath } from "../../lib/public-path"
@@ -23,7 +24,7 @@ interface SidebarProps {
 // Only this one trigger is withheld. Flip to true to put the button back.
 const SHOW_SIDEBAR_SEARCH = false
 
-export function Sidebar(_props: SidebarProps = {}) {
+export function Sidebar({ activeCompany }: SidebarProps = {}) {
   const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
@@ -36,6 +37,23 @@ export function Sidebar(_props: SidebarProps = {}) {
     setActiveWorkspace,
   } = useWorkspace()
   const [feedbackOpen, setFeedbackOpen] = useState(false)
+  // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
+  // active dataset — the same run the scheduler triggers, not a bespoke
+  // sync-all. The backend collapses repeat clicks onto the in-flight run
+  // (routes/pipeline.py _INFLIGHT), so the button never stacks runs; the
+  // spinning state is what a second click sees instead.
+  const { runStatus, isTriggering, showCompleted, triggerRun } = usePipelineStatus(activeCompany ?? "")
+  const syncRunning = isTriggering || runStatus?.status === "running"
+  const syncFailed = !syncRunning && runStatus?.status === "failed"
+  const lastSyncedAgo =
+    runStatus?.status === "completed" ? relTimeAgo(runStatus.completed_at) : null
+  const syncTitle = syncRunning
+    ? "Syncing your data…"
+    : syncFailed
+      ? "Last sync failed — click to retry"
+      : lastSyncedAgo
+        ? `Sync your data — last synced ${lastSyncedAgo}`
+        : "Sync your data"
   // Workspace switcher (multi-workspace 2026-07): the brand name doubles as
   // the trigger; the menu lists the caller's workspaces + a create affordance.
   const [wsMenuOpen, setWsMenuOpen] = useState(false)
@@ -301,19 +319,58 @@ export function Sidebar(_props: SidebarProps = {}) {
       </div>
       <div className="divider-nav" />
 
-      {/* User identity row — display only. Signing out moved to Settings →
-          Account, so no sign-out affordance here (icon or avatar click). */}
+      {/* User identity row — the avatar/name are display only (signing out
+          moved to Settings → Account; no sign-out affordance on icon or
+          avatar click). The sync button is the one interactive element. */}
       <div className="sb-rail-user">
         <span className="sb-rail-avatar" title={displayName}>
           {initials}
         </span>
         <span className="sb-rail-username">{displayName}</span>
+        {/* Sync-your-data lives here so it's reachable from EVERY screen in
+            both rail modes: expanded, the username's ellipsis truncation
+            (min-width: 0) keeps this pinned visible on the right however long
+            the name is; collapsed, the avatar and name are CSS-hidden and this
+            is the user row's ONLY visible element (product call 2026-08-13 —
+            identity chrome earns no rail slot, an action does). The row around
+            it stays a display-only identity chip — this button is the only
+            interactive element in it. */}
+        <button
+          type="button"
+          className={`sb-sync-btn${syncRunning ? " sb-sync-btn--running" : ""}${showCompleted ? " sb-sync-btn--done" : ""}${syncFailed ? " sb-sync-btn--failed" : ""}`}
+          title={syncTitle}
+          aria-label="Sync your data"
+          aria-busy={syncRunning || undefined}
+          disabled={!activeCompany}
+          data-testid="sidebar-sync"
+          onClick={() => {
+            if (!syncRunning) void triggerRun()
+          }}
+        >
+          {showCompleted ? <IconCheck size={15} /> : <IconRefresh size={15} />}
+          <span className="nav-tooltip">{syncTitle}</span>
+        </button>
       </div>
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
       <CreateWorkspaceModal open={createWsOpen} onClose={() => setCreateWsOpen(false)} />
     </aside>
   )
+}
+
+// Coarse relative time for the sync tooltip ("last synced 2h ago"). The
+// staleness hint is the passive replacement for a sync-reminder nudge (product
+// call 2026-08-13: no notifications), so it only needs day-level precision.
+function relTimeAgo(iso: string | null): string | null {
+  if (!iso) return null
+  const then = Date.parse(iso)
+  if (Number.isNaN(then)) return null
+  const mins = Math.floor((Date.now() - then) / 60_000)
+  if (mins < 1) return "just now"
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
 }
 
 function ChevronIcon({ collapsed }: { collapsed: boolean }) {
