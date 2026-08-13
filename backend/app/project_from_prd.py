@@ -39,6 +39,7 @@ import logging
 from app.db.client import require_client
 from app.db.conversations import bind_conversation_to_project
 from app.db.projects import add_artifact, create_project
+from app.project_origin_seed import seed_project_origin_memory
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,18 @@ def maybe_auto_create_project_for_prd(
         project_id = project["id"]
         add_artifact(project_id, "prd", prd_id)
         bind_conversation_to_project(conversation_id, project_id, company_id, user_id)
+        # Seed the NEW project's memory with the origin context — the
+        # decisions/reasoning from the originating chat + a brief of what the
+        # PRD is. Best-effort and self-contained: it never raises, so a
+        # summarizer failure can't turn a created project into a None return
+        # (this runs ONLY in the new-project branch — an already-bound
+        # conversation returned above and is never re-seeded).
+        seed_project_origin_memory(
+            project_id=project_id,
+            prd_id=prd_id,
+            prd_title=prd_title,
+            conversation_id=conversation_id,
+        )
         return project_id
     except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
         logger.warning(

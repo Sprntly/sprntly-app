@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 
@@ -252,6 +253,13 @@ acknowledgements ("thanks", "sounds good", "got it"), plain questions with \
 no answer yet, or ephemeral status updates ("still looking into it", \
 "will check tomorrow") — for these, set action to "none".
 
+Sprntly's OWN descriptions of what IT can do, what Sprntly the product can \
+do, or its role/capabilities/meta-behaviour — for example "I'm your project \
+agent", "I can edit the PRD", "here's what I can do", "I can read your \
+memory and artifacts" — are NOT durable project facts. These describe the \
+ASSISTANT, not the project; a teammate learns nothing about the PROJECT \
+from them. Set action to "none" for these too, exactly like small talk.
+
 Each existing entry is tagged with its source: "agent" (something Sprntly \
 itself recorded previously) or "user" (something a teammate typed by \
 hand). Choose exactly one action:
@@ -286,6 +294,41 @@ _PROMOTE_SCHEMA = {
     "required": ["action", "target_entry_id", "body"],
     "additionalProperties": False,
 }
+
+
+# Deterministic self-reference guard (backstop) — mirrors the "update"
+# path's belt-and-braces shape: a prompt rule (above) PLUS a deterministic
+# check that fires regardless of what the classifier returned, exactly like
+# `update_agent_promoted_entry`'s own `promoted_by='agent'` WHERE-clause
+# backstops its own prompt rule. Casefolded, first-person/agent-subject
+# capability phrasing ONLY — the classifier writes `body` as a SUMMARIZED
+# statement in its own words (per `_PROMOTE_SYSTEM` above), so a genuine
+# project fact is phrased in third person ("the team decided…", "the API
+# rate limit is…") and never matches this pattern set. Kept small and
+# documented; AC-8's non-regression test is the guard against over-broad
+# matching on real project facts.
+_SELF_CAPABILITY_PATTERNS = (
+    re.compile(r"\bi can(?:not|['’]t)?\b"),  # "I can…" / "I cannot…" / "I can't…"
+    re.compile(r"\bi['’]m your\b"),
+    re.compile(r"\bi am your\b"),
+    re.compile(r"\bas your\b[^.]{0,40}\bassistant\b"),
+    re.compile(r"\bsprntly can\b"),
+    re.compile(r"\bmy role\b"),
+    re.compile(r"\bi have tools\b"),
+)
+
+
+def _is_self_capability(body: str) -> bool:
+    """True when `body` (the classifier's OWN generated candidate text) is
+    Sprntly describing ITS OWN capabilities, role, or meta-behaviour rather
+    than a genuine project fact — the deterministic backstop applied in
+    `maybe_promote_turn` AFTER the classifier returns but BEFORE any write,
+    so a mis-classification can't poison memory (defense in depth alongside
+    the `_PROMOTE_SYSTEM` exclusion rule)."""
+    if not body:
+        return False
+    lowered = body.casefold()
+    return any(pattern.search(lowered) for pattern in _SELF_CAPABILITY_PATTERNS)
 
 
 def _render_existing_entries(entries: list[dict]) -> str:
@@ -387,6 +430,19 @@ def maybe_promote_turn(project_id: int, conversation_id: int, transcript: str) -
         action = str(out.get("action") or "").strip().lower()
         body = str(out.get("body") or "").strip()
         target_entry_id = out.get("target_entry_id")
+
+        if action in ("new", "update") and _is_self_capability(body):
+            # Deterministic backstop — fires REGARDLESS of what the
+            # classifier decided, so a mis-classification (the classifier
+            # forced/tricked into "new" or "update" on a self-capability
+            # excerpt) still can't poison memory. Coerced to a no-op: no
+            # write, no regen, exactly as if the classifier had said "none".
+            logger.info(
+                "memory_promotion_self_capability_skipped project_id=%s "
+                "conversation_id=%s",
+                project_id, conversation_id,
+            )
+            return None
 
         if action == "update":
             if not body or target_entry_id is None:

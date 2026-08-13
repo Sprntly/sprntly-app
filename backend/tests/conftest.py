@@ -1898,6 +1898,62 @@ def _no_background_memory_synthesis(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_background_origin_seed(request, monkeypatch):
+    """Keep the project-origin-seed's summarizer call from firing a REAL
+    Anthropic request.
+
+    `maybe_auto_create_project_for_prd`'s new-project branch calls
+    `seed_project_origin_memory`, which makes ONE bounded `call_json` call —
+    not just from the tests that mean to exercise the seed itself. ANY test
+    that creates a `prd_auto` project (via `/v1/prd/generate-from-task`,
+    `/v1/prd/import`, or the helper called directly — e.g.
+    `test_project_from_prd.py`'s existing suite) would otherwise fire a real
+    Anthropic request using the suite's fake API key — the same hazard class
+    `_no_background_memory_synthesis`/`_no_background_interjection_gate`
+    above exist for. Confirmed empirically: without this guard, the existing
+    `test_project_from_prd.py` suite still passes (the seed's own AD-P7
+    fallback swallows the failed call), but it does so only because this
+    sandbox has no network egress — a CI runner with egress would instead
+    round-trip a real 401 against Anthropic on every such test, or worse,
+    spend real credit if a valid key ever leaked into the test environment.
+
+    Defaults to a blank brief/decisions so the seed's own deterministic
+    PRD-derived fallback brief still writes (never an empty-memory surprise
+    for an unrelated test that happens to assert on entry counts). A test
+    that means to drive the seed itself (`test_project_origin_seed.py`)
+    patches `app.project_origin_seed.call_json` directly; that patch runs
+    AFTER this autouse fixture and wins for that test (same ordering the
+    sibling guards rely on). Opt out with
+    `@pytest.mark.real_origin_seed_synthesis` — the dedicated real-LLM live
+    suite drives an UNSTUBBED `call_json` instead."""
+    if request.node.get_closest_marker("real_origin_seed_synthesis"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_json(*, system, user, model, schema=None, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return {"brief_summary": "", "decisions": []}
+
+    try:
+        mod = importlib.import_module("app.project_origin_seed")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_background_interjection_gate(request, monkeypatch):
     """Keep a non-mention group turn from firing a REAL Anthropic request.
 

@@ -131,6 +131,27 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "of that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_project_origin_seed_live.py", "RUN_PROJECT_ORIGIN_SEED_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the project-"
+        "origin-seed writer: proves a real seed call actually lands a "
+        "project_memory_entries row through the real supabase-py client and "
+        "that the promote -> schedule_regen -> regenerate_summary loop "
+        "actually updates summary_md (not merely flips stale) — a fully-"
+        "stubbed LLM cannot prove either. Deterministic backstop: "
+        "test_project_origin_seed.py mocks call_json/add_agent_promoted_"
+        "entry/schedule_regen/get_prd/_read_turns against a fake DB and "
+        "covers the writer's contract (brief+decisions shape, the one-regen "
+        "call, the summarizer-failure fallback, the no-title unseeded case, "
+        "never-raises, the one cost line, and the DRY reuse-not-fork check) "
+        "in the fast lane; this suite is the real-DB/real-LLM proof, run "
+        "locally against the dev rig when touching this writer."
+    ),
+    ("test_project_origin_seed_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_ORIGIN_SEED_LIVE above — both "
+        "variables gate the identical test, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
     ("test_ask_project_promotion.py", "RUN_ASK_PROJECT_PROMOTION_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the individual-"
         "chat memory-promotion hook wired into ask_job_runner.run_ask_job: "
