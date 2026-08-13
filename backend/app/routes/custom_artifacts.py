@@ -67,6 +67,19 @@ router = APIRouter(prefix="/v1/custom-artifacts", tags=["custom-artifacts"])
 # 1,995,035, which the storage layer then sliced back to 400,000 — 80% of the
 # document silently discarded behind a 200 OK. The size that matters is the
 # size that gets STORED, so both writers below measure the sanitized string.
+#
+# A GENEROUS RAW GUARD STILL RUNS FIRST, though, because "measure after
+# sanitizing" means the parser sees the input before anything bounds it: a
+# 100MB body would be buffered by FastAPI, built into a full BeautifulSoup
+# tree and re-serialised before the real ceiling could refuse it. The multiple
+# is deliberately loose (escaping expands by at most ~5x) so it can only ever
+# catch input that could not have fit anyway.
+_RAW_BODY_LIMIT = MAX_BODY_CHARS * 8
+
+
+def _guard_raw_size(body_html: str | None) -> None:
+    if body_html is not None and len(body_html) > _RAW_BODY_LIMIT:
+        raise HTTPException(413, "Document is too large")
 
 
 def _public(row: dict, *, with_body: bool = True) -> dict:
@@ -123,6 +136,7 @@ def create(
     # to another tenant's chat and read that chat's title back out of their own
     # library. Storing only ids the caller owns closes it at the source, which
     # also covers every future reader of the column.
+    _guard_raw_size(body.body_html)
     if body.conversation_id is not None and not conversation_belongs_to_company(
         body.conversation_id, company.company_id
     ):
@@ -191,6 +205,7 @@ def update(
     moved it and offer the current text, rather than dropping the user's work
     on the floor with a bare error.
     """
+    _guard_raw_size(body.body_html)
     # No ownership pre-read here: `update_artifact` resolves the row
     # company-filtered and returns None for one that is absent OR foreign,
     # which becomes the same 404 below. A pre-read would be a second round trip

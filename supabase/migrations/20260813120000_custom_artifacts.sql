@@ -32,9 +32,13 @@
 -- — explicit per-person sharing is a later slice, and adding a column for it
 -- now would be a guess at a design nobody has made yet.
 --
--- `workspace_id` records which workspace it was written in and is NULLABLE for
--- the same reason it is on ticket_sets: a background generation may carry no
--- workspace context. It is provenance, not a boundary.
+-- `workspace_id` is RESERVED, and currently always NULL. It exists because
+-- `reports` and `ticket_sets` both carry one and a document is the same shape
+-- of thing, so adding it later would mean a migration for a column those
+-- tables already have. Nothing writes it today: `require_company` resolves a
+-- COMPANY, not a workspace, and inventing a value would be worse than a
+-- truthful NULL. Provenance, never a boundary — reads are company-scoped, so
+-- no query filters on it and none should start without an explicit decision.
 --
 -- `conversation_id` is the chat the document was born in. A LINK, not
 -- ownership (`on delete set null`): deleting the chat leaves the document in

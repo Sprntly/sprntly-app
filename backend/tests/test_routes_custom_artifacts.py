@@ -435,3 +435,53 @@ def test_finishing_a_generation_bumps_the_version(docs_env, monkeypatch):
     assert ctx.client.get(
         f"/v1/custom-artifacts/{row['id']}"
     ).json()["body_html"] == "<p>generated</p>"
+
+
+def test_saving_into_a_deleted_document_reports_gone_not_conflict(docs_env, monkeypatch):
+    """A deleted row also matches zero rows on a compare-and-set — but it is
+    NOT a conflict.
+
+    The conflict response exists to say "here is their version"; for a deleted
+    document there is no version to show, and a 409 carrying `current: null`
+    leaves the editor telling the user a colleague overwrote them when in fact
+    the document is gone. Those want different words and different buttons.
+    """
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, body_html="<p>a</p>").json()["id"]
+    ctx.client.delete(f"/v1/custom-artifacts/{doc_id}")
+
+    r = ctx.client.patch(
+        f"/v1/custom-artifacts/{doc_id}",
+        json={"body_html": "<p>mine</p>", "base_version": 1},
+    )
+    assert r.status_code == 404
+
+
+def test_the_storage_layer_sanitizes_even_when_a_caller_forgets(docs_env, monkeypatch):
+    """The chokepoint is the db module, not the route.
+
+    Callers do sanitize, but "every writer remembers" is a convention, and this
+    content renders INLINE in a contenteditable where the sanitizer is the only
+    defence. A future importer or backfill that writes directly must not be
+    able to store a live payload — so the guarantee lives where the write does.
+    """
+    from app.db.custom_artifacts import create_artifact, get_artifact
+
+    ctx = company_client(monkeypatch)
+    row = create_artifact(ctx.company_id, body_html="<p>ok</p><script>alert(1)</script>")
+    stored = get_artifact(ctx.company_id, row["id"])
+    assert "<script" not in stored["body_html"]
+    assert "ok" in stored["body_html"]
+
+
+def test_an_absurdly_large_body_is_refused_before_it_is_parsed(docs_env, monkeypatch):
+    """Measuring after sanitizing means the PARSER sees the input first, so a
+    generous raw guard has to run ahead of it — otherwise a 100MB body is
+    buffered, built into a full document tree and re-serialised before anything
+    refuses it."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx).json()["id"]
+    r = ctx.client.patch(
+        f"/v1/custom-artifacts/{doc_id}", json={"body_html": "x" * (400_000 * 8 + 1)}
+    )
+    assert r.status_code == 413

@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from app.custom_artifact_html import sanitize_artifact_html
 from app.db.client import require_client, retry_on_disconnect, utc_now
 
 logger = logging.getLogger(__name__)
@@ -67,9 +68,23 @@ class BodyTooLarge(ValueError):
 
 
 def _checked_body(body_html: str) -> str:
-    if len(body_html) > MAX_BODY_CHARS:
-        raise BodyTooLarge(f"body is {len(body_html)} chars (max {MAX_BODY_CHARS})")
-    return body_html
+    """Sanitize, then bound. Every write goes through here.
+
+    THE SANITIZER IS CALLED AT THE STORAGE CHOKEPOINT, not only by callers.
+    Callers do sanitize, and the module docstring used to say so — but "every
+    writer remembers" is a convention, and this content is rendered INLINE in a
+    contenteditable where the sanitizer is the sole defence. A future importer,
+    a backfill script or a new route that forgets is a stored-XSS bug; here it
+    is structurally impossible. `sanitize_artifact_html` is idempotent, so
+    callers that already sanitize pay nothing for the second pass.
+
+    Bounding happens AFTER sanitizing because the sanitized string is what gets
+    stored — see the route's note on `&`-expansion.
+    """
+    cleaned = sanitize_artifact_html(body_html)
+    if len(cleaned) > MAX_BODY_CHARS:
+        raise BodyTooLarge(f"body is {len(cleaned)} chars (max {MAX_BODY_CHARS})")
+    return cleaned
 
 
 class VersionConflict(RuntimeError):
@@ -177,7 +192,27 @@ def list_artifacts_for_conversation(
 
 
 @retry_on_disconnect
-def update_artifact(
+def _current_version(company_id: str, artifact_id: int) -> int | None:
+    """Just the version (None when absent/foreign).
+
+    `get_artifact` selects `*`, which on this table means up to 400KB of
+    `body_html` — pulled back on EVERY debounced autosave purely to compute
+    `version + 1`. One column instead.
+    """
+    rows = (
+        require_client().table("custom_artifacts")
+        .select("version")
+        .eq("company_id", company_id)
+        .eq("id", artifact_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return int(rows[0]["version"]) if rows else None
+
+
+def update_artifact(  # NOT @retry_on_disconnect — see below
     company_id: str,
     artifact_id: int,
     *,
@@ -197,6 +232,20 @@ def update_artifact(
     and `VersionConflict` is raised carrying the current row. When omitted the
     write is unconditional (last-write-wins) — see the module docstring for why
     both modes exist.
+
+    DELIBERATELY NOT `@retry_on_disconnect`, unlike every other function here.
+    That decorator retries on `httpx.ReadError`, which fires AFTER the request
+    was sent — so on a compare-and-set it can re-run a write that already
+    landed, find its own bumped version, match zero rows, and report a
+    CONFLICT for the user's own successful save. The editor would then tell
+    them a colleague overwrote them and offer to discard text that is already
+    stored: strictly worse than the transient error the retry exists to hide.
+
+    A compare-and-set is not idempotent, so it cannot be transparently retried.
+    A transport failure surfaces as an error and the editor retries from a
+    fresh read, which is both correct and safe. The unconditional path (no
+    `base_version`) IS idempotent, but it shares this function, and one rule
+    that is always right beats two that depend on an argument.
     """
     patch: dict[str, Any] = {"updated_at": utc_now(), "updated_by": updated_by}
     if title is not None:
@@ -211,11 +260,11 @@ def update_artifact(
     # on a no-op edit would fail a colleague's next save for no reason.
     content_changed = any(k in patch for k in ("title", "kind", "body_html"))
 
-    current = get_artifact(company_id, artifact_id)
-    if current is None:
+    current_version = _current_version(company_id, artifact_id)
+    if current_version is None:
         return None
     if content_changed:
-        patch["version"] = int(current.get("version") or 1) + 1
+        patch["version"] = current_version + 1
 
     q = (
         require_client().table("custom_artifacts")
@@ -230,9 +279,19 @@ def update_artifact(
     rows = q.execute().data or []
     if not rows:
         if base_version is not None:
-            raise VersionConflict(get_artifact(company_id, artifact_id))
+            # Zero rows matched, and there are THREE ways to get here. Re-read
+            # before deciding which, because the three want different answers:
+            after = get_artifact(company_id, artifact_id)
+            if after is None:
+                # Deleted concurrently. NOT a conflict: the editor's conflict UI
+                # exists to show "here is their version", and there is no
+                # version to show. Reported as absent → 404, so the user is told
+                # the document is gone rather than that a colleague overwrote
+                # them.
+                return None
+            raise VersionConflict(after)
         # No base version and no matching row: the document was deleted between
-        # the read above and this write. Absent, not a conflict.
+        # the version read above and this write. Absent, not a conflict.
         return None
     return rows[0]
 
