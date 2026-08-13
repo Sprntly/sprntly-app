@@ -939,11 +939,25 @@ export type ChatIntentEnvelope = {
      *  conversation's); the backend downgrades a target-less or format-less
      *  request to `answer` before it ever reaches a surface. */
     | "change_prd_template"
+    /** Write a document of any kind into the shared "Others" library —
+     *  dispatches POST /v1/custom-artifacts/generate with `task` +
+     *  `artifact_kind`. Needs no target PRD: a leadership update stands alone.
+     *
+     *  This arrived LATE relative to the backend: the planner could decide it
+     *  and the endpoint could execute it for a whole release before the
+     *  envelope was allowed to carry it, during which the chat answered in
+     *  prose and told users it had written a document that was never created.
+     *  An intent the client cannot see is an intent that does not exist. */
+    | "create_artifact"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
   /** edit_prd: the change to apply, self-contained. */
   instruction: string | null
+  /** create_artifact: WHAT KIND of document, in the user's own words
+   *  ("leadership update"). Free text — the executor stores it as a label and
+   *  nothing branches on it. Null on every other intent. */
+  artifact_kind: string | null
   /** open_artifact: which existing artifact kind to bring up. */
   artifact_type: OpenArtifactKind | null
   /** open_artifact: the subject the user named the document by. */
@@ -5082,6 +5096,15 @@ export const customArtifactsApi = {
       .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
       .then((r) => r.artifacts),
   get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** The documents born in one chat, newest first — what re-attaches a thread's
+   *  document to its panel after a reload. Bodies omitted; opening one fetches
+   *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
+  listForConversation: (conversationId: number) =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>(
+        `/v1/custom-artifacts/by-conversation/${conversationId}`,
+      )
+      .then((r) => r.artifacts),
   create: (body: {
     kind?: string
     title?: string

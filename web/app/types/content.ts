@@ -741,6 +741,14 @@ export interface AppContentState {
    *  first ask persists). Reading that null as "standalone" is what used to
    *  render the PREVIOUS thread's document inside an empty new chat. */
   reportFocusStandalone: boolean
+  /** The team document (custom artifact) open in the panel's Document tab, or
+   *  null when this thread has none — which is the normal state, and what
+   *  keeps the tab hidden. Set by the chat's `create_artifact` dispatch. */
+  documentId: number | null
+  /** True from the moment a document is requested until its first poll shows
+   *  it ready. Purely presentational: the row's own `status` is the truth, and
+   *  this only avoids a flash of "empty document" before the first fetch. */
+  documentGenerating: boolean
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */
