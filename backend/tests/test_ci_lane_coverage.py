@@ -359,6 +359,31 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "and is unrunnable in any CI lane on either count. See that entry for the "
         "deterministic fast-lane backstops."
     ),
+    ("test_projects_prd_chat_edit_route_live.py", "RUN_PROJECT_CHAT_EDIT_LIVE"): (
+        "Real local-Supabase + real-LLM round-trip for "
+        "POST /v1/projects/{id}/prd/chat-edit — the private project chat's "
+        "PRD-edit write path, through the REAL route: a genuine cross-project "
+        "prd_id (same company, sibling project) writes ZERO rows and is refused "
+        "end to end, and an own-project edit persists (payload_md changes, "
+        "exactly one prd_versions snapshot). Needs BOTH a live LLM "
+        "(ANTHROPIC_API_KEY, the scoped editor calls the model) and a real "
+        "Postgres fan-out (list_artifacts_for_project) a fake in-memory store "
+        "cannot exercise. Deterministic backstops run every PR in the fast "
+        "lane: test_project_chat_edit.py mutation-proofs the identical ★ gate "
+        "(cross-project/cross-tenant/gate-error -> zero rows, own-project -> "
+        "one version) against monkeypatched dependencies, and "
+        "test_projects_prd_chat_edit_route.py covers the route's own gate "
+        "order (membership / flag / target-resolution) with a mocked editor; "
+        "this suite is the real-LLM+real-DB proof, run locally against the dev "
+        "rig when touching this route or the shared apply_chat_edit_scoped."
+    ),
+    ("test_projects_prd_chat_edit_route_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_CHAT_EDIT_LIVE above — the scoped editor "
+        "calls a real LLM in addition to the env flag, so it is gated on BOTH "
+        "(_RUN_LIVE = RUN_PROJECT_CHAT_EDIT_LIVE=='1' and "
+        "bool(ANTHROPIC_API_KEY)) and is unrunnable in any CI lane on either "
+        "count. See that entry for the deterministic fast-lane backstops."
+    ),
     ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
         "Needs a real local Supabase Realtime (the running Realtime service + "
         "a live websocket) to prove a `member.added` published through the "

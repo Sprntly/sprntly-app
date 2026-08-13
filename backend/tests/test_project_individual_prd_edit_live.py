@@ -158,7 +158,7 @@ def test_loop_actually_calls_a_read_tool(scene):
     payload = respond_individual(
         project_id=scene["p_a1"], dataset=scene["slug"], company_id=scene["company_id"],
         question="What PRDs are attached to this project? Name them.",
-        history=[], allow_prd_edit=False,
+        history=[],
         single_shot=lambda: {"answer": "(fallback)", "citations": []},
     )
     assert payload["answer"] and payload["answer"] != "(fallback)"

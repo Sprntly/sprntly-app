@@ -9,6 +9,7 @@ import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
@@ -3848,63 +3849,71 @@ export function ChatScreen() {
           .catch(() => null)
         if (envelope) {
           envelopeDecided = true
-          if (envelope.intent === "generate_tickets") {
-            if (docFile) {
-              setAttachments([])
-              importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
-              settlePendingSend()
-              return
-            }
-            if (activeTab?.prd) {
-              setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-              openContentPanel("tickets")
-              settlePendingSend()
-              return
-            }
-            // No PRD on this tab → a STANDALONE ticket set. The runner owns the
-            // scope patch, the generating flag and the panel open; this branch
-            // only decides that a set is what the user asked for.
-            if (ticketSetInFlightGuard()) return
-            ticketSetCommandFlow(trimmed, envelope.task?.trim() || trimmed)
-            settlePendingSend()
-            return
-          } else if (envelope.intent === "edit_prd") {
-            const targetPrd = envelope.prd_id ?? tabPrdId
-            if (!docFile && activeTab && targetPrd != null && envelope.instruction) {
-              void prdChatEditFlow(envelope.instruction, activeTab.id, targetPrd)
-              settlePendingSend()
-              return
-            }
-            // No resolvable target/instruction → grounded ask (it can at least
-            // answer about the document).
-          } else if (envelope.intent === "open_artifact") {
-            // OPEN, never generate. The two verbs are told apart in exactly one
-            // place (backend app/chat_intent.py's OPEN-vs-GENERATE rule) and
-            // this branch is the whole of the client's half: it can open a
-            // document, ask which one, or say there isn't one — it has no path
-            // into any generation flow, so a misfire here can never cost the
-            // user an unwanted PRD.
-            if (envelope.open) {
-              openArtifactFlow(trimmed, envelope.open)
-              settlePendingSend()
-              return
-            }
-            // No lookup on the envelope (an older backend): fall through to the
-            // grounded ask, which at least answers about the document.
-          } else if (envelope.intent === "generate_prd") {
-            if (docFile) {
-              setAttachments([])
-              importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
-              settlePendingSend()
-              return
-            }
-            prdCommandFlow(trimmed, envelope.task)
-            settlePendingSend()
-            return
-          }
-          // generate_prototype: ChatScreen has no chat prototype flow (parity
-          // with the ladder, which never intercepted prototype phrasings here);
-          // answer / unhandled → the ask path below.
+          // The intent→executor SWITCH itself is lifted into the shared
+          // `dispatchChatIntent` primitive (AD-P13a) — the private project
+          // chat reuses the SAME switch. ChatScreen supplies today's inline
+          // flows as executors, byte-identical to the ladder they replace;
+          // the doc/tab guards that decide WHICH flow to run stay HERE
+          // (ChatScreen-local UI state dispatchChatIntent knows nothing
+          // about), not inside the shared primitive.
+          const targetPrdId =
+            !docFile && activeTab ? (envelope.prd_id ?? tabPrdId) : null
+          const result = dispatchChatIntent(
+            envelope,
+            { hasEditTarget: targetPrdId != null, editTargetPrdId: targetPrdId },
+            {
+              onGenerateTickets: (env) => {
+                if (docFile) {
+                  setAttachments([])
+                  importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+                  settlePendingSend()
+                  return
+                }
+                if (activeTab?.prd) {
+                  setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+                  openContentPanel("tickets")
+                  settlePendingSend()
+                  return
+                }
+                // No PRD on this tab → a STANDALONE ticket set. The runner owns
+                // the scope patch, the generating flag and the panel open; this
+                // branch only decides that a set is what the user asked for.
+                if (ticketSetInFlightGuard()) return
+                ticketSetCommandFlow(trimmed, env.task?.trim() || trimmed)
+                settlePendingSend()
+              },
+              onEditPrd: (instruction, prdId) => {
+                void prdChatEditFlow(instruction, activeTab!.id, prdId!)
+                settlePendingSend()
+              },
+              onOpenArtifact: (open) => {
+                // OPEN, never generate. The two verbs are told apart in exactly
+                // one place (backend app/chat_intent.py's OPEN-vs-GENERATE
+                // rule) and this is the whole of the client's half: it can open
+                // a document, ask which one, or say there isn't one — it has no
+                // path into any generation flow, so a misfire here can never
+                // cost the user an unwanted PRD.
+                openArtifactFlow(trimmed, open)
+                settlePendingSend()
+              },
+              onGeneratePrd: (env) => {
+                if (docFile) {
+                  setAttachments([])
+                  importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+                  settlePendingSend()
+                  return
+                }
+                prdCommandFlow(trimmed, env.task)
+                settlePendingSend()
+              },
+              // No resolvable edit target/instruction, no open lookup, or
+              // answer/low-confidence/unknown/generate_prototype → nothing to
+              // do here; ChatScreen's own grounded-ask code below already runs
+              // unconditionally whenever `result.handled` is false.
+              onAnswer: () => {},
+            },
+          )
+          if (result.handled) return
         }
       }
       // ── Legacy ladder (flag off, or envelope fetch failed) ────────────────

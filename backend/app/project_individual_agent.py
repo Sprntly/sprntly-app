@@ -1,14 +1,23 @@
 """Bounded tool-loop responder for the PRIVATE project chat ("My chat with
-Sprntly").
+Sprntly") — the `answer` executor only.
 
 The private individual thread historically answers single-shot
 (`qa_agent._answer_single_shot`) with no tools, so it can neither reach the
-project's full memory/artifacts/ledger the @Sprntly group agent can, nor edit
-the project's PRD. This module runs the SAME project read tools the group agent
-uses (imported from `app.project_group_context` — never forked, so the tenancy
-gate stays single-sourced) on a bounded `run_tool_loop`, and — behind the
-`PROJECT_PRD_EDIT_ENABLED` flag — hands it the propose-PRD-patch write tool
-(§D) whose IDOR gate (§C) allows a patch only against a PRD on THIS project.
+project's full memory/artifacts/ledger the @Sprntly group agent can. This
+module runs the SAME project read tools the group agent uses (imported from
+`app.project_group_context` — never forked, so the tenancy gate stays
+single-sourced) on a bounded `run_tool_loop`.
+
+PRD edits no longer flow through this responder: the client-side intent
+classifier (`dispatchChatIntent`, `web/app/lib/chat/dispatchChatIntent.ts`)
+peels an `edit_prd`-classified message off BEFORE it ever reaches `/v1/ask`,
+routing it to the in-place, versioned `POST /v1/projects/{id}/prd/chat-edit`
+instead (the shared `apply_chat_edit_scoped` + the ★ cross-project IDOR gate).
+This responder therefore no longer wires the propose-PRD-patch tool
+(`project_prd_patch_tool.py`, the retired propose/review flow) — an edit-phrased
+`answer` turn (one that reached here anyway, e.g. the classifier abstained)
+creates no `prd_patches` row; it answers in text only, same as any other
+read-tool question.
 
 Contract (mirrors `_respond_as_group_agent`): bounded (`max_iters=5`), exactly
 one structured cost line per reply (identifiers only — never body/question),
@@ -32,10 +41,6 @@ from typing import Callable
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_group_context import dispatch_read_tool, read_tools
-from app.project_prd_patch_tool import (
-    PROPOSE_PROJECT_PRD_PATCH_TOOL,
-    handle_propose_prd_patch,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +51,7 @@ _SYSTEM = (
     "specific artifact's content, and its task ledger — call them when the answer "
     "depends on project data rather than guessing. Everything you can read is "
     "scoped to this one project; never assume data from another project or "
-    "company. When a tool to propose a PRD edit is available and the "
-    "conversation has produced a concrete change the PRD should reflect, you may "
-    "propose it — it becomes a pending suggestion the user reviews, never an "
-    "immediate overwrite."
+    "company."
 )
 
 
@@ -76,7 +78,6 @@ def respond_individual(
     company_id: str,
     question: str,
     history: list[dict],
-    allow_prd_edit: bool,
     single_shot: Callable[[], dict],
 ) -> dict:
     """Produce the private-chat reply for a project ask via a bounded tool loop.
@@ -84,33 +85,22 @@ def respond_individual(
     Returns a payload dict `{"answer": <text>, "citations": []}` (single-shot
     shape). On ANY failure, degrades to `single_shot()` (the caller's own
     `qa_agent.answer(...)`), so the request still returns an answer body — never
-    a 500 (AD-P7).
-
-    `allow_prd_edit` (from `project_prd_edit_enabled()`) gates the propose tool:
-    when False it is absent from the registry (belt) and its handler is
-    unreachable (braces). `company_id` is the caller's company UUID; the write
-    handler receives `workspace_id=company_id` so the accept/reject routes'
-    workspace filter sees any proposed patch."""
+    a 500 (AD-P7). Read tools only — no PRD-write tool is registered; an
+    edit-phrased turn that reaches here answers in text, it never creates a
+    `prd_patches` row (edits are classified client-side, see the module
+    docstring)."""
     start = time.monotonic()
-    tools = read_tools() + (
-        [PROPOSE_PROJECT_PRD_PATCH_TOOL] if allow_prd_edit else []
-    )
+    tools = read_tools()
     meta: dict = {}
 
     def _dispatch(name: str, tool_input: dict) -> str:
-        # Read tools first (breadth+depth); returns None when `name` isn't one.
+        # Read tools only — returns None when `name` isn't one.
         read = dispatch_read_tool(
             name, tool_input,
             project_id=project_id, dataset=dataset, company_id=company_id,
         )
         if read is not None:
             return read
-        if allow_prd_edit and name == "propose_prd_patch":
-            return handle_propose_prd_patch(
-                tool_input,
-                project_id=project_id, dataset=dataset,
-                company_id=company_id, workspace_id=company_id,
-            )
         return f"(unknown tool: {name})"
 
     try:

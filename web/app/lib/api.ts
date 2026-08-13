@@ -5329,6 +5329,15 @@ export type DelegationEventResult = {
   status: string
 }
 
+/** Response from `POST /v1/projects/{id}/prd/chat-edit` — a discriminated
+ *  "did it actually write" shape, since the route degrades to a no-edit
+ *  reply (membership passes but the flag is off, or the target PRD can't be
+ *  resolved/is ambiguous) rather than erroring. `edited: false` carries a
+ *  plain `answer` string a caller can render exactly like a grounded ask. */
+export type ProjectChatEditResult =
+  | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
+  | { edited: false; answer: string }
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -5398,6 +5407,19 @@ export const projectsApi = {
     api.post<{ project_id: number; artifact_type: string; artifact_id: number }>(
       `/v1/projects/${encodeURIComponent(String(id))}/artifacts`,
       { artifact_type: artifactType, artifact_id: artifactId },
+    ),
+  /** Apply a free-form chat edit instruction to the project's PRD
+   *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private (and, later,
+   *  group) project chat's in-place, versioned edit path, reusing the same
+   *  scoped editor + ★ cross-project IDOR gate the main chat's
+   *  `prdApi.chatEdit` calls guard-off. The route resolves its OWN edit
+   *  target server-side (never a client-supplied `prd_id`); membership-gated
+   *  and `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
+   *  rather than an error. */
+  prdChatEdit: (id: number | string, instruction: string) =>
+    api.post<ProjectChatEditResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
+      { instruction },
     ),
   /** Save a chat output as a first-class project artifact
    *  (`POST /v1/projects/{id}/artifacts/from-chat`, item-14 substrate).

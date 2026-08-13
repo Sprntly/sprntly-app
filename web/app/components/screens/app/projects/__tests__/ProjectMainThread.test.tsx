@@ -80,12 +80,17 @@ describe("ProjectMainThread — neither side forks or imports the chat monolith 
     )
   })
 
-  it("neither ProjectMainThread nor ProjectIndividualChat imports or references the chat monolith container", () => {
+  it("neither ProjectMainThread nor ProjectIndividualChat imports or mounts the chat monolith container (AD-P13a)", () => {
+    // Migrated to the post-amendment invariant: AD-P13a explicitly allows
+    // BOTH sides to consume the shared `dispatchChatIntent` PRIMITIVE (proven
+    // here on the individual side, which actually uses it) while the
+    // container import/mount prohibition still holds.
     const mainThreadSrc = readFileSync(join(__dirname, "../ProjectMainThread.tsx"), "utf8")
     const individualSrc = readFileSync(join(__dirname, "../ProjectIndividualChat.tsx"), "utf8")
     expect(mainThreadSrc).not.toContain("ChatScreen")
     expect(individualSrc).not.toContain("from \"../ChatScreen\"")
     expect(individualSrc).not.toMatch(/import\s*\{[^}]*\bChatScreen\b[^}]*\}\s*from/)
+    expect(individualSrc).toContain('from "../../../../lib/chat/dispatchChatIntent"')
   })
 
   it("passes the insightNote prop through to ProjectIndividualChat unchanged", () => {

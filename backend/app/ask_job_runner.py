@@ -174,14 +174,14 @@ def _run_sync(
     try:
         if project_id is not None:
             # Project-scoped individual chat: a bounded tool-loop responder with
-            # the project read tools (depth) plus, when PROJECT_PRD_EDIT_ENABLED,
-            # the propose-PRD-patch write tool (§C/§D IDOR-gated). It returns the
+            # the project read tools (depth), answer-executor only — PRD edits
+            # are classified client-side and never reach this loop (see
+            # project_individual_agent.py's module docstring). It returns the
             # same payload shape as the single-shot path, so the strip/complete/
             # capture/log calls below run UNCHANGED, and degrades to `_single_shot`
             # on any failure. Non-project asks (`project_id is None`) skip this
             # branch entirely — byte-identical to before this change.
             from app.project_individual_agent import respond_individual
-            from app.project_prd_patch_tool import project_prd_edit_enabled
 
             payload = respond_individual(
                 project_id=project_id,
@@ -189,7 +189,6 @@ def _run_sync(
                 company_id=enterprise_id,
                 question=question,
                 history=history,
-                allow_prd_edit=project_prd_edit_enabled(),
                 single_shot=_single_shot,
             )
         else:

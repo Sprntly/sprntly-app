@@ -5,8 +5,11 @@ Covers: the loop round-trips a tool_use → tool_result → text (AC1); it honou
 `max_iters=5` on a runaway model (AC2); a no-tool turn returns single-pass
 (AC3); a NON-project ask still uses single-shot and never calls the responder
 (AC4); dispatch is scoped to this ask's ids (AC5); exactly one identifiers-only
-cost line per project reply and zero for a non-project ask (AC7); and a
-`run_tool_loop` raise degrades to the single-shot answer (AC8).
+cost line per project reply and zero for a non-project ask (AC7); a
+`run_tool_loop` raise degrades to the single-shot answer (AC8); and — the
+private-loop de-wiring — `respond_individual` no longer accepts/wires the
+propose-PRD-patch tool at all, so an edit-phrased turn that reaches it creates
+no `prd_patches` row.
 
 The Anthropic client is faked (mirrors `test_llm_tool_loop.py`); the
 `ask_job_runner` branch tests drive `run_ask_job` with the qa_agent answer +
@@ -79,7 +82,7 @@ def test_individual_loop_tool_roundtrip(monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         payload = pia.respond_individual(
             project_id=9, dataset="d", company_id="c1",
-            question="how many PRDs?", history=[], allow_prd_edit=False,
+            question="how many PRDs?", history=[],
             single_shot=_single_shot_stub(),
         )
     assert payload == {"answer": "You have 2 PRDs.", "citations": []}
@@ -101,7 +104,7 @@ def test_individual_loop_no_tool_call_single_pass(monkeypatch):
     monkeypatch.setattr(pia, "dispatch_read_tool", _no_dispatch)
     payload = pia.respond_individual(
         project_id=9, dataset="d", company_id="c1",
-        question="hi", history=[], allow_prd_edit=False,
+        question="hi", history=[],
         single_shot=_single_shot_stub(),
     )
     assert payload["answer"] == "Hi there."
@@ -126,7 +129,7 @@ def test_individual_loop_bounds_at_max_iters(monkeypatch):
     monkeypatch.setattr(pia, "dispatch_read_tool", lambda *a, **kw: "no tasks")
     payload = pia.respond_individual(
         project_id=9, dataset="d", company_id="c1",
-        question="status?", history=[], allow_prd_edit=False,
+        question="status?", history=[],
         single_shot=_single_shot_stub(),
     )
     assert fake.n == 5  # bounded at max_iters
@@ -150,7 +153,7 @@ def test_dispatch_scoped_to_this_project(monkeypatch):
     monkeypatch.setattr(pia, "dispatch_read_tool", _spy)
     pia.respond_individual(
         project_id=42, dataset="acme", company_id="c-only",
-        question="q", history=[], allow_prd_edit=False,
+        question="q", history=[],
         single_shot=_single_shot_stub(),
     )
     assert seen == {"project_id": 42, "dataset": "acme", "company_id": "c-only"}
@@ -171,34 +174,37 @@ def test_individual_loop_raise_degrades_to_single_shot(monkeypatch):
 
     payload = pia.respond_individual(
         project_id=9, dataset="d", company_id="c1",
-        question="q", history=[], allow_prd_edit=False, single_shot=_ss,
+        question="q", history=[], single_shot=_ss,
     )
     assert payload == {"answer": "fallback answer", "citations": []}
     assert called["n"] == 1
 
 
-def test_allow_prd_edit_registers_propose_tool(monkeypatch):
-    # AC25 (belt) — the propose tool is present only when allow_prd_edit=True.
+def test_respond_individual_no_propose_tool(monkeypatch):
+    # §C de-wiring — the propose-PRD-patch tool is never registered (belt) and
+    # an edit-phrased turn that reaches this responder anyway creates no
+    # `prd_patches` row (braces: there is no write path left to reach).
     captured = {}
+    written = []
 
-    def _fake_loop(*, tools, **kw):
+    def _fake_loop(*, tools, dispatch, **kw):
         captured["names"] = [t["name"] for t in tools]
+        # Simulate the model trying the old tool name anyway — the dispatch
+        # function must not recognize it (no write handler wired at all).
+        result = dispatch("propose_prd_patch", {"rationale": "x", "patch_md": "y"})
+        written.append(result)
         return "ok"
 
     monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
     monkeypatch.setattr(pia, "log_llm_run", lambda **kw: None)
+    monkeypatch.setattr(pia, "dispatch_read_tool", lambda *a, **kw: None)
 
     pia.respond_individual(
-        project_id=9, dataset="d", company_id="c1", question="q", history=[],
-        allow_prd_edit=False, single_shot=_single_shot_stub(),
+        project_id=9, dataset="d", company_id="c1", question="edit the PRD",
+        history=[], single_shot=_single_shot_stub(),
     )
     assert "propose_prd_patch" not in captured["names"]
-
-    pia.respond_individual(
-        project_id=9, dataset="d", company_id="c1", question="q", history=[],
-        allow_prd_edit=True, single_shot=_single_shot_stub(),
-    )
-    assert "propose_prd_patch" in captured["names"]
+    assert written == ["(unknown tool: propose_prd_patch)"]
 
 
 # ── AC4 / AC7 — ask_job_runner branch: non-project unchanged ─────────────────
@@ -223,8 +229,10 @@ def test_non_project_ask_uses_single_shot_unchanged(isolated_settings, monkeypat
 
 
 def test_project_ask_routes_through_respond_individual(isolated_settings, monkeypatch):
-    # AC1/AC7 (integration) — a project ask calls respond_individual with the
-    # threaded ids + allow_prd_edit from the flag, and completes its payload.
+    # AC1/AC7/AC11 (integration) — a project ask calls respond_individual with
+    # the threaded ids and NO `allow_prd_edit` kwarg at all (§C de-wiring —
+    # ask_job_runner's project branch no longer reads the flag), and completes
+    # its payload.
     seen = {}
 
     def _spy(**kw):
@@ -232,9 +240,6 @@ def test_project_ask_routes_through_respond_individual(isolated_settings, monkey
         return {"answer": "project answer", "citations": []}
 
     monkeypatch.setattr(pia, "respond_individual", _spy)
-    monkeypatch.setattr(
-        "app.project_prd_patch_tool.project_prd_edit_enabled", lambda: True
-    )
     monkeypatch.setattr(ajr.qa_agent, "answer",
                         lambda **kw: (_ for _ in ()).throw(AssertionError("no single-shot")))
     monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: completed.setdefault(i, p))
@@ -248,8 +253,7 @@ def test_project_ask_routes_through_respond_individual(isolated_settings, monkey
         conversation_id=5, project_id=9,
     ))
     assert completed[2]["answer"] == "project answer"
-    # company_id threaded is the enterprise_id (== company.company_id) and
-    # workspace parity is proven in the propose-tool tests.
+    # company_id threaded is the enterprise_id (== company.company_id).
     assert seen["project_id"] == 9
     assert seen["company_id"] == "ent-co"
-    assert seen["allow_prd_edit"] is True
+    assert "allow_prd_edit" not in seen

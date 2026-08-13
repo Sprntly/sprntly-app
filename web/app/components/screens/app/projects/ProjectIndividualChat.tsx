@@ -51,7 +51,10 @@ import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useCompany } from "../../../../context/CompanyContext"
+import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { useAuth } from "../../../../lib/auth"
+import { chatIntentEnvelopeOn } from "../../../../lib/onboarding/types"
+import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import {
   runAskGeneration,
@@ -61,9 +64,14 @@ import {
   AskCancelledError,
   AskTimeoutError,
 } from "../../../../lib/runAskGeneration"
+import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
+import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
   projectsApi,
+  chatIntentApi,
+  storiesApi,
   type AskResponse,
+  type ChatIntentEnvelope,
   type DelegationLedgerRow,
   type IndividualTurn,
   type OpenArtifactCandidate,
@@ -121,6 +129,12 @@ function formatTime(d: number): string {
 
 export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }: ProjectIndividualChatProps) {
   const { activeCompany } = useCompany()
+  const { workspace } = useWorkspace()
+  // Same default-on classifier flag the main chat reads (`chatIntentEnvelopeOn`
+  // — unknown/loading workspace fails OPEN). Off (the staff kill switch) skips
+  // classification entirely and sends stay `/v1/ask`-only, byte-identical to
+  // this component's pre-ticket behavior.
+  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
   const auth = useAuth()
   // The topic is keyed on the CALLER's own id (the assignee reading their
   // own thread) — same session the app already holds, no new fetch.
@@ -383,34 +397,134 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
     setBusy(true)
     stoppedRef.current = false
 
-    ensureConversationId()
-      .then((conversationId) =>
-        runAskGeneration(question, activeCompany, tabId, {
-          project_id: Number(projectId),
-          conversation_id: conversationId,
-          isStopped: () => stoppedRef.current,
-        }),
+    // The pre-ticket send: `/v1/ask` with `project_id`, unchanged. Also the
+    // `answer`/low-confidence/unknown/`generate_prototype` fall-through AND
+    // the classify-failure fail-open floor (AC14).
+    const runAsk = () =>
+      ensureConversationId()
+        .then((conversationId) =>
+          runAskGeneration(question, activeCompany, tabId, {
+            project_id: Number(projectId),
+            conversation_id: conversationId,
+            isStopped: () => stoppedRef.current,
+          }),
+        )
+        .then((reply) => {
+          setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
+        })
+        .catch((err: unknown) => {
+          if (err instanceof AskStoppedError) {
+            setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, stopped: true } : t)))
+            return
+          }
+          if (err instanceof AskCancelledError) {
+            // The surface went away mid-poll — nothing to render into.
+            return
+          }
+          const message =
+            err instanceof AskTimeoutError
+              ? "This is taking longer than expected. It's still running on our side."
+              : "That answer didn't come through. Try again."
+          setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message } : t)))
+        })
+        .finally(() => setBusy(false))
+
+    if (!envelopeDispatchEnabled) {
+      void runAsk()
+      return
+    }
+
+    const settleReply = (reply: AskResponse) => {
+      setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
+      setBusy(false)
+    }
+    const settleError = (message: string) => {
+      setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message } : t)))
+      setBusy(false)
+    }
+    const reply = (answer: string): AskResponse => ({
+      answer, key_points: [], citations: [], confidence: 1, unanswered: "",
+    })
+
+    const runGenerateTickets = async () => {
+      try {
+        const start = await storiesApi.generateFromInsight(question, null)
+        if (start.ticket_set_id == null) {
+          settleError("I couldn't start that ticket run. Try again.")
+          return
+        }
+        const startedAt = Date.now()
+        let status: string = "generating"
+        while (Date.now() - startedAt < 3 * 60 * 1000) {
+          const job = await storiesApi.getJob(start.job_id)
+          status = job.status
+          if (status !== "generating") break
+          await sleepUntilNextPoll(3000)
+        }
+        if (status !== "ready") {
+          settleError("That ticket run didn't finish. Try again.")
+          return
+        }
+        await projectsApi.addArtifact(projectId, "ticket_set", start.ticket_set_id)
+        settleReply(reply(
+          "I've written a ticket set for that and attached it to this project — check the Artifacts tab.",
+        ))
+      } catch {
+        settleError("That ticket run didn't come through. Try again.")
+      }
+    }
+
+    const runGeneratePrd = async (task: string) => {
+      const result = await runPrdGenerationFromTask(task).catch(
+        () => ({ ok: false as const, message: "That PRD didn't come through. Try again." }),
       )
-      .then((reply) => {
-        setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
-      })
-      .catch((err: unknown) => {
-        if (err instanceof AskStoppedError) {
-          setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, stopped: true } : t)))
+      if (!result.ok) {
+        settleError(result.message)
+        return
+      }
+      await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
+      settleReply(reply(
+        `I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`,
+      ))
+    }
+
+    const runEditPrd = async (instruction: string) => {
+      try {
+        const res = await projectsApi.prdChatEdit(projectId, instruction)
+        if (!res.edited) {
+          settleReply(reply(res.answer))
           return
         }
-        if (err instanceof AskCancelledError) {
-          // The surface went away mid-poll — nothing to render into.
-          return
-        }
-        const message =
-          err instanceof AskTimeoutError
-            ? "This is taking longer than expected. It's still running on our side."
-            : "That answer didn't come through. Try again."
-        setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message } : t)))
+        settleReply(reply(res.summary || "Updated the PRD."))
+      } catch {
+        settleError("That edit didn't come through. Try again.")
+      }
+    }
+
+    chatIntentApi
+      .resolve(question, {})
+      .then((envelope: ChatIntentEnvelope) => {
+        dispatchChatIntent(
+          envelope,
+          // The write target is resolved SERVER-side (`_resolve_prd_id` over
+          // THIS project's own PRDs) — never a client-trusted id — so there
+          // is nothing to pre-resolve here; the route itself degrades to a
+          // no-edit reply on 0/ambiguous PRDs.
+          { hasEditTarget: true, editTargetPrdId: null },
+          {
+            onEditPrd: (instruction) => void runEditPrd(instruction),
+            onGenerateTickets: () => void runGenerateTickets(),
+            onGeneratePrd: (env) => void runGeneratePrd(env.task || question),
+            // Neither this thin thread nor its manifest scope has a viewer to
+            // open an artifact into (no PRD/evidence panel here) — fall back
+            // to the grounded ask, same as an unresolved envelope.
+            onOpenArtifact: () => void runAsk(),
+            onAnswer: () => void runAsk(),
+          },
+        )
       })
-      .finally(() => setBusy(false))
-  }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId])
+      .catch(() => void runAsk())
+  }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled])
 
   const handleStop = useCallback(() => {
     stoppedRef.current = true

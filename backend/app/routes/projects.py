@@ -47,8 +47,11 @@ from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
+from app.project_chat_edit import apply_chat_edit_scoped
+from app.project_prd_gate import ProjectPrdWriteDenied
 from app.project_prd_patch_tool import (
     PROPOSE_PROJECT_PRD_PATCH_TOOL,
+    _resolve_prd_id,
     handle_propose_prd_patch,
     project_prd_edit_enabled,
 )
@@ -629,6 +632,66 @@ def add_project_artifact(
         project_id, payload.artifact_type, payload.artifact_id,
     )
     return ref
+
+
+class ProjectChatEditIn(BaseModel):
+    instruction: str = Field(..., min_length=3, max_length=4000)
+
+
+@router.post("/{project_id}/prd/chat-edit")
+def project_chat_edit(
+    project_id: int,
+    body: ProjectChatEditIn,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """The private (and, later, group) project chat's PRD-edit write path —
+    the in-place, versioned counterpart to the retired propose/review
+    `prd_patches` flow, reusing the SAME `apply_chat_edit_scoped`
+    the main chat's `POST /v1/prd/{id}/chat-edit` calls guard-off.
+
+    Membership-gated (`_require_project_member`), THEN the request-time
+    `PROJECT_PRD_EDIT_ENABLED` rollout flag (503 semantics degrade to a
+    no-op — off means no write and a no-edit reply, never an error), THEN
+    target resolution: the edit target is resolved SERVER-side over THIS
+    project's own artifacts via `_resolve_prd_id` (single-PRD auto-select /
+    ambiguous-disambiguate) — never a client-supplied `prd_id`, so there is
+    nothing here for a caller to spoof. 0/ambiguous PRDs make no write and
+    return a no-edit, answer-shaped payload (`{"edited": false, "answer"}`)
+    instead of an error, so the private chat can degrade to a grounded ask.
+
+    `apply_chat_edit_scoped` then runs the ★ cross-project IDOR gate
+    (`assert_prd_on_project`) before any read/write — defense in depth here
+    (the resolved id is already this project's own), and the SAME single-
+    sourced gate a future group-chat write path will call with a
+    less-trusted target. A `ProjectPrdWriteDenied` from that gate is caught
+    and degrades to the same no-edit shape rather than a raw 403/404, since
+    the resolved-target contract promises callers a soft refusal, not an
+    error, on this route.
+    """
+    _require_project_member(project_id, ctx)
+
+    if not project_prd_edit_enabled():
+        return {
+            "edited": False,
+            "answer": "PRD editing from chat isn't turned on for this project yet.",
+        }
+
+    dataset = _dataset_for(ctx)
+    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    if prd_id is None:
+        return {"edited": False, "answer": refusal or "I couldn't work out which PRD to edit."}
+
+    try:
+        result = apply_chat_edit_scoped(
+            prd_id, body.instruction, ctx, project_id=project_id, dataset=dataset,
+        )
+    except ProjectPrdWriteDenied:
+        return {
+            "edited": False,
+            "answer": "I can only edit a PRD that's attached to this project.",
+        }
+
+    return {"edited": True, **result}
 
 
 @router.post("/{project_id}/artifacts/from-chat")

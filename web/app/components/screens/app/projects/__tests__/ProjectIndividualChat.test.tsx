@@ -67,6 +67,20 @@ vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
 }))
 
+// New on this ticket: the component now reads the classifier flag
+// (`chatIntentEnvelopeOn`) to decide whether to classify-then-dispatch at
+// all. Explicit OFF here keeps every pre-existing assertion in this file
+// byte-identical (plain `/v1/ask`-only sends, no `chatIntentApi` call) — the
+// flag-ON classify→dispatch behavior is covered end to end in
+// `ProjectIndividualChat.dispatch.dom.test.tsx`.
+vi.mock("../../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({
+    loading: false, profile: null,
+    workspace: { feature_flags: { chat_intent_envelope: false } },
+    refresh: async () => {},
+  }),
+}))
+
 // New on this ticket: the component now subscribes to the caller's own
 // per-user realtime channel, which needs a resolvable user id — mock
 // `useAuth` (the same primitive `ProjectGroupChat` already mocks in its own
@@ -120,8 +134,13 @@ describe("ProjectIndividualChat — AD-P13 reuse (source scan)", () => {
     expect(src).not.toMatch(/function\s+ChatComposer/)
   })
 
-  it("does not import or reference the chat monolith container", () => {
+  it("imports the shared dispatchChatIntent primitive, forbids the chat monolith container (AD-P13a)", () => {
+    // Migrated from the pre-amendment "no ChatScreen reference at all" guard:
+    // AD-P13a explicitly authorizes consuming the shared dispatch PRIMITIVE
+    // while the container prohibition still holds — this asserts both halves
+    // of the post-amendment invariant, not just the absence of a substring.
     const src = readFileSync(join(__dirname, "../ProjectIndividualChat.tsx"), "utf8")
+    expect(src).toContain('from "../../../../lib/chat/dispatchChatIntent"')
     expect(src).not.toContain("ChatScreen")
   })
 

@@ -980,41 +980,16 @@ def chat_edit(
     panel can refresh live. Before this endpoint, an edit-phrased chat message
     on a PRD tab was answered in text only and the document never changed
     (issue b of the chat→PRD bug set).
+
+    Delegates to the shared `apply_chat_edit_scoped` (`project_chat_edit.py`)
+    guard-off (`project_id=None`) — this is the byte-identical main-chat hot
+    path; the project-scoped write (with the ★ cross-project IDOR gate) lives
+    on `POST /v1/projects/{id}/prd/chat-edit` instead. Request model, response
+    keys, and status codes (200 / 409 empty PRD / 502 edit failure) are
+    unchanged by the extraction.
     """
-    from app.prd_questions import apply_chat_edit
+    from app.project_chat_edit import apply_chat_edit_scoped
 
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-
-    # Edit the RAW payload_md (the pure PRD HTML) — same discipline as the
-    # input-answer editor: design-agent 'applied' patches are folded on read by
-    # get_prd_rendered, so editing the raw doc keeps them folding once.
-    prd_html = (row.get("payload_md") or "").strip()
-    if not prd_html:
-        raise HTTPException(409, "PRD has no content to edit yet")
-
-    try:
-        edit = apply_chat_edit(
-            prd_html, body.instruction, enterprise_id=company.company_id
-        )
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Could not apply the edit: {exc}")
-
-    if edit["sections_changed"]:
-        # Snapshot the pre-edit content so the change is undoable (mirrors
-        # PUT /{id} and the input-answer path).
-        try:
-            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
-        except Exception:
-            logger.warning(
-                "auto-version snapshot failed for prd_id=%s before chat edit "
-                "(undo point not captured)", prd_id, exc_info=True,
-            )
-        update_prd_content(prd_id, row.get("title", ""), edit["html"])
-    # No sections changed → the editor judged the instruction wasn't an edit;
-    # leave the stored document untouched (no snapshot, no write).
-
-    return {
-        "prd": get_prd_rendered(prd_id),
-        "sections_changed": edit["sections_changed"],
-        "summary": edit["summary"],
-    }
+    return apply_chat_edit_scoped(
+        prd_id, body.instruction, company, project_id=None
+    )
