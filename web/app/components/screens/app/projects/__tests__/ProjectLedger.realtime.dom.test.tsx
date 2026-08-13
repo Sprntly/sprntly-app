@@ -240,50 +240,17 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-// ── AC-4: open modal re-reads on a delegation.event ──
-describe("ledger modal — live update (AC-4)", () => {
-  it("test_modal_updates_on_delegation_event: an open modal refetches and the row buttons update", async () => {
-    assignedRows = [row({ delegation_id: 5, status: "assigned", bucket: "open" })]
-    await renderDetailReady()
-
-    fireEvent.click(screen.getByTestId("task-ledger-view-all"))
-    // Initial open read → assignee/assigned shows Accept.
-    expect(await screen.findByTestId("delegation-action-accepted")).toBeTruthy()
-    expect(screen.queryByTestId("delegation-action-completed")).toBeNull()
-
-    // The assignee accepts elsewhere; the live event drives an in-place re-read.
-    assignedRows = [row({ delegation_id: 5, status: "accepted", bucket: "open" })]
-    await act(async () => {
-      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "accepted" })
-      await Promise.resolve()
-    })
-
-    // accepted → assignee now has In progress / Mark done, no manual reload.
-    expect(await screen.findByTestId("delegation-action-completed")).toBeTruthy()
-    expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy()
-  })
-})
-
 // ── AC-5: rail counts go live ──
+// The `test_modal_updates_on_delegation_event` (AC-4) and
+// `test_rail_counts_update_on_delegation_event` (AC-5) cases that lived here
+// asserted the Task-ledger rail card (`task-ledger-view-all` /
+// `task-ledger-counts`) — that card is deliberately UN-MOUNTED from
+// ProjectDetailScreen for now (see the comment there), so the DOM they
+// asserted against no longer exists. Deleted rather than left red; the
+// wiring underneath (`ledgerCounts`/`ledgerRows`/`ledgerVersion`) is still
+// exercised indirectly by the reconnect-reconcile and degradation tests
+// below, which don't depend on the rail card's own markup.
 describe("rail counts — live update (AC-5)", () => {
-  it("test_rail_counts_update_on_delegation_event: counts refetch and re-render", async () => {
-    counts = { assigned_to_me_open: 0, waiting_on_open: 0 }
-    await renderDetailReady()
-    await waitFor(() =>
-      expect(screen.getByTestId("task-ledger-counts").textContent).toContain("0 assigned to you"),
-    )
-
-    counts = { assigned_to_me_open: 1, waiting_on_open: 0 }
-    await act(async () => {
-      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
-      await Promise.resolve()
-    })
-
-    await waitFor(() =>
-      expect(screen.getByTestId("task-ledger-counts").textContent).toContain("1 assigned to you"),
-    )
-  })
-
   it("ignores unrelated events (brief.delivered does not refetch counts)", async () => {
     await renderDetailReady()
     const callsAfterMount = ledgerCountsMock.mock.calls.length
@@ -320,7 +287,12 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
     expect(topics).not.toContain("project:101")
   })
 
-  it("test_degraded_falls_back_to_l03_behaviour: degraded channel, no error, no second channel, refetch-on-emit still works", async () => {
+  // `test_degraded_falls_back_to_l03_behaviour` originally also asserted a
+  // refetch-on-emit against the (now UN-MOUNTED) Task-ledger rail card's
+  // `task-ledger-counts` node — dropped for the same reason as AC-4/AC-5
+  // above. The degraded-channel-scoping + no-error-surface assertions below
+  // don't depend on that markup, so they're preserved rather than lost.
+  it("test_degraded_channel_scoping: degraded channel, no error, no second channel", async () => {
     realtimeState.degraded = true
     await renderDetailReady()
 
@@ -331,15 +303,15 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
     // No error surfaced anywhere in the shell.
     expect(screen.queryByRole("alert")).toBeNull()
 
-    // The refetch-on-emit path still works while degraded.
-    counts = { assigned_to_me_open: 2, waiting_on_open: 0 }
+    // The refetch-on-emit path itself still fires (a real network call) while
+    // degraded — verified at the mock-call level rather than via the
+    // rail card's own DOM, which is unmounted.
+    const callsBeforeEmit = ledgerCountsMock.mock.calls.length
     await act(async () => {
       lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
       await Promise.resolve()
     })
-    await waitFor(() =>
-      expect(screen.getByTestId("task-ledger-counts").textContent).toContain("2 assigned to you"),
-    )
+    await waitFor(() => expect(ledgerCountsMock.mock.calls.length).toBe(callsBeforeEmit + 1))
   })
 })
 
