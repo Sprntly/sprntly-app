@@ -6,7 +6,7 @@
 -- change to the fact table.
 --
 -- No `workspace_id` column, same divergence as `project_delegations`
--- (see `20260811120300_project_delegations.sql`): tenancy is scoped via
+-- (see `20260813130300_project_delegations.sql`): tenancy is scoped via
 -- `delegation_id -> project_delegations -> projects(company_id,
 -- workspace_id)` and enforced at the route layer, with a server-role
 -- RLS policy here rather than a per-row `workspace_id` column.

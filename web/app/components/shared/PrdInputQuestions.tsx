@@ -58,6 +58,8 @@ export function prdStateFromRecord(rec: PrdRecord): PrdState {
     briefId: rec.brief_id,
     insightIndex: rec.insight_index,
     source: rec.source,
+    artifactTemplateId: rec.artifact_template_id ?? null,
+    artifactTemplateName: rec.artifact_template_name ?? null,
   }
 }
 

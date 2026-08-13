@@ -48,6 +48,20 @@ vi.mock("../../../lib/api", () => {
   }
   return {
     ApiError,
+    // The planner decides. This suite drives the composer with a real PRD
+    // command ("generate a prd for onboarding retention") because it needs the
+    // agent-action card that a completed PRD run produces — the card is where
+    // the "Generate prototype" button lives. So the verdict is stubbed to what
+    // the planner returns for that message: generate_prd, with the subject as
+    // the task.
+    chatIntentApi: {
+      resolve: vi.fn().mockResolvedValue({
+        intent: "generate_prd", confidence: 0.95,
+        task: "onboarding retention", instruction: null,
+        reason: "asked for a PRD", source: "planner",
+        prd_id: null, prd_title: null,
+      }),
+    },
     briefApi: {
       current: vi.fn().mockResolvedValue({
         id: 1,

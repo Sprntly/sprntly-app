@@ -592,6 +592,87 @@ def test_non_open_messages_are_left_to_the_model(message):
     assert not ci.looks_like_open_request(message), message
 
 
+# ── Plain-question pre-gate ──────────────────────────────────────────────────
+# The gate skips the model on messages whose verdict would be `answer` anyway,
+# because the frontend AWAITS this call before the ask is sent. Its danger is
+# the mirror of the open-vs-generate backstop's: gating a COMMAND would
+# resurrect the keyword-dispatch failure this module exists to fix. The
+# "still reaches the model" table below is therefore the one that matters, and
+# it leads with the three keyword-free commands named in the module docstring.
+
+@pytest.mark.parametrize("message", [
+    "what are customers complaining about?",
+    "why are enterprise users asking for this?",
+    "how many tickets came in last week?",
+    "which accounts churned this quarter?",
+    "is the checkout flow still failing?",
+    "do we have data on activation?",
+    "should we prioritise billing or onboarding?",
+    "What did the last call say about pricing?",
+])
+def test_plain_questions_skip_the_model(message):
+    assert ci.is_plain_question(message), message
+
+
+@pytest.mark.parametrize("message", [
+    # THE regression cases: keyword-free commands whose meaning lives in the
+    # thread. This module exists because these were being answered as prose.
+    "draft it up",
+    "break this into work items",
+    "make it shorter",
+    # Commands phrased politely as questions.
+    "can you draft the PRD for this?",
+    "could you write this up?",
+    "would you generate tickets from this?",
+    # Compound — a question that also instructs.
+    "how should we price this, and write it up?",
+    # Retrieval, which is its own intent (open_artifact).
+    "where is the PRD for checkout?",
+    # Not punctuated as a question.
+    "what are customers complaining about",
+    # Interrogative, but not where the gate can see it.
+    "customers are complaining, why?",
+    # Long enough that an instruction could be buried in it.
+    "what should we do about " + ("x" * 200) + "?",
+    "",
+    "   ",
+])
+def test_commands_and_ambiguity_still_reach_the_model(message):
+    assert not ci.is_plain_question(message), message
+
+
+def test_the_pre_gate_makes_no_model_call(monkeypatch):
+    """The point of the gate: a plain question must not pay for the envelope's
+    sonnet call, which the frontend awaits before `POST /v1/ask` is even sent."""
+    calls: list = []
+    monkeypatch.setattr(ci, "llm_call", lambda **kw: calls.append(kw))
+
+    out = ci.resolve_chat_intent("ent-A", "what are customers complaining about?")
+
+    assert calls == []
+    assert out["intent"] == "answer"
+    # Distinguishable from the fail-open envelope, which shares its shape.
+    assert out["source"] == "pre_gate"
+
+
+def test_the_pre_gate_is_off_when_a_prd_is_open_or_a_file_is_attached(monkeypatch):
+    """A question asked against an open PRD can BE an action ("what should we
+    change here?"), and only the model can tell — so the gate must not fire in
+    either context, however question-shaped the message looks."""
+    calls: list = []
+
+    def _reached(**kw):
+        calls.append(kw)
+        raise RuntimeError("only the fact that the model was reached matters")
+
+    monkeypatch.setattr(ci, "llm_call", _reached)
+
+    ci.resolve_chat_intent("ent-A", "what should we change here?", prd_id=7)
+    ci.resolve_chat_intent("ent-A", "what does this say?", has_attachments=True)
+
+    assert len(calls) == 2
+
+
 def test_a_generate_verdict_on_an_open_shaped_message_is_vetoed(monkeypatch):
     """THE regression gate for the headline safety property.
 

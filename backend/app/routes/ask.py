@@ -7,7 +7,7 @@ import time
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.ask_job_runner import ask_channel, run_ask_job
 from app.auth import (  # noqa: F401 — require_company re-exported for tests' dependency_overrides
@@ -26,7 +26,11 @@ from app.db import (
     get_ask_job,
     start_ask_job,
 )
-from app.deps.ownership import require_owned_dataset, require_owned_prd
+from app.deps.ownership import (
+    require_owned_dataset,
+    require_owned_evidence,
+    require_owned_prd,
+)
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 
@@ -95,6 +99,16 @@ ASK_RESPONSE_SCHEMA: dict = {
 }
 
 
+async def _timed_cache_resolve(dataset: str, question: str):
+    """[timing] wrapper for the cache-hit resolution — this leg contains the
+    deliberate 5-7s synthetic delay on a hit and up to 25s of waiting on a
+    warming row, so it must be individually visible in a latency trace."""
+    from app.timing import timed
+
+    with timed("route:ask.cache_resolve"):
+        return await asyncio.to_thread(_resolve_cache_hit, dataset, question)
+
+
 class AskIn(BaseModel):
     # The cap must fit a question PLUS an inlined `[Attached files]` block —
     # the composer appends extracted document markdown (clamped to 100k there,
@@ -114,10 +128,35 @@ class AskIn(BaseModel):
     prd_id: int | None = Field(default=None, ge=1)
     # Optional individual project chat: when set, the caller's project
     # memory (summary + top-N entries) and job_role are folded into this
-    # turn's context (AD-P8). Membership-gated (AD-P11) in the route — a
-    # foreign-tenant project 404s, a same-tenant non-member 403s. Omitted:
-    # `/v1/ask` behaves exactly as it does today (no project block).
+    # turn's context. Membership-gated in the route — a foreign-tenant
+    # project 404s, a same-tenant non-member 403s. Omitted: `/v1/ask`
+    # behaves exactly as it does today (no project block).
     project_id: int | None = Field(default=None, ge=1)
+    # Standalone-artifact grounding, same idea for the tabs that hold an
+    # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
+    # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
+    # to the document actually on screen. Ownership-gated in the route, and
+    # prd_id wins when several arrive — a tab has ONE primary artifact, and a
+    # PRD tab's context already carries its evidence and tickets.
+    evidence_id: int | None = Field(default=None, ge=1)
+    ticket_set_id: int | None = Field(default=None, ge=1)
+
+    # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
+    # NUL; this one stops one ARRIVING — the client inlines attachment text it
+    # extracted (or replays text from a turn stored before that fix) into the
+    # question, and a single NUL anywhere in it makes `start_ask_job`'s insert
+    # fail with SQLSTATE 22P05 and 500 the whole send. Observed live, twelve
+    # times in one session.
+    #
+    # STRIPS rather than refuses: the character is never meaningful in a
+    # question, and rejecting the message would turn a stray byte into a
+    # user-visible failure — which is the thing being fixed.
+    @field_validator("question")
+    @classmethod
+    def _drop_nul(cls, v: str) -> str:
+        from app.ingest import strip_nul
+
+        return strip_nul(v)
 
 
 def _strip_citations(payload: dict) -> dict:
@@ -254,6 +293,18 @@ async def ask(
     # into the answer context. 404 on mismatch, same as the dataset gate.
     if body.prd_id is not None:
         require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
+    # Standalone-artifact asks, same posture: a crafted id must 404 here, never
+    # leak a foreign document into this tenant's prompt. (The context builders
+    # re-check ownership too — route gate AND builder gate, deliberately.)
+    if body.evidence_id is not None:
+        require_owned_evidence(body.evidence_id, company.company_id, company.workspace_id)
+    if body.ticket_set_id is not None:
+        from app.db.ticket_sets import get_set
+
+        # get_set filters company_id in the query — None means missing OR
+        # foreign, indistinguishable on purpose.
+        if get_set(company.company_id, body.ticket_set_id) is None:
+            raise HTTPException(404, "Ticket set not found")
 
     # Individual project chat (AD-P2/AD-P8/AD-P11): the project must belong
     # to the caller's company/workspace (404 on a foreign-tenant id, same
@@ -277,7 +328,10 @@ async def ask(
     # holds an assistant turn must not be served a cache hit that never read
     # that thread. Moving it up costs one extra DB read on a cache hit; it
     # already ran on every miss.
-    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+    from app.timing import timed
+
+    with timed("route:ask.history"):
+        history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
     # Project context fold-in (AD-P8 — the bounded-assembly pattern, not the
     # KG tables): the project's memory summary + top-N entries + the
@@ -356,8 +410,18 @@ async def ask(
     # ask has no thread yet to be blind to (that's what the starter chips send).
     mid_thread = any(turn.get("role") == "assistant" for turn in history)
     cached_payload = (
-        await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
-        if (body.prd_id is None and body.project_id is None and not mid_thread)
+        await _timed_cache_resolve(body.dataset, body.question)
+        if (
+            body.prd_id is None
+            # SKIPPED for project-scoped asks too: a cache hit never read the
+            # project's memory block just folded into `history` above.
+            and body.project_id is None
+            # An artifact-tab ask is context-bound for the same reason a
+            # PRD-tab one is: the cache never read the open document.
+            and body.evidence_id is None
+            and body.ticket_set_id is None
+            and not mid_thread
+        )
         else None
     )
     if cached_payload is not None:
@@ -404,6 +468,8 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            evidence_id=body.evidence_id,
+            ticket_set_id=body.ticket_set_id,
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
@@ -432,6 +498,8 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            evidence_id=body.evidence_id,
+            ticket_set_id=body.ticket_set_id,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
             # The caller's own identity — see above.
@@ -602,6 +670,11 @@ async def stream_ask_generation(
     re-attaching mid-answer), `{"kind":"delta","text":…}` carrying decoded
     answer markdown (the `answer` field only — key_points/citations/confidence
     arrive with the poll), then a terminal `{"kind":"done"|"error"}`.
+    `{"kind":"restart"}` may appear between deltas: a transient gateway failure
+    made the generation re-emit from zero, so everything streamed before it is
+    superseded and the client drops its accumulated text (see
+    app.graph.token_stream). A client that ignores the kind degrades to
+    rendering both attempts until the poll replaces the preview.
 
     PROGRESSIVE DISPLAY ONLY — the client keeps polling GET /v1/ask/{id}, which
     stays the authoritative source of the finished answer. Cache-hit and

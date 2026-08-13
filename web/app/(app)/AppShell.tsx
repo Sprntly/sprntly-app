@@ -32,6 +32,7 @@ import { useBriefHydration } from "../lib/useBriefHydration"
 import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useThreadReportsSync } from "../components/shared/useThreadReports"
+import { useThreadDocumentSync } from "../components/shared/useThreadDocument"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
 import { useArtifactUrlSync } from "./hooks/useArtifactUrlSync"
 
@@ -44,6 +45,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // same shape as useBriefHydration below: the panel and ChatScreen both read
   // that list, and neither should fetch it.
   useThreadReportsSync()
+  // Same owner, same reason: re-attaches the active thread's team document so
+  // it survives a reload. See useThreadDocument for why it is not in ChatScreen.
+  useThreadDocumentSync()
   const auth = useAuth()
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()

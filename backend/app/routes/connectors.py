@@ -91,8 +91,10 @@ from app.connectors import (
 from app.connectors.google_drive_sync import (
     SyncConfigError,
     _refresh_credentials,
+    load_config as _drive_load_config,
     merge_config as _drive_merge_config,
     normalize_picked_files,
+    reachable_file_ids,
     sync_google_drive,
 )
 from app.connectors.tokens import (
@@ -163,6 +165,48 @@ def _prewarm_codebase_map_on_push(installation_id: int, repo: str, ref: str | No
         logger.warning(
             "codebase-map push pre-warm skipped for installation %s repo %s",
             installation_id, repo, exc_info=True,
+        )
+
+
+# Strong refs to in-flight push-triggered skill syncs. asyncio holds only a weak
+# reference to a bare create_task result, so without this a sync could be
+# garbage-collected mid-run and a pushed skill would silently wait for the
+# half-hourly sweep instead (same pattern as `_context_tasks` below).
+_skill_sync_tasks: set[asyncio.Task] = set()
+
+
+def _sync_skill_folders_on_push(
+    installation_id: int, repo_full_name: str, pushed_branch: str, default_branch: str
+) -> None:
+    """Best-effort: fire the SAME folder sync the half-hourly sweep runs, now,
+    for any synced skill folder living on the branch this push just moved — so
+    a skill file added to the repo is in the library seconds later instead of
+    at the next tick. Matching, tenancy and per-source failure isolation all
+    live in skills.github_sync; GitHub delivers webhooks after the ref has
+    moved, so the sync's own head-SHA resolve sees the new commit.
+
+    Scheduled as a background task behind the webhook response — GitHub times
+    deliveries out at 10s, and a tree walk plus a file read per skill does not
+    belong inside that budget. NEVER blocks or raises into the webhook flow;
+    with no running loop (direct unit calls) it skips, exactly like a delivery
+    that never arrived — the sweep is the backstop either way."""
+    try:
+        from app.skills.github_sync import sync_sources_for_push
+
+        task = asyncio.get_running_loop().create_task(
+            sync_sources_for_push(
+                installation_id=int(installation_id),
+                repo_full_name=repo_full_name,
+                pushed_branch=pushed_branch,
+                default_branch=default_branch,
+            )
+        )
+        _skill_sync_tasks.add(task)
+        task.add_done_callback(_skill_sync_tasks.discard)
+    except Exception:  # noqa: BLE001 — the push sync must never break the webhook.
+        logger.warning(
+            "skill-folder push sync skipped for installation %s repo %s",
+            installation_id, repo_full_name, exc_info=True,
         )
 
 
@@ -806,6 +850,53 @@ def _seed_corpus_after_sync(company_id: str, dataset: str | None) -> None:
     kickoff_corpus_seed(company_id, slug)
 
 
+def _drive_removed_file_ids(
+    previous_config: dict, incoming_ids: list[str | None]
+) -> list[str]:
+    """Which Drive file ids a re-pick took OUT of reach, as a user action.
+
+    POST /connectors/google-drive/files REPLACES the picked-file list
+    wholesale, so "previously reachable, no longer reachable" is a difference
+    between two stored/posted SELECTIONS and nothing else. It is computed from
+    `config["files"]` and `config["folder_contents"]` — both already in our
+    database — and never from a Drive enumeration, which is the whole safety
+    property: a sync that returned three of a folder's ten files must not be
+    able to say the other seven were removed. See `reachable_file_ids`.
+
+    An EMPTY incoming list is a real removal here and is treated as one,
+    unlike Slack's channel selection where empty means "no explicit selection,
+    fall back to everything". Drive has no such fallback: `sync_google_drive`
+    with no picked files is an explicit no-op, so clearing the Picker really
+    does disconnect every document.
+
+    THE ONE CASE THIS OVER-REMOVES, stated rather than hidden: a file that
+    lives in two folders, where the user removes one of them and adds a
+    NEW folder containing the same file in the same save. The new folder has
+    no stored expansion yet, so the file is not counted as retained and its
+    row is dropped; the next sync re-registers it only once the file itself
+    changes, because Drive re-fetches on `modifiedTime`. The alternative —
+    consulting the walk the sync is about to do — is the partial-enumeration
+    hazard, and it fails in the direction that loses data on a transient
+    error instead of on a rare deliberate reshuffle."""
+    folder_contents = previous_config.get("folder_contents") or {}
+    previous_ids = [
+        str((f or {}).get("id") or "").strip()
+        for f in (previous_config.get("files") or [])
+        if isinstance(f, dict)
+    ]
+    kept = {str(i or "").strip() for i in incoming_ids if str(i or "").strip()}
+    removed_picks = [pid for pid in previous_ids if pid and pid not in kept]
+    if not removed_picks:
+        return []
+    # A file reachable from something the user KEPT stays, however it was also
+    # reachable before — the subtraction is what makes moving a file between
+    # two picked folders a no-op rather than a deletion.
+    return sorted(
+        reachable_file_ids(removed_picks, folder_contents)
+        - reachable_file_ids(kept, folder_contents)
+    )
+
+
 class GoogleDrivePickedFile(BaseModel):
     id: str
     name: str | None = None
@@ -844,6 +935,12 @@ def google_drive_save_files(
         raise HTTPException(404, "Google Drive is not connected")
 
     picked = [f.model_dump() for f in body.files]
+    # Worked out BEFORE the sync, from the selection stored right now against
+    # the one the user just posted — see _drive_removed_file_ids. Computing it
+    # after would mean subtracting a set the sync had already rewritten.
+    removed_file_ids = _drive_removed_file_ids(
+        _drive_load_config(row), [f.get("id") for f in picked]
+    )
     try:
         # Validate the ids up front (422 on a bad id) before kicking sync.
         normalize_picked_files(picked)
@@ -854,6 +951,26 @@ def google_drive_save_files(
         )
     except SyncConfigError as e:
         raise HTTPException(400, str(e)) from e
+
+    # Only once the save actually happened. The ids were frozen above, so the
+    # sync decides WHETHER this cleanup runs, never WHAT it removes — a
+    # sync that half-failed cannot widen it. Running it before the sync would
+    # drop rows for a save that then 400s on a malformed id, leaving the
+    # user's unchanged selection missing documents.
+    if removed_file_ids:
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents(
+                company.company_id,
+                document_catalog.PROVIDER_GOOGLE_DRIVE,
+                removed_file_ids,
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "drive un-pick: catalog deregistration failed for company=%s",
+                company.company_id,
+            )
 
     _auto_enable_drive_input_source(company.company_id, dataset)
     _seed_corpus_after_sync(company.company_id, dataset)
@@ -2113,6 +2230,15 @@ def confluence_save_sync_spaces(
     row = db.get_connection(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
     if not row:
         raise HTTPException(404, "Confluence is not connected")
+    try:
+        previous_config = json.loads(row.get("config_json") or "{}")
+    except (TypeError, ValueError):
+        previous_config = {}
+    previous_ids = [
+        str(i) for i in (
+            previous_config.get(confluence_oauth.CONFIG_SYNC_SPACE_IDS) or []
+        ) if i
+    ]
     # Dedupe preserving order — the puller walks the selection in order.
     ids = list(dict.fromkeys(s.id for s in body.spaces))
     keys = {
@@ -2132,6 +2258,46 @@ def confluence_save_sync_spaces(
         config = json.loads((updated or {}).get("config_json") or "{}")
     except (TypeError, ValueError):
         config = {}
+
+    # Drop a deselected space's pages from the document catalog.
+    #
+    # The puller catalogues EVERY page it walks, and nothing removed one, so a
+    # space the admin unticked stayed catalogued forever: still offered to the
+    # model as a document this workspace has, still rankable, still eligible
+    # to be asserted as the subject of a question — after which the body fetch
+    # fails and the user is told the contents could not be loaded, which reads
+    # as a glitch rather than as "that space is not connected any more".
+    #
+    # Keyed on the space ID, which is why `container_id` exists: the rows are
+    # keyed on PAGE ids, and nothing stored on them joined to a space until
+    # now (`source_name` is the display name; the key can be parsed out of
+    # `url` but does not survive a rename). Pages catalogued before that
+    # column existed carry NULL and are skipped until the next pull stamps
+    # them — under-cleaning, never mis-deleting.
+    #
+    # `if ids else []` mirrors the Slack channel selection exactly, and is the
+    # edge that matters most here: an EMPTY selection means "every readable
+    # space" (see this route's docstring), so clearing the picker WIDENS what
+    # is synced. Diffing against it would read a widening as the removal of
+    # every space the admin had listed and delete the whole catalog.
+    removed_space_ids = (
+        [sid for sid in previous_ids if sid not in set(ids)] if ids else []
+    )
+    if removed_space_ids:
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents_in_containers(
+                company.company_id,
+                document_catalog.PROVIDER_CONFLUENCE,
+                removed_space_ids,
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "confluence un-sync: catalog deregistration failed for "
+                "company=%s", company.company_id,
+            )
+
     # Pull the new selection now rather than waiting for the 6-hourly sweep —
     # the user just told us what they want ingested.
     kickoff_sync(company.company_id, confluence_oauth.CONFLUENCE_PROVIDER)
@@ -3995,6 +4161,37 @@ def slack_save_sync_channels(
                 "slack un-sync: purge failed for company=%s", company.company_id
             )
 
+        # Drop the deselected channels from the document catalog too.
+        #
+        # `register_slack_catalog` upserts a row per synced channel and nothing
+        # ever removed one, so a deselected channel stayed catalogued forever:
+        # still listed to the model as a document this workspace has, still
+        # rankable, and — since document resolution shipped — still eligible to
+        # be ASSERTED as the subject of a question. The body fetch then fails
+        # and the user is told the contents could not be loaded, which reads as
+        # a transient problem when the channel is simply not connected any
+        # more. Measured on the shared database 2026-08-07: one such row
+        # (#cerebro-agent-escalations, last synced three days before its
+        # siblings) against six tenants.
+        #
+        # Keyed on `removed_ids`, NOT on `purge_names` beside it, and that is
+        # the more reliable half of this cleanup rather than an accident: the
+        # corpus purge needs a stored channel NAME and logs a warning when one
+        # is missing, whereas the id is what the user's own deselection
+        # produced and is always present. So a channel whose name was never
+        # stored still leaves the catalog cleanly.
+        try:
+            from app import document_catalog
+
+            document_catalog.deregister_documents(
+                company.company_id, document_catalog.PROVIDER_SLACK, removed_ids
+            )
+        except Exception:  # noqa: BLE001 — cleanup must never fail the save
+            logger.exception(
+                "slack un-sync: catalog deregistration failed for company=%s",
+                company.company_id,
+            )
+
     return {
         "ok": True,
         "config": config,
@@ -4588,7 +4785,14 @@ def _handle_push_event(payload: dict) -> None:
     — so we additionally fire a best-effort, bounded, coalesced background pre-warm
     of the new sha so the NEXT /locate is hot instead of paying the cold
     rebuild inline. No explicit cache deletion is needed: commit_sha keying already
-    makes the old map unreachable, so the warm is purely a latency optimization."""
+    makes the old map unreachable, so the warm is purely a latency optimization.
+
+    And a push may have added or edited files in a SYNCED SKILL FOLDER
+    (skill_sources) — the half-hourly sweep would pick that up eventually, but
+    the webhook knows NOW, so the same sync the sweep runs is fired immediately
+    for any source tracking the pushed branch. The sweep stays as the backstop
+    for dropped deliveries; this only shortens the wait from "within 30 minutes"
+    to "within seconds of the push"."""
     repo = payload.get("repository") or {}
     repo_full_name = str(repo.get("full_name") or "").strip()
     if not repo_full_name:
@@ -4609,6 +4813,15 @@ def _handle_push_event(payload: dict) -> None:
     is_default_push = bool(default_branch) and pushed_ref == f"refs/heads/{default_branch}"
     if install_id and is_default_push:
         _prewarm_codebase_map_on_push(int(install_id), repo_full_name, None)
+
+    # Skill folders on the pushed branch. NOT gated on is_default_push — a
+    # source may track any branch — but gated on a branch push at all: a tag
+    # push moves no branch head, so no folder became stale.
+    pushed_branch = pushed_ref.removeprefix("refs/heads/") if pushed_ref.startswith("refs/heads/") else ""
+    if install_id and pushed_branch:
+        _sync_skill_folders_on_push(
+            int(install_id), repo_full_name, pushed_branch, default_branch
+        )
 
 
 def _handle_pull_request_event(payload: dict) -> None:

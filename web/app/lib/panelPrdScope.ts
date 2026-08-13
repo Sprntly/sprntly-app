@@ -26,11 +26,15 @@ type ScopeContent = Pick<
  */
 export function prdInScopeFor(
   content: ScopeContent,
-  activeTab: "evidence" | "prd" | "tickets" | "reports",
+  activeTab: "evidence" | "prd" | "tickets" | "reports" | "document",
 ): PrdState | null {
   const { prd } = content
   if (prd == null) return null
-  if (activeTab === "reports") return null
+  // Neither Reports nor Document is part of the PRD pipeline: both hang off
+  // the CHAT THREAD, so no PRD is actionable while one of them is open.
+  // Listing them explicitly rather than defaulting means a future tab has to
+  // make this choice deliberately instead of inheriting "PRD applies".
+  if (activeTab === "reports" || activeTab === "document") return null
   // A STANDALONE ticket set is on screen: these tickets came out of a chat with
   // no PRD behind them, so whatever PRD is still sitting in the shared slot did
   // not produce them. Left in scope it would arm the Share menu, the PDF export

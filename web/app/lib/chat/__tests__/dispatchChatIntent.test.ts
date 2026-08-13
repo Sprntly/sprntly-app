@@ -8,8 +8,11 @@ function envelope(overrides: Partial<ChatIntentEnvelope> = {}): ChatIntentEnvelo
     confidence: 0.9,
     task: null,
     instruction: null,
+    artifact_kind: null,
     artifact_type: null,
     artifact_query: null,
+    artifact_template_id: null,
+    artifact_template_name: null,
     reason: "test",
     source: "llm",
     prd_id: null,
@@ -24,6 +27,8 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onGenerateTickets: vi.fn(),
     onGeneratePrd: vi.fn(),
     onOpenArtifact: vi.fn(),
+    onChangeTemplate: vi.fn(),
+    onCreateArtifact: vi.fn(),
     onAnswer: vi.fn(),
   }
 }
@@ -64,6 +69,44 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
     expect(ex.onOpenArtifact).toHaveBeenCalledWith(open)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
+  })
+
+  it("create_artifact always hits onCreateArtifact, carrying the envelope", () => {
+    const ex = executors()
+    const env = envelope({ intent: "create_artifact", artifact_kind: "leadership update" })
+    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    expect(ex.onCreateArtifact).toHaveBeenCalledWith(env)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("change_prd_template with a resolvable target + format hits onChangeTemplate with the resolved prd id", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_prd_template", prd_id: 77, artifact_template_id: "acme" })
+    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    expect(ex.onChangeTemplate).toHaveBeenCalledWith(env, 77)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+})
+
+describe("dispatchChatIntent — change_prd_template falls through without a resolvable target or format (AC12)", () => {
+  it("no resolvable target (hasEditTarget: false) → onAnswer, not onChangeTemplate", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_prd_template", artifact_template_id: "acme" })
+    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    expect(ex.onChangeTemplate).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("no artifact_template_id, even with a resolvable target → onAnswer, not onChangeTemplate", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_prd_template", prd_id: 77, artifact_template_id: null })
+    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    expect(ex.onChangeTemplate).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
   })
 })
 
@@ -112,6 +155,8 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
     expect(ex.onGenerateTickets).not.toHaveBeenCalled()
     expect(ex.onGeneratePrd).not.toHaveBeenCalled()
     expect(ex.onOpenArtifact).not.toHaveBeenCalled()
+    expect(ex.onChangeTemplate).not.toHaveBeenCalled()
+    expect(ex.onCreateArtifact).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
   })

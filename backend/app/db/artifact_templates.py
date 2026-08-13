@@ -66,6 +66,37 @@ def _is_unique_violation(exc: Exception) -> bool:
     return "unique" in text or _UNIQUE_VIOLATION in text
 
 
+def _drop_planner_cache(company_id: str) -> None:
+    """Tell the Ask Planner its cached view of this company's formats is stale.
+
+    Lifted verbatim from db/custom_skills.py:70, because it is the same
+    mechanism guarding the same failure: the planner lists this company's
+    formats in every prompt and validates the id it picks against that list,
+    memoising both in-process until something says otherwise
+    (`ask_planner.invalidate_catalog_cache`). Entries live until the process
+    restarts by design, so a write that skips this leaves the planner offering a
+    deleted format — or blind to one just uploaded — for the life of the
+    process, and a nominal week-long TTL is the only thing that eventually
+    heals it.
+
+    ACTIVATION MATTERS MOST. It is the write that changes what every future
+    document is written into while changing no row a user is looking at, so a
+    stale cache there means the planner keeps describing the OLD active format
+    as the one in use — a wrong answer to "which format am I using" delivered
+    with complete confidence.
+
+    Imported lazily: `ask_planner` reaches back into `qa_agent` and the db
+    layer, so a module-level import here would close a cycle. Never allowed to
+    break a write — a cache that failed to clear is a stale prompt, which the
+    next write or a restart fixes; a format that failed to save is not."""
+    try:
+        from app.ask_planner import invalidate_catalog_cache
+
+        invalidate_catalog_cache(company_id)
+    except Exception:  # noqa: BLE001 — best-effort, never fails the write
+        logger.debug("planner cache invalidation failed for %s", company_id, exc_info=True)
+
+
 def _decode(row: dict) -> dict:
     """DB row → caller shape: JSON text columns decoded, is_active a real bool.
 
@@ -132,6 +163,10 @@ def insert_template(
         "section_map": json.dumps({}),
         "compile_status": "pending",
         "compile_notes": json.dumps([]),
+        # '' = "no summary yet"; the compile that validates this row writes the
+        # real one (summarize.generate_summary), so a fresh upload is never
+        # described by anything.
+        "summary": "",
         "content_hash": content_hash,
         "is_active": False,
         "uploader_id": uploader_id,
@@ -140,6 +175,7 @@ def insert_template(
         "updated_at": now,
     }
     resp = c.table("artifact_templates").insert(row).execute()
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else row)
 
 
@@ -150,8 +186,8 @@ def insert_template(
 # is exactly what the list is supposed to avoid.
 _LIST_COLUMNS = (
     "id, company_id, artifact_type, name, source_chars, compile_status, "
-    "compile_notes, content_hash, is_active, uploader_id, uploader_name, "
-    "created_at, updated_at"
+    "compile_notes, summary, content_hash, is_active, uploader_id, "
+    "uploader_name, created_at, updated_at"
 )
 
 
@@ -252,6 +288,7 @@ def update_template(
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     # PostgREST returns the updated representation; fall back to the row we
     # already read merged with the patch rather than reporting a failed update
     # (the caller reads None as "the row is gone" and would 404 a template that
@@ -267,6 +304,7 @@ def set_compile_result(
     compiled: str | None = None,
     section_map: dict | None = None,
     compile_notes: list | None = None,
+    summary: str | None = None,
 ) -> dict | None:
     """Record what a compile produced; returns the decoded row, or None for a
     missing-or-foreign id.
@@ -277,6 +315,12 @@ def set_compile_result(
     currently generating with — the new value is written only when a compile
     succeeds, so the last good format keeps serving until the new one validates.
     Callers that genuinely want to clear them pass `""` / `{}` explicitly.
+
+    `summary` follows the same None-means-leave-it rule, but with the OPPOSITE
+    explicit case: a successful compile passes it even when generation failed
+    and it is '' — a summary describing source text that has since been replaced
+    is worse than no summary, so success paths overwrite and failure paths
+    (which change no source) leave the old one standing.
 
     `compile_notes` is a list of {code, message} objects, never free text: the
     web keys a translation table on `code`, so a raw validator note must never
@@ -291,6 +335,8 @@ def set_compile_result(
         patch["section_map"] = json.dumps(section_map)
     if compile_notes is not None:
         patch["compile_notes"] = json.dumps(compile_notes)
+    if summary is not None:
+        patch["summary"] = summary
     c = require_client()
     resp = (
         c.table("artifact_templates")
@@ -299,6 +345,42 @@ def set_compile_result(
         .eq("id", template_id)
         .execute()
     )
+    # A compile is what turns an uploaded format into a usable one, so the
+    # planner's cached `compile_status` is exactly what decides whether it may
+    # be named — stale here means refusing a format that just became ready.
+    _drop_planner_cache(company_id)
+    return _decode(resp.data[0] if resp.data else {**row, **patch})
+
+
+def set_template_summary(
+    *, company_id: str, template_id: str, summary: str
+) -> dict | None:
+    """Write ONLY the summary; returns the decoded row, or None for a
+    missing-or-foreign id.
+
+    The self-heal backfill's writer (`summarize._summarize_row`) — a row
+    uploaded before the summary column existed gets described without touching
+    its compile state, notes, or skeleton. Deliberately not routed through
+    `set_compile_result`: that signature requires a `compile_status`, and the
+    backfill has no business restating one a compile already wrote (a racing
+    recompile could have moved it between this path's read and write).
+
+    Drops the planner's catalog cache like every other write here — the drop IS
+    the self-heal loop's second half: the next plan re-reads the library and
+    sees the summary this write landed."""
+    row = get_template_by_id(company_id, template_id)
+    if row is None:
+        return None
+    patch = {"summary": summary, "updated_at": _now_iso()}
+    c = require_client()
+    resp = (
+        c.table("artifact_templates")
+        .update(patch)
+        .eq("company_id", company_id)
+        .eq("id", template_id)
+        .execute()
+    )
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, **patch})
 
 
@@ -364,9 +446,14 @@ def activate_template(
         )
     except Exception as exc:  # noqa: BLE001 — narrowed to unique-violation below
         _restore_active(c, company_id, prior_id)
+        # Dropped on the FAILURE path too: the deactivate above already landed,
+        # so whatever the restore managed, the planner's cached copy no longer
+        # describes the rows in the table.
+        _drop_planner_cache(company_id)
         if _is_unique_violation(exc):
             raise ActiveTemplateConflict(artifact_type) from exc
         raise
+    _drop_planner_cache(company_id)
     logger.info(
         "artifact_template_activated company_present=%s type=%s",
         bool(company_id), artifact_type,
@@ -414,6 +501,7 @@ def deactivate_template(company_id: str, template_id: str) -> dict | None:
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return _decode(resp.data[0] if resp.data else {**row, "is_active": False})
 
 
@@ -434,6 +522,7 @@ def delete_template(company_id: str, template_id: str) -> dict | None:
         .eq("id", template_id)
         .execute()
     )
+    _drop_planner_cache(company_id)
     return row
 
 

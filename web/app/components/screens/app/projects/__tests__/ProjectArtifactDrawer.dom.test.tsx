@@ -65,6 +65,11 @@ vi.mock("../../../../../lib/api", () => {
     // mocked below), but kept here so the mocked `lib/api` module stays a
     // faithful superset if any transitive import reaches for it.
     designAgentApi: { getByPrd: (...a: unknown[]) => designAgentGetByPrdMock(...a) },
+    // Real implementation (no API call, no side effect) — mirrors
+    // lib/api.ts's own five-value check, kept here rather than importing the
+    // real module so this mock stays self-contained.
+    isProjectArtifactType: (t: string) =>
+      ["prd", "evidence", "prototype", "report", "ticket_set"].includes(t),
   }
 })
 // `next/link` needs no app-router provider here — render it as a plain anchor,

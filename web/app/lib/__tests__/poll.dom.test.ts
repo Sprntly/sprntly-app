@@ -142,3 +142,98 @@ describe("pollUntil", () => {
     expect(fetchStatus.mock.calls.length).toBeLessThanOrEqual(2)
   })
 })
+
+// The ask's SSE `done` frame lands before the next poll tick would, so without
+// an external wake the finished answer sits rendered-but-unshown for up to a
+// full interval. The wake must SHORTEN the sleep without ever supplying a
+// value — the polled row stays authoritative.
+describe("wakeOn (external early wake)", () => {
+  it("cuts the sleep short when the wake fires", async () => {
+    setVisibility("visible")
+    let wake: (() => void) | null = null
+    let resolved = false
+
+    const p = sleepUntilNextPoll(30_000, (w) => {
+      wake = w
+      return () => {
+        wake = null
+      }
+    }).then(() => {
+      resolved = true
+    })
+
+    await vi.advanceTimersByTimeAsync(100)
+    expect(resolved).toBe(false)
+
+    wake!()
+    await p
+    expect(resolved).toBe(true)
+  })
+
+  it("unsubscribes on every exit path, including the plain timeout", async () => {
+    setVisibility("visible")
+    const off = vi.fn()
+
+    const p = sleepUntilNextPoll(1000, () => off)
+    await vi.advanceTimersByTimeAsync(1000)
+    await p
+
+    expect(off).toHaveBeenCalledTimes(1)
+  })
+
+  it("survives a wake source that fires synchronously", async () => {
+    setVisibility("visible")
+    const off = vi.fn()
+
+    // Fires immediately, before the subscribe call has even returned.
+    const p = sleepUntilNextPoll(30_000, (w) => {
+      w()
+      return off
+    })
+    await p
+
+    // Still unsubscribed, rather than parking a listener nothing will clear.
+    expect(off).toHaveBeenCalledTimes(1)
+  })
+
+  it("never stalls the poll when the wake source throws", async () => {
+    setVisibility("visible")
+    const p = sleepUntilNextPoll(1000, () => {
+      throw new Error("broken wake source")
+    })
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(p).resolves.toBeUndefined()
+  })
+
+  it("re-reads status on wake instead of resolving from it", async () => {
+    setVisibility("visible")
+    let wake: (() => void) | null = null
+    let status = "generating"
+    const fetchStatus = vi.fn(async () => ({ status }))
+
+    const promise = pollUntil({
+      fetchStatus,
+      isDone: (v) => v.status === "ready",
+      maxMs: 60_000,
+      intervalMs: 30_000,
+      wakeOn: (w) => {
+        wake = w
+        return () => {
+          wake = null
+        }
+      },
+    })
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(fetchStatus).toHaveBeenCalledTimes(1)
+
+    // The job finished; the wake only prompts another read.
+    status = "ready"
+    wake!()
+    const result = await promise
+
+    expect(result.status).toBe("ready")
+    // Second read came from the wake, not from the 30s interval elapsing.
+    expect(fetchStatus).toHaveBeenCalledTimes(2)
+  })
+})

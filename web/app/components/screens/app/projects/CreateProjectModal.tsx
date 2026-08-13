@@ -41,7 +41,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useCompany } from "../../../../context/CompanyContext"
 import { projectPath } from "../../../../lib/routes"
-import { artifactsApi, projectsApi, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
+import { artifactsApi, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import type { InviteRole } from "../../../../lib/teamApi"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
@@ -64,6 +64,16 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
+}
+
+/** `BADGE`'s fallback for a type outside `ProjectArtifactType` (a
+ *  custom_artifact row from `artifactsApi.list()`) — this tab's picker has
+ *  no slot for one (no "custom_artifact" chip/flow exists here), so it
+ *  renders a neutral badge rather than crashing; `onSelectArtifact`/create
+ *  are still gated by `isProjectArtifactType` below before any write. */
+const UNKNOWN_BADGE = { label: "ARTIFACT", bg: "var(--info-soft)", color: "var(--info)" }
+function badgeFor(type: ArtifactItem["type"]): { label: string; bg: string; color: string } {
+  return isProjectArtifactType(type) ? BADGE[type] : UNKNOWN_BADGE
 }
 
 function artifactKey(a: ArtifactItem): string {
@@ -334,7 +344,7 @@ export function CreateProjectModalView({
               ) : (
                 <div className={styles.artPick} data-testid="create-project-artifact-list">
                   {artifacts.map((a) => {
-                    const cfg = BADGE[a.type]
+                    const cfg = badgeFor(a.type)
                     const isSel = selectedArtifact != null && artifactKey(selectedArtifact) === artifactKey(a)
                     return (
                       <div
@@ -361,7 +371,7 @@ export function CreateProjectModalView({
               {selectedArtifact ? (
                 <p className={styles.pickNote} data-testid="create-project-artifact-selected">
                   <b>Project name:</b> &ldquo;{artifactTitle(selectedArtifact)}&rdquo; · <b>first item:</b> the
-                  selected {BADGE[selectedArtifact.type].label.toLowerCase()}.
+                  selected {badgeFor(selectedArtifact.type).label.toLowerCase()}.
                 </p>
               ) : null}
             </div>
@@ -542,11 +552,26 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       }
       setCreating(true)
       const artifact = selectedArtifact
+      // A custom_artifact row can't be a project's first item today (no
+      // slot exists in project_artifacts for it — see isProjectArtifactType's
+      // own doc) — unreachable via this tab's own picker (which never shows
+      // one, see badgeFor above), but the type is statically wider, so the
+      // ref-add itself stays gated rather than assuming it away.
+      if (!isProjectArtifactType(artifact.type)) {
+        setError("That artifact can't be a project's first item yet.")
+        setCreating(false)
+        return
+      }
+      // Narrowing on `artifact.type` above doesn't carry into the `.then()`
+      // closure below (a promise callback, not a nested function TS's
+      // control-flow analysis treats as immediately-invoked) — captured into
+      // its own binding so the guard's proof actually reaches the call.
+      const artifactType = artifact.type
       projectsApi
         .create({ name: artifactTitle(artifact), origin: "artifact" })
         .then((project) =>
           projectsApi
-            .addArtifact(project.id, artifact.type, artifact.id)
+            .addArtifact(project.id, artifactType, artifact.id)
             // Best-effort follow-up ref-add (Implementation Notes: "the
             // ref-add is a follow-up call") — a failure here leaves the
             // project created but without its first item rather than
@@ -570,6 +595,17 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       }
       setCreating(true)
       const prd = selectedPrd
+      // This tab's own picker only ever lists `prdArtifacts` (`a.type ===
+      // "prd"`), so this is always true in practice — guarded rather than
+      // assumed, since `selectedPrd`'s declared type is the wider
+      // `ArtifactItem | null`.
+      if (!isProjectArtifactType(prd.type)) {
+        setError("Pick a PRD to fork.")
+        setCreating(false)
+        return
+      }
+      // Same closure-narrowing note as the "artifact" tab above.
+      const prdType = prd.type
       projectsApi
         // prd_id lets the server dedupe (first-write-wins, AD-P9):
         // re-selecting an already-forked PRD returns the EXISTING project
@@ -577,7 +613,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
         .create({ name: artifactTitle(prd), origin: "prd_auto", prd_id: prd.id })
         .then((project) =>
           projectsApi
-            .addArtifact(project.id, prd.type, prd.id)
+            .addArtifact(project.id, prdType, prd.id)
             // Same best-effort follow-up posture as the "From an artifact"
             // tab: the project exists either way, even if the artifact ref
             // add fails.

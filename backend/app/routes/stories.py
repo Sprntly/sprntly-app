@@ -143,6 +143,11 @@ class GenerateIn(BaseModel):
     # the artifacts library. Optional and ignored on the prd_id path: a set can
     # legitimately be born outside any conversation.
     conversation_id: int | None = Field(default=None, ge=1)
+    # The uploaded ticket format this run must render into, when the user named
+    # one ("break this into tickets using our Acme ticket format" — the Ask
+    # planner resolves the name to an id). Omitted means the company's ACTIVE
+    # ticket format, which is what every run got before this existed.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
 
 
 class StoryIn(BaseModel):
@@ -213,6 +218,16 @@ async def generate(
     """
     if (body.prd_id is None) == (body.insight is None):
         raise HTTPException(400, "provide exactly one of prd_id or insight")
+
+    # Validated before anything is scheduled — a format the caller cannot use is
+    # a refusal they can act on, not a multi-minute run that quietly renders in
+    # a different one. Reuses the PRD route's helper so both surfaces refuse
+    # with the same status ladder and the same copy.
+    from app.routes.prd import _requested_template_id
+
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id, "tickets"
+    )
 
     # A conversation_id is client-supplied and ids are sequential, so prove the
     # thread is this company's before stamping a set with it. 404, never 403 —
@@ -337,6 +352,7 @@ async def generate(
                 generate_user_stories,
                 company.company_id, prd_id=body.prd_id, insight=body.insight,
                 ticket_set_id=ticket_set_id,
+                artifact_template_id=template_id,
                 strategy=strategy,
                 batch_size=settings.ticket_gen_batch_size,
                 max_parallel=settings.ticket_gen_max_parallel,

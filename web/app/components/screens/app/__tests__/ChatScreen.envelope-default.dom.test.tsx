@@ -1,26 +1,20 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — the THREE states of `chat_intent_envelope`, at the ChatScreen
-// read site. The flag is DEFAULT ON (2026-08-03): a company that never had the
-// key written is on the envelope, and the staff checkbox is a kill switch
-// rather than an opt-in.
+// ChatScreen — the planner is consulted for EVERY message, whatever the
+// feature flags say.
 //
-//   * explicit `true`                  → envelope
-//   * key absent                       → envelope   ← the default-on behaviour
-//   * no feature_flags object at all   → envelope
-//   * workspace UNKNOWN (null/loading) → envelope   ← fails OPEN, on purpose
-//   * explicit `false`                 → legacy regex ladder
+// This file used to pin the three states of `chat_intent_envelope`, the kill
+// switch that chose between the backend decision and a client-side regex
+// ladder. Both the flag and the ladder are gone, and the reason is worth
+// keeping: a regex in the browser deciding to GENERATE A PRD meant an oddly
+// phrased question could spend minutes and real money building a document
+// nobody asked for, and no amount of tuning the pattern fixed the class of bug.
 //
-// Every case sends the SAME message, one the regex ladder CAN parse, so the
-// two routers are distinguishable by their output rather than by a mock spy
-// alone: the envelope generates from the task it synthesized off the thread,
-// the ladder generates from the substring its regex extracted.
-//
-// Why UNKNOWN fails open (the opposite of ds_claude_analysis, which fails
-// closed — see backend/app/qa_agent.py::_ds_claude_enabled): this flag picks a
-// ROUTING STRATEGY, not whether a tenant's data leaves the box. "I can't read
-// your flags yet" must resolve to the better router, and the envelope call
-// keeps its own fail-open floor back to the ladder if the request fails.
+// So there is no longer a state in which this screen decides anything. What is
+// pinned now is that absence — an explicit `false`, a missing key, no flags
+// object, and a workspace that has not loaded all reach the planner, because
+// there is nothing else left to reach. A kill switch here would no longer
+// choose between two routers; it would choose between the planner and nothing.
 import * as React from "react"
 import { act, cleanup, fireEvent, waitFor, within, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -170,53 +164,50 @@ async function expectEnvelopeRouted() {
   expect(classifyCommand).not.toHaveBeenCalled()
 }
 
-describe("ChatScreen — chat_intent_envelope default-on", () => {
-  it("explicit true → envelope dispatch", async () => {
+describe("ChatScreen — the planner decides, unconditionally", () => {
+  it("explicit true → the planner", async () => {
     workspaceRef.current = { feature_flags: { chat_intent_envelope: true } }
     await expectEnvelopeRouted()
   })
 
-  it("KEY ABSENT → envelope dispatch (the default-on behaviour)", async () => {
-    // A company whose feature_flags row was never written for this key — 17 of
-    // 33 at the time of the flip. No data migration turns these on; this read
-    // site does.
+  it("KEY ABSENT → the planner", async () => {
     workspaceRef.current = { feature_flags: { agents: true, top_insights: true } }
     await expectEnvelopeRouted()
   })
 
-  it("no feature_flags object at all → envelope dispatch", async () => {
+  it("no feature_flags object at all → the planner", async () => {
     workspaceRef.current = {}
     await expectEnvelopeRouted()
   })
 
-  it("workspace not loaded yet → envelope dispatch (fails OPEN)", async () => {
-    // An unknown flag state must not silently downgrade the router. The
-    // envelope call keeps its own fallback if the request itself fails.
+  it("workspace not loaded yet → the planner", async () => {
     workspaceRef.current = null
     await expectEnvelopeRouted()
   })
 
-  it("explicit false → the legacy regex ladder, and no intent call at all", async () => {
+  it("explicit FALSE → still the planner: the kill switch no longer exists", async () => {
+    // The case this file exists for. `false` used to route to the client's
+    // regex ladder; there is no ladder, so the flag is inert and the message
+    // goes where every other message goes.
     workspaceRef.current = { feature_flags: { chat_intent_envelope: false } }
-    renderChat()
-    await typeAndSend(MESSAGE)
-
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    // The ladder's regex-extracted task — NOT the envelope's synthesized one.
-    expect(generateFromTask.mock.calls[0][0]).toBe(LADDER_TASK)
-    // The kill switch has to actually save the call: a company that opted out
-    // must not be billed for a Sonnet classification per message.
-    expect(resolveIntent).not.toHaveBeenCalled()
-    expect(runAskGeneration).not.toHaveBeenCalled()
+    await expectEnvelopeRouted()
   })
 
-  it("explicit false keeps the ladder's fall-through for a plain question", async () => {
+  it("a plain question still falls through to the ask agent", async () => {
+    // The planner is consulted, says `answer`, and the grounded ask runs. The
+    // screen never decided that — it executed a verdict. Note the verdict is
+    // stubbed rather than inferred from the words: that is the whole change.
     workspaceRef.current = { feature_flags: { chat_intent_envelope: false } }
+    resolveIntent.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "a question about users", source: "planner",
+      prd_id: null, prd_title: null,
+    })
     renderChat()
     await typeAndSend("why are enterprise users asking for this?")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    expect(resolveIntent).not.toHaveBeenCalled()
+    expect(resolveIntent).toHaveBeenCalledTimes(1)
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 })

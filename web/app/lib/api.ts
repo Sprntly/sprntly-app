@@ -586,7 +586,14 @@ export const askApi = {
   start: (
     question: string,
     company: string = "asurion",
-    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number; project_id?: number },
+    opts?: {
+      conversation_id?: number
+      pinned_skill?: string
+      prd_id?: number
+      project_id?: number
+      evidence_id?: number
+      ticket_set_id?: number
+    },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
       question,
@@ -598,8 +605,12 @@ export const askApi = {
       ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
       // Individual project chat: fold this project's memory (summary + top-N
       // entries) + the caller's job_role into the turn (backend/app/routes/
-      // ask.py's `project_id` field, AD-P8) — membership-gated server-side.
+      // ask.py's `project_id` field) — membership-gated server-side.
       ...(opts?.project_id != null ? { project_id: opts.project_id } : {}),
+      // Standalone-artifact chat: ground on the open evidence report or the
+      // open ticket set instead — one primary artifact per tab.
+      ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
+      ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
@@ -916,28 +927,70 @@ export const skillsApi = {
  *  tab-sent PRD, or the one the conversation is bound to) so the reducer acts
  *  on the same document the decision was grounded on. */
 export type ChatIntentEnvelope = {
+  /** `multi_agent` is the full seven-artifact suite and only the AI bar runs
+   *  it; a surface that cannot act on an intent falls through to its ask path,
+   *  which is why the union is wider than any one surface handles. */
   intent:
     | "answer"
     | "generate_prd"
     | "edit_prd"
     | "generate_tickets"
     | "generate_prototype"
+    | "multi_agent"
     | "open_artifact"
+    /** Switch the target PRD into a different uploaded format and re-write it
+     *  in place — dispatches POST /v1/prd/{id}/change-template with
+     *  `artifact_template_id`. Targeted like edit_prd (the tab's PRD or the
+     *  conversation's); the backend downgrades a target-less or format-less
+     *  request to `answer` before it ever reaches a surface. */
+    | "change_prd_template"
+    /** Write a document of any kind into the shared "Others" library —
+     *  dispatches POST /v1/custom-artifacts/generate with `task` +
+     *  `artifact_kind`. Needs no target PRD: a leadership update stands alone.
+     *
+     *  This arrived LATE relative to the backend: the planner could decide it
+     *  and the endpoint could execute it for a whole release before the
+     *  envelope was allowed to carry it, during which the chat answered in
+     *  prose and told users it had written a document that was never created.
+     *  An intent the client cannot see is an intent that does not exist. */
+    | "create_artifact"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
   /** edit_prd: the change to apply, self-contained. */
   instruction: string | null
+  /** create_artifact: WHAT KIND of document, in the user's own words
+   *  ("leadership update"). Free text — the executor stores it as a label and
+   *  nothing branches on it. Null on every other intent. */
+  artifact_kind: string | null
   /** open_artifact: which existing artifact kind to bring up. */
   artifact_type: OpenArtifactKind | null
   /** open_artifact: the subject the user named the document by. */
   artifact_query: string | null
+  /** generate_prd / generate_tickets: the uploaded FORMAT the user asked this
+   *  document to be written in ("…using our Acme format"). Null — the normal
+   *  case — means the company's active format, which the backend resolves on
+   *  its own. Forward it to the executor: dropping it silently generates in a
+   *  different format than the one that was asked for. */
+  artifact_template_id: string | null
+  /** That format's display name, so the surface can say WHICH format it is
+   *  writing in. Never send this back — it is for the user, not the executor. */
+  artifact_template_name: string | null
   reason: string
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
-   *  | "no_artifact_query" */
+   *  | "no_artifact_query" | "template_not_found" | "no_target_format" —
+   *  template_not_found means the user named a format we could not find, so
+   *  the build/switch was deliberately downgraded to an answer that asks which
+   *  one they meant; no_target_format is a format switch that named no format
+   *  at all, answered with the library instead. */
   source: string
   prd_id: number | null
   prd_title: string | null
+  /** The full gated plan behind this verdict — action, method, sources, kg,
+   *  web search, constraints, and the model's one-clause reason. DIAGNOSTIC
+   *  ONLY: nothing branches on it, it is logged to the browser console so you
+   *  can see WHY a message went where it did without tailing the backend. */
+  plan?: Record<string, unknown>
   /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
    *  company's artifact library. Absent for every other intent. */
   open?: OpenArtifactResult
@@ -987,24 +1040,40 @@ export type OpenArtifactResult = {
 }
 
 export const chatIntentApi = {
-  /** Decide the action for one chat message (flag: chat_intent_envelope).
+  /** Decide the action for one chat message. Backed by the Ask Planner.
+   *
    *  Backend loads the conversation history itself; the client only ships the
    *  light tab context. Fail-open BY THE CALLER: any network/HTTP failure →
-   *  fall back to the legacy regex ladder, never block the send. */
-  resolve: (
+   *  the message is ANSWERED (the grounded ask path), never guessed at and
+   *  never blocked.
+   *
+   *  Logs the plan to the browser console. Every surface that dispatches an
+   *  action goes through here, so one place covers all of them — and "why did
+   *  my message go there?" is the question you actually have while testing. */
+  resolve: async (
     message: string,
     opts?: {
       conversationId?: number | null
       prdId?: number | null
       hasAttachments?: boolean
     },
-  ) =>
-    api.post<ChatIntentEnvelope>("/v1/chat/intent", {
+  ) => {
+    const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
       message,
       ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
-    }),
+    })
+    // Guarded so a console-less environment (SSR, a jsdom run without one)
+    // can never turn a diagnostic into a broken send.
+    if (typeof console !== "undefined" && console.log) {
+      console.log(
+        `[planner] ${envelope.intent}`,
+        { message, ...envelope.plan, source: envelope.source },
+      )
+    }
+    return envelope
+  },
 }
 
 /** Next-prompt suggestions for a chat thread — `POST /v1/chat/suggestions`.
@@ -1071,6 +1140,20 @@ export type PrdRecord = {
    *  practice — the chat-task PRD command runs outside the ask pipeline — kept
    *  for shape parity with db/reports.py's identical column. */
   ask_id?: number | null
+  /** The canonical, pre-existing `artifact_shares` token for this PRD
+   *  (attached by the GET routes' get-or-create — never minted by this
+   *  read). Optional: absent on any response shape that predates this
+   *  field. */
+  share_token?: string | null
+  /** WHICH uploaded format this PRD was written in (prds.artifact_template_id,
+   *  returned by the GET routes' `select("*")`). Null/absent = Sprntly's
+   *  built-in format. The id survives the format's deletion by design. */
+  artifact_template_id?: string | null
+  /** That format's NAME, resolved server-side by GET /{prd_id} so the panel's
+   *  "Format: {name}" label needs no second fetch. Null when unstamped OR when
+   *  the stamped format was since deleted — the client labels the built-in
+   *  itself and falls back to a generic label for a deleted one. */
+  artifact_template_name?: string | null
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -1757,6 +1840,11 @@ export type ArtifactTemplate = {
   /** How many notes there are — the "See all 3" affordance needs the count,
    *  and it cannot be derived from `compile_summary`. */
   compile_note_count: number
+  /** What the format CONTAINS — the LLM-written description a successful
+   *  compile stores (2–3 sentences: its sections, the document it produces,
+   *  what it emphasizes). '' until one exists: a fresh upload mid-compile, or
+   *  a legacy row the backend's self-heal hasn't described yet. */
+  summary: string
 }
 
 /** A row PLUS its uploaded source and full mapping — the edit form's source. */
@@ -2477,8 +2565,9 @@ export const connectorsApi = {
     }),
   /** Save which channels the Slack corpus sync pulls from (stored on the
    * connection config as sync_channel_ids / sync_channel_names). An empty
-   * list clears the selection — the sync reverts to every channel the bot
-   * is a member of. `joined` echoes the public channels the bot could
+   * list clears the selection — the sync then pulls NOTHING until channels
+   * are picked again (2026-08-13 scope rule; the every-bot-member-channel
+   * fallback is gone). `joined` echoes the public channels the bot could
    * self-join right away.
    *
    * Unticking is the reverse of ticking, so the response also reports the
@@ -2716,6 +2805,11 @@ export const prdApi = {
      *  new PRD immediately, so navigating away mid-generation can't leave the
      *  chat orphaned (reopened from history with no PRD and no View PRD button). */
     conversationId?: number | null,
+    /** The uploaded format the user asked for (`ChatIntentEnvelope
+     *  .artifact_template_id`). Omitted means the company's active format. The
+     *  backend 404s an id that isn't this company's and 409s one that can't
+     *  write a PRD, so a bad id surfaces instead of quietly changing shape. */
+    artifactTemplateId?: string | null,
   ) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
       task,
@@ -2724,6 +2818,7 @@ export const prdApi = {
       // PRD on them (they used to be silently forgotten by this command).
       ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
       ...(conversationId != null ? { conversation_id: conversationId } : {}),
+      ...(artifactTemplateId ? { artifact_template_id: artifactTemplateId } : {}),
     }),
   /** Clarify-first sufficiency gate (runs on EVERY chat-PRD command before
    *  generation): does the task + attached documents carry the ingredients a
@@ -2767,13 +2862,23 @@ export const prdApi = {
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
    *  slug the PRD belongs to. */
-  importDoc: (file: File, dataset: string, conversationId?: number | null) => {
+  importDoc: (
+    file: File,
+    dataset: string,
+    conversationId?: number | null,
+    /** The uploaded format to re-lay-out into, when the user named one. This
+     *  path needs it as much as generateFromTask does and is easy to miss:
+     *  attaching a file to "create a PRD using our Acme format" dispatches an
+     *  IMPORT, not a generate, so a format dropped here is a format ignored. */
+    artifactTemplateId?: string | null,
+  ) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("dataset", dataset)
     // See generateFromTask: binds the commanding chat to the PRD server-side so
     // leaving the page mid-import can't orphan it.
     if (conversationId != null) form.append("conversation_id", String(conversationId))
+    if (artifactTemplateId) form.append("artifact_template_id", artifactTemplateId)
     return api.post<PrdStartResponse>("/v1/prd/import", form)
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
@@ -2837,6 +2942,24 @@ export const prdApi = {
       `/v1/prd/${prdId}/chat-edit`,
       { instruction },
     ),
+  /** Re-write an existing PRD into a different format, in place — the content
+   *  is regenerated into the target's structure (faithful re-layout: edits
+   *  survive, nothing is invented), with the current version snapshotted to
+   *  history first. `artifactTemplateId: null` means Sprntly's built-in format
+   *  — a real choice here, unlike the generate routes' "no preference".
+   *  `unchanged: true` (already in that format) means nothing was written —
+   *  skip the regenerating state entirely. Otherwise the row is back at
+   *  `generating`: poll GET /v1/prd/{id} like any generation, and on `ready`
+   *  compare its `artifact_template_id` against the target — an unchanged
+   *  stamp means the switch failed and the previous document still stands. */
+  changeTemplate: (prdId: number, artifactTemplateId: string | null) =>
+    api.post<{
+      prd_id: number
+      status: "ready" | "generating"
+      unchanged?: boolean
+      artifact_template_id: string | null
+      title?: string
+    }>(`/v1/prd/${prdId}/change-template`, { artifact_template_id: artifactTemplateId }),
 }
 
 /** One structured "User input needed" item lifted out of the PRD document.
@@ -3854,10 +3977,17 @@ export const storiesApi = {
    *  Callers should go through `lib/runTicketSetGeneration.ts` rather than
    *  calling this directly — it owns the kick-off/poll/publish arc, and one
    *  owner is what keeps the panel from starting a second run of its own. */
-  generateFromInsight: (insight: string, conversationId?: number | null) =>
+  generateFromInsight: (
+    insight: string,
+    conversationId?: number | null,
+    /** The uploaded TICKET format the user named ("…using our Acme ticket
+     *  format"). Omitted means the company's active ticket format. */
+    artifactTemplateId?: string | null,
+  ) =>
     api.post<StoryGenerateStart>("/v1/stories/generate", {
       insight,
       ...(conversationId != null ? { conversation_id: conversationId } : {}),
+      ...(artifactTemplateId ? { artifact_template_id: artifactTemplateId } : {}),
     }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */
   getJob: (jobId: number) =>
@@ -4875,6 +5005,65 @@ export type ArtifactItem =
       }
       open: { ticket_set_id: number }
     }
+  | {
+      /** A CUSTOM ARTIFACT — a document of any kind the team wrote and keeps:
+       *  a leadership update, a launch plan, a postmortem. The "Others"
+       *  section of the library. Shared company-wide, like reports and ticket
+       *  sets, so any member can open and edit any of them. */
+      type: "custom_artifact"
+      id: number
+      /** "" until the document is named (a generation titles it from its own
+       *  <h1>). The row renders its own fallback rather than a fabricated
+       *  title stored on the record. */
+      title: string
+      /** Lifecycle. Aggregation filters to generating|ready — a `failed`
+       *  generation produced nothing and is not an artifact. */
+      status: "generating" | "ready"
+      /** LAST EDIT, not birth. A library of living documents is browsed by
+       *  last touch, and this is the key the unified listing sorts on. The
+       *  birth date is `born_at` below — the two are separate precisely so a
+       *  row edited today does not read as created today. */
+      created_at: string
+      updated_at: string
+      born_at: string
+      /** The document's own free-text label ("leadership update"). Shown in
+       *  the row's source line. NEVER dispatched on — there is no list of
+       *  kinds, so any string must render as itself. */
+      kind: string
+      source: {
+        kind: string
+        conversation_id: number | null
+        conversation_title: string | null
+      }
+      open: { custom_artifact_id: number }
+    }
+
+/** One team document, body included (GET /v1/custom-artifacts/{id}). */
+export type CustomArtifactDoc = {
+  id: number
+  kind: string
+  title: string
+  status: "generating" | "ready" | "failed"
+  /** The sanitized HTML body. Rendered inline by the editor, which is why the
+   *  server sanitizes it on every WRITE — see app/custom_artifact_html.py. */
+  body_html: string
+  /** Optimistic-concurrency counter. Send it back as `base_version` on save
+   *  and a colleague who saved first turns your write into a 409 carrying
+   *  THEIR document, instead of silently losing one of the two. */
+  version: number
+  created_at: string
+  updated_at: string
+  conversation_id: number | null
+  created_by: string | null
+  updated_by: string | null
+}
+
+/** A save refused because someone else saved first. `current` is their
+ *  document, so the editor can say who moved it and offer the live text. */
+export type CustomArtifactConflict = {
+  error: "version_conflict"
+  current: CustomArtifactDoc | null
+}
 
 /** One captured report, body included (GET /v1/reports/{id}). */
 export type ReportDoc = {
@@ -4905,6 +5094,54 @@ export const artifactsApi = {
    *  (never an error), and callers skip posting in that case. */
   chatSummary: (kind: "prd" | "evidence" | "prototype" | "ticket_set", id: number) =>
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
+}
+
+/** Team documents of any kind — the "Others" library.
+ *
+ *  Every call is company-scoped server-side; there is no per-user filter and
+ *  deliberately so, because the library is shared with the whole team. */
+export const customArtifactsApi = {
+  list: () =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
+      .then((r) => r.artifacts),
+  get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** The documents born in one chat, newest first — what re-attaches a thread's
+   *  document to its panel after a reload. Bodies omitted; opening one fetches
+   *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
+  listForConversation: (conversationId: number) =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>(
+        `/v1/custom-artifacts/by-conversation/${conversationId}`,
+      )
+      .then((r) => r.artifacts),
+  create: (body: {
+    kind?: string
+    title?: string
+    body_html?: string
+    conversation_id?: number | null
+  }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts", body),
+  /** Save. Pass `base_version` (the version you opened) to be told about a
+   *  colleague's concurrent save instead of overwriting it; omit it to accept
+   *  last-write-wins, which is right for a rename that cannot lose anything. */
+  update: (
+    id: number,
+    body: {
+      title?: string
+      kind?: string
+      body_html?: string
+      base_version?: number
+    },
+  ) => api.patch<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`, body),
+  remove: (id: number) => api.delete<{ deleted: boolean }>(`/v1/custom-artifacts/${id}`),
+  /** Start an LLM generation. Returns immediately with a `generating` row to
+   *  open and poll — the document lands on that same row. */
+  generate: (body: {
+    kind: string
+    task: string
+    context?: string
+    conversation_id?: number | null
+  }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts/generate", body),
 }
 
 /** One row in a thread's report list (GET /v1/reports?conversation_id=…) — the
@@ -5102,6 +5339,30 @@ export const mcpTokensApi = {
 
 /** Artifact type keys a project can hold (`project_artifacts.artifact_type`). */
 export type ProjectArtifactType = "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+
+/** `ArtifactItem` narrowed to the five kinds a project can actually hold —
+ *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates only
+ *  `ProjectArtifactType`, so a `custom_artifact` row can never legitimately
+ *  reach project-scoped UI. `projectsApi.artifacts()` (this project's own
+ *  attached refs) is typed to this narrower shape; `artifactsApi.list()`
+ *  (the whole company library, which DOES include custom_artifact rows) is
+ *  not — callers that pick FROM the library to attach TO a project must
+ *  filter a `custom_artifact` row out themselves before it reaches
+ *  project-typed state (see `AddArtifactModal.tsx`). */
+export type ProjectableArtifactItem = Extract<ArtifactItem, { type: ProjectArtifactType }>
+
+const PROJECT_ARTIFACT_TYPES = new Set<ProjectArtifactType>([
+  "prd", "evidence", "prototype", "report", "ticket_set",
+])
+
+/** Runtime guard mirroring `ProjectableArtifactItem`'s own doc — the ONE
+ *  place other project-scoped call sites narrow an `ArtifactItem["type"]`
+ *  before indexing a `Record<ProjectArtifactType, …>` badge/count map or
+ *  calling `projectsApi.addArtifact`, rather than each duplicating the
+ *  five-value list. */
+export function isProjectArtifactType(t: ArtifactItem["type"]): t is ProjectArtifactType {
+  return PROJECT_ARTIFACT_TYPES.has(t as ProjectArtifactType)
+}
 
 /** One row from `GET /v1/projects` — recency-ordered, MEMBER-scoped by the
  *  backend (AD-P11: a workspace project the caller isn't a member of never
@@ -5470,7 +5731,13 @@ export const projectsApi = {
   get: (id: number | string) =>
     api.get<ProjectDetail>(`/v1/projects/${encodeURIComponent(String(id))}`),
   /** The project's artifacts, in the same unified shape `GET /v1/artifacts`
-   *  returns (AD-P1/AD-P12), filtered to this project's refs. */
+   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` (not
+   *  the narrower `ProjectableArtifactItem[]`) to match every existing
+   *  caller/fixture — a `custom_artifact` row is impossible here today (the
+   *  backing join table's DB CHECK constraint), but callers that index a
+   *  `Record<ProjectArtifactType, …>` off `.type` still guard with
+   *  `isProjectArtifactType` rather than relying on that being statically
+   *  provable from this return type alone. */
   artifacts: (id: number | string) =>
     api
       .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)

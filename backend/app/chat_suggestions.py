@@ -156,6 +156,20 @@ next step — a named thing the assistant offered, a concrete gap the answer \
 left open, an obvious drill-down into data that was actually presented, or a \
 document the user is plainly building toward.
 
+OFFERING TO WRITE A DOCUMENT is one of the strongest suggestions you can make, \
+and often the right one. When the thread has produced material that a person \
+would normally write up for an audience — an update for leadership, a launch \
+plan, a postmortem, a customer FAQ, release notes, a board memo — suggest \
+writing it, naming the kind and the subject: "Draft a leadership update on the \
+Q3 reliability work", "Write this up as a launch plan".
+
+Phrase it as an instruction to WRITE the document, not a question about it: \
+the user sends your prompt as their next message, and only a clear request \
+creates anything. "What would leadership want to know?" produces an answer; \
+"Draft a leadership update on X" produces the document. Never suggest writing \
+a document the conversation has no material for — the anchor rule applies to \
+these exactly as it does to every other suggestion.
+
 Return [] when:
 - the exchange is closed (a greeting, a thank-you, a one-fact answer);
 - the answer failed, was refused, or said it lacked the data;

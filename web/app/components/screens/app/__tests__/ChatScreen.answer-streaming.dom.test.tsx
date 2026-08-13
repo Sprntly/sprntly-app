@@ -54,20 +54,31 @@ vi.mock("../../../../lib/runPrdGeneration", () => ({
 
 // Deferred ask whose onPartial is captured, so the test can drive the live
 // stream by hand before releasing the final (authoritative) reply.
-const { runAskGeneration } = vi.hoisted(() => ({ runAskGeneration: vi.fn() }))
-vi.mock("../../../../lib/runAskGeneration", () => ({
-  runAskGeneration: (...args: unknown[]) => runAskGeneration(...args),
+const { runAskGeneration, resumeAskGeneration, getPendingAsk } = vi.hoisted(() => ({
+  runAskGeneration: vi.fn(),
   resumeAskGeneration: vi.fn(),
   getPendingAsk: vi.fn().mockReturnValue(null),
+}))
+vi.mock("../../../../lib/runAskGeneration", () => ({
+  runAskGeneration: (...args: unknown[]) => runAskGeneration(...args),
+  resumeAskGeneration: (...args: unknown[]) => resumeAskGeneration(...args),
+  getPendingAsk: (...args: unknown[]) => getPendingAsk(...args),
+  AskCancelledError: class AskCancelledError extends Error {},
+  AskStoppedError: class AskStoppedError extends Error {},
+  AskTimeoutError: class AskTimeoutError extends Error {},
 }))
 
 vi.mock("../../../../lib/usePipelineStatus", () => ({
   usePipelineStatus: () => ({ runStatus: null, isTriggering: false, showCompleted: false, triggerRun: vi.fn() }),
 }))
+// `new=1` opens a FRESH chat and discards any restored tabs — right for the
+// send-a-question tests, wrong for the reload-resume one (which needs its
+// seeded pending tab to survive), so the query string is per-test.
+const { searchParams } = vi.hoisted(() => ({ searchParams: { value: "new=1" } }))
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/",
-  useSearchParams: () => new URLSearchParams("new=1"),
+  useSearchParams: () => new URLSearchParams(searchParams.value),
 }))
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
@@ -119,6 +130,15 @@ const FINAL_REPLY = {
   sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
 }
 
+// MULTI-paragraph on purpose. `buildAnswerStreamChunks` splits on blank lines
+// and returns CUMULATIVE slices, and `useAnswerSimulatedStream` only animates
+// when `chunks.length > 1` — so a single-paragraph reply skips the typewriter
+// entirely and cannot detect a re-typing regression at all.
+const MULTI_PARAGRAPH_REPLY = {
+  answer: "PARA_ONE first paragraph.\n\nPARA_TWO second paragraph.\n\nPARA_THREE third paragraph.",
+  sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+}
+
 /** Deferred runAskGeneration: hands back the captured onPartial + a release. */
 function deferAsk() {
   let release!: (reply: typeof FINAL_REPLY) => void
@@ -135,13 +155,49 @@ function deferAsk() {
   }
 }
 
+// Keys must match ChatScreen's (authUserId "anon" via the auth mock, company
+// "acme" via the company mock).
+const TABS_KEY = "sprntly_chat_tabs_anon_acme"
+const ACTIVE_KEY = "sprntly_chat_active_tab_anon_acme"
+
+/** Seed a tab whose LAST turn is still awaiting its reply — the persisted
+ *  "asking…" marker that makes ChatScreen re-attach to the in-flight ask on
+ *  mount (the reload-mid-answer path). */
+function seedPendingAskTab() {
+  sessionStorage.setItem(TABS_KEY, JSON.stringify([{
+    id: "tab-1", title: "Chat", dbConvId: null, briefMeta: null,
+    insightBody: null, prdId: null,
+    thread: [{ id: "turn-1", query: "what are customers saying?" }],
+  }]))
+  sessionStorage.setItem(ACTIVE_KEY, "tab-1")
+}
+
+/** Deferred resumeAskGeneration. Positional signature:
+ *  (askId, company, tabId, isCancelled, isStopped, onPartial, onStreamDrop). */
+function deferResume() {
+  let release!: (reply: typeof FINAL_REPLY) => void
+  let onPartial: ((md: string) => void) | undefined
+  resumeAskGeneration.mockImplementation((...args: unknown[]) => {
+    onPartial = args[5] as (md: string) => void
+    return new Promise((res) => { release = res as (r: typeof FINAL_REPLY) => void })
+  })
+  return {
+    partial: (md: string) => act(async () => { onPartial?.(md) }),
+    release: (reply: typeof FINAL_REPLY) => act(async () => { release(reply) }),
+  }
+}
+
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
   protoMap.clear()
   runAskGeneration.mockReset()
+  resumeAskGeneration.mockReset()
+  getPendingAsk.mockReset()
+  getPendingAsk.mockReturnValue(null)
   resolveIntent.mockReset()
   resolveIntent.mockResolvedValue(ANSWER_ENVELOPE)
+  searchParams.value = "new=1"
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -160,7 +216,7 @@ describe("ChatScreen — live answer streaming", () => {
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
     await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
     // Rung 1's line is the one thing that is always true while a job generates.
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Working on your question")
 
     // First delta: the skeleton yields to live markdown, the phase line moves to
     // "Writing the answer" (a delta provably arrived), and the status row STAYS
@@ -169,7 +225,7 @@ describe("ChatScreen — live answer streaming", () => {
     const streaming = document.querySelector('[data-testid="ask-streaming-partial"]')
     expect(streaming).toBeTruthy()
     expect(streaming!.textContent).toContain("top churn driver")
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Writing the answer")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Writing the answer")
 
     // More text accumulates in place.
     await ask.partial("The **top churn driver** is onboarding")
@@ -186,6 +242,74 @@ describe("ChatScreen — live answer streaming", () => {
     expect(document.body.textContent).toContain("The top churn driver is onboarding friction.")
   })
 
+  it("a turn that streamed does NOT re-type the multi-paragraph reply", async () => {
+    const ask = deferAsk()
+    renderChat()
+    await typeAndSend("what are customers saying?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    await ask.partial("Para one of the live preview.")
+    expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeTruthy()
+
+    await ask.release(MULTI_PARAGRAPH_REPLY)
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull(),
+    )
+    // The whole answer, immediately. The simulated typewriter chunks a
+    // multi-paragraph answer cumulatively from paragraph 1, so if it runs here
+    // the turn collapses back to paragraph 1 and re-reveals over tens of
+    // seconds — re-typing text the reader already watched stream in.
+    expect(document.body.textContent).toContain("PARA_ONE")
+    expect(document.body.textContent).toContain("PARA_TWO")
+    expect(document.body.textContent).toContain("PARA_THREE")
+  })
+
+  it("the RESUMED path also skips the typewriter for a turn that streamed", async () => {
+    // Second entry point into the same invariant: reload mid-answer and the
+    // re-attached ask lands its reply through resumeAskGeneration, not
+    // runAskGeneration. Its guard carries no comment and had no test, so a
+    // tidy-up there would have silently reintroduced the re-typing on exactly
+    // the path a user hits after refreshing during a long answer.
+    searchParams.value = ""          // restore the seeded tab, don't open a new chat
+    seedPendingAskTab()
+    getPendingAsk.mockReturnValue({ id: 99 })
+    const resume = deferResume()
+    renderChat()
+    await waitFor(() => expect(resumeAskGeneration).toHaveBeenCalledTimes(1))
+
+    await resume.partial("Para one of the live preview.")
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeTruthy(),
+    )
+
+    await resume.release(MULTI_PARAGRAPH_REPLY)
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull(),
+    )
+    expect(document.body.textContent).toContain("PARA_ONE")
+    expect(document.body.textContent).toContain("PARA_TWO")
+    expect(document.body.textContent).toContain("PARA_THREE")
+  })
+
+  it("a turn that did NOT stream still gets the simulated typewriter", async () => {
+    // The other side of the guard, and the reason it is a marker rather than a
+    // blanket disable: cache hits and non-streaming skill paths produce no
+    // preview at all, and the typewriter is the intended effect there. A "fix"
+    // that turned simulated typing off globally would pass the tests above and
+    // fail this one.
+    const ask = deferAsk()
+    renderChat()
+    await typeAndSend("give me the VoC report")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    // No deltas at all — nothing ever set `partial`, so nothing marks the turn.
+    await ask.release(MULTI_PARAGRAPH_REPLY)
+    await waitFor(() => expect(document.body.textContent).toContain("PARA_ONE"))
+    // Mid-typewriter: the first paragraph is on screen and the later ones are
+    // not yet. (buildAnswerStreamChunks reveals paragraphs cumulatively.)
+    expect(document.body.textContent).not.toContain("PARA_THREE")
+  })
+
   it("an ask that streams nothing keeps the skeleton until the reply lands (non-streamable paths)", async () => {
     const ask = deferAsk()
     renderChat()
@@ -197,7 +321,7 @@ describe("ChatScreen — live answer streaming", () => {
     expect(document.querySelector('[data-testid="ask-streaming-partial"]')).toBeNull()
     // A stream that publishes nothing must NOT be reported as a dropped preview:
     // it is indistinguishable from a skill that simply doesn't stream.
-    expect(document.querySelector(".cw-phase")?.textContent).toBe("Working on your question")
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Working on your question")
 
     await ask.release(FINAL_REPLY)
     await waitFor(() =>

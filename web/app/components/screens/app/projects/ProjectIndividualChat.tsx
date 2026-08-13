@@ -561,6 +561,11 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // open an artifact into (no PRD/evidence panel here) — fall back
             // to the grounded ask, same as an unresolved envelope.
             onOpenArtifact: () => void runAsk(),
+            // Same reasoning as onOpenArtifact: this thread has no format
+            // control and no document-authoring surface — fall back to the
+            // grounded ask rather than silently dropping the message.
+            onChangeTemplate: () => void runAsk(),
+            onCreateArtifact: () => void runAsk(),
             onAnswer: () => void runAsk(),
           },
         )

@@ -27,6 +27,7 @@ import Link from "next/link"
 import {
   ApiError,
   evidenceApi,
+  isProjectArtifactType,
   prdApi,
   projectsApi,
   reportsApi,
@@ -53,6 +54,16 @@ const TYPE_BADGE: Record<ProjectArtifactType, { label: string; bg: string; color
   ticket_set: { label: "Tickets", bg: "var(--info-soft)", color: "var(--info)" },
 }
 
+/** `TYPE_BADGE`'s fallback for a type outside `ProjectArtifactType` —
+ *  unreachable today (this drawer only ever opens a project's own,
+ *  DB-constrained artifacts), but `ArtifactItem["type"]` is statically
+ *  wider, so both `TYPE_BADGE[a.type]` lookups below go through
+ *  `badgeFor` rather than assuming the narrower set. */
+const UNKNOWN_TYPE_BADGE = { label: "Artifact", bg: "var(--info-soft)", color: "var(--info)" }
+function badgeFor(type: ArtifactItem["type"]): { label: string; bg: string; color: string } {
+  return isProjectArtifactType(type) ? TYPE_BADGE[type] : UNKNOWN_TYPE_BADGE
+}
+
 type Body =
   | { kind: "loading" }
   | { kind: "markdown"; title: string; md: string }
@@ -62,7 +73,7 @@ type Body =
   | { kind: "error"; note: string }
 
 function artifactTitle(a: ArtifactItem): string {
-  return a.title && a.title.trim().length > 0 ? a.title : TYPE_BADGE[a.type].label
+  return a.title && a.title.trim().length > 0 ? a.title : badgeFor(a.type).label
 }
 
 /** The `/prototype` canvas link — the one artifact that has no read-and-render
@@ -420,7 +431,7 @@ export function ProjectArtifactDrawer({
   }, [view, artifact])
 
   if (!artifact) return null
-  const cfg = TYPE_BADGE[artifact.type]
+  const cfg = badgeFor(artifact.type)
 
   // AD-HOC (live-rig): renders as a LAYOUT COLUMN beside the chat, not a
   // modal overlay. So: no backdrop, no `aria-modal`, no focus trap;

@@ -174,7 +174,7 @@ _RUN_LIVE = os.getenv("RUN_INVITE_PROJECT_ASSOCIATION_LIVE") == "1"
         "needs a real local Supabase — set RUN_INVITE_PROJECT_ASSOCIATION_LIVE=1 "
         "with SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY pointed at the local rig "
         "and the projects/team migrations applied (incl. "
-        "20260812120200_workspace_invites_project.sql)"
+        "20260813140200_workspace_invites_project.sql)"
     ),
 )
 def test_accept_invite_lands_project_member_live():

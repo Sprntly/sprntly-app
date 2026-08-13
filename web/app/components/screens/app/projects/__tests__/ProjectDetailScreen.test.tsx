@@ -65,6 +65,12 @@ vi.mock("../../../../../lib/api", () => {
       ledger: (...a: unknown[]) => ledgerMock(...a),
       emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
     },
+    // Real implementation (no API call, no side effect) — mirrors
+    // lib/api.ts's own five-value check, kept here rather than importing the
+    // real module so this mock stays self-contained. Needed by both this
+    // screen's own artifact grouping and the ArtifactsModal it mounts.
+    isProjectArtifactType: (t: string) =>
+      ["prd", "evidence", "prototype", "report", "ticket_set"].includes(t),
   }
 })
 vi.mock("../../../../../lib/auth", () => ({

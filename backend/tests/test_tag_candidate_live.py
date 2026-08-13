@@ -37,7 +37,7 @@ pytestmark = [
             "needs a real local Supabase — set RUN_TAG_CANDIDATE_LIVE=1 with "
             "SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY/SUPABASE_JWT_SECRET pointed "
             "at the local rig and the projects/team/workspaces migrations "
-            "applied (incl. 20260812120200_workspace_invites_project.sql)"
+            "applied (incl. 20260813140200_workspace_invites_project.sql)"
         ),
     ),
 ]

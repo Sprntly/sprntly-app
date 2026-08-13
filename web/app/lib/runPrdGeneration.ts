@@ -139,6 +139,7 @@ async function _pollPrdLoop(
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       public_id: prd.public_id,
+      shareToken: prd.share_token,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
@@ -146,6 +147,8 @@ async function _pollPrdLoop(
       source: prd.source,
       generatedAt: prd.generated_at,
       question: prd.question,
+      artifactTemplateId: prd.artifact_template_id ?? null,
+      artifactTemplateName: prd.artifact_template_name ?? null,
     },
   }
 }
@@ -248,6 +251,7 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       public_id: prd.public_id,
+      shareToken: prd.share_token,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
@@ -255,6 +259,8 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
       source: prd.source,
       generatedAt: prd.generated_at,
       question: prd.question,
+      artifactTemplateId: prd.artifact_template_id ?? null,
+      artifactTemplateName: prd.artifact_template_name ?? null,
     },
   }
 }
@@ -279,6 +285,7 @@ export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
       ...markdownToPrdState(prd.payload_md),
       prd_id: prd.id,
       public_id: prd.public_id,
+      shareToken: prd.share_token,
       figma_file_key: undefined,
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
@@ -286,6 +293,8 @@ export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
       source: prd.source,
       generatedAt: prd.generated_at,
       question: prd.question,
+      artifactTemplateId: prd.artifact_template_id ?? null,
+      artifactTemplateName: prd.artifact_template_name ?? null,
     },
   }
 }

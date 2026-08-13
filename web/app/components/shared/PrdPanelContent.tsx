@@ -16,10 +16,14 @@ import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { PRD_GEN } from "./generationPhases"
-import { multiAgentApi, prdApi } from "../../lib/api"
+import { artifactTemplatesApi, multiAgentApi, prdApi, type ArtifactTemplate } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
+import { builtinFormatName } from "../../lib/compileNotes"
+import { resumePrdGeneration } from "../../lib/runPrdGeneration"
+import { ConfirmDialog } from "./ConfirmDialog"
+import { clearPrdDrafts } from "./PrdInputQuestions"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import { IconFileText, IconTicket } from "@tabler/icons-react"
 import type { PrdSection, PrdState } from "../../types/content"
@@ -149,6 +153,139 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [showVersions, setShowVersions] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
+
+  // ── the Format control (the footer's third affordance) ────────────────────
+  // Which format wrote this PRD. null id = Sprntly's built-in; the whole value
+  // null = not known yet (a load path that predates artifactTemplateId on
+  // PrdState) — hydrated below with one GET before any label renders, so
+  // absence degrades to a fetch, never to a wrong name.
+  const [currentFormat, setCurrentFormat] = useState<{ id: string | null; name: string | null } | null>(null)
+  const [showFormats, setShowFormats] = useState(false)
+  // null = not fetched yet (the picker fetches lazily on first open — the
+  // panel opens constantly and must not pay a list read per open).
+  const [formats, setFormats] = useState<ArtifactTemplate[] | null>(null)
+  const [formatsError, setFormatsError] = useState(false)
+  const [confirmTarget, setConfirmTarget] = useState<{ id: string | null; name: string } | null>(null)
+  const [switching, setSwitching] = useState(false)
+  const formatToggleRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    // Hydrate the current format for the footer label. Guests never see the
+    // control (withheld like Autosaved/Version history, AC15), so never fetch.
+    if (!prd || guestSession) { setCurrentFormat(null); return }
+    if (prd.artifactTemplateId !== undefined) {
+      setCurrentFormat({ id: prd.artifactTemplateId, name: prd.artifactTemplateName ?? null })
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      try {
+        const rec = await prdApi.get(prd.prd_id)
+        if (!cancelled) {
+          setCurrentFormat({
+            id: rec.artifact_template_id ?? null,
+            name: rec.artifact_template_name ?? null,
+          })
+        }
+      } catch { /* label stays "Format" — the picker still works */ }
+    })()
+    return () => { cancelled = true }
+  }, [prd?.prd_id, prd?.artifactTemplateId, guestSession])
+
+  // Escape closes the picker (never the confirm dialog's job — it handles its
+  // own) and hands focus back to the toggle, so the expander is keyboard-
+  // dismissable like the dialog it opens.
+  useEffect(() => {
+    if (!showFormats || confirmTarget) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowFormats(false)
+        formatToggleRef.current?.focus()
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [showFormats, confirmTarget])
+
+  const toggleFormats = useCallback(async () => {
+    const opening = !showFormats
+    setShowFormats(opening)
+    // One expander at a time: both expand above the same footer, and stacking
+    // them pushes the document out of view.
+    if (opening) setShowVersions(false)
+    if (opening && formats === null) {
+      setFormatsError(false)
+      try {
+        const rows = await artifactTemplatesApi.list("prd")
+        // Active-or-ready only: an active row mid-recompile still serves its
+        // last good skeleton, so it stays offered; a draft serves nothing.
+        setFormats(rows.templates.filter((r) => r.is_active || r.compile_status === "ready"))
+      } catch {
+        setFormatsError(true)
+      }
+    }
+  }, [showFormats, formats])
+
+  const retryFormats = useCallback(async () => {
+    setFormatsError(false)
+    try {
+      const rows = await artifactTemplatesApi.list("prd")
+      setFormats(rows.templates.filter((r) => r.is_active || r.compile_status === "ready"))
+    } catch {
+      setFormatsError(true)
+    }
+  }, [])
+
+  // The switch itself. The route's `unchanged` never actually arrives here —
+  // the current row renders with no action — but it is handled anyway so a
+  // stale picker cannot strand the regenerating state.
+  const confirmSwitch = useCallback(async () => {
+    if (!prd || !confirmTarget) return
+    setSwitching(true)
+    const prev = prd
+    const target = confirmTarget
+    try {
+      const res = await prdApi.changeTemplate(prd.prd_id, target.id)
+      if (res.unchanged) {
+        setSwitching(false)
+        setConfirmTarget(null)
+        setShowFormats(false)
+        return
+      }
+      setSwitching(false)
+      setConfirmTarget(null)
+      setShowFormats(false)
+      // A stale local draft must not overwrite the re-laid-out document.
+      clearPrdDrafts(prd.prd_id)
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      const result = await resumePrdGeneration(
+        prd.prd_id, undefined,
+        (html) => setContent({ prdPartialHtml: html }),
+      )
+      if (!result.ok) {
+        // Timeout/backend hiccup: the backend preserved the document — the
+        // last loaded copy IS the honest state, never a blank pane.
+        setContent({ prd: prev, prdGenerating: false, prdPartialHtml: null })
+        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+        return
+      }
+      setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
+      // A failed regeneration restores `ready` over the previous document and
+      // keeps the OLD stamp — the mismatch is the failure signal (the content
+      // shown is still correct either way).
+      const landed = result.prd.artifactTemplateId ?? null
+      if (landed === target.id) {
+        showToast("Format switched", `This PRD is now written in ${target.name}.`)
+      } else {
+        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+      }
+    } catch {
+      setSwitching(false)
+      setConfirmTarget(null)
+      setContent({ prd: prev, prdGenerating: false, prdPartialHtml: null })
+      showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+    }
+  }, [prd, confirmTarget, setContent, showToast])
 
   // Open a prior generation (a different prds row) into the panel.
   const openGeneration = useCallback(async (genId: number) => {
@@ -348,6 +485,69 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
         </div>
       )}
 
+      {/* Format picker — the version-history expander's twin: expands above
+          the same pinned footer, one of the two open at a time. */}
+      {showFormats && prd && !guestSession && (
+        <div id="prd-format-picker" style={{ margin: "0 24px 12px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden", flexShrink: 0 }}>
+          <div style={{ padding: "10px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)", fontSize: 12, fontWeight: 600, color: "var(--ink-2)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>Format</span>
+            {formats !== null && !formatsError && (
+              <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>{formats.length + 1} format{formats.length !== 0 ? "s" : ""}</span>
+            )}
+          </div>
+          {formatsError ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
+              We couldn&apos;t load your formats. Check your connection and try again.{" "}
+              <button type="button" onClick={retryFormats} style={{ border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: 0 }}>Try again</button>
+            </div>
+          ) : formats === null ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>Loading formats…</div>
+          ) : (
+            <>
+              <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                {[
+                  { id: null as string | null, name: builtinFormatName("prd"), builtin: true },
+                  ...formats.map((f) => ({ id: f.id as string | null, name: f.name || "(untitled)", builtin: false })),
+                ].map((row) => {
+                  const rowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12.5 } as const
+                  const actionStyle = { fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", color: "var(--accent)", fontWeight: 600, flexShrink: 0 } as const
+                  const isCurrent = (currentFormat?.id ?? null) === row.id
+                  return (
+                    <div key={row.id ?? "builtin"} style={rowStyle}>
+                      <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontWeight: 500, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.name}>{row.name}</span>
+                        {row.builtin && <span className="tag tag-impact" style={{ flexShrink: 0 }}>built-in</span>}
+                      </div>
+                      {isCurrent
+                        ? <span style={{ fontSize: 11, color: "var(--ink-4)", fontWeight: 600, flexShrink: 0 }}>Current</span>
+                        : (
+                          <button
+                            type="button"
+                            id={`prd-format-use-${row.id ?? "builtin"}`}
+                            onClick={() => setConfirmTarget({ id: row.id, name: row.name })}
+                            style={actionStyle}
+                          >
+                            Use this format
+                          </button>
+                        )}
+                    </div>
+                  )
+                })}
+                {formats.length === 0 && (
+                  <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--ink-4)" }}>
+                    No PRD formats uploaded yet — add one on the Templates screen.
+                  </div>
+                )}
+              </div>
+              {/* Pre-answers the question before the confirm restates it. */}
+              <div style={{ padding: "8px 16px", fontSize: 11, color: "var(--ink-4)", borderTop: "1px solid var(--line)" }}>
+                Switching re-writes this document into the new structure. The current version is kept in history.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Pinned footer action bar — fixed to the panel's bottom edge (the way
           the header holds the tabs): autosave status, Version history toggle,
           and the prototype CTA. */}
@@ -374,6 +574,8 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
             onClick={async () => {
               setShowVersions(!showVersions)
               if (!showVersions) {
+                // One expander at a time (the format picker's rule, mirrored).
+                setShowFormats(false)
                 setVersionsLoading(true)
                 try {
                   const [v, g] = await Promise.all([prdApi.listVersions(prd.prd_id), prdApi.listGenerations(prd.prd_id)])
@@ -386,6 +588,37 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           >
             Version history
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+              <path d="M5 7L1 3h8z" />
+            </svg>
+          </button>
+          )}
+          {/* Which format this document is written in, and the switch. Withheld
+              (not disabled) in guest mode like its two neighbours — a read-only
+              viewer can't re-write the document. */}
+          {!guestSession && (
+          <button
+            type="button"
+            ref={formatToggleRef}
+            className="btn btn-ghost btn-sm"
+            data-testid="prd-format-toggle"
+            aria-expanded={showFormats}
+            aria-controls="prd-format-picker"
+            onClick={toggleFormats}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            title={currentFormat?.id != null && currentFormat.name ? `Format: ${currentFormat.name}` : undefined}
+          >
+            {(() => {
+              // "Format: {name}" — clamped so a long name can't wrap the bar;
+              // "…" until the hydrating GET lands, never a wrong name.
+              const name = currentFormat === null
+                ? "…"
+                : currentFormat.id === null
+                  ? "Sprntly built-in"
+                  : (currentFormat.name || "Custom format")
+              const clamped = name.length > 24 ? `${name.slice(0, 24).trimEnd()}…` : name
+              return `Format: ${clamped}`
+            })()}
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showFormats ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
               <path d="M5 7L1 3h8z" />
             </svg>
           </button>
@@ -409,6 +642,27 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
           </div>
         </div>
       )}
+
+      {/* The switch's confirm. tone="default" — this is reversible (version
+          history is the undo); danger-red stays reserved for destruction. */}
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title={confirmTarget?.id === null
+          ? "Re-write this PRD in Sprntly's built-in format?"
+          : `Re-write this PRD in “${confirmTarget?.name ?? ""}”?`}
+        body="Sprntly re-writes this document into that structure — the content stays, the layout changes, and your edits are carried over. The current version is saved to Version history, so you can restore it at any time."
+        confirmLabel="Re-write in this format"
+        busyLabel="Switching…"
+        busy={switching}
+        onConfirm={() => { void confirmSwitch() }}
+        onCancel={() => {
+          if (switching) return
+          setConfirmTarget(null)
+          // ConfirmDialog focuses its confirm button on open but does not
+          // restore — hand focus back to the toggle (the picker stays open).
+          setTimeout(() => formatToggleRef.current?.focus(), 0)
+        }}
+      />
     </div>
   )
 }

@@ -8,7 +8,7 @@
 -- which auto-adds nothing.
 --
 -- projects.id is `bigint generated always as identity` (see
--- 20260811120000_projects.sql) — the FK type matches, NOT uuid. RLS is
+-- 20260813130000_projects.sql) — the FK type matches, NOT uuid. RLS is
 -- already enabled on workspace_invites (20260525150000_onboarding_workspace.sql);
 -- a nullable additive column needs no new policy. Idempotent add — safe to
 -- double-apply.

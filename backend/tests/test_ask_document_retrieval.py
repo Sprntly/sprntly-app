@@ -2934,22 +2934,42 @@ def test_one_embedding_per_ask_shared_by_every_consumer(
     assert len(calls) == 1
 
 
-def test_ask_worker_publishes_the_embedding_and_always_clears_it(
+def test_ask_worker_scopes_the_embedding_lazily_and_always_clears_it(
     isolated_settings, monkeypatch
 ):
     """The worker's setter must be paired with a reset in a `finally`, exactly
     as the conversation pair is: a vector left on the context outlives its own
-    request and would be read by whatever reuses that context next."""
+    request and would be read by whatever reuses that context next.
+
+    The worker SCOPES that slot without filling it (`ask_runner._EMBED_PENDING`):
+    the vector is computed by the first consumer that actually needs one and
+    memoised back, so the ask still pays for at most one embedding but pays for
+    none at all when no consumer needs a vector. The reset discipline is
+    unchanged — `ContextVar.reset` unwinds whatever ended up in the slot,
+    resolved or not."""
     from app import ask_job_runner, ask_runner
 
     seen: dict = {}
+    calls: list = []
 
-    monkeypatch.setattr(
-        ask_runner, "_question_embedding", lambda eid, q: ([0.75] * 1536, False)
-    )
+    def _embed(eid, q):
+        calls.append(q)
+        return ([0.75] * 1536, False)
+
+    monkeypatch.setattr(ask_runner, "_question_embedding", _embed)
 
     def _boom(**kwargs):
-        seen["embedding"] = ask_runner._carried_question_embedding()
+        # Scoped, but nothing has needed a vector yet — nothing embedded.
+        seen["pending"] = (
+            ask_runner._active_question_embedding.get()
+            is ask_runner._EMBED_PENDING
+        )
+        seen["calls_before"] = len(calls)
+        # The first consumer to need one resolves it...
+        seen["first"] = ask_runner._resolve_question_embedding(_CID, "a question")
+        # ...and a second consumer reuses it rather than embedding again.
+        seen["second"] = ask_runner._resolve_question_embedding(_CID, "a question")
+        seen["calls_after"] = len(calls)
         raise RuntimeError("answer failed")
 
     monkeypatch.setattr(ask_job_runner.qa_agent, "answer", _boom)
@@ -2959,10 +2979,37 @@ def test_ask_worker_publishes_the_embedding_and_always_clears_it(
             1, _CID, "a question", "asurion", [], None, None, None,
         )
 
-    # Visible to the answer call...
-    assert seen["embedding"] == ([0.75] * 1536, False)
+    # Scoped but unresolved when the answer call began: no embedding paid for.
+    assert seen["pending"] is True
+    assert seen["calls_before"] == 0
+    # First consumer resolves, second reuses — ONE call across both.
+    assert seen["first"] == ([0.75] * 1536, False)
+    assert seen["second"] == ([0.75] * 1536, False)
+    assert seen["calls_after"] == 1
     # ...and gone once the call has returned, even though it raised.
     assert ask_runner._carried_question_embedding() is None
+    assert ask_runner._active_question_embedding.get() is None
+
+
+def test_ask_that_needs_no_vector_embeds_nothing(isolated_settings, monkeypatch):
+    """A workspace with no documents returns from `document_grounding` before
+    Stage T, which is the only consumer that reads the vector. The old eager
+    embed paid a full round trip for a vector nothing then read (2.8s on the
+    trace that motivated this); scoping it lazily must drop that to zero."""
+    from app import ask_job_runner, ask_runner
+
+    calls: list = []
+
+    def _embed(eid, q):
+        calls.append(q)
+        return ([0.75] * 1536, False)
+
+    monkeypatch.setattr(ask_runner, "_question_embedding", _embed)
+    monkeypatch.setattr(ask_job_runner.qa_agent, "answer", lambda **kw: {"answer": "x"})
+
+    ask_job_runner._run_sync(1, _CID, "a question", "asurion", [], None, None, None)
+
+    assert calls == []
 
 
 # ══════════════════ Cache-prefix ordering: content preservation ════════════
@@ -3352,3 +3399,112 @@ def test_prefix_call_sites_still_bind():
 
     assert inspect.getsource(ask_runner).count("user_cacheable_prefix=") >= 2
     assert "user_cacheable_prefix=" in inspect.getsource(qa_agent)
+
+
+# ── Stage P: the documents the PLANNER named ─────────────────────────────────
+
+def test_a_planned_document_is_loaded(isolated_settings):
+    """The planner can name a catalog document and grounding loads it, without
+    the question containing the title (Stage N cannot match it) and without the
+    fused rank having to surface it."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="wiki-42",
+        title="Pricing Principles", summary="How we price.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["wiki-42"])
+    try:
+        _, manifest = document_grounding(_CID, "what does it say about pricing?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    assert any(m.get("file_id") == "confluence:wiki-42" for m in manifest), manifest
+
+
+def test_a_planned_document_is_marked_topic_not_named(isolated_settings):
+    """THE safety property, and the reason Stage P exists in this shape.
+
+    `document_referent` was written because an earlier attempt at model-picked
+    documents pinned a Confluence page onto "what's our pricing strategy?" and
+    the model answered AS that page. Its rule is that a FALSE REFERENT IS WORSE
+    THAN NO REFERENT.
+
+    "named" asserts the USER asked for this document. "topic" says it was
+    selected automatically — the honest claim for a model's pick, and the one
+    the answer prompt already tells the model it may ignore (rule 6). So a wrong
+    planner pick costs prompt budget, exactly like a wrong Stage T pick, instead
+    of hijacking the answer's voice. If this ever flips to "named", that guard
+    is gone."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="wiki-99",
+        title="Q3 Pricing", summary="Pricing for Q3.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["wiki-99"])
+    try:
+        _, manifest = document_grounding(_CID, "what's our pricing strategy?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    picked = [m for m in manifest if m.get("file_id") == "confluence:wiki-99"]
+    assert picked, manifest
+    assert picked[0]["match"] == "topic", (
+        "a planner-picked document must never be presented as one the USER "
+        "named — see app/document_referent.py"
+    )
+
+
+def test_a_planned_id_this_company_cannot_see_is_ignored(isolated_settings):
+    """Tenant scoping does not depend on the planner being well behaved: an id
+    that is not in THIS caller's catalog selects nothing."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="theirs-1",
+        title="Someone Else's Doc", company_id="co-other-tenant",
+    )
+
+    token = ask_runner.set_active_planned_documents(["theirs-1"])
+    try:
+        _, manifest = document_grounding(_CID, "what does it say?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    assert all(m.get("file_id") != "confluence:theirs-1" for m in manifest), manifest
+
+
+def test_stage_n_still_wins_over_a_planned_document(isolated_settings):
+    """A title the user SPELLED OUT is an unambiguous request. A model's opinion
+    must never displace it, which is why Stage P runs after Stage N."""
+    from app import ask_runner
+    from app.ask_runner import document_grounding
+
+    db = isolated_settings["supabase"]
+    _seed_catalog_row(
+        db, provider="confluence", external_id="named-doc",
+        title="Billing Runbook", summary="Billing.",
+    )
+    _seed_catalog_row(
+        db, provider="confluence", external_id="planned-doc",
+        title="Something Else", summary="Other.",
+    )
+
+    token = ask_runner.set_active_planned_documents(["planned-doc"])
+    try:
+        _, manifest = document_grounding(_CID, "what does the Billing Runbook say?")
+    finally:
+        ask_runner.reset_active_planned_documents(token)
+
+    named = [m for m in manifest if m.get("file_id") == "confluence:named-doc"]
+    assert named, manifest
+    assert named[0]["match"] == "named"

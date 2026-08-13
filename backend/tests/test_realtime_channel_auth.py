@@ -59,7 +59,7 @@ pytestmark = [
 ]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations"
-_MIGRATION_FILE = "20260812120000_projects_realtime_channel_auth.sql"
+_MIGRATION_FILE = "20260813140000_projects_realtime_channel_auth.sql"
 _DB_CONTAINER = os.getenv("PROJECTS_REALTIME_CHANNEL_AUTH_TEST_DB_CONTAINER", "supabase_db_Sprntly")
 
 # `realtime.messages` and the two functions this migration creates are

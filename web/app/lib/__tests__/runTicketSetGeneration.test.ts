@@ -58,7 +58,12 @@ describe("runTicketSetGeneration", () => {
 
     expect(out).toMatchObject({ ok: true })
     expect(storiesApiMock.generateFromInsight).toHaveBeenCalledTimes(1)
-    expect(storiesApiMock.generateFromInsight).toHaveBeenCalledWith("make tickets", 42)
+    // The third argument is the uploaded TICKET format the user named, and is
+    // undefined here because this run named none — which means the company's
+    // active ticket format, exactly as before it existed.
+    expect(storiesApiMock.generateFromInsight).toHaveBeenCalledWith(
+      "make tickets", 42, undefined,
+    )
     // The title comes off the ROW, not the job — only the row has it.
     expect(r.last()).toMatchObject({
       ticketSetGenerating: false,

@@ -442,6 +442,72 @@ def edit_template(
     )
 
 
+class TemplateNotFound(TemplateStoreError):
+    """A generation asked for a format id this company does not have (404).
+
+    Company-scoped, so a FOREIGN id lands here too and is indistinguishable
+    from a missing one — the same posture `get_template_by_id` takes and the
+    same one every ownership check in the app takes, for the same reason: a
+    foreign tenant must not be able to tell "exists but not yours" from
+    "doesn't exist"."""
+
+
+class TemplateWrongType(TemplateStoreError):
+    """A format was named for a document it cannot write (409).
+
+    Refused rather than honoured: a PRD written into a ticket skeleton is a
+    document in the wrong shape, not a wrong-but-usable one."""
+
+
+def require_usable_template(
+    company_id: str, template_id: str, artifact_type: str
+) -> dict:
+    """The row a generation may write into, or a domain error the route maps.
+
+    THE GATE FOR AN EXPLICITLY REQUESTED FORMAT — the one a user named in chat
+    ("write it up in our Acme format"). It runs at the ROUTE, before any
+    generation is scheduled, and that placement is the point: by the time
+    `prd_runner.resolve_prd_template` sees an id, falling back to the active
+    format is the only option left, and silently writing a document in a format
+    nobody asked for is exactly the failure this feature exists to end. Refusing
+    here means the user finds out while they can still do something about it.
+
+    Three refusals, in the order the caller's status ladder wants them:
+      * not this company's, or gone            → TemplateNotFound (404)
+      * a format for a different kind of doc   → TemplateWrongType (409)
+      * never compiled cleanly                 → TemplateNotReady (409, with the
+        notes, so the refusal can say which gap to fix)
+
+    The readiness predicate is `compiled != ""` and NOT `compile_status ==
+    "ready"`, deliberately — the same choice, and the same reasoning, as
+    `prd_runner.resolve_prd_template`: a format being re-checked still has its
+    last good skeleton, and gating on status would refuse the format a company
+    is demonstrably already generating with. An ACTIVE row therefore passes
+    whatever its status, exactly as it does for an unspecified request.
+    """
+    row = db.get_template_by_id(company_id, template_id)
+    if row is None:
+        raise TemplateNotFound("That format doesn't exist in your library.")
+    if row.get("artifact_type") != artifact_type:
+        wanted = ARTIFACT_TYPE_LABELS.get(artifact_type, artifact_type)
+        actual = ARTIFACT_TYPE_LABELS.get(
+            row.get("artifact_type") or "", "another kind of"
+        )
+        raise TemplateWrongType(
+            f"“{row.get('name')}” is a {actual} format, so it can't be used to "
+            f"write a {wanted}."
+        )
+    if not (row.get("compiled") or "").strip():
+        label = ARTIFACT_TYPE_LABELS.get(artifact_type, "artifact")
+        notes = row.get("compile_notes") or []
+        raise TemplateNotReady(
+            f"“{row.get('name')}” isn't ready to use yet — open its preview to "
+            f"see what we couldn't place in your {label} format.",
+            notes=notes if isinstance(notes, list) else [],
+        )
+    return row
+
+
 def assert_activatable(row: dict) -> None:
     """Raise TemplateNotReady unless this template has compiled clean.
 

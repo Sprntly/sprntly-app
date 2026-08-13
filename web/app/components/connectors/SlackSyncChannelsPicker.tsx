@@ -7,8 +7,10 @@
  * get the admin-gate error inline), honored by the manual sync AND the
  * scheduled per-company refresh.
  *
- * No selection stored = the sync's legacy behavior: every channel the bot is
- * a member of. Saving an empty selection clears back to that.
+ * No selection stored = the sync pulls NOTHING (the 2026-08-13
+ * connector-scope rule: nothing selected, nothing assessed — the legacy
+ * every-bot-member-channel default is gone). Saving an empty selection
+ * clears back to that stopped state.
  *
  * Unticking is destructive on the backend — the bot leaves the channel and
  * the messages it already pulled are stripped out of the corpus — which is
@@ -22,7 +24,7 @@
  */
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ApiError,
   apiErrorMessage,
@@ -39,7 +41,7 @@ export type SlackSyncChannelsPickerViewProps = {
   error: string | null
   /** Channel ids currently ticked in the picker (not yet saved). */
   selectedIds: ReadonlySet<string>
-  /** How many channels the persisted selection has (0 = pull everything). */
+  /** How many channels the persisted selection has (0 = nothing syncs). */
   savedCount: number
   isSaving: boolean
   onToggle: (channelId: string) => void
@@ -49,6 +51,34 @@ export type SlackSyncChannelsPickerViewProps = {
 function channelLabel(c: SlackChannel): string {
   // 🔒 for private, # for public — mirrors Slack's own UI conventions.
   return `${c.is_private ? "🔒" : "#"} ${c.name}`
+}
+
+/**
+ * Put the channels the workspace is ACTUALLY pulling from at the top of the
+ * list, keeping the source order within each group.
+ *
+ * `.conn-slack-checklist` is a 240px scroll box — about five rows. Slack
+ * returns channels in its own order, so on a workspace with more channels
+ * than that the ticked ones can sit entirely below the fold: the panel says
+ * "Pulling from 1 channel" while every visible checkbox is empty, and the
+ * only way to find out WHICH is to discover that an unlabelled region
+ * scrolls. Observed on the `Sprntly` workspace (7 channels, `#product-feedback`
+ * ticked and off-screen).
+ *
+ * PINNED ON THE PERSISTED SELECTION, NOT THE LIVE ONE. Ordering by the live
+ * `selectedIds` would re-sort the list under the cursor on every tick, moving
+ * the next row the user was aiming at. `savedIds` only changes on save/reload,
+ * so within an editing session the order is stable and ticking is safe.
+ */
+export function orderBySavedFirst(
+  channels: SlackChannel[],
+  savedIds: ReadonlySet<string>,
+): SlackChannel[] {
+  if (savedIds.size === 0) return channels
+  const saved: SlackChannel[] = []
+  const rest: SlackChannel[] = []
+  for (const c of channels) (savedIds.has(c.id) ? saved : rest).push(c)
+  return [...saved, ...rest]
 }
 
 export function SlackSyncChannelsPickerView({
@@ -78,8 +108,8 @@ export function SlackSyncChannelsPickerView({
           Sprntly pulls those messages into your knowledge base on a schedule.
           Unticking a channel also deletes the messages already pulled from
           it. This applies to your whole workspace and only admins can change
-          it. With nothing ticked, every channel the bot has been invited to
-          is read.
+          it. With nothing ticked, no channels are read — pick at least one
+          to start syncing.
         </p>
       </div>
 
@@ -143,6 +173,12 @@ type Props = {
 
 export function SlackSyncChannelsPicker({ savedChannelIds, onSaved }: Props) {
   const [channels, setChannels] = useState<SlackChannel[]>([])
+  // The PERSISTED selection, held apart from the live `selectedIds` below so
+  // list order stays put while the user ticks. See `orderBySavedFirst`.
+  const savedIdSet = useMemo(
+    () => new Set(savedChannelIds ?? []),
+    [savedChannelIds],
+  )
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Start from the persisted selection so the user sees their choices.
@@ -214,11 +250,11 @@ export function SlackSyncChannelsPicker({ savedChannelIds, onSaved }: Props) {
 
   return (
     <SlackSyncChannelsPickerView
-      channels={channels}
+      channels={orderBySavedFirst(channels, savedIdSet)}
       loading={loading}
       error={error}
       selectedIds={selectedIds}
-      savedCount={(savedChannelIds ?? []).length}
+      savedCount={savedIdSet.size}
       isSaving={isSaving}
       onToggle={handleToggle}
       onSave={() => void handleSave()}

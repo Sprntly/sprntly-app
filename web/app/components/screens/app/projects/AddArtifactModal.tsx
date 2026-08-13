@@ -17,7 +17,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
-import { artifactsApi, projectsApi, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
+import { artifactsApi, projectsApi, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./AddArtifactModal.module.css"
@@ -47,11 +47,11 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
 }
 
-function artifactKey(a: ArtifactItem): string {
+function artifactKey(a: ProjectableArtifactItem): string {
   return `${a.type}-${a.id}`
 }
 
-function artifactTitle(a: ArtifactItem): string {
+function artifactTitle(a: ProjectableArtifactItem): string {
   return a.type === "ticket_set" ? (a.title.trim() || "Tickets from this conversation") : a.title
 }
 
@@ -73,7 +73,7 @@ type LoadState = "loading" | "ready" | "error"
 export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdded }: AddArtifactModalProps) {
   const { activeCompany } = useCompany()
   const [status, setStatus] = useState<LoadState>("loading")
-  const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
+  const [artifacts, setArtifacts] = useState<ProjectableArtifactItem[]>([])
   const [filter, setFilter] = useState<ArtifactFilter>("all")
   const [query, setQuery] = useState("")
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -93,7 +93,11 @@ export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdd
     artifactsApi
       .list(activeCompany)
       .then((rows) => {
-        setArtifacts(rows)
+        // A project cannot hold a custom_artifact row yet (see
+        // ProjectableArtifactItem's own doc) — excluded here, at the one
+        // place the company's full library enters this modal, rather than
+        // leaking the wider type into every filter/badge/toggle below.
+        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => r.type !== "custom_artifact"))
         setStatus("ready")
       })
       .catch(() => setStatus("error"))
@@ -146,7 +150,7 @@ export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdd
   }, [artifacts, filter, query])
 
   const toggle = useCallback(
-    (a: ArtifactItem) => {
+    (a: ProjectableArtifactItem) => {
       const key = artifactKey(a)
       if (existingKeys.has(key)) return // already on this project — non-toggleable
       setSelected((prev) => {

@@ -16,7 +16,8 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
                        module; this job is the thin shell that ticks a clock and
                        drives it per company.
   refresh_connectors — re-pulls connector data into the KG every
-                       PIPELINE_INTERVAL_HOURS so the brief reads fresh data.
+                       CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
+                       and KG read near-live data.
 """
 from __future__ import annotations
 
@@ -107,13 +108,20 @@ def _refresh_all_company_connectors() -> None:
       - when a user manually clicks Sync in Settings
     Briefs would be generated off whatever data was current at install
     time + manual syncs. This job closes that gap by re-running the
-    pullers every `pipeline_interval_hours` so the home chat / brief /
+    pullers every `connector_refresh_interval_minutes` so the home chat / brief /
     KG synthesis always read recent connector data.
 
     Per-company isolated: a db.list_connections raise for one tenant is
     logged and the loop moves on. kickoff_sync itself is fire-and-forget
     (spawns a daemon thread; see auto_sync.py) and never raises — so this
     function returns quickly without waiting on any provider's HTTP call."""
+    # Cycle-trace logging throughout this function: every cycle names what it
+    # saw and what it kicked, so "did the scheduler run X for company Y" is
+    # answerable from the service log alone. First shipped after a debugging
+    # session (2026-08-12) where the only way to see the fan-out was adding
+    # exactly these lines by hand — the same trace immediately surfaced an
+    # exhausted LLM credit balance and an expired Zoom refresh token.
+    logger.info("refresh-connectors: cycle START")
     try:
         companies = list_companies() or []
     except Exception:
@@ -121,7 +129,9 @@ def _refresh_all_company_connectors() -> None:
         return
 
     if not companies:
+        logger.info("refresh-connectors: cycle END — no companies")
         return
+    logger.info("refresh-connectors: %d companies to walk", len(companies))
 
     for company in companies:
         company_id = company.get("id")
@@ -139,6 +149,12 @@ def _refresh_all_company_connectors() -> None:
         # One call-index kick per company per cycle, however many call sources
         # it has connected — see the branch below.
         call_index_kicked = False
+        active = [c for c in connections if c.get("status") == "active"]
+        logger.info(
+            "refresh-connectors: company %s — %d connections, %d active: %s",
+            company_id, len(connections), len(active),
+            [(c.get("provider") or "?") for c in active],
+        )
         for conn in connections:
             if conn.get("status") != "active":
                 continue
@@ -151,6 +167,10 @@ def _refresh_all_company_connectors() -> None:
                     continue
                 slack_kicked = True
                 try:
+                    logger.info(
+                        "refresh-connectors: KICK slack corpus sync for %s",
+                        company_id,
+                    )
                     kickoff_slack_corpus_sync(company_id)
                 except Exception:
                     logger.exception(
@@ -176,6 +196,11 @@ def _refresh_all_company_connectors() -> None:
             if provider in CALL_INDEX_PROVIDERS and not call_index_kicked:
                 call_index_kicked = True
                 try:
+                    logger.info(
+                        "refresh-connectors: KICK call-index sync for %s "
+                        "(trigger provider=%s)",
+                        company_id, provider,
+                    )
                     kickoff_call_index_sync(company_id)
                 except Exception:
                     logger.exception(
@@ -189,8 +214,16 @@ def _refresh_all_company_connectors() -> None:
             # for periodic refresh.
             if not provider or (provider not in PULLERS
                                 and provider != "google_drive"):
+                logger.info(
+                    "refresh-connectors: SKIP %s/%s — no KG puller registered",
+                    company_id, provider or "<blank>",
+                )
                 continue
             try:
+                logger.info(
+                    "refresh-connectors: KICK kickoff_sync (KG pull) for %s/%s",
+                    company_id, provider,
+                )
                 kickoff_sync(company_id, provider)
             except Exception:
                 # kickoff_sync is designed not to raise, but be defensive
@@ -199,6 +232,8 @@ def _refresh_all_company_connectors() -> None:
                     "refresh-connectors: kickoff_sync raised for %s/%s",
                     company_id, provider,
                 )
+    logger.info("refresh-connectors: cycle END (kicks are fire-and-forget; "
+                "watch auto_sync/puller logs for the actual pull + KG writes)")
 
 
 async def _run_synthesis_for_all_companies() -> None:
@@ -722,7 +757,6 @@ def start_scheduler() -> None:
         logger.info("Scheduler disabled (SCHEDULER_ENABLED=false)")
         return
 
-    interval_hours = getattr(settings, "pipeline_interval_hours", 6)
     tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
     # APScheduler's DEFAULT misfire_grace_time is 1 SECOND: a firing that lands
@@ -754,13 +788,23 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     # Second job: refresh the KG from upstream connectors so the corpus stays
-    # fresh. Keeps the existing ~6h cadence — connector freshness is decoupled
-    # from the once-a-week brief send time.
+    # fresh. Every 20 minutes (owner decision 2026-08-12, relaxed from the 10
+    # chosen a day earlier): the brief/chat/KG should read near-live connector
+    # data, not this morning's. What makes a minutes-scale cadence affordable
+    # is that the whole fan-out is incremental and fire-and-forget —
+    # kickoff_sync spawns per-provider daemon threads and returns, providers
+    # dedup already-seen records on ingest, and coalesce=True collapses any
+    # backlog to one run. The cost that DOES scale with cadence is third-party
+    # API traffic (×18 vs 6h), which is why the value stays an env knob rather
+    # than a constant.
+    refresh_minutes = (
+        getattr(settings, "connector_refresh_interval_minutes", 20) or 20
+    )
     _scheduler.add_job(
         _refresh_all_company_connectors,
-        trigger=IntervalTrigger(hours=interval_hours),
+        trigger=IntervalTrigger(minutes=refresh_minutes),
         id="refresh_connectors",
-        name=f"Refresh connector data (every {interval_hours}h)",
+        name=f"Refresh connector data (every {refresh_minutes}m)",
         replace_existing=True,
     )
     # Synced skill folders: re-read every registered GitHub folder so a skill
@@ -911,8 +955,8 @@ def start_scheduler() -> None:
     logger.info(
         "Scheduler started: Top Insights brief tick every %dm "
         "(generate 3h ahead, deliver at each company's configured time) "
-        "+ connector refresh every %dh%s%s",
-        tick_minutes, interval_hours,
+        "+ connector refresh every %dm%s%s",
+        tick_minutes, refresh_minutes,
         " + drip emails" if settings.drip_emails_enabled else "",
         (
             f" + ticket sync every {getattr(settings, 'ticket_sync_interval_minutes', 15) or 15}m"

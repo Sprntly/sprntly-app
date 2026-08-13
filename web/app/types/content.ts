@@ -636,6 +636,17 @@ export interface PrdState extends PrdContent {
    *  record behind it (a streaming draft), which read as "no timestamp" rather
    *  than as oldest. */
   generatedAt?: string
+  /** Canonical artifact-share token for this PRD's Share link; read, never
+   *  minted on open. Absent-safe. */
+  shareToken?: string | null
+  /** WHICH uploaded format wrote this PRD (`PrdRecord.artifact_template_id`).
+   *  null = Sprntly's built-in; UNDEFINED = the load path predates the field —
+   *  the panel's Format control hydrates it with one GET before rendering a
+   *  label, so absence degrades to a fetch, never to a wrong name. */
+  artifactTemplateId?: string | null
+  /** That format's name (`PrdRecord.artifact_template_name`, resolved
+   *  server-side). null when built-in or the format was deleted. */
+  artifactTemplateName?: string | null
 }
 
 export interface AppContentState {
@@ -730,6 +741,14 @@ export interface AppContentState {
    *  first ask persists). Reading that null as "standalone" is what used to
    *  render the PREVIOUS thread's document inside an empty new chat. */
   reportFocusStandalone: boolean
+  /** The team document (custom artifact) open in the panel's Document tab, or
+   *  null when this thread has none — which is the normal state, and what
+   *  keeps the tab hidden. Set by the chat's `create_artifact` dispatch. */
+  documentId: number | null
+  /** True from the moment a document is requested until its first poll shows
+   *  it ready. Purely presentational: the row's own `status` is the truth, and
+   *  this only avoids a flash of "empty document" before the first fetch. */
+  documentGenerating: boolean
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */

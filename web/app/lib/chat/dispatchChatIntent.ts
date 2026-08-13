@@ -54,9 +54,20 @@ export interface ChatIntentExecutors {
   onGenerateTickets: (envelope: ChatIntentEnvelope) => void
   onGeneratePrd: (envelope: ChatIntentEnvelope) => void
   onOpenArtifact: (open: NonNullable<ChatIntentEnvelope["open"]>) => void
+  /** change_prd_template: switch the target PRD into a different uploaded
+   *  format in place. `prdId` mirrors `onEditPrd`'s own resolved-target
+   *  parameter — the SAME `ctx.editTargetPrdId` a caller resolved for
+   *  edit_prd, reused here rather than a second per-caller resolution path,
+   *  since both intents target "the tab's PRD or the conversation's". */
+  onChangeTemplate: (envelope: ChatIntentEnvelope, prdId: number | null) => void
+  /** create_artifact: write a document of any kind into the shared library.
+   *  Needs no target PRD — a leadership update stands alone — so unlike
+   *  edit_prd/change_prd_template this has no guard beyond the intent match. */
+  onCreateArtifact: (envelope: ChatIntentEnvelope) => void
   /** The grounded-ask fall-through — called whenever no structured intent's
-   *  guard held (an unresolvable edit_prd target, a lookup-less open_artifact,
-   *  or `answer`/low-confidence/unknown/`generate_prototype`). */
+   *  guard held (an unresolvable edit_prd/change_prd_template target, a
+   *  lookup-less open_artifact, or `answer`/low-confidence/unknown/
+   *  `generate_prototype`). */
   onAnswer: () => void
 }
 
@@ -69,10 +80,13 @@ export type DispatchChatIntentResult = { handled: true } | { handled: false }
  *    `envelope.instruction` — else `onAnswer` (`{handled: false}`).
  *  - `open_artifact` → `onOpenArtifact` only when `envelope.open` is present
  *    — else `onAnswer`.
- *  - `generate_tickets` / `generate_prd` → the matching executor
- *    unconditionally (no guard beyond the intent match) — the doc-vs-
- *    existing-PRD-vs-standalone decision is the EXECUTOR's, not this
+ *  - `generate_tickets` / `generate_prd` / `create_artifact` → the matching
+ *    executor unconditionally (no guard beyond the intent match) — the
+ *    doc-vs-existing-PRD-vs-standalone decision is the EXECUTOR's, not this
  *    switch's.
+ *  - `change_prd_template` → `onChangeTemplate` only when `ctx.hasEditTarget`
+ *    AND `envelope.artifact_template_id` — else `onAnswer`. Same target guard
+ *    as `edit_prd` (a format switch is targeted exactly like an edit).
  *  - anything else (`answer`, low confidence, unknown, `generate_prototype`)
  *    → `onAnswer`.
  *
@@ -108,6 +122,18 @@ export function dispatchChatIntent(
 
     case "generate_prd":
       executors.onGeneratePrd(envelope)
+      return { handled: true }
+
+    case "change_prd_template":
+      if (ctx.hasEditTarget && envelope.artifact_template_id) {
+        executors.onChangeTemplate(envelope, ctx.editTargetPrdId)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
+
+    case "create_artifact":
+      executors.onCreateArtifact(envelope)
       return { handled: true }
 
     default:

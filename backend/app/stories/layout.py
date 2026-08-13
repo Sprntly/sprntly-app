@@ -273,9 +273,24 @@ def layout_prompt_hint(stored) -> str:
     return "\n".join(lines)
 
 
-def resolve_ticket_layout(company_id: str | None) -> tuple[list[dict] | None, str | None]:
-    """The company's active ticket description layout, and the id of the format
-    it came from — or (None, None) for Sprntly's default.
+def resolve_ticket_layout(
+    company_id: str | None, override_id: str | None = None
+) -> tuple[list[dict] | None, str | None]:
+    """The ticket description layout to write with, and the id of the format it
+    came from — or (None, None) for Sprntly's default.
+
+    `override_id` is a format this run was told to use — the one the user named
+    in chat ("break this into tickets using our Acme ticket format"), resolved to
+    an id by the Ask planner and validated at the route. It outranks whatever is
+    active, because a company-wide activation cannot express "this one, this
+    time". None — the normal case — means the active format, which is what every
+    request got before the override existed.
+
+    An override that cannot be used falls back to the ACTIVE format and is
+    logged at WARNING, the same degradation and for the same reason as
+    `prd_runner.resolve_prd_template`: the route has already refused the ids a
+    user could do something about, so reaching here means the row moved under a
+    run in flight, and failing the tickets would be worse than reshaping them.
 
     Same shape and same posture as `prd_runner.resolve_prd_template`: default
     first for the common case, a DB read only when there is a company, and
@@ -292,16 +307,39 @@ def resolve_ticket_layout(company_id: str | None) -> tuple[list[dict] | None, st
     an unknown `source` in front of `to_description`."""
     if not company_id:
         return None, None
-    try:
-        from app.db.artifact_templates import get_active_template
 
-        row = get_active_template(company_id, "tickets")
-    except Exception:  # noqa: BLE001 — any DB failure degrades to the default
-        logger.warning(
-            "active ticket format lookup failed for company=%s; using the default",
-            company_id, exc_info=True,
-        )
-        return None, None
+    row = None
+    if override_id:
+        try:
+            from app.db.artifact_templates import get_template_by_id
+
+            row = get_template_by_id(company_id, override_id)
+        except Exception:  # noqa: BLE001 — degrade to the active format below
+            row = None
+        # Company-filtered by the read, so a foreign id is already a miss. The
+        # TYPE check is this layer's own: a PRD format's compiled artifact is an
+        # HTML skeleton, not a `[{label, source}]` layout, so honouring one here
+        # would hand `normalize_layout` something it cannot read.
+        if row is not None and row.get("artifact_type") != "tickets":
+            row = None
+        if row is None:
+            logger.warning(
+                "ticket format %s was requested for company=%s and could not be "
+                "used — these tickets are NOT in the format that was asked for",
+                override_id, company_id,
+            )
+
+    if row is None:
+        try:
+            from app.db.artifact_templates import get_active_template
+
+            row = get_active_template(company_id, "tickets")
+        except Exception:  # noqa: BLE001 — any DB failure degrades to the default
+            logger.warning(
+                "active ticket format lookup failed for company=%s; using the default",
+                company_id, exc_info=True,
+            )
+            return None, None
     if not row:
         return None, None
     compiled = (row.get("compiled") or "").strip()

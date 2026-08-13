@@ -180,6 +180,39 @@ def cross_connector_sweep_enabled(flags: dict | None) -> bool:
     return True
 
 
+def ask_planner_shadow_enabled(flags: dict | None) -> bool:
+    """Resolve the `ask_planner_shadow` flag from a raw feature_flags dict.
+
+    Gates the SHADOW-MODE Ask planner (app/ask_planner.py) — an extra LLM call
+    that runs alongside `qa_agent.route`, logs what it would have decided, and
+    acts on nothing. Slice 1 of backend/docs/ASK_PLANNER.md.
+
+    DEFAULT OFF, which is the reverse of every sibling in this module, and the
+    reverse on BOTH of the two "not an explicit true" cases:
+
+      * explicit `true`             → ON
+      * key absent                  → OFF
+      * flags UNKNOWN (read failed) → OFF
+
+    `agents` / `top_insights` / `company_research` grandfather a missing key ON
+    so existing companies keep a capability they already had without a backfill.
+    This flag gates the opposite kind of thing: not a capability anyone has, but
+    an extra paid model call on EVERY chat message, collecting measurements for
+    a feature that does not exist yet. Nobody has opted in, so a missing key must
+    mean "not enrolled" rather than "enrolled by default", and an unreadable
+    flags row must mean the same — "I couldn't read your flags" is not a reason
+    to start spending a company's tokens. `ds_claude_analysis` already
+    established the failed-read half of that reasoning; this flag extends it to
+    the missing-key half because the spend is unconditional rather than gated on
+    a rare question shape.
+
+    The cost of failing closed is exactly one missing shadow row.
+    """
+    if not isinstance(flags, dict):
+        return False
+    return bool(flags.get("ask_planner_shadow", False))
+
+
 def read_feature_flags(company_id: str) -> dict | None:
     """A company's raw feature_flags dict, or None when the READ itself failed.
 
@@ -189,7 +222,16 @@ def read_feature_flags(company_id: str) -> dict | None:
     Callers that grandfather a missing key ON cannot tell those apart from `{}`
     alone — and a caller that must fail CLOSED on an unknown state needs to.
     """
+    from app.db.authcache import feature_flags_cache
     from app.db.client import require_client
+
+    # TTL-cached like every other per-request tenancy read (this was the only
+    # one that wasn't, and a single ask read the row three times). Writes
+    # invalidate via `authcache.invalidate_feature_flags`, so a toggled flag
+    # applies on the next request rather than after the TTL.
+    cached = feature_flags_cache.get(company_id)
+    if cached is not None:
+        return cached
 
     try:
         rows = (
@@ -204,11 +246,16 @@ def read_feature_flags(company_id: str) -> dict | None:
         )
     except Exception:  # noqa: BLE001 — the caller decides open vs closed
         logger.warning("feature_flags read failed for %s", company_id, exc_info=True)
+        # Deliberately NOT cached. None means the read FAILED, and
+        # `feature_flags_for_company` grandfathers a failed read to "on" —
+        # caching it would grant a company whose flags say `agents: false` a
+        # full TTL of access. Only a genuine dict is stored below. Same shape
+        # of invariant as authcache's "never cache empty memberships".
         return None
-    if not rows:
-        return {}
-    flags = rows[0].get("feature_flags")
-    return flags if isinstance(flags, dict) else {}
+    flags = rows[0].get("feature_flags") if rows else None
+    resolved = flags if isinstance(flags, dict) else {}
+    feature_flags_cache.set(company_id, resolved)
+    return resolved
 
 
 def feature_flags_for_company(company_id: str) -> dict:

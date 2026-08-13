@@ -467,6 +467,75 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
   })
 })
 
+// The same grounding contract for the tabs that hold an artifact WITHOUT a
+// PRD: an evidence tab names its evidence, a standalone ticket-set tab its
+// set, and a PRD outranks both — one primary artifact per tab, because the
+// PRD context already carries its own evidence and tickets.
+describe("ChatScreen — standalone-artifact asks name the open artifact", () => {
+  type AskOpts = { prd_id?: number; evidence_id?: number; ticket_set_id?: number }
+
+  function seedTab(extra: Record<string, unknown>) {
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+      {
+        id: "tab-a", title: "Artifact chat", dbConvId: 42, briefMeta: null,
+        prdId: null,
+        thread: [{
+          id: "t1", query: "hello",
+          reply: {
+            answer: "hi", sources: [], follow_ups: [], key_points: [],
+            citations: [], confidence: 1, unanswered: "",
+          },
+        }],
+        ...extra,
+      },
+    ]))
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
+  }
+
+  async function renderAndSend(text: string): Promise<AskOpts | undefined> {
+    render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+      ),
+    )
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    return runAskGeneration.mock.calls[0][3] as AskOpts | undefined
+  }
+
+  it("an evidence tab sends its evidence_id and no prd_id", async () => {
+    seedTab({ evidenceId: 74 })
+    const opts = await renderAndSend("What is the strongest signal here?")
+    expect(opts?.evidence_id).toBe(74)
+    expect(opts?.prd_id).toBeUndefined()
+    expect(opts?.ticket_set_id).toBeUndefined()
+  })
+
+  it("a standalone ticket-set tab sends its ticket_set_id", async () => {
+    seedTab({ ticketSetId: 7 })
+    const opts = await renderAndSend("Which ticket covers the export flow?")
+    expect(opts?.ticket_set_id).toBe(7)
+    expect(opts?.prd_id).toBeUndefined()
+    expect(opts?.evidence_id).toBeUndefined()
+  })
+
+  it("a PRD on the tab outranks a stamped evidence id", async () => {
+    seedTab({ prdId: 5, evidenceId: 74 })
+    const opts = await renderAndSend("What are the metrics?")
+    // 99, not 5: a restored PRD tab re-loads its document by id on mount, and
+    // this suite's loadPrdById stub answers every id with PRD 99. What this
+    // test pins is the precedence — the ask names the PRD, never the evidence.
+    expect(opts?.prd_id).toBe(99)
+    expect(opts?.evidence_id).toBeUndefined()
+  })
+})
+
 // A HEADER open (brief insight / ideation / backlog) has NO in-chat command turn:
 // the insight card IS the tab's opening agent message and must stay at the TOP,
 // even after the user starts chatting on it. (Contrast the in-chat command flow,

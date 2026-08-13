@@ -15,10 +15,17 @@ export type StreamHandlers = {
 }
 
 /**
- * Subscribe to a backend SSE token stream (PRD / evidence / …) and accumulate
- * delta frames into the growing document. Mirrors the design-agent EventSource
- * pattern: the bearer rides in the URL (EventSource can't set headers), frames
- * are `{kind:'delta',text}` then a terminal `{kind:'done'|'error'}`.
+ * Subscribe to a backend SSE token stream (PRD / evidence / chat answers) and
+ * accumulate delta frames into the growing document. Mirrors the design-agent
+ * EventSource pattern: the bearer rides in the URL (EventSource can't set
+ * headers), frames are `{kind:'delta',text}` then a terminal
+ * `{kind:'done'|'error'}`, with `{kind:'replay'}` catching up a mid-generation
+ * join and `{kind:'restart'}` announcing that a backend retry has superseded
+ * everything streamed so far.
+ *
+ * FRAME KINDS DEGRADE, THEY DO NOT FAIL: an unrecognised kind falls through
+ * the chain and is ignored. Backend and frontend do not deploy atomically, so
+ * a new server frame reaching an old client must leave it exactly as it was.
  *
  * PROGRESSIVE DISPLAY ONLY — the caller keeps polling for the authoritative
  * finished document, so any stream failure just stops the live preview and is
@@ -55,12 +62,23 @@ export function subscribeToGenerationStream(
           if (restart > 0) acc = acc.slice(restart)
           handlers.onDelta(acc, frame.text)
         }
+      } else if (frame.kind === "restart") {
+        // The backend retried mid-generation and is about to re-emit from
+        // zero: everything accumulated so far is superseded. Drop it, but do
+        // NOT call onDelta("") — blanking the preview for the ~100ms until the
+        // first replacement delta arrives is a visible flash for no gain. The
+        // next delta renders attempt 2 alone.
+        //
+        // This is the signal the `<!doctype` heuristic below cannot give for
+        // markdown answers (chat), which have no document open to look for.
+        acc = ""
       } else if (frame.kind === "delta" && frame.text) {
         acc += frame.text
-        // A backend mid-generation retry re-emits the document from zero on
-        // the same channel. A second document open (a doctype past position 0)
-        // marks that restart — reset the accumulator to the fresh document so
-        // the preview doesn't show the two attempts glued together.
+        // Fallback for HTML documents (PRD / evidence): a second document open
+        // (a doctype past position 0) marks a restart that arrived without an
+        // explicit `restart` frame — an older backend, or a generation path
+        // whose sink is not rewound. Kept alongside the frame above, not
+        // replaced by it.
         const restart = acc.toLowerCase().lastIndexOf("<!doctype")
         if (restart > 0) acc = acc.slice(restart)
         handlers.onDelta(acc, frame.text)

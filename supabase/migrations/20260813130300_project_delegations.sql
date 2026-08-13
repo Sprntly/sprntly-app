@@ -8,8 +8,8 @@
 -- No `workspace_id` column, deliberately diverging from the general
 -- new-table convention: this ticket follows the Projects-era sibling
 -- pattern already set by `project_memory_entries` / `project_chat_members`
--- (see `20260811120200_project_memory.sql`,
--- `20260811120100_conversations_project_columns.sql`) — scope via
+-- (see `20260813130200_project_memory.sql`,
+-- `20260813130100_conversations_project_columns.sql`) — scope via
 -- `project_id -> projects(company_id, workspace_id)`, tenancy enforced at
 -- the route layer, and a server-role RLS policy rather than a per-row
 -- `workspace_id` column.

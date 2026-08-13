@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useGuestSession } from "../../context/GuestSessionContext"
@@ -12,6 +12,16 @@ import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { HtmlReportView } from "./HtmlReportView"
 import { useCpanelPhase } from "./useCpanelPhase"
 import { EmptyPane } from "./EmptyPane"
+
+// LAZY, and deliberately so. DocumentTab mounts the rich-text editor, which
+// pulls ProseMirror in behind it. A static import here would put that whole
+// dependency in the bundle of every screen that renders the panel — including
+// the overwhelming majority of chats that never write a document — and would
+// force every existing ContentPanel test to resolve TipTap just to render a
+// tab bar. Loaded when the tab is actually opened.
+const DocumentTab = lazy(() =>
+  import("./DocumentTab").then((m) => ({ default: m.DocumentTab })),
+)
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
@@ -39,7 +49,6 @@ import {
 import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
 import { buildCombinedHtml } from "../../lib/combinedExport"
 import { documentsApi } from "../../lib/api"
-import { artifactShareApi } from "../../lib/artifactShareApi"
 import { saveBlob } from "../../lib/saveBlob"
 import type {
   PrdState, PrdContent, PrdDesignBlock, AppContentState, TicketSetFailureKind,
@@ -59,6 +68,10 @@ const TABS = [
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
   { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
+  // A team document written from this chat ("draft a leadership update"). Same
+  // posture as Reports and for the same reason — it hangs off the THREAD, not
+  // off the PRD — so it sits last and is hidden until one exists.
+  { icon: <IconFileText size={11.5}/> , id: "document", label: "Document" },
 ] as const
 
 // The key is versioned because the bounds below moved: widths stored under the
@@ -95,8 +108,21 @@ function ShareMenu({
   disabledReason?: string
 }) {
   const [open, setOpen] = useState(false)
+  const [copied, setCopied] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd && !disabledReason
+  // Built from the pre-existing canonical token attached to the PRD record —
+  // NO network call on open. public_id (never the raw sequential prd_id) is
+  // what this link must carry — see the prds.public_id migration's own
+  // comment for why. Fallback to prd_id only covers a PrdState with no
+  // public_id at all (not currently reachable — every load path sets it),
+  // matching the same defensive-fallback shape used elsewhere. Nullish when
+  // the token hasn't landed yet (e.g. the exact stream-completion instant
+  // before a refetch) — the control renders disabled rather than minting.
+  const shareUrl =
+    prd?.shareToken && typeof window !== "undefined"
+      ? `${window.location.origin}/?prd=${encodeURIComponent(prd.public_id ?? String(prd.prd_id))}&share=${prd.shareToken}`
+      : null
   // An HTML PRD generated from a brief insight almost always has an Evidence
   // brief, so we offer the combined Evidence + PRD download. The evidence may
   // not be loaded into context yet (it's populated by the Evidence tab), so the
@@ -153,21 +179,14 @@ function ShareMenu({
   }
 
   const handleCopyLink = async () => {
-    if (!prd) return
-    setOpen(false)
+    if (!shareUrl) return
     try {
-      const { token } = await artifactShareApi.mint("prd", prd.prd_id)
-      // public_id (never the raw sequential prd_id) is what this copyable
-      // link must carry — see the prds.public_id migration's own comment
-      // for why. Fallback to prd_id only covers a PrdState with no
-      // public_id at all (not currently reachable — every load path sets
-      // it), matching the same defensive-fallback shape used elsewhere.
-      const prdParam = prd.public_id ?? String(prd.prd_id)
-      const url = `${window.location.origin}/?prd=${encodeURIComponent(prdParam)}&share=${token}`
-      await navigator.clipboard.writeText(url)
-      onToast("Share link copied", "Anyone with the link can view this PRD.")
+      await navigator.clipboard.writeText(shareUrl)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
     } catch {
-      onToast("Copy link failed", "Could not create a share link. Please try again.")
+      // Copy failures are non-fatal — the link stays visible to copy manually
+      // (mirrors the design-agent ShareMenu's identical catch).
     }
   }
 
@@ -187,11 +206,31 @@ function ShareMenu({
       </button>
       {open && enabled && (
         <div className="share-menu share-menu--down open" role="menu">
-          <div className="share-menu-item" role="menuitem" onClick={handleCopyLink}>
+          <div className="share-menu-item" role="menuitem" style={{ cursor: "default" }}>
             <div className="share-menu-item-icon"><IconLink size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Copy share link</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Invite a teammate to view this PRD</div>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ fontWeight: 600 }}>Share link</div>
+              {shareUrl ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2 }}>
+                  <code
+                    title={shareUrl}
+                    style={{
+                      fontSize: 11, color: "var(--muted)", overflow: "hidden",
+                      textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
+                      maxWidth: 300, minWidth: 0,
+                    }}
+                  >
+                    {shareUrl}
+                  </code>
+                  <button type="button" className="btn" onClick={handleCopyLink}>
+                    {copied ? "Copied!" : "Copy"}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
+                  <button type="button" className="btn" disabled>Preparing link…</button>
+                </div>
+              )}
             </div>
           </div>
           <div className="share-menu-item" role="menuitem" onClick={handlePdf}>
@@ -369,6 +408,9 @@ export function ContentPanel() {
     // asked for.
     tickets: !pipelineInScope && !standaloneSet,
     reports: reportsHidden,
+    // Hidden until this thread has written one. A tab that is always present
+    // but usually empty teaches people to ignore it.
+    document: content.documentId == null,
   }
   // The tab currently being shown is never pulled out from under the reader —
   // whatever is in the body must stay reachable in the bar above it. Evidence is
@@ -591,6 +633,11 @@ export function ContentPanel() {
             <span className="cpanel-main-name">
               {activeTab === "reports"
                 ? "Reports"
+                // Same rule, one tab over: a leadership update is not a PRD,
+                // and letting the line fall through to the literal "PRD" put
+                // the wrong document's name over the right one's body.
+                : activeTab === "document"
+                  ? "Document"
                 // A standalone set has no PRD to name, and naming one anyway
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
@@ -604,7 +651,11 @@ export function ContentPanel() {
                 meaning on Reports — a report carries its OWN share/PDF actions,
                 on the open document (ReportsTab). Force-disabled in guest mode —
                 a guest has no edit/export entitlement (AC15). */}
-            {activeTab !== "reports" && (
+            {/* Document is excluded for the same reason as Reports: this menu
+                exports the Evidence + PRD pair, which has nothing to do with a
+                team document — and on a thread with no PRD it would export
+                nothing at all. */}
+            {activeTab !== "reports" && activeTab !== "document" && (
               <ShareMenu
                 prd={actionablePrd}
                 evidence={content.evidence}
@@ -624,6 +675,16 @@ export function ContentPanel() {
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
             <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
+          {activeTab === "document" && content.documentId != null && (
+            <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading document…</div>}>
+              {/* Keyed on the id: a second "draft a …" in the same thread
+                  swaps this prop, and every ref in that component (the base
+                  version, the user's unsaved text, the dirty flag) belongs to
+                  the document it was mounted for. Remounting is the only way
+                  none of it leaks into the next one. */}
+              <DocumentTab key={content.documentId} documentId={content.documentId} />
+            </Suspense>
           )}
         </div>
 

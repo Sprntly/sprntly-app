@@ -39,12 +39,44 @@ const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  const { isPrdCommand, isTicketsCommand, prdCommandTask } = await import(
+    "../../../../lib/prd-commands"
+  )
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    // The PLANNER decides what a message asks for; this screen only executes the
+    // verdict. These tests stub the verdict with the SAME extraction the client
+    // used to run inline (`lib/prd-commands`), which is what their expectations
+    // were written against — so what they assert is the FLOW ("given
+    // generate_prd with this task, a PRD is generated with it"), unchanged.
+    //
+    // Whether a sentence IS a PRD command, and what its subject is, is now the
+    // planner's judgement and is tested in backend/tests/test_ask_planner.py.
+    // Reusing the old helper here is a test double standing in for a model, not
+    // a rule the product still applies.
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string) => ({
+        intent: isTicketsCommand(q)
+          ? "generate_tickets"
+          : isPrdCommand(q)
+          ? "generate_prd"
+          : "answer",
+        confidence: 0.95,
+        // null for a pointer-not-a-name phrasing ("our top product
+        // opportunity") — the planner leaves `task` empty there too, and the
+        // screen asks what the PRD should cover.
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },

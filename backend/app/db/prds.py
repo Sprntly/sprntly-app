@@ -146,13 +146,64 @@ def set_prd_artifact_template(prd_id: int, artifact_template_id: str | None) -> 
 
     Called with None on the built-in path, which is a no-op write: NULL is
     already what the column holds and what "written in Sprntly's own format"
-    means, so nothing is stamped and nothing needs to be cleared."""
+    means, so nothing is stamped and nothing needs to be cleared. The one path
+    for which None is NOT already true — a re-render of a stamped PRD back into
+    the built-in — clears explicitly via `clear_prd_artifact_template`, so this
+    function's no-op stays safe for its many fresh-row callers."""
     if artifact_template_id is None:
         return
     c = require_client()
     c.table("prds").update(
         {"artifact_template_id": artifact_template_id}
     ).eq("id", prd_id).execute()
+
+
+def clear_prd_artifact_template(prd_id: int) -> None:
+    """Un-stamp a PRD: it is now written in Sprntly's built-in format.
+
+    The change-template path's counterpart to `set_prd_artifact_template`,
+    which deliberately treats None as "nothing to record" for the fresh-row
+    generation paths. A re-render into the built-in is the one case where the
+    column holds a REAL id that is no longer true, so the clear is its own,
+    explicit write — same best-effort posture: losing it mislabels provenance,
+    never fails a finished PRD."""
+    c = require_client()
+    c.table("prds").update(
+        {"artifact_template_id": None}
+    ).eq("id", prd_id).execute()
+
+
+def mark_prd_generating(prd_id: int) -> None:
+    """Put a finished row back into flight for an in-place regeneration.
+
+    The change-template path re-runs generation over an EXISTING row (the row
+    is the job state, as everywhere in this module), so the client's poll and
+    the `prd:<id>` stream behave exactly as they do for a first generation.
+    `payload_md` is deliberately untouched: a failure mid-regeneration leaves
+    the last good document standing (`fail_prd` writes only status+error), and
+    the caller restores `ready` over it."""
+    c = require_client()
+    c.table("prds").update({
+        "status": "generating",
+        "error": None,
+    }).eq("id", prd_id).execute()
+
+
+def mark_prd_ready(prd_id: int) -> None:
+    """Put a row whose regeneration failed back to `ready`.
+
+    Correct ONLY because an in-place regeneration never touches `payload_md`
+    until it completes (`complete_prd` is the single content write), so a
+    failed one leaves the previous document fully intact — `ready` is the
+    truthful status for it. The client detects the failed switch by comparing
+    the row's `artifact_template_id` against the one it asked for; leaving the
+    row `failed` instead would bury a perfectly good document behind an error
+    screen on every later open."""
+    c = require_client()
+    c.table("prds").update({
+        "status": "ready",
+        "error": None,
+    }).eq("id", prd_id).execute()
 
 
 def complete_prd_2part(prd_id: int, title: str, human_md: str, llm_part: str) -> None:

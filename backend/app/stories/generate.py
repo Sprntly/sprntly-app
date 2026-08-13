@@ -1102,6 +1102,7 @@ def generate_from_input(
     prd_input: str,
     purpose: str = "from_prd",
     model: Optional[str] = None,
+    artifact_template_id: Optional[str] = None,
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
@@ -1124,7 +1125,10 @@ def generate_from_input(
     # get it and a run finishes in the layout it started in. (None, None) — the
     # default layout — for every company without an active ticket format, which
     # leaves the prompt and every rendered description byte-identical.
-    layout, _template_id = resolve_ticket_layout(enterprise_id)
+    #
+    # `artifact_template_id`, when the caller passed one, names the format this
+    # run was ASKED for and outranks the active one.
+    layout, _template_id = resolve_ticket_layout(enterprise_id, artifact_template_id)
     hint = layout_prompt_hint(layout)
     if hint:
         prd_input = "\n\n".join([prd_input, hint])
@@ -1234,6 +1238,7 @@ def generate_user_stories(
     prd_id: Optional[int] = None,
     insight: Optional[str] = None,
     ticket_set_id: Optional[int] = None,
+    artifact_template_id: Optional[str] = None,
     model: Optional[str] = None,
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -1259,6 +1264,10 @@ def generate_user_stories(
     identical; only latency differs. `on_batch` (fanout only) streams partial
     tickets as each batch completes; `on_plan` (fanout only) delivers the
     planned stub roster before enrichment starts.
+
+    `artifact_template_id` is an uploaded ticket format this run must render
+    into, overriding the company's active one — the format the user named in
+    chat. None (the normal case) means the active format.
     """
     if (prd_id is None) == (insight is None):
         raise ValueError("provide exactly one of prd_id or insight")
@@ -1277,6 +1286,7 @@ def generate_user_stories(
         prd_input=_build_input(prd=prd, insight=insight),
         purpose=purpose,
         model=model,
+        artifact_template_id=artifact_template_id,
         strategy=strategy,
         batch_size=batch_size,
         max_parallel=max_parallel,

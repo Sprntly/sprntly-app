@@ -132,7 +132,11 @@ def select_sync_channels(
     """Apply the user's pull-channel selection to the bot-visible channels.
 
     Returns (channels_to_sync, errors). No stored selection (or an empty
-    one) keeps the legacy behavior — every channel the bot is a member of.
+    one) syncs NOTHING — nothing selected, nothing assessed. This flipped
+    from the legacy every-bot-member-channel default in the 2026-08-13
+    connector-scope hardening (same rule the GitHub sync got in #1158): a
+    sync must never read more than the tenant explicitly picked, and an
+    empty picker is "not configured yet", not "take everything".
     Selected channels the bot can't see (not a member / archived) come back
     as errors by name so the user knows to /invite the bot, and the sync
     proceeds with whatever remains.
@@ -141,7 +145,10 @@ def select_sync_channels(
         str(cid) for cid in (config.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
     ]
     if not selected_ids:
-        return channels, []
+        return [], [
+            "No channels selected — nothing was synced. Tick the channels "
+            "to pull from in the Slack connector's Configure panel."
+        ]
 
     names = config.get(CONFIG_SYNC_CHANNEL_NAMES) or {}
     by_id = {ch.get("id", ""): ch for ch in channels}
@@ -460,6 +467,35 @@ def channels_summary_to_markdown(
 # ───── Sync orchestrator ─────
 
 
+def team_id_from_config(config: dict[str, Any]) -> str | None:
+    """The workspace IDENTITY (`T…`) off a stored Slack connection config.
+
+    Deliberately reads `config["team"]["id"]` and NOTHING ELSE. Three other
+    values in reach are also "the workspace" in casual speech and all three
+    are wrong here:
+
+      `team.name`     the display name ("Acme Corp"), renameable
+      `team.domain`   the subdomain, renameable, and what the permalink uses
+      `fetch_team_info()`  the same id via a live API call
+
+    This value is stored on every Slack catalog row so a later disconnect
+    check can ask "does any active connection for this company still carry
+    this workspace id?" against `connections.config.team.id` — the very field
+    it was read from (`db/connections.py:list_slack_connections_by_team`
+    matches on exactly that path). Reading a display name instead yields a
+    column that is populated, plausible, and matches NOTHING, so that check
+    would classify every catalogued Slack document as an orphan and delete an
+    entire tenant's Slack catalog. Reading it from a live call would make the
+    column unwritable whenever Slack is unreachable, for a fact already on
+    disk.
+
+    Takes `row_config()` output, which is always a dict — no isinstance guard,
+    because a branch that cannot execute is not a safeguard. Returns None for
+    a missing/blank id so the caller stores NULL (UNKNOWN) rather than "".
+    """
+    return str((config.get("team") or {}).get("id") or "").strip() or None
+
+
 def _slack_team_domain(access_token: str) -> str | None:
     """The workspace's Slack subdomain, for building a channel permalink —
     resolved ONCE PER SYNC, never once per channel: `fetch_team_info` is a
@@ -539,14 +575,14 @@ def sync_slack(
         return result
 
     # Honor the user's pull-channel selection (picked at connect time or in
-    # the connector's Configure drawer). No selection = every bot-member
-    # channel, unchanged from before the picker existed.
+    # the connector's Configure drawer). No selection = sync nothing —
+    # nothing selected, nothing assessed.
     channels, selection_errors = select_sync_channels(channels, config)
     result.errors.extend(selection_errors)
     result.channels_count = len(channels)
     if not channels:
-        # Everything the user selected is bot-invisible — the per-channel
-        # errors above say which and why; nothing to write.
+        # Nothing selected, or everything the user selected is bot-invisible
+        # — the errors above say which and why; nothing to write.
         _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
         return result
 
@@ -659,8 +695,12 @@ def sync_slack(
     # below, for catalog permalinks — made ONCE per sync, not once per
     # channel.
     team_domain = _slack_team_domain(access_token)
+    team_id = team_id_from_config(config)
     try:
-        kickoff_slack_extract(company_id, slack_channel_docs, team_domain=team_domain)
+        kickoff_slack_extract(
+            company_id, slack_channel_docs,
+            team_domain=team_domain, team_id=team_id,
+        )
     except Exception:  # noqa: BLE001 — extraction must never fail the sync
         logger.exception(
             "slack sync: KG extraction kick failed for %s", company_id

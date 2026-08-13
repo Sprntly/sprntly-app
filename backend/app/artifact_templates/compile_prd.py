@@ -59,6 +59,7 @@ from app.artifact_templates.store import (
 # impl-spec compiler needs a local import, because that module imports from the
 # same two this one does and would close a cycle.
 from app.stories.layout import TicketLayoutError, compile_ticket_layout
+from app.artifact_templates.summarize import generate_summary
 from app.artifact_templates.validate import validate_prd_skeleton
 from app.graph.gateway import llm_call
 from app.skills.loader import get_skill
@@ -117,9 +118,28 @@ section's `form` field set accordingly.
 
 Use `.eyebrow` for section headings. If their format has a section Sprntly has \
 no equivalent for, keep it — give it an `.eyebrow` and a placeholder saying what \
-goes there. If Sprntly needs an element their format has no home for, place it \
-at the nearest logical point rather than dropping it, and note that in \
-`unmapped_house`.
+goes there.
+
+DO NOT ADD SECTIONS THEIR FORMAT DOES NOT HAVE. This is the rule customers care \
+about most, and it overrides any instinct to be helpful: a team that uploads \
+their format wants documents in THEIR shape, and a Sprntly section they never \
+asked for reads as the product ignoring the format they just uploaded. So if a \
+Sprntly concept — a hypothesis, a projected-impact block, a risks section, \
+anything — has no home in their format, LEAVE IT OUT and list it in \
+`unmapped_house`. Do not invent a section for it, do not append it to the end, \
+and do not graft an extra row or paragraph into one of their sections to carry \
+it.
+
+The class vocabulary above is the ONE exception, and it is not a section: those \
+elements are machinery four shipped features query by CSS selector, not content \
+a reader sees as an extra part of the document. Place each one inside whichever \
+of THEIR sections it belongs to — evidence into the section that holds evidence, \
+the inputs list into whatever they call open questions — and if their format \
+genuinely has no such section, leave the element out and record it in \
+`unmapped_house` so the validator can tell them which feature it costs.
+
+None of this applies to Sprntly's own built-in format, which is not compiled \
+here and keeps every section it has always had.
 
 NEVER emit: a <script> tag, an on* attribute, or a src/href pointing anywhere \
 except fonts.googleapis.com or fonts.gstatic.com. A skeleton containing any of \
@@ -270,7 +290,14 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
             enterprise_id=company_id,
             agent="artifact_template",
             purpose="compile_prd_template",
-            prompt_version="prd-template-compile-v1",
+            # v2: the compiler stopped ADDING house sections a customer's format
+            # has no home for. v1 placed them "at the nearest logical point",
+            # which is what produced the "Added by Sprntly" block in the preview
+            # — a hypothesis and a projected-impact row grafted into a format
+            # that asked for neither. A v2 skeleton is a materially different
+            # document from a v1 one for the same source, so the two must not be
+            # pooled in the decision log.
+            prompt_version="prd-template-compile-v2",
             system=_COMPILE_SYSTEM + _UNTRUSTED_TEMPLATE_ADDENDUM,
             # ONLY the customer's markdown is uncached. See the module docstring.
             input=_COMPILE_USER.format(source=source_md.strip()),
@@ -330,6 +357,18 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
     store_skeleton = None if verdict.status == "failed" else skeleton
     store_map = None if verdict.status == "failed" else section_map
 
+    # The summary rides exactly where the skeleton does: a stored skeleton means
+    # THIS source now governs the row, so its description is (re)written — even
+    # when generation failed and it is '', because a summary describing replaced
+    # source text is worse than none. A failed validate stores neither, keeping
+    # the summary paired with the `compiled` it describes. Never fails the
+    # compile: `generate_summary` returns '' on any failure.
+    summary = None
+    if store_skeleton is not None:
+        summary = generate_summary(
+            company_id, artifact_type="prd", source_md=source_md
+        )
+
     logger.info(
         "artifact_template_compiled company_present=%s status=%s notes=%s "
         "sections=%s",
@@ -342,6 +381,7 @@ def compile_prd_template(company_id: str, template_id: str) -> dict | None:
         compiled=store_skeleton,
         section_map=store_map,
         compile_notes=notes,
+        summary=summary,
     )
 
 
@@ -393,6 +433,16 @@ def _compile_ticket_layout_row(company_id: str, row: dict) -> dict | None:
         compile_status="ready",
         compiled=json.dumps(layout),
         compile_notes=[],
+        # The one model call this deterministic leg makes, and it is not part
+        # of the compile: the summary is how chat describes the format, it
+        # rides where `compiled` does (see the PRD leg), and `generate_summary`
+        # returns '' rather than raising — so this leg still cannot fail
+        # transiently.
+        summary=generate_summary(
+            company_id,
+            artifact_type="tickets",
+            source_md=row.get("source_md") or "",
+        ),
     )
 
 

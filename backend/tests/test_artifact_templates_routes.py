@@ -422,6 +422,25 @@ def test_list_row_carries_the_note_summary_and_count(tenant_client):
     assert row["compile_note_count"] == 3
 
 
+def test_list_row_carries_the_formats_own_summary(tenant_client):
+    """`summary` (what the format CONTAINS, written at compile time) is a list
+    column so the Templates card can render it without a detail fetch — and
+    it is '' rather than absent before one exists, per the house every-field
+    rule."""
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client).json()["id"]
+    from app import db
+
+    assert t.client.get(_URL).json()["templates"][0]["summary"] == ""
+
+    db.set_template_summary(
+        company_id=t.company_id, template_id=tid,
+        summary="Two sections, evidence-first.",
+    )
+    row = t.client.get(_URL).json()["templates"][0]
+    assert row["summary"] == "Two sections, evidence-first."
+
+
 def test_the_list_payload_reads_nothing_the_list_select_omits(isolated_settings):
     """Guard for a bug the fake Supabase structurally cannot catch.
 

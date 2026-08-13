@@ -362,13 +362,44 @@ def fallback_to_md(filename: str, data: bytes) -> str:
     )
 
 
+def strip_nul(text: str) -> str:
+    """Drop NUL characters from extracted text. THE ROOT-CAUSE FIX for a 500.
+
+    `U+0000` IS VALID UTF-8, so a UTF-16LE file saved without a BOM, a PDF with
+    padded strings, or a .docx carrying embedded binary all decode cleanly and
+    pass every character-level check — and then Postgres refuses the write,
+    because `text` cannot store a NUL. It answers SQLSTATE 22P05 ("unsupported
+    Unicode escape sequence — \\u0000 cannot be converted to text") and PostgREST
+    surfaces it as an APIError, which reaches the user as a 500 on a send.
+
+    Observed live: a chat message with a document attached inlines the extracted
+    text into the question, `db.asks.start_ask_job` inserts it, and the entire
+    `POST /v1/ask` dies — not the attachment, the whole message.
+
+    NO TEST IN THIS SUITE CAN CATCH THAT DOWNSTREAM. The SQLite fake stores NULs
+    happily, so the failure only exists against real Postgres — the same trap
+    `artifact_templates.store.TemplateSourceNotText` documents, which is why
+    that path refuses a NUL outright at upload.
+
+    Here it STRIPS rather than refuses, and the difference is deliberate: an
+    uploaded FORMAT with a NUL is a file the user chose wrong and can re-save,
+    while an attachment in mid-conversation is a document they want read. The
+    NUL carries no meaning in either case — dropping it costs nothing and keeps
+    the message working.
+    """
+    return text.replace("\x00", "") if text else text
+
+
 def convert(filename: str, data: bytes) -> str:
-    """Dispatch by extension; unknown types fall back instead of failing."""
+    """Dispatch by extension; unknown types fall back instead of failing.
+
+    Every converter's output passes through `strip_nul`, so no extraction path
+    can hand a NUL to a caller that will try to persist it — see there."""
     suffix = Path(filename).suffix.lower()
     fn = _SUFFIX_TO_CONVERTER.get(suffix)
     if fn is None:
-        return fallback_to_md(filename, data)
-    return fn(data)
+        return strip_nul(fallback_to_md(filename, data))
+    return strip_nul(fn(data))
 
 
 # Naming helpers ----------------------------------------------------------

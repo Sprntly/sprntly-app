@@ -81,7 +81,12 @@ export type PrdTabRequest = {
 /** The right-side content panel's tabs. Evidence → PRD → Tickets are the PRD
  *  pipeline; Reports is the thread's captured report documents, which hang off
  *  the conversation rather than off a PRD. */
-export type ContentPanelTab = "evidence" | "prd" | "tickets" | "reports"
+export type ContentPanelTab =
+  | "evidence" | "prd" | "tickets" | "reports"
+  /** A team document (custom artifact) — the "Others" library's kind. Like
+   *  Reports it hangs off the CHAT THREAD rather than off the PRD, so it sits
+   *  after the pipeline and stays hidden until the thread actually has one. */
+  | "document"
 
 /** A request to open a captured report in the thread it was generated in.
  *

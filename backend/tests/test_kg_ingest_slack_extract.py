@@ -583,6 +583,22 @@ def slack_sync_env(isolated_settings, tmp_data_dir, monkeypatch):
     return slack_sync
 
 
+def _select_channels(slack_sync_env, monkeypatch, ids: list[str]) -> None:
+    """Store an explicit pull-channel selection on the stubbed connection.
+
+    Since the 2026-08-13 scope rule, no selection syncs NOTHING — so every
+    sync-wiring test must say which channels it means to pull, exactly as a
+    configured tenant would."""
+    monkeypatch.setattr(
+        slack_sync_env, "_get_company_token_and_config",
+        lambda company_id: (
+            "xoxb-test",
+            {slack_sync_env.CONFIG_SYNC_CHANNEL_IDS: ids},
+            {"user_id": "u1"},
+        ),
+    )
+
+
 def test_sync_slack_builds_one_channel_doc_per_channel_and_kicks_off_extraction(
     slack_sync_env, monkeypatch
 ):
@@ -590,6 +606,7 @@ def test_sync_slack_builds_one_channel_doc_per_channel_and_kicks_off_extraction(
 
     channels = [_channel("C1", "general"), _channel("C2", "support"),
                 _channel("C3", "random")]
+    _select_channels(slack_sync_env, monkeypatch, ["C1", "C2", "C3"])
     messages = {
         "C1": [{"user": "U1", "text": "hi", "ts": "1700000000.000001"}],
         "C2": [{"user": "U1", "text": "help please", "ts": "1700000001.000001"}],
@@ -657,6 +674,7 @@ def test_slack_extract_makes_no_new_slack_api_calls(slack_sync_env, monkeypatch)
     channels = [_channel("C1", "general")]
     messages = {"C1": [{"user": "U1", "text": "hi", "ts": "1700000000.000001",
                         "reply_count": 0}]}
+    _select_channels(slack_sync_env, monkeypatch, ["C1"])
     url_log: list[str] = []
     monkeypatch.setattr(
         slack_sync_env, "_slack_get",
@@ -681,6 +699,7 @@ def test_slack_extract_failure_never_raises_into_sync_slack(slack_sync_env, monk
 
     channels = [_channel("C1", "general")]
     messages = {"C1": [{"user": "U1", "text": "hi", "ts": "1700000000.000001"}]}
+    _select_channels(slack_sync_env, monkeypatch, ["C1"])
     monkeypatch.setattr(slack_sync_env, "_slack_get",
                         _slack_get_fake(channels, messages))
 
@@ -701,6 +720,7 @@ def test_slack_corpus_file_still_written_after_sync(slack_sync_env, monkeypatch,
 
     channels = [_channel("C1", "general")]
     messages = {"C1": [{"user": "U1", "text": "hi", "ts": "1700000000.000001"}]}
+    _select_channels(slack_sync_env, monkeypatch, ["C1"])
     monkeypatch.setattr(slack_sync_env, "_slack_get",
                         _slack_get_fake(channels, messages))
     monkeypatch.setattr(se, "kickoff_slack_extract", lambda *a, **k: True)
@@ -721,6 +741,7 @@ def test_team_info_called_once_per_sync(slack_sync_env, monkeypatch):
         c["id"]: [{"user": "U1", "text": "hi", "ts": "1700000000.000001"}]
         for c in channels
     }
+    _select_channels(slack_sync_env, monkeypatch, [c["id"] for c in channels])
     monkeypatch.setattr(slack_sync_env, "_slack_get",
                         _slack_get_fake(channels, messages))
     monkeypatch.setattr(se, "kickoff_slack_extract", lambda *a, **k: True)

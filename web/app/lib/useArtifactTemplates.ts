@@ -50,6 +50,12 @@ const IN_FLIGHT = new Set(["pending", "compiling"])
  *  the whole time, so a tighter loop buys nothing but requests. */
 export const COMPILE_POLL_INTERVAL_MS = 3_000
 
+/** One delayed re-read after a list returned a ready row with no `summary`
+ *  (the self-heal window: the same read made the backend describe the row in
+ *  the background). 8s comfortably covers one haiku call + the write; a
+ *  slower heal just keeps the placeholder line until the next visit. */
+export const SUMMARY_HEAL_REFRESH_MS = 8_000
+
 /** 5 minutes of wall clock. Past that the row keeps its Checking badge but says
  *  so and offers Check again — a spinner that runs forever is the one outcome
  *  that never resolves itself. */
@@ -173,6 +179,11 @@ export function useArtifactTemplates(opts?: {
   const statusRef = useRef<Map<string, string>>(new Map())
   const onReadyRef = useRef(opts?.onReady)
   onReadyRef.current = opts?.onReady
+  // One summary self-heal re-read per mount epoch (see applyList). A ref, not
+  // state — arming it must not render. `applyListRef` exists only so the
+  // timer can call the CURRENT applyList without being a dependency of it.
+  const healRef = useRef(false)
+  const applyListRef = useRef<((payload: ArtifactTemplateList) => ArtifactTemplate[]) | null>(null)
 
   /** Fold a list response into state and announce anything that just finished.
    *  Returns the rows so the poller can decide whether to keep going. */
@@ -217,10 +228,33 @@ export function useArtifactTemplates(opts?: {
         )
         for (const row of becameReady) onReadyRef.current?.(row)
       }
+      // SELF-HEAL, second half. A ready row with no `summary` predates the
+      // summary column; the list read that just returned it also made the
+      // backend describe it in the background. ONE delayed re-read (not a
+      // poll loop) lets the card heal on screen rather than on the next
+      // visit. Single-shot per mount epoch: if the heal is slower than the
+      // delay, the placeholder line stays — and stays true.
+      if (
+        !healRef.current &&
+        rows.some((r) => r.compile_status === "ready" && !r.summary)
+      ) {
+        healRef.current = true
+        const mine = epochRef.current
+        setTimeout(() => {
+          if (epochRef.current !== mine) return
+          artifactTemplatesApi
+            .list()
+            .then((payload) => {
+              if (epochRef.current === mine) applyListRef.current?.(payload)
+            })
+            .catch(() => { /* the placeholder line keeps the story honest */ })
+        }, SUMMARY_HEAL_REFRESH_MS)
+      }
       return rows
     },
     [],
   )
+  applyListRef.current = applyList
 
   /** Watch the list until nothing is in flight. Only ever one loop at a time —
    *  a second upload while the first is compiling joins the existing poll,
@@ -283,6 +317,8 @@ export function useArtifactTemplates(opts?: {
     setTemplates([])
     setStalledIds(new Set())
     statusRef.current = new Map()
+    // Re-arm the summary self-heal: a workspace switch is a new library.
+    healRef.current = false
     artifactTemplatesApi
       .list()
       .then((payload) => {

@@ -279,6 +279,27 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Team documents of any kind — the "Others" library (mirrors
+-- 20260813120000_custom_artifacts.sql). Present in the BASE schema, not only in
+-- the suites that exercise it, because the startup lifespan sweeps this table
+-- for orphaned generations — so every test that boots the app touches it.
+CREATE TABLE custom_artifacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    kind            TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    body_html       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'ready',
+    error           TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    updated_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Fire-and-forget Ask job rows (mirrors 20260617120000_ask_jobs.sql). Status
 -- walks generating → ready (or error); `response` holds the citation-stripped
 -- answer JSON. Per-request + per-tenant — distinct from cached_asks/ask_log.
@@ -638,7 +659,7 @@ CREATE TABLE workspace_invites (
     job_role      TEXT,
     invited_by    TEXT,
     workspace_ids TEXT NOT NULL DEFAULT '[]',
-    -- Project association (mirrors 20260812120200_workspace_invites_project.sql):
+    -- Project association (mirrors 20260813140200_workspace_invites_project.sql):
     -- when set, accept auto-adds the accepter to project_members (Extension B).
     -- No FK here: workspace_invites is created before the projects table below,
     -- and the fake schema mirrors columns, not constraint ordering.
@@ -1198,6 +1219,12 @@ CREATE TABLE document_catalog (
     user_id         TEXT,
     provider        TEXT NOT NULL,
     external_id     TEXT NOT NULL,
+    -- The provider-side CONTAINER (Confluence space id today). Nullable, and
+    -- the null-ness carries meaning that tests depend on: `IN` never matches
+    -- NULL in either engine, so a row registered before this column existed
+    -- is skipped by the container-keyed deregistration rather than swept up
+    -- by it.
+    container_id    TEXT,
     title           TEXT NOT NULL,
     source_name     TEXT NOT NULL DEFAULT '',
     url             TEXT,
@@ -1207,6 +1234,11 @@ CREATE TABLE document_catalog (
     topics          TEXT NOT NULL DEFAULT '[]',
     summary_model   TEXT,
     summary_version TEXT,
+    -- Mirrors 20260811120000_document_catalog_provider_workspace.sql. NULLABLE
+    -- and NULL-by-default on purpose: NULL means UNKNOWN, never "belongs to no
+    -- workspace", and the tests below pin that a caller who does not know the
+    -- workspace can neither clear nor invent one.
+    provider_workspace_id TEXT,
     embedding       TEXT,
     body_text       TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -1300,6 +1332,9 @@ CREATE TABLE artifact_templates (
                      CHECK (compile_status IN
                             ('pending', 'compiling', 'ready', 'needs_review', 'failed')),
     compile_notes  TEXT NOT NULL DEFAULT '[]',
+    -- Mirrors 20260812200000_artifact_templates_summary.sql: the LLM-written
+    -- description a successful compile stores; '' = "no summary yet".
+    summary        TEXT NOT NULL DEFAULT '',
     content_hash   TEXT NOT NULL DEFAULT '',
     is_active      INTEGER NOT NULL DEFAULT 0,
     uploader_id    TEXT NOT NULL,
@@ -1424,7 +1459,7 @@ CREATE TABLE conversations (
     -- (mirrors prd_id above).
     evidence_id INTEGER,
     -- Additive group-chat columns (mirrors
-    -- 20260811120100_conversations_project_columns.sql). Every pre-existing
+    -- 20260813130100_conversations_project_columns.sql). Every pre-existing
     -- + future per-user chat keeps project_id NULL / kind='individual' by
     -- default, so the untouched per-user ownership path is unaffected.
     project_id  INTEGER REFERENCES projects (id) ON DELETE SET NULL,
@@ -1449,7 +1484,7 @@ CREATE TABLE conversation_turns (
     -- (20260723170000_conversation_turn_attachments.sql).
     attachments     TEXT,
     -- Which human posted this turn (mirrors
-    -- 20260811120100_conversations_project_columns.sql). NULL for
+    -- 20260813130100_conversations_project_columns.sql). NULL for
     -- assistant turns and every pre-existing single-owner-chat turn.
     author_user_id  TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
@@ -1508,10 +1543,10 @@ CREATE TABLE artifact_share_joins (
     UNIQUE (share_id, joined_user_id)
 );
 
--- Projects + collaboration layer (mirrors 20260811120000_projects.sql,
--- 20260811120100_conversations_project_columns.sql [conversations/
+-- Projects + collaboration layer (mirrors 20260813130000_projects.sql,
+-- 20260813130100_conversations_project_columns.sql [conversations/
 -- conversation_turns columns are ALTERed onto those tables above],
--- 20260811120200_project_memory.sql). No FK on company_id/workspace_id
+-- 20260813130200_project_memory.sql). No FK on company_id/workspace_id
 -- here — same reasoning as the `workspaces` table comment above: route
 -- tests routinely fabricate tenant ids that have no `companies`/
 -- `workspaces` row, and require_workspace's self-heal must be able to
@@ -1574,7 +1609,7 @@ CREATE TABLE project_memory_summary (
     stale        INTEGER NOT NULL DEFAULT 0
 );
 
--- Mirrors 20260811120300_project_delegations.sql. No FK on
+-- Mirrors 20260813130300_project_delegations.sql. No FK on
 -- assigner/assignee user_id — same reasoning as project_members above,
 -- these are auth.users ids the fake DB never seeds a row for.
 CREATE TABLE project_delegations (
@@ -1593,7 +1628,7 @@ CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id
 CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
 CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
 
--- Mirrors 20260812120100_delegation_events.sql. No FK on actor_user_id —
+-- Mirrors 20260813140100_delegation_events.sql. No FK on actor_user_id —
 -- same reasoning as project_delegations above (auth.users ids the fake
 -- DB never seeds a row for). The migration's own CHECK constraint and
 -- `v_delegation_status` left-join-lateral view are NOT mirrored here —
@@ -1611,7 +1646,7 @@ CREATE TABLE delegation_events (
 );
 CREATE INDEX idx_delegation_events_delegation ON delegation_events (delegation_id, id);
 
--- Mirrors 20260811120400_conversation_read_cursors.sql. Inputs-only read
+-- Mirrors 20260813130400_conversation_read_cursors.sql. Inputs-only read
 -- cursor (AD-P3/AD-P20) — no `unread` boolean/count column anywhere;
 -- unread is derived at read time by the db helper. No FK on user_id —
 -- same reasoning as project_delegations above (auth.users ids the fake
@@ -1622,6 +1657,20 @@ CREATE TABLE conversation_read_cursors (
     last_read_turn_id INTEGER NOT NULL DEFAULT 0,
     updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (conversation_id, user_id)
+);
+
+-- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
+-- bigint identity / jsonb / timestamptz are INTEGER / TEXT here). The persisted
+-- call transcripts the VoC digest reads instead of live-fetching per question.
+create table if not exists call_transcripts (
+    id            integer primary key autoincrement,
+    company_id    text not null,
+    provider      text not null,
+    external_id   text not null,
+    call_date     text,
+    payload       text not null,
+    fetched_at    text not null default '',
+    unique (company_id, provider, external_id)
 );
 """
 
@@ -1810,6 +1859,27 @@ def _no_background_template_compile(request, monkeypatch):
         if hasattr(mod, "schedule_compile"):
             monkeypatch.setattr(mod, "schedule_compile", _noop_schedule,
                                 raising=False)
+
+    # The summary self-heal is the same hazard through a different door: the
+    # templates LIST route (and the planner's catalog read) schedules a
+    # background summarize for any ready row with an empty summary — which is
+    # every ready row a test seeds — and that call is a gateway `llm_call` too.
+    # 0 = "nothing scheduled", which is the function's no-work return, so list
+    # responses keep their shape under the patch. Same two-module patching,
+    # same reason. The summarize suite opts out with the marker above and
+    # drives the gateway with its own stub.
+    def _noop_summaries(company_id, rows):  # noqa: ARG001
+        return 0
+
+    for mod_name in ("app.artifact_templates.summarize",
+                     "app.routes.artifact_templates"):
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        if hasattr(mod, "schedule_missing_summaries"):
+            monkeypatch.setattr(mod, "schedule_missing_summaries",
+                                _noop_summaries, raising=False)
     yield
 
 

@@ -54,7 +54,7 @@ pytestmark = [
 ]
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations"
-_MIGRATION_FILE = "20260811120300_project_delegations.sql"
+_MIGRATION_FILE = "20260813130300_project_delegations.sql"
 _DB_CONTAINER = os.getenv("PROJECTS_SCHEMA_TEST_DB_CONTAINER", "supabase_db_Sprntly")
 
 

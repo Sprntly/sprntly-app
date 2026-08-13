@@ -31,6 +31,11 @@ vi.mock("../../../../../lib/api", () => {
     projectsApi: {
       artifacts: (...a: unknown[]) => artifactsMock(...a),
     },
+    // Real implementation (no API call, no side effect) — mirrors
+    // lib/api.ts's own five-value check, kept here rather than importing the
+    // real module so this mock stays self-contained.
+    isProjectArtifactType: (t: string) =>
+      ["prd", "evidence", "prototype", "report", "ticket_set"].includes(t),
   }
 })
 

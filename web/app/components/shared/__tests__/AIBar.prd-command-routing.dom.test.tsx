@@ -37,7 +37,12 @@ vi.mock("next/navigation", () => ({
 }))
 
 const { briefCurrentSpy } = vi.hoisted(() => ({ briefCurrentSpy: vi.fn() }))
-vi.mock("../../../lib/api", () => {
+vi.mock("../../../lib/api", async () => {
+  const { isPrdCommand, prdCommandTask } = await import("../../../lib/prd-commands")
+  // Declared INSIDE the factory: vi.mock is hoisted, so a module-scope const it
+  // closed over could be in its temporal dead zone when the factory runs.
+  const MULTI_AGENT_PHRASING =
+    /\bprd\s+first\b|\bmulti[- ]?agent\b|\baggressive\s+(?:analysis|mode)\b/i
   class ApiError extends Error {
     status = 0
     body: unknown = null
@@ -46,6 +51,35 @@ vi.mock("../../../lib/api", () => {
     ApiError,
     briefApi: { current: briefCurrentSpy },
     prdApi: {},
+    // The PLANNER decides what a message asks for; this bar only executes the
+    // verdict. Stubbed with the SAME helpers the bar used to run inline, which
+    // is what these expectations were written against — so what they assert is
+    // still the ROUTING ("a question reaches the ask agent, never the PRD
+    // generator"), which is the whole point of the suite.
+    //
+    // Whether a sentence is a command is now the planner's judgement and is
+    // tested in backend/tests/test_ask_planner.py. Reusing the helper here is a
+    // double standing in for a model, not a rule the product still applies.
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string) => ({
+        // The multi-agent suite is its own action now. The bar used to detect
+        // it with a local regex over "prd first" / "multi-agent" / "aggressive
+        // analysis"; the planner owns that call, so the double names the same
+        // phrasings to keep this suite asserting the ROUTING.
+        intent: MULTI_AGENT_PHRASING.test(q) && isPrdCommand(q)
+          ? "multi_agent"
+          : isPrdCommand(q)
+          ? "generate_prd"
+          : "answer",
+        confidence: 0.95,
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
   }
 })
 

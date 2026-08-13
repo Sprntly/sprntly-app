@@ -219,6 +219,15 @@ def llm_call(
     timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
     t0 = time.monotonic()
+    # [timing] — the gateway is the one chokepoint every model call crosses, so
+    # a start/end pair HERE labels every LLM leg of a request (planner, answer,
+    # suggestions, …) by its purpose with zero per-callsite edits.
+    from app.timing import logger as _timing_logger
+
+    _timing_logger.info(
+        "[timing] block=llm:%s event=start agent=%s model=%s",
+        purpose, agent, chosen_model,
+    )
     # Bind the tenant's own Claude key (when configured) for this call. This is
     # the single chokepoint every KG-agent / brief / PRD / evidence / ticket call
     # flows through, and `enterprise_id` is the company id — so binding here
@@ -266,6 +275,12 @@ def llm_call(
                 temperature=temperature, on_delta=on_delta,
             )
     latency_ms = int((time.monotonic() - t0) * 1000)
+    _timing_logger.info(
+        "[timing] block=llm:%s event=end dur_ms=%d agent=%s model=%s in_tok=%s out_tok=%s cache_read=%s",
+        purpose, latency_ms, agent, meta.get("model", chosen_model),
+        meta.get("input_tokens", 0), meta.get("output_tokens", 0),
+        meta.get("cache_read_input_tokens", 0),
+    )
 
     result = LLMResult(
         output=output,

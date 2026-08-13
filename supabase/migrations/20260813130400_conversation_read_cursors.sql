@@ -7,8 +7,8 @@
 -- No `workspace_id` column, deliberately diverging from the general
 -- new-table convention — same Projects-era sibling pattern already set by
 -- `project_delegations`/`project_memory_entries`/`project_chat_members`
--- (see `20260811120300_project_delegations.sql`,
--- `20260811120100_conversations_project_columns.sql`): scoped via
+-- (see `20260813130300_project_delegations.sql`,
+-- `20260813130100_conversations_project_columns.sql`): scoped via
 -- `conversation_id -> conversations -> project`, tenancy enforced at the
 -- route layer (`_require_project_member`), server-role RLS rather than a
 -- per-row `workspace_id` column.

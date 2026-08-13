@@ -37,6 +37,7 @@ import { PROJECTS_PATH } from "../../../../lib/routes"
 import {
   ApiError,
   projectsApi,
+  isProjectArtifactType,
   type ArtifactItem,
   type DelegationCounts,
   type DelegationLedgerRow,
@@ -118,6 +119,11 @@ function groupArtifactsByType(
 ): Partial<Record<ProjectArtifactType, ArtifactItem[]>> {
   const out: Partial<Record<ProjectArtifactType, ArtifactItem[]>> = {}
   for (const a of artifacts) {
+    // A custom_artifact row can't reach a project's own artifact list today
+    // (project_artifacts' DB CHECK constraint), so it has no bucket here —
+    // skipped rather than assumed away, since `ArtifactItem["type"]` is
+    // statically wider than `ProjectArtifactType`.
+    if (!isProjectArtifactType(a.type)) continue
     const bucket = (out[a.type] ??= [])
     bucket.push(a)
   }

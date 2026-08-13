@@ -37,7 +37,7 @@ from tests._project_helpers import seed_same_tenant_non_member
 _RUN_LIVE = os.getenv("RUN_CONVERSATION_READ_CURSORS_ROUNDTRIP") == "1"
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations"
-_MIGRATION_FILE = "20260811120400_conversation_read_cursors.sql"
+_MIGRATION_FILE = "20260813130400_conversation_read_cursors.sql"
 _DB_CONTAINER = os.getenv("PROJECTS_SCHEMA_TEST_DB_CONTAINER", "supabase_db_Sprntly")
 
 

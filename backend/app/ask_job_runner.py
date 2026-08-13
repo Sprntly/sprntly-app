@@ -1,3 +1,5 @@
+
+from app.timing import timed_def
 """Background worker for the blur-safe chat Ask flow.
 
 `POST /v1/ask` persists a `generating` row in `ask_jobs` and schedules
@@ -12,6 +14,7 @@ failure marks the row `error` and never crashes the task (the asyncio loop
 holds a strong ref via routes/ask.py's `_inflight_tasks`).
 """
 import asyncio
+import json
 import logging
 
 from app import ask_runner, qa_agent
@@ -72,6 +75,7 @@ def _strip_citations(payload: dict) -> dict:
     return payload
 
 
+@timed_def("worker:ask")
 def _run_sync(
     ask_id: int,
     enterprise_id: str,
@@ -84,7 +88,12 @@ def _run_sync(
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    # Keyword-only with defaults so the suite's positional direct calls keep
+    # working; the one production caller (run_ask_job) passes them by name.
+    *,
     project_id: int | None = None,
+    evidence_id: int | None = None,
+    ticket_set_id: int | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -92,9 +101,16 @@ def _run_sync(
     # by GET /v1/ask/{id}/stream). Display only — the persisted job row the
     # client polls stays the authoritative answer, so the non-streamable paths
     # (reports, tool loops) simply publish nothing.
-    extractor = AnswerFieldExtractor(
-        token_stream.delta_sink(loop, ask_channel(ask_id))
-    )
+    #
+    # The extractor's `on_restart` is the sink's own `reset`: when the gateway
+    # retries mid-stream the answer is re-emitted from zero, and rewinding only
+    # the JSON parse state would leave attempt 1's markdown sitting in the
+    # channel's replay buffer and in the browser's accumulator for attempt 2 to
+    # be appended to. Chat answers are plain markdown, so the frontend's
+    # `<!doctype` restart heuristic — which covers the HTML generations — never
+    # fires for them; this is the explicit signal that does.
+    sink = token_stream.delta_sink(loop, ask_channel(ask_id))
+    extractor = AnswerFieldExtractor(sink, on_restart=getattr(sink, "reset", None))
     # `qa_agent.answer()` has no conversation_id/user_id parameter — and
     # keeping it that way is the point (see app.ask_runner.set_active_conversation
     # for the full rationale: threading either through answer() ->
@@ -113,26 +129,52 @@ def _run_sync(
     # whose documents share the workspace's own name, is nothing. Ranking was
     # then decided by recency and still reported as a topic match.
     #
-    # Computed HERE, once, before `answer()` picks a path, so both paths get
-    # the same vector and the ask pays for exactly one embedding:
-    # `compose_ask_answer` reuses this instead of computing its own.
+    # SCOPED here, once, before `answer()` picks a path, so that whichever path
+    # runs shares one vector and the ask pays for at most one embedding.
     #
-    # Computed BEFORE either setter, deliberately: this is the only step here
-    # that does real work (an HTTP call), and nothing between a `set_` and the
-    # `try` is covered by the `finally`. This worker runs on a pooled thread,
-    # and a ContextVar left set outlives the request into whatever ask reuses
-    # that thread next — a stale conversation id would then scope another
-    # user's document lookup. `_question_embedding` swallows its own failures
-    # and returns `(None, True)` rather than raising, so today that window is
-    # already closed; ordering it this way is what keeps it closed if that
-    # ever stops being true.
-    embedding, embedding_degraded = ask_runner._question_embedding(
-        enterprise_id, question
-    )
+    # Scoped rather than COMPUTED: the vector is only ever read by Stage T of
+    # document grounding and by KG retrieval, and there are two common shapes
+    # where neither runs. A workspace with no documents returns from
+    # `document_grounding` before Stage T, and a PRD-grounded ask skips KG
+    # retrieval entirely — both used to pay a full embedding round trip
+    # (measured at 2.8s) for a vector nothing then read. Deferring it to first
+    # use keeps the exactly-once guarantee (the resolver memoises back into
+    # this slot) while dropping that cost to zero on the paths that need
+    # nothing. See `ask_runner._EMBED_PENDING` for the three slot states.
+    #
+    # This also closes, rather than merely orders around, the hazard the eager
+    # call had to be careful about: nothing between a `set_` and the `try` is
+    # covered by the `finally`, and this worker runs on a POOLED thread where a
+    # ContextVar left set outlives the request into whatever ask reuses that
+    # thread next — a stale conversation id would then scope another user's
+    # document lookup. The eager embed was ordered before both setters to keep
+    # that window shut; scoping does no I/O at all, so there is no window.
+    #
+    # THE PLANNER RUNS FIRST, before `answer()` picks a path. It ran here
+    # originally to get ahead of the eager embedding call — a live HTTP round
+    # trip the plan did not depend on. That call is gone (the embedding is now
+    # resolved lazily by whichever consumer needs it, and on a planned turn that
+    # may be none at all), so the ordering is no longer load-bearing for
+    # latency; what keeps the planner here is the separation of concerns below.
+    #
+    # It runs HERE rather than inside `answer()` so that function stays a pure
+    # executor of a plan it is handed, rather than something that both decides
+    # and executes. `plan_for_answer` returns None on any planner failure, and
+    # `answer(plan=None)` is byte-identical to the pre-planner behaviour, so an
+    # outage degrades this path rather than breaking it.
+    #
+    # A pinned turn is never planned: the user already named the skill, so there
+    # is nothing to decide and no reason to bill them for a decision.
+    ask_plan = None
+    if not pinned_skill:
+        from app import ask_planner
+
+        ask_plan = ask_planner.plan_for_answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
-    embedding_token = ask_runner.set_active_question_embedding(
-        embedding, embedding_degraded
-    )
+    embedding_token = ask_runner.set_active_question_embedding_pending()
     # The prior turns, by the same route and for the same reason: document
     # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
     # is without them, and the skill-routed path reaches document grounding
@@ -140,6 +182,12 @@ def _run_sync(
     # `history` is already loaded and already this function's parameter —
     # `routes.ask._load_history` fetched it, ownership-checked, before the job
     # started — so this publishes what is in hand rather than reading again.
+    # The documents the plan named, on the same request-scoped route and with
+    # the same finally-cleared discipline. Empty when nothing planned one, which
+    # is the normal outcome and leaves document selection exactly as it was.
+    planned_docs_token = ask_runner.set_active_planned_documents(
+        getattr(ask_plan, "documents", None) if ask_plan is not None else None
+    )
     history_token = ask_runner.set_active_history(history)
     # Project-scoped ask (individual project chat): let qa_agent skip the
     # connector-lookup interceptors so the folded, authoritative project-context
@@ -149,12 +197,15 @@ def _run_sync(
 
     def _single_shot() -> dict:
         return qa_agent.answer(
+            plan=ask_plan,
             enterprise_id=enterprise_id,
             question=question,
             dataset=dataset,
             history=history,
             pinned_skill=pinned_skill,
             prd_id=prd_id,
+            evidence_id=evidence_id,
+            ticket_set_id=ticket_set_id,
             # Cooperative cancellation: the user's Stop flips the job row to
             # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
             # steps and raises AskCancelled to abort before the expensive answer call.
@@ -197,6 +248,7 @@ def _run_sync(
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
+        ask_runner.reset_active_planned_documents(planned_docs_token)
         ask_runner.reset_active_project_id(project_id_token)
     # Append-only analytics log, same as the old inline path.
     try:
@@ -209,6 +261,37 @@ def _run_sync(
         )
     except Exception:  # noqa: BLE001 — analytics logging must never fail the answer
         logger.exception("log_ask failed for ask_id=%s", ask_id)
+    # The other half of the planner-first shadow (backend/docs/ASK_PLANNER.md):
+    # the plan was logged at the TOP of qa_agent.answer, before anything
+    # decided; this line records what the ladder ACTUALLY did, read off the
+    # finished payload (`_skill`/`_skill_action` are set by whichever
+    # interceptor, pipeline or skill answered — both None on the direct path).
+    # The two lines join on `question`. Logged here because this is the one
+    # exit point where the outcome is known — answer() returns from a dozen
+    # places, and instrumenting each was the invasive option.
+    #
+    # Same flag as the shadow itself, checked cheaply: this whole function is
+    # already on a background worker, and `shadow_enabled` fails closed, so an
+    # unenrolled company logs nothing and a broken flag read costs one line.
+    try:
+        from app import ask_planner
+
+        if ask_planner.shadow_enabled(enterprise_id):
+            logger.info(
+                "ask-planner actual: %s",
+                json.dumps(
+                    {
+                        "enterprise_id": enterprise_id,
+                        "question": ask_planner._clamp_for_log(question),
+                        "skill": payload.get("_skill"),
+                        "action": payload.get("_skill_action"),
+                    },
+                    sort_keys=True,
+                    default=str,
+                ),
+            )
+    except Exception:  # noqa: BLE001 — shadow telemetry must never fail the answer
+        logger.exception("ask-planner actual line failed for ask_id=%s", ask_id)
     complete_ask_job(ask_id, _strip_citations(payload))
     # A report skill answers with a self-contained HTML document rather than
     # markdown. Capture it as a durable `reports` artifact so it survives the
@@ -256,6 +339,8 @@ async def run_ask_job(
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
     prd_id: int | None = None,
+    evidence_id: int | None = None,
+    ticket_set_id: int | None = None,
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
@@ -284,7 +369,9 @@ async def run_ask_job(
             conversation_id,
             user_id,
             workspace_id,
-            project_id,
+            project_id=project_id,
+            evidence_id=evidence_id,
+            ticket_set_id=ticket_set_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
         # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a

@@ -41,7 +41,7 @@ CREATE TABLE prd_patches (
 
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "supabase" / "migrations" / "20260812130000_prd_patches_nullable_prototype_id.sql"
+    / "supabase" / "migrations" / "20260813150000_prd_patches_nullable_prototype_id.sql"
 )
 
 
@@ -185,7 +185,7 @@ def _migration_sql():
 
 def test_migration_file_exists_named_and_drops_not_null():
     assert _MIGRATION_PATH.exists()
-    assert _MIGRATION_PATH.name == "20260812130000_prd_patches_nullable_prototype_id.sql"
+    assert _MIGRATION_PATH.name == "20260813150000_prd_patches_nullable_prototype_id.sql"
     sql = _migration_sql()
     assert "alter column prototype_id drop not null" in sql
     # F11 — never alters prds, never touches the FK.

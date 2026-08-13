@@ -38,9 +38,13 @@ import { ChatSuggestionIcon, IconDocument, IconSparkle } from "../../shared/app-
 // as "reopen that tab".
 import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
 // The composer — extracted 2026-08-10 so the individual chat and the project
-// group chat share ONE implementation instead of two (AD-P13).
+// group chat share ONE implementation instead of two.
 import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
-import { ApiError, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo } from "../../../lib/api"
+import {
+  customArtifactsApi,
+  type ChatIntentEnvelope,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo,
+} from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -175,6 +179,14 @@ type ChatTab = {
   prdId: number | null
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
+  /** The cached evidence's row id — what an ask from this tab sends as
+   *  `evidence_id` so "this evidence" is answered from the open document.
+   *  Optional and best-effort: stamped wherever evidence lands on the tab
+   *  (generation, resume, the existence probe); a tab that never learned
+   *  the id simply asks without it — exactly the pre-feature behaviour.
+   *  A tab with a PRD never sends it: the PRD context already carries its
+   *  evidence. */
+  evidenceId?: number | null
   /** This tab was opened from a Top Insights card's "View Evidence" — the
    *  finding's EVIDENCE is what it is about, so refocusing it restores the panel
    *  on the Evidence tab rather than closing it (a tab with no PRD) or jumping to
@@ -451,11 +463,24 @@ export function prdGroundingDocs(
 // the backend call INSIDE its async block (network AFTER the optimistic render).
 type LocalPrdSource =
   // "convert this document to a PRD" — POST /v1/prd/import happens in-panel.
-  | { kind: "importDoc"; file: File; company: string; openTickets?: boolean }
+  // `artifactTemplateId` (both kinds) = the uploaded FORMAT the user named
+  // ("…using our Acme format"), resolved to an id by the backend planner and
+  // carried on the intent envelope. Undefined — the normal case — means the
+  // company's active format. It rides the SOURCE rather than being read at the
+  // call site because the network call happens inside `openPrdInTab`'s async
+  // block, one commit after the decision was made.
+  | {
+      kind: "importDoc"; file: File; company: string; openTickets?: boolean
+      artifactTemplateId?: string | null
+    }
   // "generate a PRD for <task>" — POST /v1/prd/generate happens in-panel.
   // `sourceDocs` = documents attached earlier in the thread (extracted text);
   // the backend grounds the PRD on them alongside the task/KG evidence.
-  | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
+  | {
+      kind: "generateTask"; task: string
+      sourceDocs?: { name: string; content: string }[]
+      artifactTemplateId?: string | null
+    }
 type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
   source: PrdTabRequest["source"] | LocalPrdSource
   /** Generate IN THIS TAB: pin the target to an existing chat tab so the PRD
@@ -921,31 +946,6 @@ function ChatTicketSetActions({
  *  matches to keep this turn out of a later PRD's grounding. Note what it does
  *  NOT contain — any ticket text. The whole point of the set is that the bodies
  *  live in the panel instead of being printed into the bubble. */
-/** An interrogative that merely MENTIONS making tickets — a question for the
- *  ask agent, not a request to build an artifact.
- *
- *  This guards the LEGACY LADDER only. `isTicketsCommand` is a bare
- *  verb-near-noun regex with no question gate of its own (unlike
- *  `isPrdCommand`, which has one), so "how should I create tickets for a
- *  migration?" matches it. That was harmless while a no-PRD tickets phrasing
- *  fell through to the ask agent; now that the same phrasing WRITES A DURABLE
- *  ARTIFACT and bills a multi-minute generation, an interrogative has to stay a
- *  question. The envelope path needs no equivalent — the backend resolver
- *  classifies that message as `answer` and never reaches the ticket branch.
- *
- *  Shaped after `prd-commands.ts`'s PRD_QUESTION_RE, including its one
- *  subtlety: an aux verb only reads as a question when a NON-"you" subject
- *  follows it, so the polite command "can you break this into tickets" is still
- *  a command while "can we split this into tickets?" is a question. */
-const TICKETS_QUESTION_RE = new RegExp(
-  "^\\s*(?:(?:hey|hi|hello|yo|ok|okay|so|also|and|but|btw|actually|question)\\b[\\s,:;–—-]*)*(?:" +
-    "(?:what|whats|what'?s|why|where|when|who|which|how)\\b" +
-    "|(?:do|does|did|should|shall|is|are|am|was|were|can|could|would|will|may|might)" +
-    "\\s+(?:we|i|the|this|that|it|there|a|an|our|my|your|their|these|those|he|she|they)\\b" +
-  ")",
-  "i",
-)
-
 const TICKET_SET_ACK =
   "Writing tickets for that — they'll open in the panel on the right when ready. " +
   "Use the View Tickets button in this chat to reopen them anytime."
@@ -1011,13 +1011,13 @@ export function ChatScreen() {
     },
     [router, skipArtifactReflectOnNavRef],
   )
-  // Action-envelope dispatch (DEFAULT ON; staff-panel kill switch): one
-  // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
-  // decides what each message asks for, replacing the client regex/classifier
-  // ladder in submitAsk. Only an explicit `false` lands on that ladder — a
-  // missing key, and a workspace that hasn't loaded, both resolve to ON (see
-  // chatIntentEnvelopeOn for why an UNKNOWN flag state fails OPEN here).
-  const envelopeDispatchEnabled = chatIntentEnvelopeOn(workspace?.feature_flags)
+  // Action dispatch is UNCONDITIONAL: one backend call (POST /v1/chat/intent,
+  // backed by the Ask Planner — history-aware, sees the open PRD, the connected
+  // sources and the company's skills) decides what every message asks for.
+  //
+  // There is no flag and no fallback ladder. Both existed while this competed
+  // with a client-side regex cascade; that cascade is gone, so the kill switch
+  // would now only choose between "the planner decides" and "nothing decides".
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
@@ -1053,11 +1053,19 @@ export function ChatScreen() {
         prd: null,
         prdId: t.prdId ?? null,
         evidence: null,
+        // Persisted (small int, like prdId): what an ask from this tab sends
+        // as evidence_id, so "this evidence" still grounds after a reload.
+        evidenceId: t.evidenceId ?? null,
         // Persisted: an evidence tab reopens on its Evidence panel, not closed.
         evidenceOnly: t.evidenceOnly ?? false,
         evidenceDetail: null,
         prdGenerating: false,
         evidenceGenerating: false,
+        // Not persisted today (reopening hydrates the set from its
+        // conversation), but restored when present so the id survives any
+        // future persist — and so an ask can name the set without waiting on
+        // that hydrate.
+        ticketSetId: t.ticketSetId ?? null,
         // Persisted: preserves the inline-vs-header card ordering across reload.
         prdInFlow: t.prdInFlow ?? false,
         prdFlowTurnId: t.prdFlowTurnId,
@@ -2059,8 +2067,14 @@ export function ChatScreen() {
               // has no id yet and binds a moment later (bindConvToPrd below).
               const knownConvId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
               const start = source.kind === "importDoc"
-                ? await prdApi.importDoc(source.file, source.company, knownConvId)
-                : await prdApi.generateFromTask(source.task, false, source.sourceDocs, knownConvId)
+                ? await prdApi.importDoc(
+                    source.file, source.company, knownConvId,
+                    source.artifactTemplateId,
+                  )
+                : await prdApi.generateFromTask(
+                    source.task, false, source.sourceDocs, knownConvId,
+                    source.artifactTemplateId,
+                  )
               // The project this chat was auto-forked into (server-side) — read
               // in the success block below to land the user in its private chat.
               autoProjectId = start.project_id ?? null
@@ -2096,7 +2110,22 @@ export function ChatScreen() {
           }
           // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
+          //
+          // `setPrdPanelPending(null)` FIRST, and it is load-bearing. Opening a
+          // PRD tab arms a DEFERRED panel-open (`prdPanelPending`, drained by an
+          // effect a commit later) so the panel survives the route change that
+          // openPrdTab triggers. That deferred open lands on "prd" — and if it
+          // is still armed when we get here, it fires AFTER this line and puts
+          // the panel straight back on the PRD, silently undoing the switch the
+          // user actually asked for.
+          //
+          // Whether it has drained yet is a race between a React commit and the
+          // import + generation round trip, so it resolves one way against a
+          // real network and the other against a fast or cached import. Cancel
+          // it instead: by this point the destination is decided, and a default
+          // that arrived earlier has no business overriding it.
           if (wantsTickets && activeTabIdRef.current === tabId) {
+            setPrdPanelPending(null)
             openContentPanel("tickets")
           }
           // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
@@ -2344,7 +2373,7 @@ export function ChatScreen() {
         if (activeTabIdRef.current === tabId) setContent({ evidencePartialHtml: html })
       })
       if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence, evidenceId: result.evidenceId } : t))
         setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
         // Chat summary only when something was BUILT — the read-first path
         // marks a mere reopen of already-ready evidence with `existing`.
@@ -2418,7 +2447,7 @@ export function ChatScreen() {
               if (activeTabIdRef.current === activeTabId) setContent({ evidencePartialHtml: html })
             })
             if (result.ok) {
-              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence, evidenceId: result.evidenceId } : t))
               setContent({ evidencePartialHtml: null })
               // This path only exists because a FRESH generation was in flight
               // when the screen unmounted (pending-job marker) — summarize it.
@@ -2491,9 +2520,20 @@ export function ChatScreen() {
     const changed = prevConvForFocusRef.current !== activeConvId
     prevConvForFocusRef.current = activeConvId
     setContent(changed
-      ? { conversationId: activeConvId, reportFocusId: null, reportFocusStandalone: false }
+      ? {
+          conversationId: activeConvId,
+          reportFocusId: null,
+          reportFocusStandalone: false,
+          // Cleared with the rest, and for exactly the same reason: a document
+          // belongs to the thread that wrote it. Leaving it set meant switching
+          // to another chat (or starting a new one) still showed a Document tab
+          // rendering the PREVIOUS thread's document.
+          documentId: null,
+          documentGenerating: false,
+        }
       : { conversationId: activeConvId })
   }, [activeConvId, setContent])
+
 
   // This thread's captured reports, newest first — fetched once by
   // useThreadReportsSync (AppShell). Defaulted for the surfaces/tests that render
@@ -3179,7 +3219,11 @@ export function ChatScreen() {
           t.id === tabId ? { ...t, thread: t.thread.filter((tn) => tn.id !== turnId) } : t))
       void (async () => {
         try {
-          const { artifactsApi } = await import("../../../lib/api")
+          // Static `artifactsApi` binding, deliberately NOT `await import(...)`:
+          // this file already imports lib/api statically, so the dynamic form
+          // split nothing — and under vitest it raced the mock registry, with
+          // this late detached import resolving the REAL module while every
+          // earlier import in the same flow got the test's mock.
           const { summary } = await artifactsApi.chatSummary(kind, artifactId)
           if (!summary?.trim()) {
             dropPendingTurn()
@@ -3315,6 +3359,95 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent])
 
+  // "Change the template to Acme" on a PRD tab: dispatch the in-place format
+  // switch (POST /v1/prd/{id}/change-template) and acknowledge in the thread —
+  // the ack posts on dispatch, like the ticket-set ack, because the re-write
+  // renders live in the panel and the thread's job is to say what started and
+  // where to look. The regeneration's OUTCOME lands as a toast (the same pair
+  // the panel's own Format control shows), read from the row's stamp: a failed
+  // regeneration is restored to `ready` with its content intact and its OLD
+  // stamp — unchanged stamp, unchanged document.
+  const prdChangeTemplateFlow = useCallback(async (
+    query: string, targetTabId: string, prdId: number,
+    templateId: string, templateName: string | null,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    const label = templateName ? `“${templateName}”` : "that format"
+    let res: { status: "ready" | "generating"; unchanged?: boolean; artifact_template_id: string | null }
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      res = await prdApi.changeTemplate(prdId, templateId)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize({
+        answer: `I couldn't switch the format — ${msg}. The PRD is unchanged, and its version history is intact.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+      return
+    }
+    if (res.unchanged) {
+      finalize({
+        answer: `This PRD is already written in ${label} — nothing to change.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+      return
+    }
+    finalize({
+      answer: `Switching this PRD to ${label} — re-writing it into that structure now. It'll re-render in the panel on the right, and the previous version is saved in Version history.`,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    // The turn is answered; the thread stays usable while the re-write runs.
+    setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+
+    // Drive the panel exactly like a first generation: stale drafts cleared (a
+    // local draft must not overwrite the re-laid-out document), the tab and
+    // panel flip to generating, and the poll + SSE stream render it live.
+    clearPrdDrafts(prdId)
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, prd: null, prdGenerating: true } : t))
+    if (targetTabId === activeTabIdRef.current) {
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+    }
+    try {
+      const { resumePrdGeneration, loadPrdById } = await import("../../../lib/runPrdGeneration")
+      const result = await resumePrdGeneration(prdId, undefined, (html) => {
+        if (targetTabId === activeTabIdRef.current) setContent({ prdPartialHtml: html })
+      })
+      const prd = result.ok
+        ? result.prd
+        // Timeout/hiccup: the backend preserved the document — reload it so the
+        // panel shows the honest state, never a blank pane.
+        : await loadPrdById(prdId).then((r) => (r.ok ? r.prd : null)).catch(() => null)
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId ? { ...t, prd, prdGenerating: false } : t))
+      if (targetTabId === activeTabIdRef.current) {
+        setContent({ prd, prdGenerating: false, prdPartialHtml: null })
+      }
+      if (result.ok && (result.prd.artifactTemplateId ?? null) === templateId) {
+        showToast("Format switched", `This PRD is now written in ${templateName || "the new format"}.`)
+      } else {
+        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+      }
+    } catch {
+      showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
   // on screen next to the document — instead of spawning a new tab. Only a
@@ -3356,6 +3489,12 @@ export function ChatScreen() {
     tabId: string,
     task: string,
     seed: { turnId: string; title: string; query: string } | null,
+    /** The uploaded TICKET format the user named, off the intent envelope.
+     *  Undefined — the normal case, and every RE-RUN — means the company's
+     *  active ticket format. A re-run deliberately does not carry it: the
+     *  original envelope is long gone by then, and inventing one would be a
+     *  guess about what was asked for rather than a record of it. */
+    artifactTemplateId?: string | null,
   ) => {
     setTabs((prev) => prev.map((t) => t.id === tabId
       ? { ...t, ticketSetRunning: true, ticketSetStatus: "generating", ticketSetTask: task }
@@ -3381,7 +3520,9 @@ export function ChatScreen() {
       // out over the "generate a PRD first" empty state for the length of one
       // conversation create. Never yank the panel out from under another tab.
       if (activeTabIdRef.current === tabId) openContentPanel("tickets")
-      const result = await runTicketSetGeneration(task, convId ?? null, setContent)
+      const result = await runTicketSetGeneration(
+        task, convId ?? null, setContent, artifactTemplateId,
+      )
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === tabId
           ? { ...t, ticketSetRunning: false, ticketSetId: result.set.id, ticketSetStatus: "ready" }
@@ -3406,7 +3547,31 @@ export function ChatScreen() {
    *  Optimistic-first, the same rule the PRD command flows follow: the ack turn
    *  renders on THIS commit and every network call happens after it, so the
    *  composer never clears into a void. */
-  const ticketSetCommandFlow = useCallback((seedQuery: string, task: string) => {
+  /** A compact transcript of a tab's thread, for grounding a generated
+   *  document. Newest turns last and the whole thing bounded, because this is
+   *  prompt input: an unbounded thread would push the actual request out of
+   *  the model's attention, and the oldest turns are the least likely to be
+   *  what "this" refers to. */
+  const threadContextFor = useCallback((tabId: string): string => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab) return ""
+    const parts: string[] = []
+    for (const turn of tab.thread) {
+      if (turn.query) parts.push(`Q: ${turn.query}`)
+      const answer = turn.reply?.answer
+      if (answer) parts.push(`A: ${answer}`)
+    }
+    const joined = parts.join("\n\n")
+    const MAX = 12_000
+    return joined.length <= MAX ? joined : `…\n\n${joined.slice(-MAX)}`
+  }, [])
+
+  const ticketSetCommandFlow = useCallback((
+    seedQuery: string,
+    task: string,
+    /** The uploaded TICKET format the user named, off the intent envelope. */
+    artifactTemplateId?: string | null,
+  ) => {
     const inTab = reusableActiveTab()
     const turnId =
       typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
@@ -3441,10 +3606,78 @@ export function ChatScreen() {
       turnId,
       title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
       query: seedQuery,
-    })
+    }, artifactTemplateId)
   }, [
     reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
     startTicketSetRun,
+  ])
+
+  /** Write a team document from this chat and open it in the right panel.
+   *
+   *  Mirrors `ticketSetCommandFlow`: seed a turn with an acknowledgement, put
+   *  it on the rail and in Supabase, THEN start the work — so the exchange
+   *  survives a reload and reads like every other command. */
+  const documentCommandFlow = useCallback((
+    seedQuery: string,
+    envelope: ChatIntentEnvelope,
+  ) => {
+    const inTab = reusableActiveTab()
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const kind = envelope.artifact_kind?.trim() || "document"
+    const ack: AskResponse = {
+      answer: `Writing your ${kind} — it will open in the panel on the right.`,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+    let tabId: string
+    let convId: number | null = null
+    if (inTab) {
+      tabId = inTab.id
+      convId = inTab.dbConvId ?? null
+      setTabs((prev) => prev.map((t) => t.id === inTab.id
+        ? {
+            ...t,
+            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+            thread: [...t.thread, seedTurn],
+          }
+        : t))
+      setDraft("")
+    } else {
+      // Sent from the landing or a PRD/insight tab whose binding must not be
+      // disturbed → the command opens its own chat tab, rather than writing a
+      // document that belongs to no thread at all.
+      tabId = openTab(handle, [seedTurn])
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
+    void finalizeConversationTurn(turnId, { reply: ack }, tabId)
+
+    void (async () => {
+      try {
+        const created = await customArtifactsApi.generate({
+          kind,
+          task: envelope.task?.trim() || seedQuery,
+          // THE GROUNDING. Without this the generator takes its
+          // "CONTEXT: none was supplied" branch and writes a structural
+          // skeleton that lists what it does not know — for a request whose
+          // whole subject was discussed in the thread above it. The planner's
+          // `task` is a brief, not the evidence behind it.
+          context: threadContextFor(tabId),
+          conversation_id: convId,
+        })
+        setContent({ documentId: created.id, documentGenerating: true })
+        openContentPanel("document")
+      } catch {
+        showToast(
+          "Couldn't start that document",
+          "Please try again, or create one from Artifacts.",
+        )
+      }
+    })()
+  }, [
+    reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
+    setContent, openContentPanel, showToast, threadContextFor,
   ])
 
   /** The reply-footer button: reopen a finished set, or re-run a failed one. */
@@ -3480,7 +3713,11 @@ export function ChatScreen() {
     void loadTicketSet(tab.ticketSetId, setContent)
   }, [content.ticketSet, setContent, openContentPanel, showToast, startTicketSetRun])
 
-  const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
+  const prdCommandFlow = useCallback((
+    seedQuery?: string,
+    taskOverride?: string | null,
+    artifactTemplateId?: string | null,
+  ) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
     // seeded from THIS conversation — the user's turns in the active tab — so the
@@ -3520,6 +3757,7 @@ export function ChatScreen() {
         kind: "generateTask",
         task: effectiveTask,
         ...(sourceDocs.length ? { sourceDocs } : {}),
+        ...(artifactTemplateId ? { artifactTemplateId } : {}),
       },
     }
     const tabId = openPrdInTab(req)
@@ -3540,13 +3778,27 @@ export function ChatScreen() {
   // spinner on THIS commit and runs importDoc inside its async block (network
   // AFTER the render). The placeholder title is the file name until the backend's
   // real title lands.
-  const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+  const importPrdCommandFlow = useCallback((
+    file: File,
+    opts: {
+      openTickets: boolean; seedQuery?: string
+      /** The uploaded format the user named. Easy to miss on THIS path and the
+       *  most important one to get right: attaching a file to "create a PRD
+       *  using our Acme format" dispatches an import, so a format dropped here
+       *  is a document silently written in a different one. */
+      artifactTemplateId?: string | null
+    },
+  ) => {
     const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: file.name,
       seedQuery: opts.seedQuery,
       ...(inTab ? { inTabId: inTab.id } : {}),
-      source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
+      source: {
+        kind: "importDoc", file, company: activeCompany,
+        openTickets: opts.openTickets,
+        ...(opts.artifactTemplateId ? { artifactTemplateId: opts.artifactTemplateId } : {}),
+      },
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
@@ -3834,9 +4086,11 @@ export function ChatScreen() {
         )
         return true
       }
+      // `isPrdTab` survives the ladder's removal because the ask path below
+      // still reads it. The two deictic regexes that sat here did not: they
+      // existed only to stop the ladder's own patterns from hijacking a PRD
+      // tab, and there are no patterns left to hijack anything.
       const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
-      const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
-      const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
       // Clarify-first answers: this tab's PRD task is parked behind the
       // sufficiency gate's questions — the message IS the answers (or a
       // "generate now" skip), never a fresh command/ask. Checked before every
@@ -3858,25 +4112,77 @@ export function ChatScreen() {
         settlePendingSend()
         return
       }
-      // ── Action-envelope dispatch (flag: chat_intent_envelope) ─────────────
-      // ONE backend decision per message (POST /v1/chat/intent): the resolver
-      // sees the conversation history and the open PRD, so keyword-free and
-      // deictic phrasings ("draft it up", "break this into work items", "make
-      // it shorter") resolve to the right executor — the regex ladder below
-      // judges only the newest message and cannot. Each intent maps onto the
-      // SAME flows the ladder drives today; `answer` (and any unhandled case)
-      // falls through to the grounded ask path. Fail-open: a network/HTTP
-      // failure falls back to the full legacy ladder, so command dispatch
-      // never degrades below today's behavior.
-      let envelopeDecided = false
+      // ── The planner decides. Nothing in this file guesses. ───────────────
+      // EVERY message goes to the backend first (POST /v1/chat/intent, now
+      // backed by the Ask Planner) and the verdict decides which flow runs.
+      // This browser used to decide for itself, with a ladder of regexes over
+      // the newest message — `isPrdCommand`, `isTicketsCommand`,
+      // `isPrdEditCommand`, `mentionsPrd` plus a haiku classifier behind it.
+      // That ladder is gone, and its removal is the point: a regex deciding to
+      // GENERATE A PRD means an oddly-phrased question spends minutes and real
+      // money building a document nobody asked for, and no amount of tuning the
+      // pattern fixes the class of bug. The planner reads the whole message and
+      // the whole thread, so it does not have that failure mode.
+      //
+      // FAILURE MODE ON PURPOSE: if the call fails, this falls through to the
+      // grounded ask path — the question gets ANSWERED. It does not fall back
+      // to guessing. The worst case is that a genuine "write me a PRD" is
+      // answered as a question and the user asks again; the alternative is
+      // exactly the accidental generation this removal exists to stop.
+      //
       // A "/skill …" message is EXPLICIT intent with its own backend fast-path
-      // (qa_agent's slash route) — never spend an envelope call reinterpreting
-      // it.
-      if (envelopeDispatchEnabled && !trimmed.startsWith("/")) {
+      // (qa_agent's slash route) — the user named the skill, so there is
+      // nothing to infer and no call to spend.
+      // Attachment text, read ONCE and read EARLY — before the planner is asked
+      // to decide, because the decision depends on it.
+      //
+      // This used to run after the intent call, and the planner therefore judged
+      // "generate a PRD" with a deck attached as a request with no subject: it
+      // returned generate_prd at 0.5 confidence, the action floor (0.6) downgraded
+      // it to `answer`, and the user got prose instead of a document. The ask
+      // worker then planned the SAME turn again a few seconds later, this time
+      // with the extracted text in the question, and scored it 0.97 — the right
+      // answer, arriving after the client had already committed to the wrong one.
+      //
+      // Extracting first costs no extra wall-clock: this work was always on the
+      // critical path, just later in it. Best-effort by design — a failure here
+      // yields null and the message goes to the planner bare, exactly as before;
+      // the real extraction below keeps its own rollback/toast handling and is
+      // still the thing that decides whether the send can proceed.
+      let earlyExtracted: (string | null)[] | null = null
+      if (attachments.length > 0) {
+        earlyExtracted = await Promise.all(
+          attachments.map((a) =>
+            a.content
+              ? Promise.resolve<string | null>(a.content)
+              : a.file
+              ? askApi
+                  .extractFile(a.file)
+                  .then((r) => r.markdown.slice(0, 50000))
+                  .catch(() => null)
+              : Promise.resolve<string | null>(a.content ?? null),
+          ),
+        )
+      }
+
+      if (!trimmed.startsWith("/")) {
         const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
+        // The planner sees what the answer path will see. Same `[Attached files]`
+        // framing and the same 100k clamp the send below uses, so the question
+        // the plan was made for and the question that gets executed match — which
+        // is also what lets the worker reuse this plan instead of buying another.
+        const attachedForIntent = earlyExtracted?.some((t) => t)
+          ? attachments
+              .map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`)
+              .join("\n\n")
+              .slice(0, 100000)
+          : null
+        const intentMessage = attachedForIntent
+          ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}`
+          : trimmed
         const envelope = await import("../../../lib/api")
           .then(({ chatIntentApi }) =>
-            chatIntentApi.resolve(trimmed, {
+            chatIntentApi.resolve(intentMessage, {
               conversationId: activeTab?.dbConvId ?? null,
               prdId: tabPrdId,
               hasAttachments: attachments.length > 0,
@@ -3884,14 +4190,13 @@ export function ChatScreen() {
           )
           .catch(() => null)
         if (envelope) {
-          envelopeDecided = true
           // The intent→executor SWITCH itself is lifted into the shared
-          // `dispatchChatIntent` primitive (AD-P13a) — the private project
-          // chat reuses the SAME switch. ChatScreen supplies today's inline
-          // flows as executors, byte-identical to the ladder they replace;
-          // the doc/tab guards that decide WHICH flow to run stay HERE
-          // (ChatScreen-local UI state dispatchChatIntent knows nothing
-          // about), not inside the shared primitive.
+          // `dispatchChatIntent` primitive — the private project chat reuses
+          // the SAME switch. ChatScreen supplies today's inline flows as
+          // executors, byte-identical to the ladder they replace; the doc/tab
+          // guards that decide WHICH flow to run stay HERE (ChatScreen-local
+          // UI state dispatchChatIntent knows nothing about), not inside the
+          // shared primitive.
           const targetPrdId =
             !docFile && activeTab ? (envelope.prd_id ?? tabPrdId) : null
           const result = dispatchChatIntent(
@@ -3901,7 +4206,10 @@ export function ChatScreen() {
               onGenerateTickets: (env) => {
                 if (docFile) {
                   setAttachments([])
-                  importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+                  importPrdCommandFlow(docFile, {
+                    openTickets: true, seedQuery: trimmed,
+                    artifactTemplateId: env.artifact_template_id,
+                  })
                   settlePendingSend()
                   return
                 }
@@ -3915,7 +4223,9 @@ export function ChatScreen() {
                 // the scope patch, the generating flag and the panel open; this
                 // branch only decides that a set is what the user asked for.
                 if (ticketSetInFlightGuard()) return
-                ticketSetCommandFlow(trimmed, env.task?.trim() || trimmed)
+                ticketSetCommandFlow(
+                  trimmed, env.task?.trim() || trimmed, env.artifact_template_id,
+                )
                 settlePendingSend()
               },
               onEditPrd: (instruction, prdId) => {
@@ -3935,103 +4245,50 @@ export function ChatScreen() {
               onGeneratePrd: (env) => {
                 if (docFile) {
                   setAttachments([])
-                  importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+                  importPrdCommandFlow(docFile, {
+                    openTickets: false, seedQuery: trimmed,
+                    artifactTemplateId: env.artifact_template_id,
+                  })
                   settlePendingSend()
                   return
                 }
-                prdCommandFlow(trimmed, env.task)
+                prdCommandFlow(trimmed, env.task, env.artifact_template_id)
                 settlePendingSend()
               },
-              // No resolvable edit target/instruction, no open lookup, or
-              // answer/low-confidence/unknown/generate_prototype → nothing to
-              // do here; ChatScreen's own grounded-ask code below already runs
-              // unconditionally whenever `result.handled` is false.
+              onChangeTemplate: (env, prdId) => {
+                // The in-place format switch. dispatchChatIntent's own guard
+                // (ctx.hasEditTarget && env.artifact_template_id) already
+                // ensures prdId is non-null and a format id is present before
+                // this executor ever runs.
+                void prdChangeTemplateFlow(
+                  trimmed, activeTab!.id, prdId!,
+                  env.artifact_template_id!, env.artifact_template_name,
+                )
+                settlePendingSend()
+              },
+              onCreateArtifact: (env) => {
+                // "Draft a leadership update on the Q3 reliability work" —
+                // write a team document and open it in THIS chat's right panel.
+                //
+                // SEEDS A REAL TURN, like every other command flow here. The
+                // first cut just fired the request and returned: the composer
+                // cleared, the optimistic bubble vanished, and the thread
+                // showed nothing — no question, no acknowledgement, nothing
+                // persisted. From the user's side that is indistinguishable
+                // from the message being swallowed, which is the very
+                // complaint this flow exists to fix.
+                documentCommandFlow(trimmed, env)
+                settlePendingSend()
+              },
+              // No resolvable edit/format target/instruction, no open lookup,
+              // or answer/low-confidence/unknown/generate_prototype → nothing
+              // to do here; ChatScreen's own grounded-ask code below already
+              // runs unconditionally whenever `result.handled` is false.
               onAnswer: () => {},
             },
           )
           if (result.handled) return
         }
-      }
-      // ── Legacy ladder (flag off, or envelope fetch failed) ────────────────
-      if (!envelopeDecided) {
-      if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
-        if (docFile) {
-          setAttachments([])
-          importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
-          settlePendingSend()
-          return
-        }
-        // No document: mirror the reply-footer "Create tickets" action when this
-        // tab already carries a PRD.
-        if (activeTab?.prd) {
-          setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-          openContentPanel("tickets")
-          settlePendingSend()
-          return
-        }
-        // …and with no PRD either, the SAME standalone-set flow the envelope
-        // branch above runs. Mirrored deliberately rather than shared through a
-        // fall-through: the envelope is behind `chat_intent_envelope`, and a
-        // tenant with the kill switch on reaches this ladder instead. Without
-        // this the flag would decide whether tickets are a durable artifact or
-        // a markdown wall in a chat bubble. A QUESTION about tickets is still a
-        // question — see TICKETS_QUESTION_RE for why only this path needs it.
-        if (!TICKETS_QUESTION_RE.test(trimmed)) {
-          if (ticketSetInFlightGuard()) return
-          ticketSetCommandFlow(trimmed, trimmed)
-          settlePendingSend()
-          return
-        }
-      } else if (
-        !docFile && isPrdTab && isPrdEditCommand(trimmed) &&
-        (activeTab?.prd?.prd_id ?? activeTab?.prdId) != null
-      ) {
-        // Edit-phrased message beside an open, READY PRD → the scoped chat-edit
-        // flow: the document actually changes (issue b). This branch runs BEFORE
-        // the command branch below so a non-deictic edit ("add SSO to the PRD")
-        // can't fall into isPrdCommand and spawn an unrelated NEW PRD — the
-        // second failure mode of the old deictic guard. A still-generating tab
-        // (no prd id yet) skips this branch and gets a grounded text answer.
-        void prdChatEditFlow(trimmed, activeTab!.id, (activeTab!.prd?.prd_id ?? activeTab!.prdId)!)
-        settlePendingSend()
-        return
-      } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
-        if (docFile) {
-          setAttachments([])
-          importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
-          settlePendingSend()
-          return
-        }
-        // No document — open the PRD tab from the brief's top insight instead of
-        // sending it to the ask agent (which would answer with a raw prd-author
-        // HTML dump).
-        prdCommandFlow(trimmed)
-        settlePendingSend()
-        return
-      } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
-        // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
-        // recognize a command — "various words a person might use" ("let's get
-        // a PRD going for checkout") can't all be regexed. Ask haiku before
-        // letting it fall through to the ask agent. Skipped on a PRD tab with
-        // no attachment: there, a PRD mention is near-always about the OPEN
-        // artifact and belongs to the grounded ask path (same reasoning as the
-        // deictic guard above). Fail-open: classifier error/low confidence →
-        // the message proceeds to the ask path exactly as before this tier.
-        const verdict = await import("../../../lib/api")
-          .then(({ prdApi }) => prdApi.classifyCommand(trimmed))
-          .catch(() => null)
-        if (verdict?.is_prd_command && verdict.confidence >= 0.7) {
-          if (docFile) {
-            setAttachments([])
-            importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
-            settlePendingSend()
-            return
-          }
-          prdCommandFlow(trimmed, verdict.task)
-          settlePendingSend()
-          return
-        }
-      }
       }
       // Attached file content is folded into the ask as context. Text
       // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
@@ -4134,13 +4391,20 @@ export function ChatScreen() {
           // is best-effort (a failure leaves the text-only chip, never blocks the
           // send). Order is preserved via the resolved array.
           const extracted = await Promise.all(
-            pending.map(async (a) => {
+            pending.map(async (a, idx) => {
               const [text, stored] = await Promise.all([
                 // Text files were already read client-side (content present) — use
                 // it. Only binary docs (content empty, raw file kept) need the
                 // server-side markdown extraction.
+                //
+                // `earlyExtracted` is that extraction, already done above so the
+                // planner could see it. Reused here rather than repeated: without
+                // this, giving the planner the attachment text would have cost a
+                // second parse of every document on every send.
                 a.content
                   ? Promise.resolve(a.content)
+                  : earlyExtracted?.[idx] != null
+                  ? Promise.resolve(earlyExtracted[idx] as string)
                   : a.file
                   ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
                   : Promise.resolve(a.content),
@@ -4289,6 +4553,16 @@ export function ChatScreen() {
             // PRD-tab chat: also send the PRD id so the answer is grounded on the
             // open PRD + its insight/evidence/tickets/prototype.
             ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
+            // Standalone-artifact grounding: ONE primary artifact per tab,
+            // PRD first (its context already carries evidence + tickets),
+            // then an open evidence report, then a standalone ticket set.
+            ...(targetTab?.prdId == null && targetTab?.evidenceId != null
+              ? { evidence_id: targetTab.evidenceId }
+              : {}),
+            ...(targetTab?.prdId == null && targetTab?.evidenceId == null
+              && targetTab?.ticketSetId != null
+              ? { ticket_set_id: targetTab.ticketSetId }
+              : {}),
           })
         },
         onResult: (tabId, res) => {
@@ -4407,7 +4681,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, clearSuggestions, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -4938,6 +5212,17 @@ export function ChatScreen() {
               ))
             },
           )
+          // Same reason as the onResult path above, on the route a user reaches
+          // by reloading mid-answer: if this turn streamed, mark it animated
+          // BEFORE the reply lands. `hasFreshReply` reads this set during
+          // render, and without the mark the simulated typewriter would collapse
+          // a long answer back to its first paragraph and re-reveal it at
+          // ~600-800ms per paragraph — re-typing text already read.
+          //
+          // It has to be this durable, id-keyed marker and not a check on the
+          // turn itself: the setTabs below clears `partial` in the SAME update
+          // that sets `reply`, so by render time `turn.partial` is always
+          // undefined and any predicate based on it would be dead code.
           const streamedTurn = tabsRef.current
             .find((t) => t.id === targetTabId)?.thread.find((turn) => turn.id === turnId)
           if (streamedTurn?.partial) animatedTurnIds.current.add(turnId)
@@ -5445,6 +5730,17 @@ export function ChatScreen() {
         const ev = await loadEvidenceByInsight(bId, iIdx)
         if (!cancelled && ev) {
           setInsightsWithEvidence((prev) => new Set(prev).add(activeEvidenceKey))
+          // The probe just learned which evidence row this tab's insight
+          // maps to — remember it so an ask from this tab can ground on
+          // it. Only filled where missing: a generation that already
+          // stamped a fresher id must not be overwritten by a probe that
+          // raced it.
+          setTabs((prev) => prev.map((t) =>
+            t.briefMeta
+              && `${t.briefMeta.briefId}:${t.briefMeta.insightIndex}` === activeEvidenceKey
+              && t.evidenceId == null
+              ? { ...t, evidenceId: ev.evidenceId }
+              : t))
         }
       } catch { /* non-fatal: default to the PRD action */ }
     })()

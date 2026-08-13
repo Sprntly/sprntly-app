@@ -491,6 +491,22 @@ export function ArtifactFormatsView({
             </span>
           </div>
 
+          {/* What the format CONTAINS (the compile-written `summary`), above
+              provenance — "which format is this" outranks "who uploaded it
+              when". While a compile is in flight the badge + reason own the
+              in-progress story, so nothing renders here. A READY row with no
+              summary is the self-heal window (uploaded before summaries
+              existed; the backend describes it on first read) — say so, in a
+              line that stays true if the heal is still coming. Other states
+              with no summary simply say nothing. */}
+          {row.summary ? (
+            <p className="afmt-summary" title={row.summary}>{row.summary}</p>
+          ) : row.compile_status === "ready" ? (
+            <p className="afmt-summary afmt-summary--placeholder">
+              Writing a short description of this format…
+            </p>
+          ) : null}
+
           <p className="afmt-meta">{metaParts(row).join(" · ")}</p>
 
           {/* Dropped entirely when there is nothing to say — a healthy card is

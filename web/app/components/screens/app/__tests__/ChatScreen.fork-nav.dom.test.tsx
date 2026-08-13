@@ -39,12 +39,31 @@ const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
 }))
-vi.mock("../../../../lib/api", () => {
+vi.mock("../../../../lib/api", async () => {
+  // Action dispatch is unconditional (no client fallback ladder) — the
+  // "generate a PRD for …" trigger this file exercises only reaches
+  // `prdApi.generateFromTask` via a `chatIntentApi.resolve` verdict, so this
+  // stubs the planner with the SAME extraction the client used to run
+  // inline (`lib/prd-commands`), matching the pattern already established in
+  // `ChatScreen.prd-command.dom.test.tsx`.
+  const { isPrdCommand, prdCommandTask } = await import("../../../../lib/prd-commands")
   class ApiError extends Error {
     status = 0
     body: unknown = null
   }
   return {
+    chatIntentApi: {
+      resolve: vi.fn(async (q: string) => ({
+        intent: isPrdCommand(q) ? "generate_prd" : "answer",
+        confidence: 0.95,
+        task: prdCommandTask(q),
+        instruction: null,
+        reason: "test stub",
+        source: "planner",
+        prd_id: null,
+        prd_title: null,
+      })),
+    },
     ApiError,
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
