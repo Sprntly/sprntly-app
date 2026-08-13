@@ -11,6 +11,7 @@ import { useContent } from "../../context/ContentContext"
 import { useGuestSession } from "../../context/GuestSessionContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
+import { PrdMarkdownEditor, PrdToolbar, type PrdMarkdownHandle } from "./PrdMarkdownEditor"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
@@ -25,22 +26,7 @@ import { ConfirmDialog } from "./ConfirmDialog"
 import { clearPrdDrafts } from "./PrdInputQuestions"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import { IconFileText, IconTicket } from "@tabler/icons-react"
-import {
-  IconGrid,
-  IconLinkInsert,
-  IconListBullet,
-  IconRedo,
-  IconUndo,
-} from "./app-icons"
 import type { PrdSection, PrdState } from "../../types/content"
-
-const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
-function loadDraft(prdId: number): string | null {
-  try { return localStorage.getItem(PRD_DRAFT_KEY(prdId)) } catch { return null }
-}
-function saveDraft(prdId: number, html: string) {
-  try { localStorage.setItem(PRD_DRAFT_KEY(prdId), html) } catch { /* ignore */ }
-}
 
 type SaveStatus = "saved" | "saving" | "unsaved"
 
@@ -59,38 +45,6 @@ function PrdSummaryStrip({ prd }: { prd: PrdState }) {
           <div style={{ color: "var(--ink)", lineHeight: 1.45 }}>{text}</div>
         </div>
       ))}
-    </div>
-  )
-}
-
-function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus: SaveStatus; exec: (cmd: string, value?: string) => void }) {
-  const statusLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved" : "Saved · Draft"
-  const statusColor = saveStatus === "saving" ? "var(--accent)" : saveStatus === "unsaved" ? "var(--ink-3)" : "var(--accent)"
-  return (
-    <div className="prd-toolbar">
-      <div className="prd-tools-l">
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Undo" onClick={() => exec("undo")}><IconUndo size={16} /></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Redo" onClick={() => exec("redo")}><IconRedo size={16} /></button>
-        <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Bold" onClick={() => exec("bold")}><strong>B</strong></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Italic" onClick={() => exec("italic")}><em>I</em></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Underline" onClick={() => exec("underline")}><u>U</u></button>
-        <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Heading 1" onClick={() => exec("formatBlock", "h1")}>H1</button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Heading 2" onClick={() => exec("formatBlock", "h2")}>H2</button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Bullet list" onClick={() => exec("insertUnorderedList")}><IconListBullet size={16} /></button>
-        <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Insert link" style={{ display: "inline-flex", alignItems: "center" }} onClick={() => { const url = prompt("Enter URL"); if (url) exec("createLink", url) }}>
-          <IconLinkInsert size={15} /><span style={{ marginLeft: 5 }}>Link</span>
-        </button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Insert table" style={{ display: "inline-flex", alignItems: "center" }}>
-          <IconGrid size={15} /><span style={{ marginLeft: 5 }}>Table</span>
-        </button>
-      </div>
-      <div className="prd-status">
-        <span style={{ width: 6, height: 6, borderRadius: "50%", background: hasDoc ? statusColor : "var(--muted)", transition: "background 0.3s" }} />
-        {hasDoc ? statusLabel : "No draft"}
-      </div>
     </div>
   )
 }
@@ -187,9 +141,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
     return () => { cancelled = true }
   }, [qaBriefId, qaInsightIndex])
 
-  const bodyRef = useRef<HTMLDivElement>(null)
   const htmlViewRef = useRef<PrdHtmlHandle>(null)
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Markdown (non-v3) PRD editor handle — the SAME shared PrdMarkdownEditor the
+  // project drawer uses (AD-P13b). The panel drives its manual "Save now"
+  // through this imperative handle, mirroring htmlViewRef for the v3 path.
+  const mdViewRef = useRef<PrdMarkdownHandle>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved")
   // v3 PRDs are a self-contained HTML page (prd-author v4.2), rendered + edited
   // in a sandboxed iframe (PrdHtmlView) rather than the markdown section editor.
@@ -342,36 +298,14 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
     }
   }, [setContent, showToast])
 
-  useEffect(() => {
-    if (!prd || !bodyRef.current) return
-    const draft = loadDraft(prd.prd_id)
-    if (draft) bodyRef.current.innerHTML = draft
-  }, [prd?.prd_id])
-
-  const handleInput = useCallback(() => {
-    setSaveStatus("unsaved")
-    if (saveTimer.current) clearTimeout(saveTimer.current)
-    saveTimer.current = setTimeout(async () => {
-      if (!prd || !bodyRef.current) return
-      setSaveStatus("saving")
-      const html = bodyRef.current.innerHTML
-      saveDraft(prd.prd_id, html)
-      const textContent = bodyRef.current.innerText || ""
-      try {
-        await prdApi.update(prd.prd_id, { title: prd.title, payload_md: textContent })
-        setSaveStatus("saved")
-      } catch { setSaveStatus("saved") }
-    }, 2000)
-  }, [prd])
-
-  const exec = (cmd: string, value?: string) => {
-    bodyRef.current?.focus()
-    document.execCommand(cmd, false, value)
-  }
+  // The markdown editor's contenteditable body, draft recovery, debounced
+  // autosave, and execCommand toolbar now live in the shared PrdMarkdownEditor
+  // primitive (AD-P13b) — the panel only drives the manual "Save now" below.
 
   // Manual save — the bottom "Autosaved" button. The PRD already autosaves on
-  // edit (handleInput, debounced); this lets the user force a save now and is
-  // also where the autosave status is surfaced.
+  // edit (debounced, inside the editor); this lets the user force a save now and
+  // is also where the autosave status is surfaced. Both editors expose the same
+  // imperative save() handle, so this delegates to whichever is mounted.
   const saveNow = useCallback(async () => {
     if (!prd) return
     // v3 HTML PRD: the iframe view owns persistence (round-trips the full HTML
@@ -388,11 +322,11 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       }
       return
     }
-    if (!bodyRef.current) return
+    // Markdown PRD: the shared editor owns draft + flatten-to-text persistence;
+    // its imperative save() re-throws on failure so the toast path is preserved.
     setSaveStatus("saving")
-    saveDraft(prd.prd_id, bodyRef.current.innerHTML)
     try {
-      await prdApi.update(prd.prd_id, { title: prd.title, payload_md: bodyRef.current.innerText || "" })
+      await mdViewRef.current?.save()
       setSaveStatus("saved")
       showToast("Saved", "Your PRD has been saved.")
     } catch {
@@ -409,11 +343,12 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">
-        {/* The markdown editor toolbar (execCommand) doesn't apply to the v3
-            HTML page — it's edited natively inside the iframe — so hide it.
-            Also hidden in guest mode: a read-only viewer has no edit control
-            (AC15). */}
-        {!isHtmlPrd && !guestSession && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
+        {/* The disabled no-document toolbar shown in the empty / generating /
+            streaming states (there's no PRD to edit yet). Once a markdown PRD is
+            loaded its toolbar comes from the shared PrdMarkdownEditor below; a
+            v3 HTML PRD is edited natively in the iframe (no execCommand toolbar);
+            and a guest never sees an edit control (AC15). */}
+        {!prd && !guestSession && <PrdToolbar hasDoc={false} saveStatus={saveStatus} exec={() => {}} />}
         {prd && isHtmlPrd ? (
           <>
             {/* Key on the HTML so a scoped edit (e.g. answering a "User input
@@ -441,27 +376,29 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
             )}
           </>
         ) : prd ? (
-          <>
-            <PrdSummaryStrip prd={prd} />
-            <div
-              className="prd-body"
-              contentEditable={!guestSession}
-              spellCheck={false}
-              suppressContentEditableWarning
-              ref={bodyRef}
-              onInput={guestSession ? undefined : handleInput}
-            >
-              <div className="prd-meta">{prd.metaLine}</div>
-              <h1 className="prd-title">{prd.title}</h1>
-              <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} />
-              {qaSections.length > 0 && (
-                <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
-                  <h2 className="prd-h2">Test Scenarios</h2>
-                  <PrdSections sections={qaSections} />
-                </div>
-              )}
-            </div>
-          </>
+          // AD-P13b — one editor, two consumers: the markdown PRD's
+          // contenteditable body + execCommand toolbar + draft/autosave now
+          // live in the shared PrdMarkdownEditor. onSave is OMITTED here so the
+          // main-chat save path (prdApi.update) is byte-for-byte unchanged; the
+          // project drawer injects a gated save into the SAME primitive.
+          <PrdMarkdownEditor
+            ref={mdViewRef}
+            prdId={prd.prd_id}
+            title={prd.title}
+            onStatus={setSaveStatus}
+            readOnly={!!guestSession}
+            beforeBody={<PrdSummaryStrip prd={prd} />}
+          >
+            <div className="prd-meta">{prd.metaLine}</div>
+            <h1 className="prd-title">{prd.title}</h1>
+            <PrdSections sections={prd.sections} prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} prdTitle={prd.title} />
+            {qaSections.length > 0 && (
+              <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
+                <h2 className="prd-h2">Test Scenarios</h2>
+                <PrdSections sections={qaSections} />
+              </div>
+            )}
+          </PrdMarkdownEditor>
         ) : content.prdGenerating && content.prdPartialHtml ? (
           // Live streaming preview: partial Part A HTML is already arriving —
           // render it as it grows, with a slim pulsing indicator instead of the

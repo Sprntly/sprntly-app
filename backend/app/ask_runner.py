@@ -535,6 +535,48 @@ def reset_active_history(token) -> None:
     _active_history.reset(token)
 
 
+# ── The active project id, by the same request-scoped route ─────────────────
+# The individual PROJECT chat ("My chat with Sprntly") sends to /v1/ask with a
+# project_id, and `routes/ask.py` folds a bounded, AUTHORITATIVE project-context
+# block (members + task ledger + artifact manifest) into the ask's history. But
+# `qa_agent.answer()`'s connector-lookup interceptors (tracker / named-source /
+# document lookup) fire on the raw question BEFORE the generic route reaches
+# that block, so a project-meta question ("who's on this project?", "what tasks
+# are open?", "how many PRDs?") is hijacked into a "connect a connector" reply
+# that never consults the folded project facts.
+#
+# Rides a ContextVar for the SAME reason the conversation/embedding/history
+# values above do: threading a param through `answer()` is the qa_agent.py edit
+# this mechanism exists to avoid. Set once per ask in `ask_job_runner._run_sync`,
+# read by `qa_agent.answer()` to SKIP those interceptors for a project-scoped
+# ask so the question falls through to the block. `None` for every non-project
+# ask, so that surface is byte-for-byte unaffected.
+_active_project_id: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "ask_runner_active_project_id", default=None
+)
+
+
+def set_active_project_id(project_id: int | None):
+    """Record THIS ask's project id (individual project chat). Call from
+    `ask_job_runner._run_sync` beside `set_active_conversation`, and always undo
+    in the same `finally` — a worker thread that kept a previous ask's project
+    id would mis-scope another ask's interceptor routing.
+
+    Returns an opaque token for `reset_active_project_id`."""
+    return _active_project_id.set(project_id)
+
+
+def reset_active_project_id(token) -> None:
+    """Undo `set_active_project_id` — call from a `finally`."""
+    _active_project_id.reset(token)
+
+
+def active_project_id() -> int | None:
+    """This ask's project id, or None on a non-project ask / when nothing set
+    one. Read by `qa_agent.answer()` to gate the connector-lookup interceptors."""
+    return _active_project_id.get()
+
+
 def _owned_conversation_attachments(
     enterprise_id: str, conversation_id: int | None, caller_user_id: str | None
 ) -> list[tuple[int, int, dict, str]]:

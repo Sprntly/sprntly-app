@@ -230,6 +230,51 @@ describe("ReportsTab — a thread with one report", () => {
   })
 })
 
+describe("ReportsTab — a skill='saved-chat' report renders as markdown", () => {
+  const savedChatDoc = (id: number, title: string, markdown: string) => ({
+    id, skill: "saved-chat", title, question: "",
+    html: markdown,
+    created_at: new Date().toISOString(), conversation_id: 77, prd_id: null,
+    share_mode: "private", share_token: null,
+  })
+
+  it("renders the stored markdown as elements, not the HTML-document iframe", async () => {
+    reportGet.mockResolvedValue(
+      savedChatDoc(8, "Competitors · Q2", "# Prioritization\n\n**Ship A** first\n\n- One\n- Two"),
+    )
+
+    await renderTab()
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-report-id="8"]') as HTMLElement)
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy(),
+    )
+    const body = screen.getByTestId("saved-chat-markdown")
+    expect(body.querySelector("h1")?.textContent).toBe("Prioritization")
+    expect(body.querySelector("strong")?.textContent).toBe("Ship A")
+    expect(body.querySelectorAll("li").length).toBe(2)
+    // Never the sandboxed-iframe path — that's reserved for a real HTML document.
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+
+  it("still routes a skill-template HTML report to the sandboxed iframe, unchanged", async () => {
+    // A non-"saved-chat" report (e.g. voice-of-customer-report) is untouched:
+    // `doc()` above already builds one with a real `<!DOCTYPE html>` body.
+    reportGet.mockResolvedValue(doc(9, "VoC · Q2"))
+
+    await renderTab([ROWS[0]])
+
+    await waitFor(() => {
+      const frame = document.querySelector("iframe") as HTMLIFrameElement | null
+      expect(frame).toBeTruthy()
+      expect(frame?.getAttribute("srcdoc")).toContain("<h1>VoC · Q2</h1>")
+    })
+    expect(screen.queryByTestId("saved-chat-markdown")).toBeNull()
+  })
+})
+
 describe("ReportsTab — nothing to show", () => {
   it("says the chat has no reports", async () => {
     await renderTab([])

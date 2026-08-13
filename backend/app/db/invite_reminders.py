@@ -23,13 +23,21 @@ def list_pending_invites_all_companies() -> list[dict]:
     """Every pending workspace_invites row, across all companies.
 
     Each row: {id, company_id, email, role, invited_by, created_at,
-    workspace_ids}. "Pending" == the row exists (accept/revoke delete it), so
-    this is exactly the set the reminder sweep should consider.
+    workspace_ids, project_id}. "Pending" == the row exists (accept/revoke
+    delete it), so this is exactly the set the reminder sweep should consider.
+
+    `project_id` is included so the sweep can tell a project-carrying invite
+    (Extension B, AD-TNM3) apart and name the project in the reminder copy —
+    without it the column-enumerated select drops the field and the copy
+    silently no-ops.
     """
     client = require_client()
     return (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, invited_by, created_at, workspace_ids")
+        .select(
+            "id, company_id, email, role, invited_by, created_at, "
+            "workspace_ids, project_id"
+        )
         .execute()
         .data
         or []

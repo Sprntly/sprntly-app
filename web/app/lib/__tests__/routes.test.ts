@@ -6,6 +6,8 @@ import {
   screenIdFromPathname,
   prototypePath,
   PROTOTYPE_PATH,
+  projectPath,
+  PROJECTS_PATH,
 } from "../routes"
 
 describe("routes — standalone connectors removed (commit A)", () => {
@@ -56,6 +58,25 @@ describe("routes — prototypePath generate-intent option", () => {
     expect(prototypePath(42, { generate: false })).toBe("/prototype?prd=42")
     expect(prototypePath()).toBe(PROTOTYPE_PATH)
     expect(prototypePath(null, { generate: false })).toBe(PROTOTYPE_PATH)
+  })
+})
+
+describe("routes — projectPath chat-param (fork-to-private-chat nav)", () => {
+  it("test_projectPath_chat_param — appends &chat= when a project id AND opts.chat are both present", () => {
+    expect(projectPath(7, { chat: "individual" })).toBe("/projects?id=7&chat=individual")
+    expect(projectPath(7, { chat: "group" })).toBe("/projects?id=7&chat=group")
+    expect(projectPath("7", { chat: "individual" })).toBe("/projects?id=7&chat=individual")
+  })
+
+  it("test_projectPath_byte_identical_no_opts — projectPath(id)/projectPath()/projectPath(null,{chat}) are unchanged from the base single-arg form", () => {
+    expect(projectPath(7)).toBe("/projects?id=7")
+    expect(projectPath(7, {})).toBe("/projects?id=7")
+    expect(projectPath()).toBe(PROJECTS_PATH)
+    expect(projectPath(null)).toBe(PROJECTS_PATH)
+    // With no id, chat is ignored — there is no detail view to select a tab on.
+    expect(projectPath(null, { chat: "group" })).toBe(PROJECTS_PATH)
+    expect(projectPath(undefined, { chat: "individual" })).toBe(PROJECTS_PATH)
+    expect(projectPath("")).toBe(PROJECTS_PATH)
   })
 })
 

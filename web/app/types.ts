@@ -44,6 +44,10 @@ export type ScreenId =
   // The Skills gallery — every routable PM skill as a card; clicking one opens
   // a chat thread with the skill's /trigger pre-filled in the composer.
   | "skills"
+  // Projects — a shared container gathering a topic's artifacts + the group/
+  // individual chats and memory behind them. Coexists with Artifacts and
+  // Ideation (AD-P14); flat route `/projects`, detail selected by `?id=`.
+  | "projects"
 
 // The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
@@ -79,6 +83,7 @@ export const APP_SCREENS: ScreenId[] = [
   "ideation",
   "templates",
   "skills",
+  "projects",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -110,6 +115,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   ideation: "Ideation",
   templates: "Templates",
   skills: "Skills",
+  projects: "Projects",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {

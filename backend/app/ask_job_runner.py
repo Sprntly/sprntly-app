@@ -91,6 +91,7 @@ def _run_sync(
     # Keyword-only with defaults so the suite's positional direct calls keep
     # working; the one production caller (run_ask_job) passes them by name.
     *,
+    project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
 ) -> None:
@@ -188,8 +189,14 @@ def _run_sync(
         getattr(ask_plan, "documents", None) if ask_plan is not None else None
     )
     history_token = ask_runner.set_active_history(history)
-    try:
-        payload = qa_agent.answer(
+    # Project-scoped ask (individual project chat): let qa_agent skip the
+    # connector-lookup interceptors so the folded, authoritative project-context
+    # block answers project-meta questions instead of a "connect a connector"
+    # deflection. None for every non-project ask (interceptors unchanged there).
+    project_id_token = ask_runner.set_active_project_id(project_id)
+
+    def _single_shot() -> dict:
+        return qa_agent.answer(
             plan=ask_plan,
             enterprise_id=enterprise_id,
             question=question,
@@ -214,11 +221,35 @@ def _run_sync(
             on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
             on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
         )
+
+    try:
+        if project_id is not None:
+            # Project-scoped individual chat: a bounded tool-loop responder with
+            # the project read tools (depth), answer-executor only — PRD edits
+            # are classified client-side and never reach this loop (see
+            # project_individual_agent.py's module docstring). It returns the
+            # same payload shape as the single-shot path, so the strip/complete/
+            # capture/log calls below run UNCHANGED, and degrades to `_single_shot`
+            # on any failure. Non-project asks (`project_id is None`) skip this
+            # branch entirely — byte-identical to before this change.
+            from app.project_individual_agent import respond_individual
+
+            payload = respond_individual(
+                project_id=project_id,
+                dataset=dataset,
+                company_id=enterprise_id,
+                question=question,
+                history=history,
+                single_shot=_single_shot,
+            )
+        else:
+            payload = _single_shot()
     finally:
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
         ask_runner.reset_active_planned_documents(planned_docs_token)
+        ask_runner.reset_active_project_id(project_id_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask
@@ -285,6 +316,19 @@ def _run_sync(
         prd_id=prd_id,
         is_cancelled=lambda: is_ask_cancelled(ask_id),
     )
+    # Individual project chat (build spec §5.3): after the answer is the
+    # authoritative stored reply, best-effort promote a durable insight into
+    # project memory — gated on a project-scoped ask, so a non-project ask is
+    # byte-for-byte unaffected. Self-swallowing (maybe_promote_turn never
+    # raises), so it can only ADD a memory entry, never delay/break the
+    # answer. Reuses the existing group-chat promotion writer verbatim (no
+    # re-implementation) — it already schedules its own summary regen, so
+    # nothing else is added here.
+    if project_id is not None and conversation_id is not None:
+        from app.project_memory import maybe_promote_turn
+
+        transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
+        maybe_promote_turn(project_id, conversation_id, transcript)
 
 
 async def run_ask_job(
@@ -300,6 +344,7 @@ async def run_ask_job(
     conversation_id: int | None = None,
     user_id: str | None = None,
     workspace_id: str | None = None,
+    project_id: int | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -324,6 +369,7 @@ async def run_ask_job(
             conversation_id,
             user_id,
             workspace_id,
+            project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
         )
