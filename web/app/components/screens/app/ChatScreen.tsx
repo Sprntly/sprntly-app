@@ -2789,36 +2789,6 @@ export function ChatScreen() {
       : { conversationId: activeConvId })
   }, [activeConvId, setContent])
 
-  // Mirrors `content.documentId` for the async reads below, which cannot see
-  // React state at resolution time and must not clobber a newer document.
-  const documentIdRef = useRef<number | null>(null)
-  useEffect(() => { documentIdRef.current = content.documentId ?? null }, [content.documentId])
-
-  // Re-attach this thread's own document after a switch or a reload.
-  //
-  // `documentId` is in-memory only, so without this a document the thread DOES
-  // own disappears from the panel the moment you reload — the row is still
-  // there, the tab just forgets it. Newest first, matching how the thread's
-  // reports re-attach.
-  useEffect(() => {
-    if (activeConvId == null) return
-    let cancelled = false
-    void customArtifactsApi
-      .listForConversation(activeConvId)
-      .then((rows) => {
-        // Guarded on the id AND on nothing having been set meanwhile: a
-        // generation started while this was in flight must win over a stale
-        // list read for the same thread.
-        // A generation that started while this was in flight MUST win: it is
-        // the document the user just asked for, and this list is a stale read
-        // of the same thread. `setContent` takes a patch rather than an
-        // updater, so the current value is tracked in a ref.
-        if (cancelled || rows.length === 0 || documentIdRef.current != null) return
-        setContent({ documentId: rows[0].id })
-      })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [activeConvId, setContent])
 
   // This thread's captured reports, newest first — fetched once by
   // useThreadReportsSync (AppShell). Defaulted for the surfaces/tests that render
