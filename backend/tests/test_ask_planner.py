@@ -624,6 +624,11 @@ def test_the_schema_property_order_is_load_bearing():
         # to `pipeline_id`. Reading the pipeline's number as the action's is the
         # bug this field exists to end.
         "action", "action_confidence", "task", "instruction",
+        # `create_artifact`'s KIND of document sits here for the same
+        # subject-before-form reason as the template pair below it: deciding
+        # "leadership update" before `task` would let the document's shape
+        # steer what it is about.
+        "artifact_kind",
         # The uploaded format this build writes into, and — when we could not
         # find the one they named — the words they used, so the answer can ask.
         "artifact_template_id", "template_query",

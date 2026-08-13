@@ -485,3 +485,61 @@ def test_an_absurdly_large_body_is_refused_before_it_is_parsed(docs_env, monkeyp
         f"/v1/custom-artifacts/{doc_id}", json={"body_html": "x" * (400_000 * 8 + 1)}
     )
     assert r.status_code == 413
+
+
+# ─── Generation ──────────────────────────────────────────────────────────────
+
+def test_generate_returns_a_generating_row_immediately(docs_env, monkeypatch):
+    """The row exists BEFORE the multi-minute call, so the panel has an id to
+    open and poll against rather than waiting on one that does not exist yet.
+
+    Creating it up front is also what makes double-generation structurally
+    impossible: the client never posts content back, so a double-click or a
+    StrictMode double-effect has nothing to write with.
+    """
+    import app.routes.custom_artifacts as mod
+
+    # The generation itself is exercised in test_custom_artifact_generate.py;
+    # here we assert the ROUTE's contract, so the writer is a no-op.
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "leadership update", "task": "Q3 reliability"},
+    )
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc["status"] == "generating"
+    assert doc["id"] >= 1
+    # Named while it writes, so the library row is never a blank line.
+    assert doc["title"] == "leadership update"
+
+
+def test_generate_refuses_a_foreign_conversation(docs_env, monkeypatch):
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    outsider = "outsider-" + uuid.uuid4().hex[:8]
+    other_cid = seed_company(user_id=outsider, slug="rival")
+    ctx = company_client(monkeypatch)
+    foreign_chat = _seed_conversation(company_id=other_cid)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t", "conversation_id": foreign_chat},
+    )
+    assert r.status_code == 404
+
+
+def test_a_generating_document_is_readable_while_it_writes(docs_env, monkeypatch):
+    """The panel polls this row, so it has to be fetchable mid-generation."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+    doc_id = ctx.client.post(
+        "/v1/custom-artifacts/generate", json={"kind": "memo", "task": "t"}
+    ).json()["id"]
+    got = ctx.client.get(f"/v1/custom-artifacts/{doc_id}")
+    assert got.status_code == 200 and got.json()["status"] == "generating"

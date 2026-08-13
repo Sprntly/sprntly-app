@@ -279,6 +279,27 @@ CREATE TABLE cached_asks (
     generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Team documents of any kind — the "Others" library (mirrors
+-- 20260813120000_custom_artifacts.sql). Present in the BASE schema, not only in
+-- the suites that exercise it, because the startup lifespan sweeps this table
+-- for orphaned generations — so every test that boots the app touches it.
+CREATE TABLE custom_artifacts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    conversation_id INTEGER,
+    kind            TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL DEFAULT '',
+    body_html       TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'ready',
+    error           TEXT,
+    version         INTEGER NOT NULL DEFAULT 1,
+    created_by      TEXT,
+    updated_by      TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Fire-and-forget Ask job rows (mirrors 20260617120000_ask_jobs.sql). Status
 -- walks generating → ready (or error); `response` holds the citation-stripped
 -- answer JSON. Per-request + per-tenant — distinct from cached_asks/ask_log.
