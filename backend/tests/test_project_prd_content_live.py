@@ -69,10 +69,12 @@ def sb():
 def scene(sb):
     """TWO real (company, workspace, user) tuples — reuses whatever real
     tenant(s) already exist in the local rig for tenant A, and fabricates a
-    real second company/workspace/member row for tenant B (mirrors
+    real second company/workspace row for tenant B (mirrors
     `test_projects_crud_live.py`'s fixture_ids posture) — plus, on tenant A,
     two real projects (P1 with its own PRD attached, P2 with none) so a
-    cross-project id is genuine, not simulated. Cleans up every row it
+    cross-project id is genuine, not simulated. Tenant B never authenticates
+    in this test (only its foreign PRD is probed against tenant A's caller),
+    so no `company_members` row is needed for it. Cleans up every row it
     created."""
     import uuid as _uuid
 
@@ -93,7 +95,7 @@ def scene(sb):
             break
     assert company_id, "no (company w/ slug, workspace, member) in the local rig"
 
-    created = {"projects": [], "briefs": [], "prds": [], "companies": [], "workspaces": [], "members": []}
+    created = {"projects": [], "briefs": [], "prds": [], "companies": [], "workspaces": []}
 
     def _brief(dataset, label):
         row = c.table("briefs").insert({
@@ -124,8 +126,8 @@ def scene(sb):
     prd_p1 = _prd(_brief(slug, "prd content live P1"), "P1 PRD")
     projects_db.add_artifact(p1, "prd", prd_p1)
 
-    # A genuine SECOND tenant — its own company/workspace/member/brief/prd, so
-    # a cross-tenant id is a real foreign row, not simulated.
+    # A genuine SECOND tenant — its own company/workspace/brief/prd, so a
+    # cross-tenant id is a real foreign row, not simulated.
     b_slug = "live-b-" + _uuid.uuid4().hex[:8]
     b_company_id = _uuid.uuid4().hex
     c.table("companies").insert({"id": b_company_id, "slug": b_slug, "display_name": b_slug}).execute()
@@ -134,11 +136,6 @@ def scene(sb):
 
     b_ws = ensure_default_workspace(b_company_id)
     created["workspaces"].append(b_ws["id"])
-    b_user_id = "live-b-user-" + _uuid.uuid4().hex[:8]
-    c.table("company_members").insert({
-        "id": _uuid.uuid4().hex, "company_id": b_company_id, "user_id": b_user_id, "role": "owner",
-    }).execute()
-    created["members"].append((b_company_id, b_user_id))
     prd_b = _prd(_brief(b_slug, "prd content live B"), "B PRD (foreign tenant)")
 
     yield {
@@ -155,8 +152,6 @@ def scene(sb):
         sb.table("prds").delete().eq("id", prd_id).execute()
     for bid in created["briefs"]:
         sb.table("briefs").delete().eq("id", bid).execute()
-    for cid, uid in created["members"]:
-        sb.table("company_members").delete().eq("company_id", cid).eq("user_id", uid).execute()
     for ws_id in created["workspaces"]:
         sb.table("workspaces").delete().eq("id", ws_id).execute()
     for cid in created["companies"]:
