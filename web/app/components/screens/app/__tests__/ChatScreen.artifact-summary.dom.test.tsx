@@ -191,7 +191,7 @@ describe("ChatScreen — artifact chat summary on fresh PRD generation", () => {
     expect(bubbles).toEqual(["generate a PRD for dark mode on mobile"])
   })
 
-  it("posts the summary after a clarify-card answer flow too", async () => {
+  it("posts the summary after a clarify-answer flow too", async () => {
     clarifyTask.mockResolvedValueOnce({
       sufficient: false,
       missing: ["Target users"],
@@ -199,12 +199,12 @@ describe("ChatScreen — artifact chat summary on fresh PRD generation", () => {
     })
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
-
+    // The clarify batch answers in the dock's popup stepper; a single-question
+    // batch submits on its one click.
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
     await act(async () => {
-      fireEvent.click(within(screen.getByTestId("clarify-questions")).getAllByTestId("clarify-choice")[0])
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
     })
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-submit")) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     await waitFor(() => expect(chatSummary).toHaveBeenCalledWith("prd", 501))

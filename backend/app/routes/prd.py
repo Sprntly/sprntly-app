@@ -1070,6 +1070,83 @@ def answer_input_question(
     }
 
 
+class InputAnswerItem(BaseModel):
+    question_id: int
+    answer: str = Field(..., min_length=1)
+
+
+class InputAnswersBatchIn(BaseModel):
+    answers: list[InputAnswerItem] = Field(..., min_length=1)
+
+
+@router.post("/{prd_id}/input-questions/answer-batch")
+def answer_input_questions_batch(
+    prd_id: int,
+    body: InputAnswersBatchIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Answer SEVERAL "User input needed" questions in one scoped edit.
+
+    The chat's question popup collects the whole batch before submitting
+    (owner directive: answer everything first, send once) — so the answers
+    arrive together, and folding them together is strictly better than N
+    sequential calls to the single-answer route: one scoped-editor pass over
+    the document instead of N (each of which re-reads and re-writes the whole
+    HTML), one undoable version snapshot instead of N stacked ones, and no
+    window where the PRD reflects half a batch.
+
+    Same contract as the single-answer route otherwise: every question must
+    belong to this PRD and the edit is all-or-nothing — a failed edit leaves
+    the document untouched and NO question marked answered.
+    """
+    from app.prd_questions import apply_answers
+
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    # Resolve every target up front — a batch naming a foreign or unknown
+    # question dies before any LLM work, not after.
+    pairs: list[tuple[dict, str]] = []
+    for item in body.answers:
+        question = get_question(item.question_id)
+        if not question or question.get("prd_id") != prd_id:
+            raise HTTPException(404, f"Question {item.question_id} not found")
+        pairs.append((question, item.answer))
+
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "PRD has no content to edit")
+
+    try:
+        edit = apply_answers(
+            prd_html,
+            [(q["prompt"], a) for q, a in pairs],
+            enterprise_id=company.company_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Could not apply the answers: {exc}")
+
+    # ONE snapshot for the whole batch — undo restores the pre-batch document.
+    try:
+        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
+    except Exception:
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before input-answer batch "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
+
+    update_prd_content(prd_id, row.get("title", ""), edit["html"])
+    answered = [
+        answer_question(q["id"], a, answered_by=company.user_name) for q, a in pairs
+    ]
+
+    return {
+        "prd": get_prd_rendered(prd_id),
+        "questions": answered,
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
+
+
 class ChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
 

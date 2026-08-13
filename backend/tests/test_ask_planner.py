@@ -588,11 +588,12 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    # v7 since library questions became exclusive (kg=false / no sources is
-    # now contractual for them). The version is pinned here rather than merely
-    # compared to itself because pooling rows across versions would pool two
-    # different menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v7"
+    # v8 since the action menu gained `assign_tickets` ("assign this ticket to
+    # Dave" used to land on update_ticket, whose executor rewrites content, not
+    # ownership). The version is pinned here rather than merely compared to
+    # itself because pooling rows across versions would pool two different
+    # menus.
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v8"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -725,10 +726,11 @@ def test_generate_prd_survives_an_empty_task_on_purpose():
     assert "generate_prd" not in ap._NEEDS_TASK
 
 
-@pytest.mark.parametrize("action", ["edit_prd", "update_ticket"])
+@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets"])
 def test_an_edit_without_an_instruction_degrades_to_answer(action):
     """`chat_intent` already applies this rule (`no_instruction` → answer);
-    rewriting a document toward nothing is worse than not rewriting it."""
+    rewriting a document toward nothing is worse than not rewriting it — and
+    an assignment with nobody named has nothing to execute."""
     assert ap._gate_action(action, "", "")[0] == "answer"
     assert ap._gate_action(action, "", "make it shorter") == (
         action, "", "make it shorter",

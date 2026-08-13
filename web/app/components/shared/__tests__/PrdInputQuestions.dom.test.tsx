@@ -296,6 +296,92 @@ describe("PrdInputQuestions container", () => {
     }
   })
 
+  it("popup mode portals pending questions into the host; the batch submits ONCE, at the end", async () => {
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    const listQuestions = vi.fn().mockResolvedValue([escalateQ, needWithOptionsQ])
+    const answerQuestionsBatch = vi.fn().mockResolvedValue({
+      prd: answeredRecord,
+      questions: [
+        { ...escalateQ, status: "answered", answer: "On" },
+        { ...needWithOptionsQ, status: "answered", answer: "0–20%" },
+      ],
+      sections_changed: ["Requirements"],
+      summary: "Reminders default on.",
+    })
+
+    render(
+      <PrdInputQuestions
+        prdId={1}
+        listQuestions={listQuestions}
+        answerQuestionsBatch={answerQuestionsBatch}
+        popupHost={host}
+      />,
+    )
+
+    // The stepper lands IN THE HOST, one question at a time, wearing the tag
+    // as its chip — and the thread renders no inline pending cards.
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+    expect(host.querySelector('[data-testid="question-popup"]')).toBeTruthy()
+    expect(screen.queryByTestId("prd-input-question")).toBeNull()
+    expect(screen.getByTestId("question-popup-chip").textContent).toBe("Decision")
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("1/2")
+
+    // First click advances — NOTHING submits mid-stepper (the owner's
+    // directive: finish all the questions before anything is sent).
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    })
+    expect(answerQuestionsBatch).not.toHaveBeenCalled()
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+
+    // The last answer settles the batch → ONE call carries both answers, the
+    // applying line shows while it runs, then the ✓ records land inline.
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    })
+    await waitFor(() =>
+      expect(answerQuestionsBatch).toHaveBeenCalledWith(1, [
+        { question_id: 11, answer: "On" },
+        { question_id: 13, answer: "0–20%" },
+      ]))
+    await waitFor(() =>
+      expect(screen.getAllByTestId("prd-input-question-resolved")).toHaveLength(2))
+
+    document.body.removeChild(host)
+  })
+
+  it("popup mode: a skipped question falls back to its inline card", async () => {
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    const listQuestions = vi.fn().mockResolvedValue([escalateQ])
+
+    render(
+      <PrdInputQuestions prdId={1} listQuestions={listQuestions} popupHost={host} />,
+    )
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
+
+    // Skipping is "not in a stepper", never "gone": the question resurfaces as
+    // the inline chat card it always was, still answerable.
+    await waitFor(() => expect(screen.getByTestId("prd-input-question")).toBeTruthy())
+    expect(screen.queryByTestId("question-popup")).toBeNull()
+    document.body.removeChild(host)
+  })
+
+  it("popup mode with no host yet (dock owned by a higher-priority batch) holds the questions", async () => {
+    const listQuestions = vi.fn().mockResolvedValue([escalateQ])
+    const { container } = render(
+      <PrdInputQuestions prdId={1} listQuestions={listQuestions} popupHost={null} />,
+    )
+    // The loader ran, but nothing renders anywhere — no inline card, no popup —
+    // until the host hands the dock over.
+    await waitFor(() => expect(listQuestions).toHaveBeenCalled())
+    expect(container.querySelector(".piq-list")).toBeNull()
+    expect(screen.queryByTestId("question-popup")).toBeNull()
+  })
+
   it("stops polling on unmount", async () => {
     vi.useFakeTimers()
     try {

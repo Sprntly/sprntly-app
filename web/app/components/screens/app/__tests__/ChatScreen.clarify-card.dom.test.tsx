@@ -13,8 +13,11 @@
 // (2) THE QUESTIONS THEMSELVES. The backend returns each question with 2–4
 //     candidate `options`; the chat flattened them into a numbered markdown list
 //     and made the user re-type prose answering four things at once. They now
-//     render as ONE answerable card — options as buttons, one submit for the
-//     batch — while answering in the composer keeps working exactly as before.
+//     step through the dock's QuestionPopup — one question at a time, options
+//     as buttons, ‹ 1/2 › pagination, Skip — and the batch submits when the
+//     last question settles. The thread keeps a one-line pointer while the
+//     popup is up, the popup's × falls back to the inline card, and answering
+//     in the composer keeps working exactly as before.
 //
 // Also guards the third report: a multi-line ask must keep its line breaks when
 // it lands in the thread.
@@ -169,6 +172,12 @@ async function typeAndSend(text: string) {
 
 const questionCards = () => Array.from(document.querySelectorAll('[data-testid="clarify-question"]'))
 
+/** The dock's question stepper — the clarify batch's primary answering
+ *  surface. */
+const popup = () => screen.getByTestId("question-popup")
+const waitForPopup = () =>
+  waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+
 /** After a simulated reload the harness's ?new=1 activates a fresh landing tab;
  *  the restored thread tab sits first in the strip — click it. */
 async function openRestoredTab() {
@@ -209,49 +218,58 @@ describe("ChatScreen — the PRD command's acknowledgment is deferred until the 
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
     // The questions answer the COMMAND turn rather than arriving as a second,
-    // author-less message — one user bubble, one agent body.
+    // author-less message — one user bubble, one agent body (carrying the
+    // pointer at the popup).
     const bubbles = Array.from(document.querySelectorAll(".bc-user-bubble"))
     expect(bubbles).toHaveLength(1)
     expect(bubbles[0].textContent).toBe("generate a PRD for dark mode on mobile")
+    expect(screen.getByTestId("clarify-popup-note").textContent).toContain("2 quick questions")
   })
 })
 
-describe("ChatScreen — clarifying questions as an answerable card", () => {
-  it("renders the backend's options as buttons instead of flattening them into prose", async () => {
+describe("ChatScreen — clarifying questions as the dock's popup stepper", () => {
+  it("steps one question at a time with the backend's options as buttons", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
-    const cards = questionCards()
-    expect(cards).toHaveLength(2)
-    const choices = within(cards[0] as HTMLElement).getAllByTestId("clarify-choice")
-    expect(choices.map((b) => b.textContent)).toEqual(["Admins", "End users"])
-    // The option-less question gets a free-text box outright.
-    expect(within(cards[1] as HTMLElement).getByTestId("clarify-input")).toBeTruthy()
+    await waitForPopup()
+    // One question on screen, not a page of them — with its position.
+    expect(screen.getByTestId("question-popup-prompt").textContent)
+      .toBe("Who are the target users?")
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("1/2")
+    const options = screen.getAllByTestId("question-popup-option")
+    expect(options.map((b) => b.textContent)).toEqual(["Admins", "End users"])
+    // …plus the typed escape hatch, so the option list is never a cage.
+    expect(screen.getByTestId("question-popup-other")).toBeTruthy()
+    // While the popup is up the thread carries a pointer, not a second copy of
+    // the questions.
+    expect(screen.queryByTestId("clarify-questions")).toBeNull()
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 
-  it("submits the whole batch at once and generates with the answers folded in", async () => {
+  it("click, type, done — the batch submits on the last answer and generates with the answers folded in", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
+    // Q1: click an option — the stepper advances on its own.
     await act(async () => {
-      fireEvent.click(within(questionCards()[0] as HTMLElement).getAllByTestId("clarify-choice")[0])
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
     })
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+    // Q2 has no options → the free-text box shows outright. Nothing has been
+    // sent yet — the batch goes when the last question settles.
+    expect(generateFromTask).not.toHaveBeenCalled()
     await act(async () => {
-      fireEvent.change(within(questionCards()[1] as HTMLElement).getByTestId("clarify-input"), {
+      fireEvent.change(screen.getByTestId("question-popup-input"), {
         target: { value: "30% fewer support tickets" },
       })
     })
-    // Nothing has been sent yet — the batch goes on one submit.
-    expect(generateFromTask).not.toHaveBeenCalled()
-
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-submit")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-submit-text")) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     const combined = generateFromTask.mock.calls[0][0] as string
@@ -262,10 +280,9 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     expect(combined).toContain("How will you measure success?\n30% fewer support tickets")
     // The answers were NOT misrouted to the ask agent.
     expect(runAskGeneration).not.toHaveBeenCalled()
-    // The input form is spent, so a second click can't kick another generation…
-    await waitFor(() => expect(screen.queryByTestId("clarify-questions")).toBeNull())
-    // …but the batch does NOT revert to the flattened wall of text. It stays a
-    // formatted record of what was decided.
+    // The popup is spent, so a second click can't kick another generation…
+    await waitFor(() => expect(screen.queryByTestId("question-popup")).toBeNull())
+    // …and the thread keeps a formatted record of what was decided.
     const record = screen.getByTestId("clarify-questions-resolved")
     expect(within(record).getAllByTestId("clarify-question")).toHaveLength(2)
     expect(within(record).getAllByTestId("clarify-answer").map((n) => n.textContent))
@@ -276,17 +293,17 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     expect(within(record).queryByTestId("clarify-submit")).toBeNull()
   })
 
-  it("a question left blank shows the assumption it fell back to, not a gap", async () => {
+  it("a question skipped in the popup shows the assumption it fell back to, not a gap", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
-    // Answer only Q1; Q2 (no options, no skip_default) is left alone.
+    // Answer only Q1; Q2 is skipped with the stepper's own Skip.
     await act(async () => {
-      fireEvent.click(within(questionCards()[0] as HTMLElement).getAllByTestId("clarify-choice")[1])
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[1])
     })
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-submit")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
 
     await waitFor(() => expect(screen.getByTestId("clarify-questions-resolved")).toBeTruthy())
     const record = screen.getByTestId("clarify-questions-resolved")
@@ -297,13 +314,33 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     expect(record.textContent).toContain("1 of 2 answered")
   })
 
+  it("the popup's × falls back to the inline card — closing it can never strand the questions", async () => {
+    clarifyTask.mockResolvedValueOnce(QUESTIONS)
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+    await waitForPopup()
+
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-dismiss")) })
+
+    expect(screen.queryByTestId("question-popup")).toBeNull()
+    // The inline card — the popup's predecessor — takes over, fully answerable.
+    const card = screen.getByTestId("clarify-questions")
+    expect(within(card).getAllByTestId("clarify-question")).toHaveLength(2)
+    await act(async () => {
+      fireEvent.click(within(card).getAllByTestId("clarify-choice")[0])
+    })
+    await act(async () => { fireEvent.click(screen.getByTestId("clarify-submit")) })
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask.mock.calls[0][0]).toContain("Who are the target users?\nAdmins")
+  })
+
   it("'Generate now' leaves a record of the assumptions it proceeded on", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-skip")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip-all")) })
 
     await waitFor(() => expect(screen.getByTestId("clarify-questions-resolved")).toBeTruthy())
     const record = screen.getByTestId("clarify-questions-resolved")
@@ -316,7 +353,7 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
     const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "admins only" } }) })
@@ -331,23 +368,23 @@ describe("ChatScreen — clarifying questions as an answerable card", () => {
     expect(record.textContent).not.toContain("assumed:")
   })
 
-  it("'Generate now' on the card generates from the ORIGINAL task", async () => {
+  it("'Generate now' on the popup generates from the ORIGINAL task", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-skip")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip-all")) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")
   })
 
-  it("still accepts a prose answer typed in the composer — the card is an addition, not a replacement", async () => {
+  it("still accepts a prose answer typed in the composer — the popup is an addition, not a replacement", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
     const threadInput = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => { fireEvent.change(threadInput, { target: { value: "admins only" } }) })
@@ -390,7 +427,7 @@ describe("ChatScreen — the clarify gate's failure windows", () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     const view = renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
     view.unmount()
     renderChat()
@@ -425,23 +462,25 @@ describe("ChatScreen — the clarify gate's failure windows", () => {
 
     // Gate settles → the held message can go through normally.
     await act(async () => { resolveClarify(QUESTIONS) })
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
   })
 
   it("clamps an over-long combined task to the backend's 4000-char cap", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    await waitFor(() => expect(screen.getByTestId("clarify-questions")).toBeTruthy())
+    await waitForPopup()
 
-    // A card answer long enough to blow past the cap once the prompts are
-    // echoed in — without the clamp this 422s AFTER the ack is on screen.
+    // Skip Q1, then a Q2 answer long enough to blow past the cap once the
+    // prompts are echoed in — without the clamp this 422s AFTER the ack is on
+    // screen. Settling the last question is what submits the batch.
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
     await act(async () => {
-      fireEvent.change(within(questionCards()[1] as HTMLElement).getByTestId("clarify-input"), {
+      fireEvent.change(screen.getByTestId("question-popup-input"), {
         target: { value: "x".repeat(5000) },
       })
     })
-    await act(async () => { fireEvent.click(screen.getByTestId("clarify-submit")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-submit-text")) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     const sent = generateFromTask.mock.calls[0][0] as string
