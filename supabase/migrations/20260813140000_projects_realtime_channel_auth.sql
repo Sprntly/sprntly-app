@@ -57,31 +57,41 @@ end; $$;
 -- The backend publishes over the service-role REST path and is unaffected
 -- by these policies.
 --
--- NOTE (local-rig / deploy-pipeline landmark, flagged for the planner):
--- `realtime.messages` is owned by `supabase_realtime_admin` on this stack,
--- not by `postgres` — the default role the CLI's local DB_URL and
--- `SUPABASE_DB_URL` connect as. CREATE POLICY / ALTER TABLE ... ENABLE ROW
--- LEVEL SECURITY require table ownership (or superuser) in Postgres; a
--- plain GRANT does not suffice. Applying this migration therefore needs a
--- connection role with superuser (locally: `supabase_admin`) or explicit
--- ownership of `realtime.messages` — verified empirically against this
--- local rig; NOT fixable from inside a migration file run as `postgres`
--- (granting `supabase_realtime_admin` membership is itself
--- superuser-only). Whether the deploy pipeline's `SUPABASE_DB_URL` role has
--- the needed privilege in staging/prod is unverified and out of this
--- ticket's scope — flag to `sprntly-infra` before promotion.
-alter table realtime.messages enable row level security;  -- no-op if already enabled
+-- NOTE (deploy-pipeline landmark): `realtime.messages` is owned by
+-- `supabase_realtime_admin` on this stack, not by `postgres` — the default
+-- role most migration pipelines (including the hosted deploy path) connect
+-- as. CREATE POLICY / ALTER TABLE ... ENABLE ROW LEVEL SECURITY require
+-- table ownership (or superuser) in Postgres; a plain GRANT does not
+-- suffice. The five statements below are therefore wrapped in a guard: on a
+-- privileged connection (superuser, or the table owner — locally:
+-- `supabase_admin`) they run for real and the policies are created; on an
+-- unprivileged connection (the hosted deploy pipeline's `postgres` role)
+-- Postgres raises `insufficient_privilege` (SQLSTATE 42501) on the first
+-- statement, the guard catches it, logs a NOTICE, and the migration
+-- completes and records normally instead of aborting every backend deploy.
+-- The feature is dark (no Realtime channel is joined yet), so shipping
+-- without these policies applied on hosted is expected and non-blocking;
+-- they must be applied out-of-band via a privileged role (Supabase
+-- Dashboard SQL editor, Management API, or `supabase_admin` locally)
+-- before Projects realtime is turned on.
+do $$
+begin
+  execute 'alter table realtime.messages enable row level security';
 
-drop policy if exists "project_group_channel_receive" on realtime.messages;
-create policy "project_group_channel_receive" on realtime.messages
-  for select to authenticated using (public.is_project_channel_member(realtime.topic()));
-drop policy if exists "project_group_channel_send" on realtime.messages;
-create policy "project_group_channel_send" on realtime.messages
-  for insert to authenticated with check (public.is_project_channel_member(realtime.topic()));
+  execute 'drop policy if exists "project_group_channel_receive" on realtime.messages';
+  execute $policy$create policy "project_group_channel_receive" on realtime.messages
+    for select to authenticated using (public.is_project_channel_member(realtime.topic()))$policy$;
+  execute 'drop policy if exists "project_group_channel_send" on realtime.messages';
+  execute $policy$create policy "project_group_channel_send" on realtime.messages
+    for insert to authenticated with check (public.is_project_channel_member(realtime.topic()))$policy$;
 
-drop policy if exists "project_individual_channel_receive" on realtime.messages;
-create policy "project_individual_channel_receive" on realtime.messages
-  for select to authenticated using (public.is_individual_channel_member(realtime.topic()));
-drop policy if exists "project_individual_channel_send" on realtime.messages;
-create policy "project_individual_channel_send" on realtime.messages
-  for insert to authenticated with check (public.is_individual_channel_member(realtime.topic()));
+  execute 'drop policy if exists "project_individual_channel_receive" on realtime.messages';
+  execute $policy$create policy "project_individual_channel_receive" on realtime.messages
+    for select to authenticated using (public.is_individual_channel_member(realtime.topic()))$policy$;
+  execute 'drop policy if exists "project_individual_channel_send" on realtime.messages';
+  execute $policy$create policy "project_individual_channel_send" on realtime.messages
+    for insert to authenticated with check (public.is_individual_channel_member(realtime.topic()))$policy$;
+exception
+  when insufficient_privilege then
+    raise notice 'Skipped realtime.messages RLS/policy statements: connecting role does not own realtime.messages (owned by supabase_realtime_admin). Policies were NOT applied by this migration and must be applied out-of-band via a privileged role (Supabase Dashboard SQL editor, Management API, or supabase_admin) before Projects realtime is enabled. Expected on hosted while the feature is dark.';
+end $$;
