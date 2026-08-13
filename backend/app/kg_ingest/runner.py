@@ -21,6 +21,7 @@ everything, never to skipping unextracted data.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 from typing import Callable, Iterable
@@ -141,7 +142,15 @@ def sync_provider(
     puller, _, hint = PULLERS[provider]
 
     if records is None:
-        records = list(puller(token))
+        # A puller that declares `enterprise_id` gets the tenant id so it can
+        # scope the pull to tenant-owned connector config — github reads its
+        # App installation's granted repo list instead of trusting the user
+        # token's org-wide visibility. Signature-gated so every other puller
+        # keeps its plain token-only contract.
+        kwargs: dict = {}
+        if "enterprise_id" in inspect.signature(puller).parameters:
+            kwargs["enterprise_id"] = enterprise_id
+        records = list(puller(token, **kwargs))
         # Name every pull as it lands: which connector, for whom, how much.
         # This plus the fresh/dedup line below make "did provider X's data
         # reach the KG, and if not where did it stop" answerable from logs.

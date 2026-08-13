@@ -23,9 +23,25 @@ def _http_error(status: int) -> requests.HTTPError:
 
 # ---------- activity puller ----------
 
+def _select_repos(monkeypatch, repos, installs=None):
+    """Stub the tenant's App installation(s) granting exactly ``repos``.
+
+    Also poisons fetch_user_repos: the puller must NEVER consult the user
+    token's org-wide repo visibility (the 2026-08-13 over-collection bug).
+    """
+    monkeypatch.setattr(gh_puller, "list_github_installations",
+                        lambda eid: installs if installs is not None
+                        else [{"installation_id": 1}])
+    monkeypatch.setattr(github_app, "fetch_installation_repos",
+                        lambda install_id, per_page=100: [
+                            {"full_name": r} for r in repos])
+    def _forbidden(*a, **k):
+        raise AssertionError("puller consulted /user/repos — selection ignored")
+    monkeypatch.setattr(github_app, "fetch_user_repos", _forbidden)
+
+
 def test_github_puller_yields_prs_and_commits(monkeypatch):
-    monkeypatch.setattr(github_app, "fetch_user_repos",
-                        lambda tok, per_page=50: [{"full_name": "acme/api"}])
+    _select_repos(monkeypatch, ["acme/api"])
     monkeypatch.setattr(github_app, "fetch_recent_pull_requests",
                         lambda tok, repo, per_page=20: [{
                             "number": 42, "title": "Add SSO login",
@@ -38,7 +54,7 @@ def test_github_puller_yields_prs_and_commits(monkeypatch):
                             "sha": "abc1234567", "message": "fix: null deref in auth\n\ndetails",
                             "author": "dev2", "date": "2026-06-02T00:00:00Z",
                         }])
-    recs = list(gh_puller.pull("tok"))
+    recs = list(gh_puller.pull("tok", enterprise_id="ent-A"))
     pr = next(r for r in recs if r.kind == "pull_request")
     commit = next(r for r in recs if r.kind == "commit")
     assert pr.external_id == "acme/api#pr-42"
@@ -50,9 +66,7 @@ def test_github_puller_yields_prs_and_commits(monkeypatch):
 
 
 def test_github_puller_skips_unreadable_repo(monkeypatch):
-    monkeypatch.setattr(github_app, "fetch_user_repos",
-                        lambda tok, per_page=50: [{"full_name": "acme/secret"},
-                                                  {"full_name": "acme/open"}])
+    _select_repos(monkeypatch, ["acme/secret", "acme/open"])
 
     def prs(tok, repo, per_page=20):
         if repo == "acme/secret":
@@ -63,14 +77,13 @@ def test_github_puller_skips_unreadable_repo(monkeypatch):
     monkeypatch.setattr(github_app, "fetch_recent_pull_requests", prs)
     monkeypatch.setattr(github_app, "fetch_recent_commits",
                         lambda tok, repo, per_page=30: [])
-    recs = list(gh_puller.pull("tok"))
+    recs = list(gh_puller.pull("tok", enterprise_id="ent-A"))
     # secret repo skipped entirely; open repo's PR survives
     assert [r.external_id for r in recs] == ["acme/open#pr-1"]
 
 
 def test_github_puller_reraises_non_skippable(monkeypatch):
-    monkeypatch.setattr(github_app, "fetch_user_repos",
-                        lambda tok, per_page=50: [{"full_name": "acme/api"}])
+    _select_repos(monkeypatch, ["acme/api"])
 
     def prs(tok, repo, per_page=20):
         raise _http_error(500)
@@ -79,13 +92,83 @@ def test_github_puller_reraises_non_skippable(monkeypatch):
     monkeypatch.setattr(github_app, "fetch_recent_commits",
                         lambda tok, repo, per_page=30: [])
     with pytest.raises(requests.HTTPError):
-        list(gh_puller.pull("tok"))
+        list(gh_puller.pull("tok", enterprise_id="ent-A"))
+
+
+def test_github_puller_no_installation_pulls_nothing(monkeypatch):
+    """No App installation = nothing selected = nothing pulled — never a
+    fallback to the user token's visibility (that fallback is how tenants
+    ingested private repos from every org the connecting user belonged to)."""
+    _select_repos(monkeypatch, [], installs=[])
+
+    def _forbidden(*a, **k):
+        raise AssertionError("no repo should be read when nothing is selected")
+    monkeypatch.setattr(github_app, "fetch_recent_pull_requests", _forbidden)
+    monkeypatch.setattr(github_app, "fetch_recent_commits", _forbidden)
+    assert list(gh_puller.pull("tok", enterprise_id="ent-A")) == []
+
+
+def test_github_puller_without_enterprise_id_pulls_nothing(monkeypatch):
+    """Tenant context missing → the selection is unknowable → pull nothing."""
+    def _forbidden(*a, **k):
+        raise AssertionError("must not fetch anything without tenant context")
+    monkeypatch.setattr(github_app, "fetch_user_repos", _forbidden)
+    monkeypatch.setattr(github_app, "fetch_recent_pull_requests", _forbidden)
+    assert list(gh_puller.pull("tok")) == []
+
+
+def test_github_puller_unions_and_caps_installations(monkeypatch):
+    """Two installations union their grants (deduped, order kept) and the
+    result respects the pilot repo cap."""
+    grants = {
+        1: [{"full_name": f"org-a/r{i}"} for i in range(8)],
+        2: [{"full_name": "org-a/r0"},          # duplicate — deduped
+            {"full_name": "org-b/x1"}, {"full_name": "org-b/x2"},
+            {"full_name": "org-b/x3"}, {"full_name": "org-b/x4"}],
+    }
+    monkeypatch.setattr(gh_puller, "list_github_installations",
+                        lambda eid: [{"installation_id": 1},
+                                     {"installation_id": 2}])
+    monkeypatch.setattr(github_app, "fetch_installation_repos",
+                        lambda install_id, per_page=100: grants[install_id])
+    pulled: list[str] = []
+    monkeypatch.setattr(github_app, "fetch_recent_pull_requests",
+                        lambda tok, repo, per_page=20: pulled.append(repo) or [])
+    monkeypatch.setattr(github_app, "fetch_recent_commits",
+                        lambda tok, repo, per_page=30: [])
+    list(gh_puller.pull("tok", enterprise_id="ent-A"))
+    assert pulled == [f"org-a/r{i}" for i in range(8)] + ["org-b/x1", "org-b/x2"]
+    assert len(pulled) == gh_puller._MAX_REPOS
 
 
 def test_github_registered_in_pullers():
     from app.kg_ingest.runner import PULLERS, token_for
     assert "github" in PULLERS
     assert token_for("github", {"access_token": "gho_x"}) == "gho_x"
+
+
+def test_runner_hands_enterprise_id_to_declaring_pullers(monkeypatch):
+    """sync_provider passes enterprise_id to a puller that declares it (the
+    github repo-scope contract) and keeps the token-only contract for the
+    rest."""
+    from app.kg_ingest import runner
+
+    seen = {}
+
+    def scoped_puller(token, *, enterprise_id=None):
+        seen["scoped"] = (token, enterprise_id)
+        return []
+
+    def plain_puller(token):
+        seen["plain"] = token
+        return []
+
+    monkeypatch.setitem(runner.PULLERS, "github", (scoped_puller, "access_token", "hint"))
+    monkeypatch.setitem(runner.PULLERS, "clickup", (plain_puller, "access_token", "hint"))
+    runner.sync_provider(None, "ent-A", "github", token="tok")
+    runner.sync_provider(None, "ent-A", "clickup", token="tok")
+    assert seen["scoped"] == ("tok", "ent-A")
+    assert seen["plain"] == "tok"
 
 
 # ---------- data-API helpers (mocked HTTP) ----------
