@@ -111,6 +111,9 @@ def test_auto_create_names_from_prd_title(tenant_client, isolated_settings):
 
 
 def test_auto_create_first_write_wins(tenant_client, isolated_settings):
+    """A conversation binds to exactly one project. A second, distinct PRD
+    generated in that same conversation does not spawn a second project —
+    it joins the first one as an additional artifact."""
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
@@ -136,7 +139,8 @@ def test_auto_create_first_write_wins(tenant_client, isolated_settings):
     )
     assert len(projects) == 1
 
-    # The second PRD was never attached to the (unchanged) project.
+    # The second, distinct PRD is now attached to the same project alongside
+    # the first — both accumulate rather than the second being orphaned.
     artifacts = (
         require_client()
         .table("project_artifacts")
@@ -145,7 +149,88 @@ def test_auto_create_first_write_wins(tenant_client, isolated_settings):
         .execute()
         .data
     )
-    assert [a["artifact_id"] for a in artifacts] == [prd_id]
+    assert {a["artifact_id"] for a in artifacts} == {prd_id, second_prd_id}
+
+
+def test_auto_create_attaches_second_distinct_prd_to_bound_project(tenant_client, isolated_settings):
+    """A distinct PRD generated in a conversation already bound to project P
+    is attached to P — P ends up with two `prd` artifacts and no new
+    project is created."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    first_prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=first_prd_id, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    second_prd_id = _seed_brief_and_prd(db_mod, "acme", title="Offline mode")
+    result = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=second_prd_id, prd_title="Offline mode", conversation_id=conv_id,
+    )
+    assert result == project_id
+
+    projects = (
+        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+    )
+    assert len(projects) == 1
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_type, artifact_id")
+        .eq("project_id", project_id)
+        .execute()
+        .data
+    )
+    assert {(a["artifact_type"], a["artifact_id"]) for a in artifacts} == {
+        ("prd", first_prd_id),
+        ("prd", second_prd_id),
+    }
+
+
+def test_auto_create_attach_to_bound_project_is_idempotent(tenant_client, isolated_settings):
+    """Attaching a PRD that is already on the bound project (e.g. a
+    re-issued generate of the same PRD) does not create a duplicate
+    artifact row — exactly one row for it, no matter how many times it is
+    re-attached."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    for _ in range(2):
+        result = maybe_auto_create_project_for_prd(
+            company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+            prd_id=prd_id, prd_title="Dark mode", conversation_id=conv_id,
+        )
+        assert result == project_id
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_id")
+        .eq("project_id", project_id)
+        .eq("artifact_type", "prd")
+        .eq("artifact_id", prd_id)
+        .execute()
+        .data
+    )
+    assert len(artifacts) == 1
 
 
 def test_auto_create_none_conversation_skips(tenant_client, isolated_settings):
@@ -798,3 +883,85 @@ def test_auto_create_names_from_prd_title_live(sb, live_ids, _project_ids, _clea
 
     project = sb.table("projects").select("name").eq("id", project_id).execute().data[0]
     assert project["name"] == live_ids["prd_title"]
+
+
+@live
+def test_auto_create_attaches_second_distinct_prd_to_bound_project_live(
+    sb, live_ids, _project_ids, _cleanup_live_projects
+):
+    """Real-Postgres round-trip: a second, distinct PRD generated in a
+    conversation already bound to project P is attached to P via a real
+    `project_artifacts` upsert (no duplicate row on re-attach, no second
+    project)."""
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+        user_id=live_ids["user_id"], prd_id=live_ids["prd_id"],
+        prd_title=live_ids["prd_title"], conversation_id=live_ids["conversation_id"],
+    )
+    assert project_id is not None
+    _project_ids.append(project_id)
+
+    second_brief = sb.table("briefs").insert(
+        {
+            "dataset": f"live-pfp-attach-{uuid.uuid4().hex[:8]}",
+            "week_label": "Live auto-create-from-prd (second)",
+            "payload": {},
+            "is_current": False,
+        }
+    ).execute().data[0]
+    second_prd = sb.table("prds").insert(
+        {
+            "brief_id": second_brief["id"],
+            "insight_index": 0,
+            "title": f"Live second PRD {uuid.uuid4().hex[:8]}",
+            "status": "ready",
+        }
+    ).execute().data[0]
+
+    try:
+        result = maybe_auto_create_project_for_prd(
+            company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+            user_id=live_ids["user_id"], prd_id=second_prd["id"],
+            prd_title=second_prd["title"], conversation_id=live_ids["conversation_id"],
+        )
+        assert result == project_id
+
+        projects = (
+            sb.table("projects").select("id").eq("company_id", live_ids["company_id"]).execute().data
+        )
+        assert project_id in {p["id"] for p in projects}
+
+        artifacts = (
+            sb.table("project_artifacts")
+            .select("artifact_type, artifact_id")
+            .eq("project_id", project_id)
+            .execute()
+            .data
+        )
+        assert {(a["artifact_type"], a["artifact_id"]) for a in artifacts} == {
+            ("prd", live_ids["prd_id"]),
+            ("prd", second_prd["id"]),
+        }
+
+        # Re-attaching the same second PRD is idempotent — still one row.
+        again = maybe_auto_create_project_for_prd(
+            company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+            user_id=live_ids["user_id"], prd_id=second_prd["id"],
+            prd_title=second_prd["title"], conversation_id=live_ids["conversation_id"],
+        )
+        assert again == project_id
+        artifacts_after = (
+            sb.table("project_artifacts")
+            .select("artifact_id")
+            .eq("project_id", project_id)
+            .eq("artifact_type", "prd")
+            .eq("artifact_id", second_prd["id"])
+            .execute()
+            .data
+        )
+        assert len(artifacts_after) == 1
+    finally:
+        sb.table("prds").delete().eq("id", second_prd["id"]).execute()
+        sb.table("briefs").delete().eq("id", second_brief["id"]).execute()
