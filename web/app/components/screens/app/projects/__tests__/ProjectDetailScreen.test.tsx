@@ -587,12 +587,16 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
     // OPEN-rows preview for the Task-ledger rail card — best-effort, party-
     // filtered reads mirrored the same way `ledgerCounts` is) and `openArtifact`
     // (the artifact opened IN-PLACE in the side-by-side drawer beside the chat;
-    // a pure local UI toggle, never the URL / never stored derived-state). The
-    // guard this test protects — no NEW state for the AGENT STATUS pulse
-    // specifically — still holds: `posting` (the ask-composer wiring this guard
-    // was written against) is still absent.
+    // a pure local UI toggle, never the URL / never stored derived-state — 12).
+    // The project invite modal adds ONE more (13): `inviteOpen`, the same shape
+    // of pure local open/close toggle as `openArtifact` — it replaces the rail
+    // Invite button's call into the shared `useNavigation().openModal("invite")`
+    // mechanics with mounting `<ProjectInviteModal>` directly. The guard this
+    // test protects — no NEW state for the AGENT STATUS pulse specifically —
+    // still holds: `posting` (the ask-composer wiring this guard was written
+    // against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(12)
+    expect(useStateDeclarations).toHaveLength(13)
     expect(src).not.toContain("posting")
   })
 })
@@ -687,7 +691,26 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(screen.getByText("Project not found")).toBeTruthy()
   })
 
-  it("invite button opens the shared invite modal mechanics", async () => {
+  it("invite button opens the project-scoped invite modal, NOT the global mock InviteModal", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
+    expect(screen.queryByTestId("project-invite-modal")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("invite-button"))
+
+    // The project-scoped surface opens...
+    expect(screen.getByTestId("project-invite-modal")).toBeTruthy()
+    // ...and the global mock modal mechanics are never touched.
+    expect(openModalMock).not.toHaveBeenCalled()
+  })
+
+  it("the project invite modal lists the project's current members", async () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
@@ -697,7 +720,12 @@ describe("ProjectDetailScreen — data fetch", () => {
     })
     await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
     fireEvent.click(screen.getByTestId("invite-button"))
-    expect(openModalMock).toHaveBeenCalledWith("invite")
+
+    const rows = screen.getAllByTestId("project-invite-member-row")
+    expect(rows.map((r) => r.textContent)).toEqual(
+      expect.arrayContaining([expect.stringContaining("David M."), expect.stringContaining("Shristi")]),
+    )
+    expect(screen.getByTestId("project-invite-member-row-agent").textContent).toContain("Sprntly")
   })
 
   // ── Remove member: confirm → DELETE call → roster refetch (AC3) ──

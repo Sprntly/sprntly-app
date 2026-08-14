@@ -202,6 +202,13 @@ def test_agent_turn_null_author_sprntly_label(isolated_settings, monkeypatch):
 def test_human_turn_no_llm_call(isolated_settings, monkeypatch, fake_group_llm):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # A SECOND human member — a solo (single-human) project now bypasses the
+    # gate entirely and always replies (the solo-project auto-respond fix),
+    # so this "no LLM call for an unaddressed human turn" case needs a real
+    # second person for the gate path to even be reachable.
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project["id"], "second-human")
 
     r = ctx.client.post(
         f"/v1/projects/{project['id']}/group/turns", json={"content": "morning team"}

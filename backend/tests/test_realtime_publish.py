@@ -160,11 +160,17 @@ def test_publish_broadcast_posts_single_private_message(isolated_settings, monke
 def test_group_publish_payload_is_shaped_dto(isolated_settings, monkeypatch, fake_group_llm):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    from app.db import projects as projects_db
     from app.db.client import require_client
 
     require_client().table("profiles").insert(
         {"id": ctx.user_id, "full_name": "Ada Lovelace", "role": "Engineer"}
     ).execute()
+    # A SECOND human member — a solo (single-human) project now bypasses the
+    # gate entirely and always replies (the solo-project auto-respond fix),
+    # which would publish a SECOND (assistant) broadcast this test doesn't
+    # want to shape-assert on.
+    projects_db.add_member(project["id"], "second-human")
 
     calls = _spy_publish(monkeypatch)
 
@@ -263,6 +269,12 @@ def test_publish_failure_does_not_fail_group_write(isolated_settings, monkeypatc
     would turn RED (500 / turn missing)."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # A SECOND human member — see test_group_publish_payload_is_shaped_dto;
+    # otherwise the solo-project auto-respond shortcut adds an assistant
+    # turn this write-isolation proof isn't about.
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project["id"], "second-human")
 
     def _boom(url, **kwargs):
         raise RuntimeError("realtime down")
@@ -355,6 +367,13 @@ def test_publish_failure_when_group_reread_raises_does_not_fail_write(
     gate -- which must keep working -- never hits an LLM either."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # A SECOND human member — a solo (single-human) project now bypasses the
+    # gate + prefilter entirely and always replies (the solo-project
+    # auto-respond fix), which would add an assistant turn this re-read
+    # isolation proof isn't about.
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project["id"], "second-human")
 
     from app.db import conversations as conversations_db
 
@@ -450,6 +469,11 @@ def test_publish_failure_when_brief_reread_raises_does_not_fail_delivery(
 def test_post_group_turn_publishes_turn_created(isolated_settings, monkeypatch, fake_group_llm):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # A SECOND human member — see test_group_publish_payload_is_shaped_dto;
+    # otherwise the solo-project auto-respond shortcut always replies.
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project["id"], "second-human")
     calls = _spy_publish(monkeypatch)
 
     r = ctx.client.post(

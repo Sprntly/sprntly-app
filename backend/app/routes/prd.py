@@ -134,11 +134,21 @@ async def generate(
             body.brief_id, body.insight_index, variant=PRD_VARIANT
         )
         if existing:
+            # Fork this PRD into a project too (conversation-less — the brief
+            # path has no chat thread). Dedup on the PRD-artifact fact, so a
+            # repeat generate of the same PRD reuses its project.
+            existing_project_id = maybe_auto_create_project_for_prd(
+                company_id=company.company_id, workspace_id=company.workspace_id,
+                user_id=company.user_id, prd_id=existing["id"],
+                prd_title=existing["title"], conversation_id=None,
+                allow_without_conversation=True,
+            )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                "project_id": existing_project_id,
             }
 
     insight = insights[body.insight_index]
@@ -149,6 +159,16 @@ async def generate(
         title=title,
         template_version=PRD_TEMPLATE_VERSION,
         variant=PRD_VARIANT,
+    )
+    # Fork the PRD into a project (conversation-less: the weekly-brief / Top
+    # Insights path has no chat thread). origin='prd_auto', PRD attached as the
+    # first artifact, deduped on the PRD-artifact fact so re-generating the same
+    # PRD does not spawn a second project. Best-effort inside — never breaks
+    # generation.
+    auto_project_id = maybe_auto_create_project_for_prd(
+        company_id=company.company_id, workspace_id=company.workspace_id,
+        user_id=company.user_id, prd_id=prd_id, prd_title=title,
+        conversation_id=None, allow_without_conversation=True,
     )
     # Phase 2 lifecycle: record that the user created a PRD for this brief
     # finding so it lands in the Completed section once the next brief arrives.
@@ -187,6 +207,7 @@ async def generate(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        "project_id": auto_project_id,
     }
 
 
@@ -247,11 +268,20 @@ async def generate_from_ideation(
             brief_id, theme_id, variant=PRD_VARIANT
         )
         if existing:
+            # Fork this PRD into a project too (conversation-less — ideation
+            # has no chat thread). Deduped on the PRD-artifact fact.
+            existing_project_id = maybe_auto_create_project_for_prd(
+                company_id=company.company_id, workspace_id=company.workspace_id,
+                user_id=company.user_id, prd_id=existing["id"],
+                prd_title=existing["title"], conversation_id=None,
+                allow_without_conversation=True,
+            )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                "project_id": existing_project_id,
             }
 
     prd_id = start_prd(
@@ -267,6 +297,15 @@ async def generate_from_ideation(
     # (keyed by theme_id — works identically for ideation and brief themes).
     _record_prd_action(company.company_id, insight)
 
+    # Fork the PRD into a project (conversation-less: the ideation path has no
+    # chat thread). Same prd_auto machinery + PRD-artifact dedup as the brief
+    # and chat paths. Best-effort inside — never breaks generation.
+    auto_project_id = maybe_auto_create_project_for_prd(
+        company_id=company.company_id, workspace_id=company.workspace_id,
+        user_id=company.user_id, prd_id=prd_id, prd_title=title,
+        conversation_id=None, allow_without_conversation=True,
+    )
+
     task = asyncio.create_task(
         generate_prd_and_warm(
             prd_id, brief_id, _IDEATION_INSIGHT_INDEX, insight_override=insight,
@@ -280,6 +319,7 @@ async def generate_from_ideation(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        "project_id": auto_project_id,
     }
 
 

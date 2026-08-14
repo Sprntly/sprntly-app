@@ -339,6 +339,146 @@ describe("ProjectGroupChat — send + refetch", () => {
   })
 })
 
+describe("ProjectGroupChat — optimistic own-message send", () => {
+  it("renders the sender's own turn immediately, before the POST resolves", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let resolvePost: (v: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePost = resolve
+      }),
+    )
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    // Rendered synchronously — the POST has not resolved yet.
+    const optimistic = screen.getByTestId("gc-msg-me")
+    expect(optimistic.textContent).toContain("hi team")
+    expect(groupTurnsMock).toHaveBeenCalledTimes(1) // no refetch triggered yet
+
+    await act(async () => {
+      resolvePost(turn({ id: 5, content: "hi team" }))
+      await Promise.resolve()
+    })
+  })
+
+  it("is not duplicated when the poster's own real turn arrives via the post-send reconcile", async () => {
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))
+    groupTurnsMock.mockResolvedValueOnce([
+      turn({ id: 5, content: "hi team", author_user_id: "u1", author_name: "Me" }),
+    ])
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    // Optimistic placeholder present immediately.
+    expect(screen.getAllByTestId("gc-msg-me")).toHaveLength(1)
+
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(2))
+    // The real turn replaced the placeholder — still exactly one bubble, not two.
+    await waitFor(() => {
+      const bubbles = screen.getAllByTestId("gc-msg-me")
+      expect(bubbles).toHaveLength(1)
+      expect(bubbles[0].textContent).toContain("hi team")
+    })
+  })
+
+  it("rolls back the optimistic turn and restores the draft on a failed send", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let rejectPost: (e: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectPost = reject
+      }),
+    )
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    // Optimistic placeholder present while the POST is in flight.
+    expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
+
+    await act(async () => {
+      rejectPost(new Error("network blip"))
+      await Promise.resolve()
+    })
+
+    // No ghost turn left behind, and the draft is restored.
+    await waitFor(() => expect(screen.queryByTestId("gc-msg-me")).toBeNull())
+    await waitFor(() =>
+      expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("hi team"),
+    )
+    expect(screen.getByTestId("gc-error")).toBeTruthy()
+  })
+})
+
+describe("ProjectGroupChat — stayed-out badge suppressed while posting", () => {
+  it("hides the stayed-out badge during posting, and shows it once posting settles with no reply", async () => {
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
+
+    let resolvePost: (v: unknown) => void = () => {}
+    postGroupTurnMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePost = resolve
+      }),
+    )
+    // The refetch after the POST resolves shows only the human turn — no
+    // agent reply landed (a genuine "stayed out" outcome).
+    groupTurnsMock.mockResolvedValueOnce([
+      turn({ id: 5, content: "hi team", author_user_id: "u1", author_name: "Me" }),
+    ])
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    // While posting: the optimistic turn is the last (user-role) turn, but
+    // the badge must stay hidden — a reply may still be generating.
+    expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
+
+    await act(async () => {
+      resolvePost(turn({ id: 5, content: "hi team" }))
+      await Promise.resolve()
+    })
+
+    // Posting has settled and no agent reply arrived — NOW it shows.
+    await waitFor(() => expect(screen.getByTestId("gc-stayed-out")).toBeTruthy())
+  })
+})
+
 describe("ProjectGroupChat — focus-gated polling (AD-P4)", () => {
   it("polls on an interval while focused, stops on blur, and clears on unmount", async () => {
     vi.useFakeTimers()
