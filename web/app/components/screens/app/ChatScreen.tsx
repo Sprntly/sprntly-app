@@ -3473,6 +3473,66 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
 
+  // ── Change the TICKETS' format from chat ────────────────────────────────────
+  // "Change the ticket template to Acme". The tickets counterpart of
+  // prdChangeTemplateFlow, but synchronous end to end: the backend re-LAYS the
+  // existing tickets (identity, edits and tracker links preserved — never a
+  // regeneration) and answers with the re-laid set, so there is no generating
+  // state to drive and no poll. `target` is the thread's standalone set when it
+  // has one, else the tab PRD's persisted tickets — resolved by the caller,
+  // because the backend cannot see a set from a prd_id-shaped envelope.
+  const ticketsChangeTemplateFlow = useCallback(async (
+    query: string, targetTabId: string,
+    target: { ticketSetId: number } | { prdId: number },
+    templateId: string, templateName: string | null,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    const asReply = (answer: string) => ({
+      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    const label = templateName ? `“${templateName}”` : "that format"
+    try {
+      const { storiesApi } = await import("../../../lib/api")
+      const res = await storiesApi.changeTemplate(target, templateId)
+      if (res.unchanged) {
+        finalize(asReply(`These tickets are already written in ${label} — nothing to change.`))
+        return
+      }
+      finalize(asReply(
+        `Done — the tickets now use ${label}. Every ticket kept its content, edits and tracker links; only the description layout changed. They're in the panel on the right.`,
+      ))
+      // Re-render the panel from the persisted truth. A standalone set is
+      // re-read through its one owner (loadTicketSet republishes the slice);
+      // a PRD's tickets re-read via the tab's cache-first effect on the nonce.
+      if (targetTabId === activeTabIdRef.current) {
+        if ("ticketSetId" in target) {
+          void loadTicketSet(target.ticketSetId, setContent)
+        } else {
+          setContent({ ticketsRefreshNonce: Date.now() })
+        }
+        openContentPanel("tickets")
+      }
+      showToast("Format switched", `These tickets now use ${templateName || "the new format"}.`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize(asReply(`I couldn't switch the ticket format — ${msg}. The tickets are unchanged.`))
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+
   // ── Assign tickets from chat ────────────────────────────────────────────────
   // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".
   // POST /v1/tickets/assign-plan resolves the sentence against the thread PRD's
@@ -4368,9 +4428,24 @@ export function ChatScreen() {
           // shared primitive.
           const targetPrdId =
             !docFile && activeTab ? (envelope.prd_id ?? tabPrdId) : null
+          // change_tickets_template's own target: the thread's standalone set
+          // outranks the tab PRD's tickets, because a thread that generated a
+          // set has that set on screen — its tickets are what "the tickets"
+          // means here. Resolved HERE (ChatScreen-local tab state), passed
+          // through the primitive's ctx.
+          const ticketsTarget =
+            !docFile && activeTab
+              ? activeTab.ticketSetId != null
+                ? { ticketSetId: activeTab.ticketSetId } as const
+                : targetPrdId != null ? { prdId: targetPrdId } as const : null
+              : null
           const result = dispatchChatIntent(
             envelope,
-            { hasEditTarget: targetPrdId != null, editTargetPrdId: targetPrdId },
+            {
+              hasEditTarget: targetPrdId != null,
+              editTargetPrdId: targetPrdId,
+              ticketsTarget,
+            },
             {
               onGenerateTickets: (env) => {
                 if (docFile) {
@@ -4431,6 +4506,18 @@ export function ChatScreen() {
                 // this executor ever runs.
                 void prdChangeTemplateFlow(
                   trimmed, activeTab!.id, prdId!,
+                  env.artifact_template_id!, env.artifact_template_name,
+                )
+                settlePendingSend()
+              },
+              onChangeTicketsTemplate: (env, target) => {
+                // The tickets' in-place format switch. The primitive's guard
+                // (ctx.ticketsTarget && env.artifact_template_id) already
+                // ensures both are present before this executor runs; the
+                // set-over-PRD preference was resolved into `ticketsTarget`
+                // above.
+                void ticketsChangeTemplateFlow(
+                  trimmed, activeTab!.id, target,
                   env.artifact_template_id!, env.artifact_template_name,
                 )
                 settlePendingSend()
@@ -4859,7 +4946,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

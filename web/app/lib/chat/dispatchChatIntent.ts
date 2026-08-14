@@ -40,6 +40,15 @@ import type { ChatIntentEnvelope } from "../api"
 export interface DispatchChatIntentContext {
   hasEditTarget: boolean
   editTargetPrdId: number | null
+  /** change_tickets_template's resolved target — WHOSE tickets switch format.
+   *  Caller-resolved like `editTargetPrdId`, but its own field rather than a
+   *  reuse of it, because the tickets target is not always a PRD: a thread
+   *  that generated a STANDALONE set switches that set (it is what "the
+   *  tickets" means on screen), and only a set-less thread falls back to the
+   *  tab's PRD. `ChatScreen` resolves set-over-PRD from its own tab state;
+   *  the project chat passes null (no tickets surface there) so the intent
+   *  falls through to its grounded ask. */
+  ticketsTarget: { ticketSetId: number } | { prdId: number } | null
 }
 
 /** The executor callbacks a caller injects — its own inline flows, unchanged.
@@ -60,6 +69,14 @@ export interface ChatIntentExecutors {
    *  edit_prd, reused here rather than a second per-caller resolution path,
    *  since both intents target "the tab's PRD or the conversation's". */
   onChangeTemplate: (envelope: ChatIntentEnvelope, prdId: number | null) => void
+  /** change_tickets_template: switch the thread's TICKETS into a different
+   *  uploaded ticket format in place (POST /v1/stories/change-template).
+   *  `target` is `ctx.ticketsTarget` passed through — see that field for why
+   *  it is its own resolution rather than a reuse of `editTargetPrdId`. */
+  onChangeTicketsTemplate: (
+    envelope: ChatIntentEnvelope,
+    target: { ticketSetId: number } | { prdId: number },
+  ) => void
   /** create_artifact: write a document of any kind into the shared library.
    *  Needs no target PRD — a leadership update stands alone — so unlike
    *  edit_prd/change_prd_template this has no guard beyond the intent match. */
@@ -93,6 +110,10 @@ export type DispatchChatIntentResult = { handled: true } | { handled: false }
  *  - `change_prd_template` → `onChangeTemplate` only when `ctx.hasEditTarget`
  *    AND `envelope.artifact_template_id` — else `onAnswer`. Same target guard
  *    as `edit_prd` (a format switch is targeted exactly like an edit).
+ *  - `change_tickets_template` → `onChangeTicketsTemplate` only when
+ *    `ctx.ticketsTarget` AND `envelope.artifact_template_id` — else
+ *    `onAnswer`. Its OWN target field, not `hasEditTarget`: the tickets
+ *    target may be a standalone set rather than a PRD.
  *  - `assign_tickets` → `onAssignTickets` only when `ctx.hasEditTarget` AND a
  *    non-empty `envelope.instruction` — else `onAnswer`. Same target guard as
  *    `edit_prd` (an assignment is targeted exactly like an edit).
@@ -136,6 +157,18 @@ export function dispatchChatIntent(
     case "change_prd_template":
       if (ctx.hasEditTarget && envelope.artifact_template_id) {
         executors.onChangeTemplate(envelope, ctx.editTargetPrdId)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
+
+    case "change_tickets_template":
+      // Guarded like change_prd_template (a format id must be present — the
+      // backend downgrades format-less switches, so this is the older-backend
+      // edge), but on the TICKETS target the caller resolved: a standalone
+      // set, a PRD's tickets, or nothing → grounded ask.
+      if (ctx.ticketsTarget && envelope.artifact_template_id) {
+        executors.onChangeTicketsTemplate(envelope, ctx.ticketsTarget)
         return { handled: true }
       }
       executors.onAnswer()

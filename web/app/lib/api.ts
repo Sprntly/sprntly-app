@@ -961,6 +961,13 @@ export type ChatIntentEnvelope = {
      *  backend downgrades a PRD-less or instruction-less request to `answer`
      *  before it reaches a surface. */
     | "assign_tickets"
+    /** Switch the thread's TICKETS into a different uploaded ticket format —
+     *  dispatches POST /v1/stories/change-template with
+     *  `artifact_template_id`. The TARGET is the client's to resolve (the
+     *  tab's standalone ticket set, else the tab PRD's tickets), because a
+     *  standalone set has no prd_id the backend could gate on; a format-less
+     *  request is still downgraded to `answer` server-side. */
+    | "change_tickets_template"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -4014,6 +4021,26 @@ export type StoryCache = {
   fresh: boolean
   stories: GeneratedStory[]
   generated_at?: string
+  /** Which uploaded TICKET format rendered this set. Null/absent = Sprntly's
+   *  built-in layout (including sets stored before the stamp existed). */
+  artifact_template_id?: string | null
+  /** That format's display name, resolved server-side (same contract as
+   *  `prdApi.get`) so the footer's "Format: {name}" label needs no second
+   *  fetch. Null for the built-in and for a since-deleted format. */
+  artifact_template_name?: string | null
+}
+
+/** What POST /v1/stories/change-template returns. `unchanged` (no `stories`)
+ *  means the set was already in that format — a satisfied request, skip the
+ *  re-render. Otherwise `stories` IS the re-laid set, already persisted:
+ *  identities, edits and tracker mappings preserved (it is a re-LAYOUT, not a
+ *  regeneration — see the backend route's docstring). */
+export type TicketTemplateSwitch = {
+  status: "ready"
+  unchanged?: boolean
+  artifact_template_id: string | null
+  artifact_template_name: string | null
+  stories?: GeneratedStory[]
 }
 
 /** What POST /v1/stories/generate hands back on both paths.
@@ -4034,6 +4061,22 @@ export const storiesApi = {
    *  only regenerate when missing/stale (`fresh` false). No LLM call. */
   getForPrd: (prdId: number) =>
     api.get<StoryCache>(`/v1/stories/for-prd/${prdId}`),
+  /** Re-lay an existing ticket set into a different ticket format, in place —
+   *  a PRD's persisted tickets (`{prdId}`) or a standalone chat-born set
+   *  (`{ticketSetId}`). `templateId` null = back to Sprntly's built-in layout
+   *  (a real choice here, unlike the generate route's "no preference").
+   *  Synchronous: the response carries the re-laid stories, already persisted —
+   *  no job to poll. */
+  changeTemplate: (
+    target: { prdId: number } | { ticketSetId: number },
+    templateId: string | null,
+  ) =>
+    api.post<TicketTemplateSwitch>("/v1/stories/change-template", {
+      ...("prdId" in target
+        ? { prd_id: target.prdId }
+        : { ticket_set_id: target.ticketSetId }),
+      artifact_template_id: templateId,
+    }),
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
    *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
@@ -4152,6 +4195,11 @@ export type TicketSetRecord = {
   conversation_id: number | null
   source_text: string
   created_at?: string | null
+  /** Which uploaded TICKET format rendered this set (null/absent = Sprntly's
+   *  built-in), with its display name resolved server-side — the same pair
+   *  `storiesApi.getForPrd` carries, for the same footer label. */
+  artifact_template_id?: string | null
+  artifact_template_name?: string | null
 }
 
 /** One row of a thread's ticket-set list (GET /v1/ticket-sets/by-conversation/

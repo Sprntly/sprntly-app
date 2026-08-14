@@ -611,6 +611,60 @@ def test_preview_carries_the_compiled_skeleton_and_the_map(tenant_client):
     assert body["section_map"]["extra_sections"] == ["Launch checklist"]
 
 
+def test_a_ticket_formats_preview_is_a_sample_ticket_not_layout_json(tenant_client):
+    """A ticket format's `compiled` is the internal `[{label, source}]` layout
+    JSON. Serving that as the preview body put raw JSON on screen (the reported
+    bug); the preview must instead RENDER the layout — a sample ticket on the
+    left, and a section map synthesized from the same layout on the right."""
+    import json as _json
+
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client, name="Acme Tickets", artifact_type="tickets").json()["id"]
+    db.set_compile_result(
+        company_id=t.company_id, template_id=tid, compile_status="ready",
+        compiled=_json.dumps([
+            {"label": "Summary", "source": "what"},
+            {"label": "Story", "source": "user_story"},
+            {"label": "QA owner", "source": "custom:qa_owner"},
+        ]),
+    )
+
+    body = t.client.get(f"{_URL}/{tid}/preview").json()
+
+    assert body["format"] == "markdown"
+    # The customer's own labels, rendered as a document — never the plumbing.
+    assert "**Summary**" in body["body"]
+    assert "**QA owner**" in body["body"]
+    assert '"source"' not in body["body"]
+    # Placeholders read as ghost text, exactly like the PRD preview's.
+    assert "{{" in body["body"]
+    # Acceptance criteria always ship with a ticket, so the sample says so.
+    assert "**Acceptance criteria**" in body["body"]
+    # The right pane's map now exists for ticket formats too, layout-derived.
+    rows = body["section_map"]["sections"]
+    assert [r["customer"] for r in rows] == ["Summary", "Story", "QA owner"]
+    assert rows[1]["form"] == "stories"
+
+
+def test_a_ticket_format_with_an_unreadable_layout_previews_empty(tenant_client):
+    """Junk in `compiled` must yield the "couldn't build a preview yet" empty
+    state — never the BUILT-IN layout wearing the customer's name."""
+    from app import db
+
+    t = tenant_client.make(slug="acme")
+    tid = _create(t.client, name="T", artifact_type="tickets").json()["id"]
+    db.set_compile_result(
+        company_id=t.company_id, template_id=tid, compile_status="ready",
+        compiled="not json at all",
+    )
+
+    body = t.client.get(f"{_URL}/{tid}/preview").json()
+    assert body["body"] == ""
+    assert body["section_map"]["sections"] == []
+
+
 # ─── edit ────────────────────────────────────────────────────────────────────
 
 

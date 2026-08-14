@@ -1000,7 +1000,9 @@ CREATE TABLE prd_tickets (
     stories       TEXT NOT NULL DEFAULT '[]',
     status        TEXT NOT NULL DEFAULT 'ready',
     error         TEXT,
-    generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    generated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which ticket format rendered the set (20260814120000_ticket_template_stamp.sql).
+    artifact_template_id TEXT
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
@@ -1020,7 +1022,9 @@ CREATE TABLE ticket_sets (
     status          TEXT NOT NULL DEFAULT 'generating',
     error           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Which ticket format rendered the set (20260814120000_ticket_template_stamp.sql).
+    artifact_template_id TEXT
 );
 CREATE INDEX ticket_sets_company_idx ON ticket_sets (company_id, id DESC);
 CREATE INDEX ticket_sets_conversation_idx ON ticket_sets (conversation_id);
