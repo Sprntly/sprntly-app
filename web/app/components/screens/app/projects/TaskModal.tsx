@@ -17,12 +17,17 @@ import { projectsApi, type DelegationLedgerRow } from "../../../../lib/api"
 import { DelegationActions, type ViewerParty } from "./DelegationActions"
 import styles from "./TaskModal.module.css"
 
-/** Human-readable label for a derived delegation status. */
-const STATUS_LABEL: Record<string, string> = {
+/** Human-readable label for a derived delegation status. Legacy labels
+ *  (`accepted`/`declined`/`cancelled`/`reopened`) are kept so any
+ *  pre-existing derived row from before the state-model simplification
+ *  still renders a human label — they are never targets of a fresh
+ *  transition (see `DelegationActions.tsx`'s `LEGAL_ACTIONS`). */
+export const STATUS_LABEL: Record<string, string> = {
   assigned: "Assigned",
   accepted: "Accepted",
   in_progress: "In progress",
   completed: "Done",
+  cleared: "Cleared",
   declined: "Declined",
   cancelled: "Cancelled",
   reopened: "Reopened",

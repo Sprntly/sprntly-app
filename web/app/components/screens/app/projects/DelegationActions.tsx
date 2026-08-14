@@ -7,60 +7,45 @@
 // authoritative surface, AD-P28) and inline on the assignee's delivered
 // brief turn in individual chat — one component, two render sites.
 //
-// `LEGAL_ACTIONS` below is a small CLIENT MIRROR of the server's transition
-// graph (`backend/app/db/delegation_events.py`'s `TRANSITIONS`/`EVENT_PARTY`).
-// It DUPLICATES that graph across the language boundary by necessity — the
-// server stays the sole authority (an out-of-sync button just 409s); this map
-// exists only so no illegal-edge or wrong-party button is ever SHOWN. It is a
-// deliberate SUBSET of the legal edges (a UX choice — e.g. an assignee starts
-// with Accept, then progresses), never a superset: every entry is verified a
-// legal server edge by `DelegationActions.dom.test.tsx` against the same edge
-// list. Purely presentational — the parent owns the emit call + the refetch.
-import { useCallback, useState } from "react"
+// `LEGAL_ACTIONS` below is a small CLIENT MIRROR of the server's simplified
+// transition graph (`backend/app/db/delegation_events.py`'s
+// `TRANSITIONS`/`EVENT_PARTY` — no approve/reject; the agent owns
+// follow-through once assigned; `cleared` is the assigner's one terminal
+// kill switch). It DUPLICATES that graph across the language boundary by
+// necessity — the server stays the sole authority (an out-of-sync button
+// just 409s); this map exists only so no illegal-edge or wrong-party button
+// is ever SHOWN. It is a deliberate SUBSET of the legal edges, never a
+// superset: every entry is verified a legal server edge by
+// `DelegationActions.dom.test.tsx` against the same edge list. A status not
+// present in this map (e.g. a legacy `accepted`/`declined`/`cancelled`/
+// `reopened` row from before the simplification) degrades safely to an
+// empty action list via the `?? []` fallback below — it renders null, never
+// throws. Purely presentational — the parent owns the emit call + the
+// refetch.
+import { useCallback } from "react"
 import styles from "./DelegationActions.module.css"
 
 export type ViewerParty = "assignee" | "assigner"
 
-type Action = { event: string; label: string; needsNote?: boolean }
+type Action = { event: string; label: string }
 
-/** The party- and state-appropriate action set. A `reopened` delegation
- *  behaves like a freshly-`assigned` one (same outgoing edges), mirroring the
- *  server's own `TRANSITIONS`. Closed states an assignee can't act on map to
- *  an empty list (assignee never reopens — assigner-only). */
+/** The party- and state-appropriate action set. `completed`/`cleared` are
+ *  both terminal — no action follows either, for either party. */
 export const LEGAL_ACTIONS: Record<ViewerParty, Record<string, Action[]>> = {
   assignee: {
     assigned: [
-      { event: "accepted", label: "Accept" },
-      { event: "declined", label: "Decline", needsNote: true },
-    ],
-    reopened: [
-      { event: "accepted", label: "Accept" },
-      { event: "declined", label: "Decline", needsNote: true },
-    ],
-    accepted: [
-      { event: "in_progress", label: "In progress" },
+      { event: "in_progress", label: "Mark in progress" },
       { event: "completed", label: "Mark done" },
-      { event: "declined", label: "Decline", needsNote: true },
     ],
-    in_progress: [
-      { event: "completed", label: "Mark done" },
-      { event: "declined", label: "Decline", needsNote: true },
-    ],
+    in_progress: [{ event: "completed", label: "Mark done" }],
     completed: [],
-    declined: [],
-    cancelled: [],
+    cleared: [],
   },
   assigner: {
-    assigned: [{ event: "cancelled", label: "Cancel" }],
-    accepted: [{ event: "cancelled", label: "Cancel" }],
-    in_progress: [{ event: "cancelled", label: "Cancel" }],
-    reopened: [{ event: "cancelled", label: "Cancel" }],
-    completed: [{ event: "reopened", label: "Reopen" }],
-    cancelled: [{ event: "reopened", label: "Reopen" }],
-    declined: [
-      { event: "reopened", label: "Reopen" },
-      { event: "cancelled", label: "Cancel" },
-    ],
+    assigned: [{ event: "cleared", label: "Clear task" }],
+    in_progress: [{ event: "cleared", label: "Clear task" }],
+    completed: [],
+    cleared: [],
   },
 }
 
@@ -76,33 +61,14 @@ export type DelegationActionsProps = {
 }
 
 export function DelegationActions({ delegationId, status, viewerParty, onEmit, compact }: DelegationActionsProps) {
-  const [declining, setDeclining] = useState(false)
-  const [note, setNote] = useState("")
-
   const actions = LEGAL_ACTIONS[viewerParty]?.[status] ?? []
 
   const onClick = useCallback(
     (action: Action) => {
-      if (action.needsNote) {
-        setDeclining(true)
-        return
-      }
       onEmit(action.event)
     },
     [onEmit],
   )
-
-  const onConfirmDecline = useCallback(() => {
-    const trimmed = note.trim()
-    onEmit("declined", trimmed.length > 0 ? trimmed : undefined)
-    setDeclining(false)
-    setNote("")
-  }, [note, onEmit])
-
-  const onCancelDecline = useCallback(() => {
-    setDeclining(false)
-    setNote("")
-  }, [])
 
   if (actions.length === 0) return null
 
@@ -111,48 +77,19 @@ export function DelegationActions({ delegationId, status, viewerParty, onEmit, c
       className={`${styles.actions} ${compact ? styles.compact : ""}`}
       data-testid={`delegation-actions-${delegationId}`}
     >
-      {declining ? (
-        <div className={styles.declineWrap} data-testid="delegation-decline-form">
-          <input
-            className={styles.declineNote}
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Add a note (optional)"
-            aria-label="Decline note"
-            data-testid="delegation-decline-note"
-          />
-          <button
-            type="button"
-            className={`${styles.btn} ${styles.btnDanger}`}
-            onClick={onConfirmDecline}
-            data-testid="delegation-decline-confirm"
-          >
-            Decline
-          </button>
-          <button
-            type="button"
-            className={styles.btn}
-            onClick={onCancelDecline}
-            data-testid="delegation-decline-cancel"
-          >
-            Cancel
-          </button>
-        </div>
-      ) : (
-        actions.map((action) => (
-          <button
-            key={action.event}
-            type="button"
-            className={`${styles.btn} ${action.event === "declined" ? styles.btnDanger : ""} ${
-              action.event === "accepted" || action.event === "completed" ? styles.btnAccent : ""
-            }`}
-            onClick={() => onClick(action)}
-            data-testid={`delegation-action-${action.event}`}
-          >
-            {action.label}
-          </button>
-        ))
-      )}
+      {actions.map((action) => (
+        <button
+          key={action.event}
+          type="button"
+          className={`${styles.btn} ${action.event === "cleared" ? styles.btnDanger : ""} ${
+            action.event === "completed" ? styles.btnAccent : ""
+          }`}
+          onClick={() => onClick(action)}
+          data-testid={`delegation-action-${action.event}`}
+        >
+          {action.label}
+        </button>
+      ))}
     </div>
   )
 }
