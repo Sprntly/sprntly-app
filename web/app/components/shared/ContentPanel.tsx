@@ -36,7 +36,7 @@ import {
 import { ConfirmDialog } from "./ConfirmDialog"
 import { builtinFormatName } from "../../lib/compileNotes"
 import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
-import { PrdPanelContent } from "./PrdPanelContent"
+import { PrdPanelContent, type PrdPanelContentProps } from "./PrdPanelContent"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { EVIDENCE_GEN, STANDALONE_TICKET_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
@@ -323,7 +323,18 @@ function useResolvePrd() {
   return { meta, resolving, resolve }
 }
 
-export function ContentPanel() {
+export type ContentPanelProps = {
+  /** Context-optional overrides forwarded verbatim to the PRD tab's
+   *  `PrdPanelContent` (see its own doc for the override contract — prop
+   *  provided → used instead of context; prop absent → context, unchanged).
+   *  Every OTHER tab (Evidence / Tickets / Reports / Document) and the
+   *  panel's own chrome (tab bar, resize, header Share menu) stay bound to
+   *  the workspace-root context; this is additive, main-chat's own render
+   *  (`<ContentPanel />`, no props) is byte-identical to before. */
+  prdPanelOverrides?: Omit<PrdPanelContentProps, "evidenceTabAvailable">
+}
+
+export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const guestSession = useGuestSession()
   const { content } = useContent()
@@ -674,7 +685,9 @@ export function ContentPanel() {
 
         <div className="cpanel-body">
           {activeTab === "evidence" && <EvidenceTab />}
-          {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
+          {activeTab === "prd" && (
+            <PrdPanelContent evidenceTabAvailable={!evidenceHidden} {...prdPanelOverrides} />
+          )}
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
             <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />

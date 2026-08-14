@@ -49,16 +49,68 @@ function PrdSummaryStrip({ prd }: { prd: PrdState }) {
   )
 }
 
-export function PrdPanelContent({ evidenceTabAvailable = true }: {
+/** The panel's own writes only ever patch these three PRD/generation slices —
+ *  never the rest of `AppContentState` — so an injected override can take
+ *  this narrowed shape instead of the full content patch. */
+export type PrdPanelContentPatch = Partial<{
+  prd: PrdState | null
+  prdGenerating: boolean
+  prdPartialHtml: string | null
+}>
+
+export type PrdPanelContentProps = {
   /** Whether the panel's Evidence tab is currently shown. Gates the HTML PRD's
    *  "View more evidence" link (top-3 evidence fold) — with no Evidence tab to
    *  jump to, we render the full list instead of a link that goes nowhere. */
   evidenceTabAvailable?: boolean
-} = {}) {
-  const { showToast, openContentPanel } = useNavigation()
-  const { content, setContent } = useContent()
+  // ── Context-optional overrides (additive) ─────────────────────────────
+  // This component is bound by default to the workspace-root ContentContext/
+  // NavigationContext (main chat, unchanged). Every prop below is OPTIONAL and
+  // OVERRIDES the matching context read when provided; when a prop is absent
+  // the component falls back to context exactly as before, so every existing
+  // caller (which passes none of these) is byte-identical. This lets the SAME
+  // panel be mounted against a caller-owned PRD (e.g. a project's own scoped
+  // fetch) instead of the global, workspace-wide `content.prd`.
+  /** Overrides `content.prd`. */
+  prd?: PrdState | null
+  /** Overrides `content.prdGenerating`. */
+  prdGenerating?: boolean
+  /** Overrides `content.prdPartialHtml`. */
+  prdPartialHtml?: string | null
+  /** Overrides `useContent().setContent` for this panel's own writes (format
+   *  switch, opening a prior generation, live-stream) — narrowed to the same
+   *  three slices this file ever patches. Absent: patches the global
+   *  ContentContext, unchanged from today. */
+  onPrdContentChange?: (patch: PrdPanelContentPatch) => void
+  /** Overrides `useNavigation().showToast`. Absent: uses the global toast. */
+  onToast?: (title: string, sub: string) => void
+  /** Overrides `useNavigation().openContentPanel` — used by the "View more
+   *  evidence" jump and the footer's Tickets CTA. Absent: switches the shared
+   *  right-rail panel's tab, unchanged from today. */
+  onOpenTab?: (tab: "evidence" | "tickets") => void
+}
+
+export function PrdPanelContent({
+  evidenceTabAvailable = true,
+  prd: prdOverride,
+  prdGenerating: prdGeneratingOverride,
+  prdPartialHtml: prdPartialHtmlOverride,
+  onPrdContentChange,
+  onToast,
+  onOpenTab,
+}: PrdPanelContentProps = {}) {
+  const nav = useNavigation()
+  const { content, setContent: setContentContext } = useContent()
   const guestSession = useGuestSession()
-  const prd = content.prd
+
+  // Prop provided → use it; prop absent → fall back to context (identical to
+  // today for every existing caller, which supplies none of these).
+  const prd = prdOverride !== undefined ? prdOverride : content.prd
+  const prdGenerating = prdGeneratingOverride !== undefined ? prdGeneratingOverride : content.prdGenerating
+  const prdPartialHtml = prdPartialHtmlOverride !== undefined ? prdPartialHtmlOverride : content.prdPartialHtml
+  const setContent = onPrdContentChange ?? setContentContext
+  const showToast = onToast ?? nav.showToast
+  const openContentPanel = onOpenTab ?? nav.openContentPanel
 
   // Jump to the Evidence tab from the HTML PRD's injected "View more evidence"
   // link (stable identity so the iframe's one-time load handler never rebinds).
@@ -399,7 +451,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               </div>
             )}
           </PrdMarkdownEditor>
-        ) : content.prdGenerating && content.prdPartialHtml ? (
+        ) : prdGenerating && prdPartialHtml ? (
           // Live streaming preview: partial Part A HTML is already arriving —
           // render it as it grows, with a slim pulsing indicator instead of the
           // full-pane spinner. The finished PRD (poll result) replaces this.
@@ -410,14 +462,14 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               sub="Rendering it below as it's written — the finished draft replaces this."
             />
             <StreamingHtmlPreview
-              html={stripLeadingFence(stripHtmlCodeFence(content.prdPartialHtml))}
+              html={stripLeadingFence(stripHtmlCodeFence(prdPartialHtml))}
               title="PRD draft (generating)"
               testId="prd-streaming-preview"
             />
           </div>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
-            {content.prdGenerating ? (
+            {prdGenerating ? (
               <GeneratingPane
                 {...PRD_GEN}
                 testId="prd-generating"
