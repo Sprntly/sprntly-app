@@ -23,7 +23,9 @@ export type ArtifactShareMetadata = {
  *              workspace). Read-only shell + the Join prompt, which grants
  *              the workspace and then re-resolves to `member`. */
 type ArtifactShareSameCompany = {
-  artifact_type: "prd"
+  // "prd" | "evidence" today; a future ticket adds "ticket_set" to this
+  // same slot — see ArtifactShareContentResponse's own comment.
+  artifact_type: "prd" | "evidence"
   artifact_id: number
   /** The PRD's opaque, unguessable external identifier — what a
    *  redirect/copyable link should use instead of artifact_id. */
@@ -52,17 +54,31 @@ export type ArtifactShareJoinResult = {
   workspace_id: string
 }
 
-/** GET .../content's shape: the raw rendered PRD row, its evidence doc (when
- *  one exists for this PRD's theme — null otherwise), and the persisted
- *  ticket set (null when tickets were never generated). Mirrors the shapes
- *  `prdApi.get`/`evidenceApi.get`/`storiesApi.getForPrd` already return —
- *  GuestArtifactViewer maps this with the SAME adapters those callers use
- *  (markdownToPrdState / markdownToEvidenceState), never a parallel parser. */
-export type ArtifactShareContentResponse = {
-  prd: PrdRecord
-  evidence: EvidenceRecord | null
-  tickets: { stories: GeneratedStory[] } | null
-}
+/** GET .../content's shape: a discriminated union on `artifact_type`.
+ *
+ *  The "prd" member is the original fixed shape — the raw rendered PRD row,
+ *  its evidence doc (when one exists for this PRD's theme — null otherwise),
+ *  and the persisted ticket set (null when tickets were never generated) —
+ *  plus the additive `artifact_type` discriminant the backend now emits.
+ *  Mirrors the shapes `prdApi.get`/`evidenceApi.get`/`storiesApi.getForPrd`
+ *  already return — GuestArtifactViewer maps this with the SAME adapters
+ *  those callers use (markdownToPrdState / markdownToEvidenceState), never a
+ *  parallel parser.
+ *
+ *  The "evidence" member is the STANDALONE-evidence case: no sibling PRD, no
+ *  tickets — just the rendered evidence row.
+ *
+ *  This is the scaffold a future ticket extends with one more "ticket_set"
+ *  member — write any new consumer to narrow on `artifact_type` so adding
+ *  that arm stays a one-line change. */
+export type ArtifactShareContentResponse =
+  | {
+      artifact_type: "prd"
+      prd: PrdRecord
+      evidence: EvidenceRecord | null
+      tickets: { stories: GeneratedStory[] } | null
+    }
+  | { artifact_type: "evidence"; evidence: EvidenceRecord }
 
 export const artifactShareApi = {
   /** Mint a fresh share token for an artifact (e.g. a PRD) the caller can see.

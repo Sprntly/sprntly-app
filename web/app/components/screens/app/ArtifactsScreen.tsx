@@ -609,6 +609,7 @@ export function ArtifactsScreen() {
         setContent({
           evidence: { ...markdownToEvidenceState(rec.payload_md), question: rec.question },
           evidenceId: rec.id,
+          evidenceShareToken: rec.share_token ?? null,
           evidenceGenerating: false,
         })
         return

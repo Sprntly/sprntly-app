@@ -29,6 +29,7 @@ from app.db import (
     find_latest_failed_evidence,
     start_evidence,
 )
+from app.db.artifact_shares import get_or_mint_canonical_share
 from app.deps.ownership import require_owned_brief, require_owned_evidence
 from app.evidence_kg import generate_evidence_kg
 from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
@@ -195,4 +196,13 @@ def get(
     """
     # require_owned_evidence resolves evidence → brief → dataset → company and
     # 404s on mismatch (or a missing row), returning the evidence row.
-    return require_owned_evidence(evidence_id, company.company_id, company.workspace_id)
+    row = require_owned_evidence(evidence_id, company.company_id, company.workspace_id)
+    # Canonical share token: read-mostly get-or-create (mirrors prd.py's GET
+    # handlers). Ownership is already proven by require_owned_evidence above.
+    row["share_token"] = get_or_mint_canonical_share(
+        artifact_type="evidence", artifact_id=row["id"],
+        owner_company_id=company.company_id,
+        owner_workspace_id=company.workspace_id,
+        created_by_user_id=company.user_id,
+    )["token"]
+    return row
