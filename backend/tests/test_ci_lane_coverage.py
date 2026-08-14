@@ -256,6 +256,19 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "fast lane; this suite is the real-DB proof, run locally against the "
         "dev rig when touching this migration or `db/delegation_events.py`."
     ),
+    ("test_delegation_followups.py", "RUN_DELEGATION_FOLLOWUPS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "delegation_followups migration's FK cascade, partial index, and RLS "
+        "policy, plus a real upsert_followup/get_followup round trip — the "
+        "fake Supabase client has no SQL engine behind it and cannot enforce "
+        "any of those. Deterministic backstop: test_delegation_status_ingest.py "
+        "drives upsert_followup/get_followup against FakeSupabaseClient in the "
+        "fast lane (partial-merge semantics, the pending_done_since clear/set "
+        "contract) and test_delegation_cadence.py covers the pure cadence "
+        "engine with no DB at all; this suite is the real-DB proof, run "
+        "locally against the dev rig when touching this migration or "
+        "`db/delegation_followups.py`."
+    ),
     ("test_conversation_read_cursors.py", "RUN_CONVERSATION_READ_CURSORS_ROUNDTRIP"): (
         "Needs a real local Supabase (PostgREST + Postgres) to prove the "
         "conversation_read_cursors migration's composite PK and RLS/policy "

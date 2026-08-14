@@ -331,6 +331,15 @@ def _run_sync(
 
         transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
         maybe_promote_turn(project_id, conversation_id, transcript)
+        # Inbound task-status ingestion on the SAME reply (task cadence
+        # spine): best-effort, never raises. Classifies the human's own
+        # message (`question`), not Sprntly's answer, against the
+        # replier's currently open delegated tasks in this conversation.
+        # Same ungated shape as the promotion call directly above — both
+        # only ever run on a project-scoped ask.
+        from app.delegation_status_ingest import maybe_ingest_status
+
+        maybe_ingest_status(project_id, conversation_id, user_id, question)
 
 
 async def run_ask_job(

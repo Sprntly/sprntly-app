@@ -1663,6 +1663,24 @@ CREATE TABLE conversation_read_cursors (
     PRIMARY KEY (conversation_id, user_id)
 );
 
+-- Mirrors 20260814140000_delegation_followups.sql. Inputs/facts-only
+-- cadence-scheduling row (AD-P17) — no derived status column. The
+-- migration's own partial `where muted = false` index is not mirrored
+-- (sqlite supports partial indexes, but nothing in the fast lane needs
+-- it); RLS is a real-Postgres concern proven by
+-- test_delegation_followups.py, not sqlite. This mirror exists only so
+-- `delegation_status_ingest.py`'s fast-lane tests can upsert/read against
+-- FakeSupabaseClient.
+CREATE TABLE delegation_followups (
+    delegation_id       INTEGER PRIMARY KEY REFERENCES project_delegations (id) ON DELETE CASCADE,
+    expected_completion TEXT,
+    next_check_in       TEXT,
+    last_checked_in     TEXT,
+    muted               INTEGER NOT NULL DEFAULT 0,
+    pending_done_since  TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
 -- bigint identity / jsonb / timestamptz are INTEGER / TEXT here). The persisted
 -- call transcripts the VoC digest reads instead of live-fetching per question.
