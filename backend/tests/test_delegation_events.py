@@ -54,6 +54,7 @@ pytestmark = [
 
 _MIGRATIONS_DIR = pathlib.Path(__file__).resolve().parents[2] / "supabase" / "migrations"
 _MIGRATION_FILE = "20260813140100_delegation_events.sql"
+_CLEARED_MIGRATION_FILE = "20260814130000_delegation_cleared_event.sql"
 _DB_CONTAINER = os.getenv("PROJECTS_SCHEMA_TEST_DB_CONTAINER", "supabase_db_Sprntly")
 
 
@@ -203,6 +204,74 @@ def test_migration_idempotent_double_apply():
             f"stdout: {result.stdout.decode(errors='replace')}\n"
             f"stderr: {result.stderr.decode(errors='replace')}"
         )
+
+
+# ── `cleared` widening — AC5, the un-thinnable constraint-name proof ──────
+
+
+def test_migration_admits_cleared_event_idempotent(sb, delegation, fixture_ids):
+    """AC5 — applying the `cleared`-widening migration twice is a no-op (no
+    error), exactly ONE event CHECK constraint exists on `delegation_events`
+    afterwards with the `conname` the migration's own `DROP CONSTRAINT`
+    targets, and — the actual failure mode this proves shut — a real
+    `cleared` insert succeeds AND a real `assigned` insert still succeeds
+    (proving the recreated CHECK is the ONLY event CHECK and admits both;
+    if the DROP had silently no-op'd on a mismatched name, the OLD CHECK
+    would still be active and would reject `cleared`)."""
+    if shutil.which("docker") is None:
+        pytest.skip("docker not on PATH — cannot apply the migration for this proof")
+
+    path = _MIGRATIONS_DIR / _CLEARED_MIGRATION_FILE
+    assert path.is_file(), f"migration file missing: {path}"
+
+    for _ in range(2):
+        with path.open("rb") as f:
+            result = subprocess.run(
+                [
+                    "docker", "exec", "-i", _DB_CONTAINER,
+                    "psql", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1",
+                ],
+                stdin=f,
+                capture_output=True,
+                timeout=30,
+            )
+        assert result.returncode == 0, (
+            f"applying {_CLEARED_MIGRATION_FILE} was not idempotent:\n"
+            f"stdout: {result.stdout.decode(errors='replace')}\n"
+            f"stderr: {result.stderr.decode(errors='replace')}"
+        )
+
+    # Exactly one event CHECK constraint on delegation_events, and its name
+    # is the one the migration's own DROP CONSTRAINT targets.
+    conname_result = subprocess.run(
+        [
+            "docker", "exec", _DB_CONTAINER,
+            "psql", "-U", "postgres", "-d", "postgres", "-tAc",
+            "select conname from pg_constraint where conrelid = 'delegation_events'::regclass "
+            "and contype = 'c' and pg_get_constraintdef(oid) ilike '%event%';",
+        ],
+        capture_output=True,
+        timeout=15,
+    )
+    assert conname_result.returncode == 0, conname_result.stderr.decode(errors="replace")
+    connames = [
+        line.strip() for line in conname_result.stdout.decode().splitlines() if line.strip()
+    ]
+    assert connames == ["delegation_events_event_check"], (
+        f"expected exactly one event CHECK named 'delegation_events_event_check', got {connames!r}"
+    )
+
+    from app.db.delegation_events import record_event
+
+    cleared_row = record_event(
+        delegation_id=delegation["id"], event="cleared", actor_user_id=delegation["assigner_user_id"]
+    )
+    assert cleared_row["event"] == "cleared"
+
+    assigned_row = record_event(
+        delegation_id=delegation["id"], event="assigned", actor_user_id=delegation["assigner_user_id"]
+    )
+    assert assigned_row["event"] == "assigned"
 
 
 # ── Schema shape / integrity (AC1, AC3, AC8) ────────────────────────────

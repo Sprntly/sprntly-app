@@ -6,7 +6,13 @@ The private individual thread historically answers single-shot
 project's full memory/artifacts/ledger the @Sprntly group agent can. This
 module runs the SAME project read tools the group agent uses (imported from
 `app.project_group_context` — never forked, so the tenancy gate stays
-single-sourced) on a bounded `run_tool_loop`.
+single-sourced) on a bounded `run_tool_loop`, PLUS the same `delegate_task`
+tool the group agent carries (`app.project_delegation` — reused verbatim,
+never forked) so a member can hand a task off from their own private chat,
+not only the group chat. `handle_delegate_task` owns the double-membership
+IDOR gate and the brief; this module only threads the caller's identity
+through and injects the project roster so the model can resolve a
+free-text assignee.
 
 PRD edits no longer flow through this responder: the client-side intent
 classifier (`dispatchChatIntent`, `web/app/lib/chat/dispatchChatIntent.ts`)
@@ -38,6 +44,8 @@ import logging
 import time
 from typing import Callable
 
+from app import project_delegation
+from app.db import projects as projects_db
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_group_context import dispatch_read_tool, read_tools
@@ -65,6 +73,22 @@ _SYSTEM = (
 )
 
 
+def _roster_prompt_block(roster: list[dict]) -> str:
+    """"PROJECT ROSTER:\n- {first} — {job_role}" — mirrors
+    `routes.projects._group_system_with_roster`'s per-line rendering
+    exactly, so the private surface resolves a free-text assignee ("the
+    designer") to the same names/roles the group agent's roster block
+    uses. Built from an ALREADY-fetched `roster` list (fetch-once, AD-P7)
+    rather than a second `list_members` read."""
+    lines = []
+    for m in roster:
+        name = m.get("name") or "(unnamed)"
+        first = name.split()[0] if name != "(unnamed)" else name
+        role = m.get("job_role") or "no role set"
+        lines.append(f"- {first} — {role}")
+    return "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
+
+
 def _render_transcript(history: list[dict], question: str) -> str:
     """Render prior turns + the new question into the loop's user message. Each
     history turn is `{role, content}`-shaped (assistant turns are the agent's);
@@ -89,33 +113,57 @@ def respond_individual(
     question: str,
     history: list[dict],
     single_shot: Callable[[], dict],
+    assigner_user_id: str | None = None,
+    source_conversation_id: int | None = None,
 ) -> dict:
     """Produce the private-chat reply for a project ask via a bounded tool loop.
 
     Returns a payload dict `{"answer": <text>, "citations": []}` (single-shot
     shape). On ANY failure, degrades to `single_shot()` (the caller's own
     `qa_agent.answer(...)`), so the request still returns an answer body — never
-    a 500 (AD-P7). Read tools only — no PRD-write tool is registered; an
-    edit-phrased turn that reaches here answers in text, it never creates a
-    `prd_patches` row (edits are classified client-side, see the module
-    docstring)."""
+    a 500 (AD-P7). Registers the project read tools AND `delegate_task` (reused
+    verbatim from `app.project_delegation` — never forked); no PRD-write tool
+    is registered — an edit-phrased turn that reaches here answers in text, it
+    never creates a `prd_patches` row (edits are classified client-side, see
+    the module docstring). `assigner_user_id`/`source_conversation_id` are the
+    caller's own identity, threaded from `ask_job_runner` — a missing
+    `assigner_user_id` degrades `delegate_task` to a safe decline string
+    (`handle_delegate_task`'s own guard), never a 500."""
     start = time.monotonic()
-    tools = read_tools()
+    try:
+        roster = projects_db.list_members(project_id)
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        roster = []
+    tools = [project_delegation.DELEGATE_TASK_TOOL, *read_tools()]
+    system = f"{_SYSTEM}\n\n{_roster_prompt_block(roster)}"
     meta: dict = {}
 
     def _dispatch(name: str, tool_input: dict) -> str:
-        # Read tools only — returns None when `name` isn't one.
+        # Project-scoped read tools first; returns None when `name` isn't
+        # one of them, so delegate_task and the unknown-tool fallback below
+        # still apply.
         read = dispatch_read_tool(
             name, tool_input,
             project_id=project_id, dataset=dataset, company_id=company_id,
         )
         if read is not None:
             return read
+        if name == "delegate_task":
+            return project_delegation.handle_delegate_task(
+                project_id=project_id,
+                assigner_user_id=assigner_user_id,
+                source_conversation_id=source_conversation_id,
+                source_turn_id=None,
+                roster=roster,
+                dataset=dataset,
+                company_id=company_id,
+                tool_input=tool_input,
+            )
         return f"(unknown tool: {name})"
 
     try:
         text = run_tool_loop(
-            system=_SYSTEM,
+            system=system,
             user=_render_transcript(history, question),
             tools=tools,
             dispatch=_dispatch,

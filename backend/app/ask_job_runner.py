@@ -241,6 +241,8 @@ def _run_sync(
                 question=question,
                 history=history,
                 single_shot=_single_shot,
+                assigner_user_id=user_id,
+                source_conversation_id=conversation_id,
             )
         else:
             payload = _single_shot()

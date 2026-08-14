@@ -156,39 +156,44 @@ def list_events(delegation_id: int) -> list[dict]:
     )
 
 
-# ── State machine + party map (AD-P27, spec §3 decision 2) ────────────────
+# ── State machine + party map (AD-P27, spec §2/§3 decision 2 — simplified,
+# no approve/reject, terminal `cleared` kill switch) ───────────────────────
 #
 # Pure logic, no DB access — the emit route's gates 3/4 evaluate against
 # these directly. `assigned` is deliberately absent from `EVENT_PARTY`: it
 # is the server-only genesis event (the hand-off hook in `project_delegation.py`)
 # and is never client-emittable over this endpoint.
+#
+# `accepted`/`declined`/`cancelled`/`reopened` are no longer emittable (spec
+# §2 "No approve/reject" — once assigned, the agent owns follow-through) —
+# their absence from EVENT_PARTY/TRANSITIONS is what makes the emit route
+# reject them (gate 3 -> 422 for no-party; a legacy derived value can never
+# recur since nothing can emit into it again). `declined`/`cancelled` are
+# retained ONLY in CLOSED_STATES so any pre-existing derived row (from
+# before this simplification) still classifies as closed — they are never
+# targets of a fresh transition. `cleared` is the new single terminal kill
+# switch (spec §2 escape hatch), owned by the assigner.
 
-OPEN_STATES: frozenset[str] = frozenset({"assigned", "accepted", "in_progress", "reopened"})
-CLOSED_STATES: frozenset[str] = frozenset({"completed", "declined", "cancelled"})
+OPEN_STATES: frozenset[str] = frozenset({"assigned", "in_progress"})
+CLOSED_STATES: frozenset[str] = frozenset({"completed", "cleared", "declined", "cancelled"})
 
-#: Which PARTY may emit each client-emittable event. Assignee owns the
-#: forward-progress events (accept/start/finish/decline); assigner owns the
-#: two overrides (cancel, reopen) — no assigner-override completion.
+#: Which PARTY may emit each client-emittable event. The assignee owns
+#: forward-progress (start/finish); the assigner owns the one terminal
+#: override (clear = stop, the requester's kill switch).
 EVENT_PARTY: dict[str, str] = {
-    "accepted": "assignee",
     "in_progress": "assignee",
     "completed": "assignee",
-    "declined": "assignee",
-    "cancelled": "assigner",
-    "reopened": "assigner",
+    "cleared": "assigner",
 }
 
 #: Legal edges: current derived status -> the set of events that may follow
-#: it. A `reopened` delegation behaves like a freshly-`assigned` one — same
-#: outgoing edges (spec-silent; adopted per spec §3 decision 2).
+#: it. `completed` and `cleared` are both terminal — nothing can be emitted
+#: from either.
 TRANSITIONS: dict[str, frozenset[str]] = {
-    "assigned": frozenset({"accepted", "in_progress", "declined", "cancelled"}),
-    "accepted": frozenset({"in_progress", "completed", "declined", "cancelled"}),
-    "in_progress": frozenset({"completed", "declined", "cancelled"}),
-    "completed": frozenset({"reopened"}),
-    "declined": frozenset({"reopened", "cancelled"}),
-    "cancelled": frozenset({"reopened"}),
-    "reopened": frozenset({"accepted", "in_progress", "declined", "cancelled"}),
+    "assigned": frozenset({"in_progress", "completed", "cleared"}),
+    "in_progress": frozenset({"completed", "cleared"}),
+    "completed": frozenset(),
+    "cleared": frozenset(),
 }
 
 
