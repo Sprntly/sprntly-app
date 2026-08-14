@@ -9,10 +9,14 @@ module runs the SAME project read tools the group agent uses (imported from
 single-sourced) on a bounded `run_tool_loop`, PLUS the same `delegate_task`
 tool the group agent carries (`app.project_delegation` — reused verbatim,
 never forked) so a member can hand a task off from their own private chat,
-not only the group chat. `handle_delegate_task` owns the double-membership
-IDOR gate and the brief; this module only threads the caller's identity
-through and injects the project roster so the model can resolve a
-free-text assignee.
+not only the group chat, PLUS the same `execute_task` tool the group agent
+carries (`app.project_task_execution` — reused verbatim, never forked) so a
+member can ask Sprntly to draft the one v1 agent-doable task (a PRD) from
+their own private chat too. `handle_delegate_task`/`handle_execute_task` own
+their own gates and generation; this module only threads the caller's
+identity through, injects the project roster so the model can resolve a
+free-text assignee, and (for `execute_task`) supplies a `post_turn` callback
+so the drafted outcome lands back in this same conversation.
 
 PRD edits no longer flow through this responder: the client-side intent
 classifier (`dispatchChatIntent`, `web/app/lib/chat/dispatchChatIntent.ts`)
@@ -45,7 +49,9 @@ import time
 from typing import Callable
 
 from app import project_delegation
+from app import project_task_execution
 from app.db import projects as projects_db
+from app.db.conversations import post_individual_turn
 from app.llm import DEFAULT_MODEL, run_tool_loop
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_group_context import dispatch_read_tool, read_tools
@@ -134,7 +140,11 @@ def respond_individual(
         roster = projects_db.list_members(project_id)
     except Exception:  # noqa: BLE001 — best-effort, AD-P7
         roster = []
-    tools = [project_delegation.DELEGATE_TASK_TOOL, *read_tools()]
+    tools = [
+        project_delegation.DELEGATE_TASK_TOOL,
+        project_task_execution.EXECUTE_TASK_TOOL,
+        *read_tools(),
+    ]
     system = f"{_SYSTEM}\n\n{_roster_prompt_block(roster)}"
     meta: dict = {}
 
@@ -158,6 +168,20 @@ def respond_individual(
                 dataset=dataset,
                 company_id=company_id,
                 tool_input=tool_input,
+            )
+        if name == "execute_task":
+            post_turn = (
+                (lambda content: post_individual_turn(source_conversation_id, "assistant", content))
+                if source_conversation_id is not None else None
+            )
+            return project_task_execution.handle_execute_task(
+                project_id=project_id,
+                requester_user_id=assigner_user_id,
+                dataset=dataset,
+                company_id=company_id,
+                tool_input=tool_input,
+                roster=roster,
+                post_turn=post_turn,
             )
         return f"(unknown tool: {name})"
 

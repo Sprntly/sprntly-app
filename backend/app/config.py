@@ -584,6 +584,15 @@ class Settings(BaseSettings):
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
 
+    # Autonomous task follow-up sweep (app/delegation_followup.py): the
+    # TASK_FOLLOWUP scheduler job that pings/reschedules/escalates tasks
+    # past their next_check_in. OFF by default — its own opt-in flag ON
+    # TOP of SCHEDULER_ENABLED (the invite-reminder gating pattern), so a
+    # staging environment stays dark even with SCHEDULER_ENABLED=true
+    # until this is explicitly flipped for prod.
+    task_followup_enabled: bool = False
+    task_followup_interval_hours: int = 1
+
     # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
     # check of recent extraction output per skill_id against the expected
     # shape each vendored connector-extraction skill declares in its own

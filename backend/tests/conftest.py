@@ -1663,6 +1663,47 @@ CREATE TABLE conversation_read_cursors (
     PRIMARY KEY (conversation_id, user_id)
 );
 
+-- Mirrors 20260814140000_delegation_followups.sql. Inputs/facts-only
+-- cadence-scheduling row (AD-P17) — no derived status column. The
+-- migration's own partial `where muted = false` index is not mirrored
+-- (sqlite supports partial indexes, but nothing in the fast lane needs
+-- it); RLS is a real-Postgres concern proven by
+-- test_delegation_followups.py, not sqlite. This mirror exists only so
+-- `delegation_status_ingest.py`'s fast-lane tests can upsert/read against
+-- FakeSupabaseClient.
+CREATE TABLE delegation_followups (
+    delegation_id       INTEGER PRIMARY KEY REFERENCES project_delegations (id) ON DELETE CASCADE,
+    expected_completion TEXT,
+    next_check_in       TEXT,
+    last_checked_in     TEXT,
+    muted               INTEGER NOT NULL DEFAULT 0,
+    pending_done_since  TEXT,
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Mirrors 20260814150000_delegation_followup_sends.sql. Idempotent
+-- per-company send-ledger for the autonomous task follow-up sweep; the
+-- UNIQUE below is the fast-lane's proof-stand-in for the migration's own
+-- constraint (the real-Postgres RLS/policy shape is proven by
+-- test_delegation_followup_sends.py, not sqlite). This mirror exists only
+-- so `delegation_followup.py`'s stubbed-LLM sweep tests can record/read
+-- sends against FakeSupabaseClient.
+CREATE TABLE delegation_followup_sends (
+    id               TEXT PRIMARY KEY,
+    delegation_id    INTEGER NOT NULL REFERENCES project_delegations (id) ON DELETE CASCADE,
+    company_id       TEXT NOT NULL,
+    assignee_user_id TEXT NOT NULL,
+    check_key        TEXT NOT NULL,
+    channel          TEXT NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'sent',
+    sent_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (delegation_id, check_key, channel)
+);
+CREATE INDEX idx_delegation_followup_sends_person
+    ON delegation_followup_sends (assignee_user_id, sent_at);
+CREATE INDEX idx_delegation_followup_sends_deleg
+    ON delegation_followup_sends (delegation_id);
+
 -- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
 -- bigint identity / jsonb / timestamptz are INTEGER / TEXT here). The persisted
 -- call transcripts the VoC digest reads instead of live-fetching per question.
