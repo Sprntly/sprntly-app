@@ -64,7 +64,7 @@ import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
-import { prototypePath, projectPath } from "../../../lib/routes"
+import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -998,7 +998,6 @@ export function ChatScreen() {
     openContentPanel,
     closeContentPanel,
     contentPanelTab,
-    skipArtifactReflectOnNavRef,
   } = useNavigation()
   const router = useRouter()
   const searchParams = useSearchParams()
@@ -1007,23 +1006,20 @@ export function ChatScreen() {
   const { content, setContent } = useContent()
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
-  // generate response. Once generation lands, carry the user into that
-  // project's PRIVATE chat to continue. Deterministic — no `setTimeout`: the
-  // just-generated PRD lands in the content panel, and the AppShell-global
-  // `useArtifactUrlSync` would otherwise reflect it onto the URL via a
-  // `router.replace` in a passive effect that fires just after this push and
-  // reverts it back to `/?prd=…`. `skipArtifactReflectOnNavRef` (set here,
-  // consumed one-shot by that effect) suppresses exactly that one reflect —
-  // see `NavigationContext.tsx`/`useArtifactUrlSync.ts` for the mechanism.
-  // Best-effort: no id (an unbound generate, or an older backend) → stay put,
-  // never a broken nav.
-  const goToProjectPrivateChat = useCallback(
+  // generate response. We DON'T navigate away (the entry-flow reshape): the
+  // page stays on `/`, the just-generated PRD stays open in the content panel,
+  // and we simply RECORD the forked project id on the shared content state so
+  // the panel can surface a project-menu affordance in its header. Because we
+  // stay put we WANT the normal `?prd=…` reflect (no `skipArtifactReflectOnNavRef`
+  // — that guard only existed to suppress the reflect during the old away-nav).
+  // Best-effort: no id (an unbound generate, or an older backend) → no-op, the
+  // panel renders exactly as it always has.
+  const bindActiveProject = useCallback(
     (projectId: number | null | undefined) => {
       if (projectId == null) return
-      skipArtifactReflectOnNavRef.current = true
-      router.push(projectPath(projectId, { chat: "individual" }))
+      setContent({ activeProjectId: projectId })
     },
-    [router, skipArtifactReflectOnNavRef],
+    [setContent],
   )
   // Action dispatch is UNCONDITIONAL: one backend call (POST /v1/chat/intent,
   // backed by the Ask Planner — history-aware, sees the open PRD, the connected
@@ -2170,7 +2166,7 @@ export function ChatScreen() {
           // The PRD came from the main chat and forked a project — carry the
           // user into that project's private chat to continue (no-op when
           // nothing forked). Last, so all local state settled first.
-          goToProjectPrivateChat(autoProjectId)
+          bindActiveProject(autoProjectId)
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
@@ -2197,7 +2193,7 @@ export function ChatScreen() {
       }
     })()
     return tabId
-  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd, settleCommandAck, failDeferredAck, goToProjectPrivateChat])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd, settleCommandAck, failDeferredAck, bindActiveProject])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -2318,7 +2314,7 @@ export function ChatScreen() {
           // — same summary the typed command gets.
           postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
           // Same main-chat PRD fork continuity as the typed command.
-          goToProjectPrivateChat(start.project_id ?? null)
+          bindActiveProject(start.project_id ?? null)
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -2357,7 +2353,7 @@ export function ChatScreen() {
       setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
-  }, [activeTabId, chatInsightState, openContentPanel, setContent, showToast, goToProjectPrivateChat])
+  }, [activeTabId, chatInsightState, openContentPanel, setContent, showToast, bindActiveProject])
 
   const handleOpenEvidence = useCallback(async () => {
     if (!activeTabId) return
@@ -2536,6 +2532,13 @@ export function ChatScreen() {
     setContent(changed
       ? {
           conversationId: activeConvId,
+          // A project binding belongs to the thread that forked it — the same
+          // rule as the report pointer and the document below. Switching to
+          // another chat (or starting a new one) must not carry the previous
+          // thread's project-menu affordance onto an unbound conversation. The
+          // main-chat generate re-binds AFTER its conversation is established,
+          // so this clear never races the bind that follows a fork.
+          activeProjectId: null,
           reportFocusId: null,
           reportFocusStandalone: false,
           // Cleared with the rest, and for exactly the same reason: a document
@@ -3151,7 +3154,7 @@ export function ChatScreen() {
           // tasks) — post the chat summary of what got built.
           postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
           // Same main-chat PRD fork continuity as the typed/Generate-button paths.
-          goToProjectPrivateChat(start.project_id ?? null)
+          bindActiveProject(start.project_id ?? null)
         } else {
           setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -3163,7 +3166,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd, goToProjectPrivateChat])
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd, bindActiveProject])
 
   /** Freeze the questions turn into its settled, read-only form. Both answering
    *  paths call this — the card's submit and a prose reply in the composer — so

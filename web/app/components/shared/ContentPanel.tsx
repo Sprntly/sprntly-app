@@ -37,6 +37,7 @@ import { ConfirmDialog } from "./ConfirmDialog"
 import { builtinFormatName } from "../../lib/compileNotes"
 import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
 import { PrdPanelContent, type PrdPanelContentProps } from "./PrdPanelContent"
+import { ProjectPanelSection } from "../screens/app/projects/ProjectPanelSection"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { EVIDENCE_GEN, STANDALONE_TICKET_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
@@ -48,6 +49,7 @@ import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
   IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar, IconLink,
+  IconFolder,
 } from "@tabler/icons-react"
 import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
 import { buildCombinedHtml } from "../../lib/combinedExport"
@@ -339,6 +341,24 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   const guestSession = useGuestSession()
   const { content } = useContent()
 
+  // ── Project section toggle (strictly additive entry-flow reshape) ───────────
+  // When the open panel belongs to a main-chat PRD that silently forked a
+  // project (`content.activeProjectId != null`), the header shows a project-menu
+  // icon that flips the panel BODY between the artifact tabs and an in-panel
+  // project section (invite / memory / members). It is LOCAL state, not a
+  // NavigationContext tab, deliberately: a nav tab would be auto-closed on every
+  // route change (NavigationContext), and the project view is mutually exclusive
+  // with the artifact view within the ONE open panel — clicking any artifact tab
+  // flips it back off. When no project is bound the icon is hidden and this state
+  // is inert, so the panel renders byte-identical to before.
+  const [projectSectionOpen, setProjectSectionOpen] = useState(false)
+  const hasActiveProject = content.activeProjectId != null
+  useEffect(() => {
+    // A thread with no bound project can never show the project section — reset
+    // so a stale open-state can't survive a thread-switch onto an unbound chat.
+    if (!hasActiveProject && projectSectionOpen) setProjectSectionOpen(false)
+  }, [hasActiveProject, projectSectionOpen])
+
   const { mounted, phase } = useCpanelPhase(contentPanelTab != null)
 
   // The tab to RENDER. During the exit animation `contentPanelTab` is already
@@ -443,6 +463,9 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   // never kick off a generation nobody asked for.
   const { resolve: resolvePrd } = useResolvePrd()
   const handleTabClick = useCallback((id: (typeof TABS)[number]["id"]) => {
+    // Artifact and project views are mutually exclusive within the one open
+    // panel — choosing an artifact tab returns the body to the artifacts.
+    setProjectSectionOpen(false)
     openContentPanel(id)
     if (id === "prd" && !content.prd && !content.prdGenerating) void resolvePrd()
   }, [openContentPanel, content.prd, content.prdGenerating, resolvePrd])
@@ -677,6 +700,22 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                 disabledReason={guestSession ? "Sign in to a full workspace to share" : undefined}
               />
             )}
+            {/* Project menu — present ONLY when this panel's PRD forked a project
+                (main-chat entry flow). Toggles the panel body between the
+                artifact tabs and the in-panel project section. Hidden entirely
+                otherwise, so a non-project panel is byte-identical to before. */}
+            {hasActiveProject && (
+              <button
+                type="button"
+                className={`cpanel-close${projectSectionOpen ? " cpanel-tab--active" : ""}`}
+                onClick={() => setProjectSectionOpen((v) => !v)}
+                aria-label={projectSectionOpen ? "Back to document" : "Project"}
+                aria-pressed={projectSectionOpen}
+                title="Project"
+              >
+                <IconFolder size={16} />
+              </button>
+            )}
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>
@@ -684,6 +723,10 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
         </div>
 
         <div className="cpanel-body">
+          {projectSectionOpen && content.activeProjectId != null ? (
+            <ProjectPanelSection projectId={content.activeProjectId} />
+          ) : (
+          <>
           {activeTab === "evidence" && <EvidenceTab />}
           {activeTab === "prd" && (
             <PrdPanelContent evidenceTabAvailable={!evidenceHidden} {...prdPanelOverrides} />
@@ -701,6 +744,8 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                   none of it leaks into the next one. */}
               <DocumentTab key={content.documentId} documentId={content.documentId} />
             </Suspense>
+          )}
+          </>
           )}
         </div>
 
