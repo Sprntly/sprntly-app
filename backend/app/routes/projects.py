@@ -51,6 +51,7 @@ from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
 from app import project_join_greeting
+from app import project_task_execution
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
@@ -1448,6 +1449,18 @@ def _respond_as_group_agent(
                     company_id=ctx.company_id,
                     tool_input=tool_input,
                 )
+            if name == "execute_task":
+                return project_task_execution.handle_execute_task(
+                    project_id=project_id,
+                    requester_user_id=assigner_user_id,
+                    dataset=dataset,
+                    company_id=ctx.company_id,
+                    tool_input=tool_input,
+                    roster=roster,
+                    post_turn=lambda content: conversations_db.post_group_turn(
+                        conversation_id, None, content, role="assistant"
+                    ),
+                )
             return f"(unknown tool: {name})"
 
         # Inject the bounded project-context block (best-effort, never raises)
@@ -1462,7 +1475,11 @@ def _respond_as_group_agent(
             parts.append(edit_note)
         parts.append(context_block)
         system = "\n\n".join(parts)
-        tools = [project_delegation.DELEGATE_TASK_TOOL, *project_group_context.read_tools()]
+        tools = [
+            project_delegation.DELEGATE_TASK_TOOL,
+            project_task_execution.EXECUTE_TASK_TOOL,
+            *project_group_context.read_tools(),
+        ]
         reply = run_tool_loop(
             system=system,
             user=transcript,
