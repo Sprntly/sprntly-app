@@ -87,6 +87,12 @@ export interface ChatIntentExecutors {
    *  per-caller resolution path, since an assignment is targeted exactly like
    *  an edit ("the tab's PRD or the conversation's" owns the tickets). */
   onAssignTickets: (instruction: string, prdId: number | null) => void
+  /** list_artifacts: show what the user has CREATED as clickable items. The
+   *  rows ride the envelope (`artifact_list`, resolved server-side); an
+   *  EMPTY array still routes here — "you haven't made any yet" is the
+   *  listing's own honest answer, not a fall-through. Only an ABSENT array
+   *  (an older backend that doesn't attach rows) falls back to `onAnswer`. */
+  onListArtifacts: (envelope: ChatIntentEnvelope) => void
   /** The grounded-ask fall-through — called whenever no structured intent's
    *  guard held (an unresolvable edit_prd/change_prd_template/assign_tickets
    *  target, a lookup-less open_artifact, or `answer`/low-confidence/unknown/
@@ -117,6 +123,9 @@ export type DispatchChatIntentResult = { handled: true } | { handled: false }
  *  - `assign_tickets` → `onAssignTickets` only when `ctx.hasEditTarget` AND a
  *    non-empty `envelope.instruction` — else `onAnswer`. Same target guard as
  *    `edit_prd` (an assignment is targeted exactly like an edit).
+ *  - `list_artifacts` → `onListArtifacts` only when `envelope.artifact_list`
+ *    is PRESENT (empty included — see the executor's note) — else `onAnswer`
+ *    (an older backend attached no rows).
  *  - anything else (`answer`, low confidence, unknown, `generate_prototype`)
  *    → `onAnswer`.
  *
@@ -181,6 +190,17 @@ export function dispatchChatIntent(
     case "assign_tickets":
       if (ctx.hasEditTarget && envelope.instruction) {
         executors.onAssignTickets(envelope.instruction, ctx.editTargetPrdId)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
+
+    case "list_artifacts":
+      // Array.isArray, not truthiness: [] is a real listing whose honest
+      // rendering is "you haven't made any yet" — only an ABSENT field (an
+      // older backend) falls through.
+      if (Array.isArray(envelope.artifact_list)) {
+        executors.onListArtifacts(envelope)
         return { handled: true }
       }
       executors.onAnswer()

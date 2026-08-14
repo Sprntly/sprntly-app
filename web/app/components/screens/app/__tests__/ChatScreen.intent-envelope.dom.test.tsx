@@ -353,6 +353,106 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     expect(ticketsChangeTemplate).not.toHaveBeenCalled()
   })
 
+  it("list_artifacts renders the user's artifacts as clickable cards", async () => {
+    resolveIntent.mockResolvedValue({
+      intent: "list_artifacts", confidence: 0.95, task: null, instruction: null,
+      list_kind: "prd",
+      artifact_list: [
+        {
+          type: "prd", id: 42, title: "Checkout abandonment", status: "ready",
+          created_at: "2026-08-01T00:00:00Z", brief_anchored: false,
+          source: { conversation_id: 9, conversation_title: "Checkout chat" },
+          open: { prd_id: 42 },
+        },
+        {
+          type: "ticket_set", id: 7, title: "Webhook retries", status: "ready",
+          created_at: "2026-08-02T00:00:00Z", brief_anchored: false,
+          source: { conversation_id: null, conversation_title: null },
+          open: { ticket_set_id: 7 },
+        },
+      ],
+      reason: "listing", source: "planner", prd_id: null, prd_title: null,
+    })
+    renderChat()
+    await typeAndSend("what are the prds i have?")
+
+    // The reply names the count HONESTLY ("your N newest", never "the N
+    // you've created" — the rows are capped); the rows render as CARDS, not
+    // prose — and nothing goes to the ask agent or any generator.
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("your 2 newest"),
+    )
+    const cards = document.querySelectorAll('[data-testid="artifact-list-card"]')
+    expect(cards.length).toBe(2)
+    expect(cards[0].textContent).toContain("Checkout abandonment")
+    // The surviving thread is named on the card — the click's promise.
+    expect(cards[0].textContent).toContain("Checkout chat")
+    expect(runAskGeneration).not.toHaveBeenCalled()
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("a HOW-MANY ask leads with the numbers, cards riding under them", async () => {
+    resolveIntent.mockResolvedValue({
+      intent: "list_artifacts", confidence: 0.95, task: null, instruction: null,
+      list_kind: "prd", list_mode: "count",
+      artifact_counts: { kind: "prd", total: 9, today: 2, yesterday: 3, by_day: [] },
+      artifact_list: [{
+        type: "prd", id: 42, title: "Checkout abandonment", status: "ready",
+        created_at: "2026-08-14T00:00:00Z", brief_anchored: false,
+        source: { conversation_id: null, conversation_title: null },
+        open: { prd_id: 42 },
+      }],
+      reason: "count", source: "planner", prd_id: null, prd_title: null,
+    })
+    renderChat()
+    await typeAndSend("how many prds have been created today compared to yesterday?")
+
+    await waitFor(() =>
+      expect(document.body.textContent).toContain(
+        "You've created 2 PRDs today and 3 yesterday — 9 in total.",
+      ),
+    )
+    expect(document.querySelectorAll('[data-testid="artifact-list-card"]').length).toBe(1)
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("a SINGLE-row listing ('the latest PRD') reads as one, not a wall", async () => {
+    resolveIntent.mockResolvedValue({
+      intent: "list_artifacts", confidence: 0.95, task: null, instruction: null,
+      list_kind: "prd", list_limit: 1,
+      artifact_list: [{
+        type: "prd", id: 42, title: "Checkout abandonment", status: "ready",
+        created_at: "2026-08-01T00:00:00Z", brief_anchored: false,
+        source: { conversation_id: null, conversation_title: null },
+        open: { prd_id: 42 },
+      }],
+      reason: "listing", source: "planner", prd_id: null, prd_title: null,
+    })
+    renderChat()
+    await typeAndSend("whats the latest prd i created?")
+
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("your most recent PRD"),
+    )
+    expect(document.querySelectorAll('[data-testid="artifact-list-card"]').length).toBe(1)
+  })
+
+  it("an EMPTY listing answers honestly with no cards", async () => {
+    resolveIntent.mockResolvedValue({
+      intent: "list_artifacts", confidence: 0.95, task: null, instruction: null,
+      list_kind: "report", artifact_list: [],
+      reason: "listing", source: "planner", prd_id: null, prd_title: null,
+    })
+    renderChat()
+    await typeAndSend("show me my reports")
+
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("haven't created any reports yet"),
+    )
+    expect(document.querySelector('[data-testid="artifact-list-card"]')).toBeNull()
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
   it("generate_tickets with no PRD on the tab builds a STANDALONE ticket set", async () => {
     resolveIntent.mockResolvedValue({
       intent: "generate_tickets", confidence: 0.9, task: "the webhook retry work",

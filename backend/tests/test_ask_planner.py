@@ -636,6 +636,10 @@ def test_the_schema_property_order_is_load_bearing():
         # `open_artifact`'s two arguments sit with the action's other arguments,
         # before any choice of skill or pipeline — same rule as task/instruction.
         "artifact_type", "artifact_query",
+        # `list_artifacts`' KIND rides with the action arguments too — a pure
+        # enum pick, no ordering subtlety beyond staying ahead of the
+        # skill/pipeline choices like every other action argument.
+        "list_kind", "list_mode",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
         "sources", "include_knowledge_graph", "include_library",
@@ -658,7 +662,8 @@ def test_the_schema_property_order_is_load_bearing():
     # invite the model to pick one on every single build.
     for optional in ("constraints", "task", "instruction", "documents",
                      "artifact_type", "artifact_query",
-                     "artifact_template_id", "template_query"):
+                     "artifact_template_id", "template_query", "list_kind",
+                     "list_mode"):
         assert optional not in ap._PLANNER_SCHEMA["required"]
     # `include_library` IS required, like `include_knowledge_graph` beside it:
     # both are booleans with a real default answer, and an omitted boolean is

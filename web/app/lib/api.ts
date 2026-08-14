@@ -968,6 +968,13 @@ export type ChatIntentEnvelope = {
      *  standalone set has no prd_id the backend could gate on; a format-less
      *  request is still downgraded to `answer` server-side. */
     | "change_tickets_template"
+    /** "What are my PRDs / tickets / reports?" — list what the user has
+     *  CREATED, as clickable items. The rows ride the envelope under
+     *  `artifact_list` (resolved server-side where tenancy lives); the client
+     *  renders them and a click opens the artifact in its own thread with its
+     *  conversation history, exactly like clicking it on the Artifacts
+     *  screen. */
+    | "list_artifacts"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -1008,6 +1015,71 @@ export type ChatIntentEnvelope = {
   /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
    *  company's artifact library. Absent for every other intent. */
   open?: OpenArtifactResult
+  /** list_artifacts ONLY — which kind of the user's own creations was asked
+   *  for ("all" | "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+   *  | "custom_artifact"). Null/absent on every other intent. */
+  list_kind?: string | null
+  /** list_artifacts ONLY — how many they asked for ("my last 5 PRDs" → 5,
+   *  "the latest PRD" → 1). Null/absent — the common case — means the
+   *  backend's own cap; the rows in `artifact_list` are ALREADY trimmed to
+   *  it, so the client reads this only to phrase the reply. */
+  list_limit?: number | null
+  /** list_artifacts ONLY — "count" when the ask was HOW MANY rather than
+   *  which ones. Null/absent reads as "items". */
+  list_mode?: string | null
+  /** list_artifacts + list_mode "count" ONLY — the tallies, computed
+   *  server-side over the FULL library (never the capped card list): the
+   *  total, today's and yesterday's counts (UTC calendar dates), and up to 14
+   *  recent days that have artifacts, newest first. Null when the tally
+   *  failed — the reply degrades to the cards alone. */
+  artifact_counts?: {
+    kind: string
+    total: number
+    today: number
+    yesterday: number
+    by_day: { date: string; count: number }[]
+  } | null
+  /** list_artifacts ONLY — the rows themselves, resolved server-side where
+   *  tenancy lives (the same aggregation the Artifacts screen reads, newest
+   *  first, capped). The client renders these as clickable items; a click
+   *  opens the artifact in its own thread with its conversation history. */
+  artifact_list?: ChatArtifactItem[]
+}
+
+/** One row of the chat's artifact listing — a clickable stand-in for the same
+ *  row on the Artifacts screen, carrying exactly the ids that screen's own
+ *  open flow uses. `source.conversation_id` + `source.conversation_title`
+ *  (when both present) are the thread a click resumes; either missing means
+ *  the artifact has no surviving chat and the click falls back to the
+ *  panel-only / standalone open — never a fake history. */
+export type ChatArtifactItem = {
+  type: "prd" | "evidence" | "prototype" | "report" | "ticket_set" | "custom_artifact"
+  id: number
+  title: string
+  status: string
+  created_at: string | null
+  brief_anchored: boolean
+  source: {
+    conversation_id?: number | null
+    conversation_title?: string | null
+    prd_id?: number | null
+    prd_title?: string | null
+    brief_id?: number | null
+    insight_index?: number | null
+    week_label?: string | null
+    skill?: string | null
+    question?: string | null
+  }
+  open: {
+    prd_id?: number | null
+    evidence_id?: number | null
+    brief_id?: number | null
+    insight_index?: number | null
+    report_id?: number | null
+    ticket_set_id?: number | null
+    custom_artifact_id?: number | null
+    prototype_id?: number | null
+  }
 }
 
 /** Artifact kinds an OPEN request can name. Both have an existing right-panel
@@ -1034,6 +1106,14 @@ export type OpenArtifactCandidate = {
    *  first finding underneath an unrelated document. */
   brief_anchored: boolean
   week_label: string | null
+  /** The conversation that produced this PRD, stamped server-side (newest
+   *  binding wins) so an open can resume the chat the user had about it.
+   *  Null/absent = no surviving thread (uploaded/brief-generated PRD, or the
+   *  chat was deleted) — the open falls back to the panel beside the current
+   *  thread, exactly as before. Both must be present to resume: a title-less
+   *  id means the chat row is gone. */
+  conversation_id?: number | null
+  conversation_title?: string | null
 }
 
 /** The 0/1/many verdict for an open request. All three outcomes are part of the

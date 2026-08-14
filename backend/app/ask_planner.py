@@ -239,6 +239,25 @@ _ACTIONS: frozenset[str] = frozenset({
     # died as a which-did-you-mean answer about a format the user had already
     # named correctly. Same argument contract as change_prd_template.
     "change_tickets_template",
+    # List what the user has CREATED in Sprntly — their PRDs, ticket sets,
+    # reports, team documents, prototypes, evidence. Its own action rather
+    # than a shading of `answer` for the reported reason: "what are the PRDs
+    # I have?" was treated as a knowledge question and went hunting through
+    # CONNECTED SOURCES (Drive/Confluence files with "PRD" in the name) —
+    # confidently describing other people's documents while the user's own
+    # artifact library sat unread. The listing itself is DETERMINISTIC: the
+    # route reads the library and the client renders clickable items; the
+    # model's whole job is recognising the ask and naming the kind
+    # (`list_kind`). Retrieval like open_artifact, so no task, no instruction.
+    "list_artifacts",
+})
+
+#: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
+#: fallback for junk — lists every kind. Vocabulary matches the artifact
+#: listing's own `type` values (db/artifacts.py), with "all" on top.
+LIST_ARTIFACT_KINDS: frozenset[str] = frozenset({
+    "all", "prd", "evidence", "prototype", "report", "ticket_set",
+    "custom_artifact",
 })
 
 #: Actions that need a `task` brief, and ones that need an `instruction`. An
@@ -407,6 +426,25 @@ _PLANNER_SCHEMA: dict = {
                 "open_artifact only: the subject the user named the document "
                 "by, in their own words. Required for an open request — without "
                 "it there is nothing to look up."
+            ),
+        },
+        "list_kind": {
+            "type": ["string", "null"],
+            "enum": ["all", "prd", "evidence", "prototype", "report",
+                     "ticket_set", "custom_artifact", None],
+            "description": (
+                "list_artifacts only: which kind of THEIR OWN creations to "
+                "list — 'all' when they asked for artifacts generally or "
+                "named several kinds. null on every other action."
+            ),
+        },
+        "list_mode": {
+            "type": ["string", "null"],
+            "enum": ["items", "count", None],
+            "description": (
+                "list_artifacts only: 'count' when the ask is HOW MANY (a "
+                "tally or a today-vs-yesterday comparison), 'items' when it "
+                "is WHICH ONES. null on every other action."
             ),
         },
         "company_skill_id": {
@@ -624,8 +662,35 @@ or wants an answer.
   artifacts. Choose it ONLY when the user asks for that depth outright, by
   naming it ("multi-agent", "aggressive analysis") or by asking for the full
   suite. "Generate a PRD" alone is generate_prd, never this.
+- list_artifacts — the user asks what THEY HAVE MADE in this product: "what
+  are my PRDs?", "show me my tickets", "list my reports", "what artifacts have
+  I created?", "what have we generated so far?". The product reads their own
+  artifact library and shows the items as clickable results — you gather
+  nothing and read nothing. Set `list_kind` to the kind they asked about
+  (prd, ticket_set, report, custom_artifact for team documents, prototype,
+  evidence) or "all" when they asked generally. A NUMBER in the ask goes in
+  `constraints.top_n` — "my last 5 PRDs" / "the 3 most recent reports" is
+  top_n 5 / 3, and a SINGULAR ask ("the latest PRD I created", "my most
+  recent report") is top_n 1 — the product shows exactly that many. A
+  HOW-MANY ask ("how many PRDs have I created?", "how many today compared to
+  yesterday?") is still THIS action with `list_mode` "count" — the product
+  computes the numbers from the library and answers with them; routing it as
+  a knowledge question sweeps connected sources for a tally no source keeps.
+  `list_mode` is "items" for everything else. No task, no instruction, no
+  sources, no pipeline.
 
 Rules that decide the close calls:
+
+- THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
+  answer. "What are my PRDs / tickets / reports?" means the documents THEY
+  MADE HERE — list_artifacts, never a sweep of Drive/Confluence/GitHub files
+  that happen to have "PRD" in the name (the reported failure: the library
+  sat unread while the answer described other documents). A question about a
+  file IN a connected source ("what does the Q3 PRD doc in Drive say?") is
+  still `answer` with sources.
+- list_artifacts vs open_artifact: PLURAL vs ONE. "What PRDs do I have?"
+  lists; "open the checkout PRD" opens that one. A request that names a
+  SPECIFIC subject wants an open; a request for the inventory wants the list.
 
 - SUBJECT MATTER decides generate_prd, never document shape. A PRD specifies a
   product change.
@@ -1039,6 +1104,15 @@ class Plan:
     #: exclusive with the id above (`_gate_template` enforces it), and its
     #: presence is what turns a build into a question about which format.
     template_query: Optional[str] = None
+    #: `list_artifacts` only: which kind of the user's own creations to list.
+    #: Always a member of LIST_ARTIFACT_KINDS once gated ("all" for junk or
+    #: absence), and None on every other action — the listing itself is
+    #: deterministic route work, this is the only argument.
+    list_kind: Optional[str] = None
+    #: `list_artifacts` only: "count" for a how-many ask (the route computes
+    #: per-day tallies and the client answers with the numbers), "items" for
+    #: a which-ones ask (the clickable cards). Junk coerces to "items".
+    list_mode: Optional[str] = None
     documents: list[str] = field(default_factory=list)
     in_scope: bool = True
 
@@ -1069,6 +1143,8 @@ class Plan:
             # from a build that named none.
             "template": self.artifact_template_name or self.artifact_template_id,
             "template_query": self.template_query,
+            "list_kind": self.list_kind,
+            "list_mode": self.list_mode,
             # "pipeline" rather than false when a pipeline owns the turn, because
             # `apply_gates` zeroes `web_search` for pipeline exclusivity — the
             # pipeline runs its OWN sweep. Logging a bare `false` there was
@@ -1624,6 +1700,18 @@ def apply_gates(
     if _artifact_kind:
         _artifact_kind = _artifact_kind[:120]
 
+    # `list_artifacts`'s own argument. A missing or invented kind does not
+    # degrade the action — "list my stuff" is a complete request, and "all" is
+    # its honest reading — so junk coerces to "all" rather than to a refusal.
+    # Same belongs-to-its-action clamp as the two above.
+    _list_kind: Optional[str] = None
+    _list_mode: Optional[str] = None
+    if action == "list_artifacts":
+        _raw_kind = _clean_str(out.get("list_kind"))
+        _list_kind = _raw_kind if _raw_kind in LIST_ARTIFACT_KINDS else "all"
+        _raw_mode = _clean_str(out.get("list_mode"))
+        _list_mode = _raw_mode if _raw_mode in ("items", "count") else "items"
+
     # A format switch with no target is not a switch. `_gate_template` already
     # turns a bad id into a `template_query` (a which-did-you-mean on the chat
     # surface); this catches the plan that carried NEITHER — the model chose
@@ -1676,6 +1764,8 @@ def apply_gates(
         artifact_template_id=artifact_template_id,
         artifact_template_name=artifact_template_name,
         template_query=template_query,
+        list_kind=_list_kind,
+        list_mode=_list_mode,
         documents=_gate_documents(
             out.get("documents"), enterprise_id, known_documents
         ),

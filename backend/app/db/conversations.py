@@ -86,6 +86,52 @@ def bind_conversation_to_prd(
         return False
 
 
+def conversations_for_prds(
+    prd_ids: list[int], company_id: str
+) -> dict[int, dict]:
+    """`{prd_id: {"id", "title"}}` — the newest conversation bound to each PRD.
+
+    The REVERSE of `get_conversation_prd_id`, for the surfaces that start from
+    the artifact and want its chat back: the chat's artifact list and the
+    open-with-thread flow both need to know which thread produced a PRD so a
+    click can resume the conversation instead of opening a bare document.
+
+    COMPANY-scoped, deliberately not user-scoped — the same posture as the
+    Artifacts listing's conversation-title joins (db/artifacts.py): an
+    artifact library is shared across the company, so the thread behind a
+    teammate's PRD is as openable as the PRD itself. Newest binding wins when
+    several chats point at one PRD (regeneration re-binds are fill-only-NULL,
+    but imports/deep-links can produce more than one row).
+
+    Best-effort: any failure returns {} and the caller renders artifacts
+    without thread affordances rather than failing the listing.
+    """
+    if not prd_ids:
+        return {}
+    try:
+        rows = (
+            require_client()
+            .table("conversations")
+            .select("id, title, prd_id")
+            .in_("prd_id", prd_ids)
+            .eq("company_id", company_id)
+            .order("id", desc=True)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — a listing enrichment, never the listing
+        logger.warning("conversations_for_prds failed", exc_info=True)
+        return {}
+    out: dict[int, dict] = {}
+    for r in rows:
+        pid = r.get("prd_id")
+        # Newest-first order + first-write-wins keeps the latest thread.
+        if isinstance(pid, int) and pid not in out:
+            out[pid] = {"id": r.get("id"), "title": r.get("title") or ""}
+    return out
+
+
 def bind_conversation_to_project(
     conversation_id: int,
     project_id: int,
