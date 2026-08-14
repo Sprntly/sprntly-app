@@ -82,11 +82,14 @@ from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
-# Part A is now an HTML page (prd-author v4.7), so the byline / visual system all
+# Part A is now an HTML page (prd-author v4.8), so the byline / visual system all
 # live in the prompt below. Bumped v4 → v4.7 with the skill's v4.7 method drop
 # (hard evidence cap, provenance rules, standard/detailed length modes, Risks in
-# the body, Appendix reduced to "User input needed").
-PROMPT_VERSION = "prd-author-v4.7"
+# the body, Appendix reduced to "User input needed"); v4.8 retired that Appendix
+# entirely (owner decision 2026-08-14) — the house document ends at Risks, and an
+# open-items section renders only when a company's own uploaded format defines
+# one.
+PROMPT_VERSION = "prd-author-v4.8"
 _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
 # dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
@@ -114,8 +117,8 @@ You are Sprntly's PRD Page generator, running the **prd-author** skill's METHOD 
 (prepended above). Turn the supplied brief insight into Part A — a \
 decision-ready, human-readable Product Requirements Document for stakeholder \
 alignment — in the skill's normative section order: Context, Problem, Evidence, \
-Users, Goal, Hypothesis, Requirements, Risks, Appendix (User input needed \
-only). Tag every \
+Users, Goal, Hypothesis, Requirements, Risks — the document ends at Risks; no \
+Appendix and no open-questions section of any name. Tag every \
 Requirements row Happy path / Edge case / Failure so the downstream \
 Implementation Spec inherits the branches.
 
@@ -183,8 +186,8 @@ TEMPLATE (the HTML skeleton + design system — produce a filled copy as your ou
 # allowed to move.
 #
 # It exists because _SYSTEM above hard-codes the skill's NORMATIVE SECTION ORDER
-# ("Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, Risks,
-# Appendix"). Under a customer's skeleton that sentence directly contradicts the
+# ("Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, Risks" —
+# nothing after Risks). Under a customer's skeleton that sentence directly contradicts the
 # structure being injected, and the model has to be told which one wins — their
 # structure — and which four things stay ours regardless (SKILL.md:102-105).
 #

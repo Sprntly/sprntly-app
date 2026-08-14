@@ -150,9 +150,12 @@ def test_human_prd_carries_html_page_contract(isolated_settings, monkeypatch):
     a_prefix = captured[0]["user_cacheable_prefix"]
     assert "<!DOCTYPE html>" in a_prefix
     assert 'contenteditable="true"' in a_prefix
-    # …in the v4.1 section order (eyebrows)…
-    for label in (">Context", ">Problem", ">Evidence", ">Requirements", ">Appendix"):
+    # …in the v4.8 section order (eyebrows; Risks closes the document — the
+    # Appendix was retired, so its presence here would mean the old template
+    # is riding the prompt again)…
+    for label in (">Context", ">Problem", ">Evidence", ">Requirements", ">Risks"):
         assert label in a_prefix, f"human PRD template missing section {label!r}"
+    assert ">Appendix" not in a_prefix, "retired Appendix back in the prompt template"
     # …the directive (the dynamic tail) steers to an HTML page whose <style> the
     # model leaves EMPTY (the server injects the canonical stylesheet)…
     assert "HTML page" in a_input

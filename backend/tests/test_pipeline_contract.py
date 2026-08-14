@@ -159,30 +159,33 @@ def test_live_prd_template_is_lean_markdown(repo_root):
 # visual system, Part B as the derived Implementation Spec.
 
 def test_prd_skill_part_a_template_is_html_visual_system(repo_root):
-    """prd-author v4.7 Part A is a single-file, editable HTML page in the
-    normative visual system, in the v4.4 section order (Context → Problem →
-    Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix,
-    which holds only User input needed) — not lean markdown. Guard the shape +
-    section order so it can't regress."""
+    """prd-author v4.8 Part A is a single-file, editable HTML page in the
+    normative visual system, in the v4.8 section order (Context → Problem →
+    Evidence → Users → Goal → Hypothesis → Requirements → Risks, and the
+    document ENDS at Risks) — not lean markdown. Guard the shape + section
+    order so it can't regress."""
     html = _skill_prd_template_part_a(repo_root)
     assert "<!DOCTYPE html>" in html
     assert 'contenteditable="true"' in html  # obviously editable
-    # v4.4 normative section order, top to bottom. Risks sits in the body
-    # (between Requirements and the Appendix); "User input needed" is the
-    # Appendix's only content.
+    # v4.8 normative section order, top to bottom. Risks closes the document —
+    # the Appendix beneath it was retired (see the retired-sections guard).
     order = ["Context", "Problem", "Evidence", "Users", "Goal", "Hypothesis",
-             "Requirements", "Risks", "Appendix", "User input needed"]
+             "Requirements", "Risks"]
     positions = [html.find(f">{label}") for label in order]
     assert all(p != -1 for p in positions), f"missing section: {order}, {positions}"
-    assert positions == sorted(positions), "sections out of v4.4 order"
+    assert positions == sorted(positions), "sections out of v4.8 order"
 
 
 def test_prd_skill_part_a_template_has_no_retired_sections(repo_root):
     """v4.4 retired Non-goals, Alignment, Rollout, and Done-when from the house
-    format (the Appendix holds only "User input needed"). Guard the template so
-    they can't creep back in."""
+    format; v4.8 retired the Appendix and its "User input needed" list (owner
+    decision 2026-08-14 — an open-questions section renders only when a
+    company's own uploaded format defines one). Guard the template so none of
+    them creep back in."""
     html = _skill_prd_template_part_a(repo_root)
-    for retired in (">Non-goals", ">Alignment", ">Rollout", ">Done-when"):
+    for retired in (">Non-goals", ">Alignment", ">Rollout", ">Done-when",
+                    ">Appendix", ">User input needed", ">Still open",
+                    ">Open questions", 'class="appendix"'):
         assert retired not in html, f"retired section {retired!r} back in template"
 
 
