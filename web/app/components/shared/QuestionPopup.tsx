@@ -77,6 +77,20 @@ export type QuestionPopupProps = {
   /** Collapse the popup and answer in the composer instead. Hidden when
    *  absent. */
   onDismiss?: () => void
+  /** Answers already settled in a PREVIOUS sitting, keyed by question index —
+   *  the stepper seeds them and starts at the first genuinely open question.
+   *  How a host makes interruption non-lossy: this popup lives in a dock that
+   *  higher-priority batches can claim mid-batch and unmounts on tab
+   *  switches, and before this prop a five-question batch answered four deep
+   *  lost everything, silently, every time (the reported "I answered these
+   *  over and over" bug). Presentation contract unchanged — the HOST owns
+   *  the storage; this only reads what it is handed. */
+  initialAnswers?: Record<number, PopupAnswer>
+  /** Fires on EVERY settle (answer or skip) with the question's index — the
+   *  host's hook for persisting the draft `initialAnswers` restores. NOT a
+   *  submit: nothing leaves the popup until `onComplete`, exactly as before
+   *  (the owner's finish-everything-first directive holds). */
+  onProgress?: (index: number, answer: PopupAnswer) => void
 }
 
 /** Next index without a settled answer, looking forward from `from` then
@@ -100,9 +114,21 @@ export function QuestionPopup({
   onSkipAll,
   skipAllLabel = "Skip all",
   onDismiss,
+  initialAnswers,
+  onProgress,
 }: QuestionPopupProps) {
-  const [index, setIndex] = useState(0)
-  const [settled, setSettled] = useState<Record<number, PopupAnswer>>({})
+  // Seeded from the previous sitting's draft (lazy initializers — read once
+  // per mount, exactly like fresh state). The start index is the first
+  // question WITHOUT a restored answer, so a resumed batch picks up where the
+  // interruption happened instead of re-asking from 1/N.
+  const [index, setIndex] = useState(() => {
+    const seeded = initialAnswers ?? {}
+    const first = nextOpen(seeded, questions.length, -1)
+    return first === -1 ? 0 : first
+  })
+  const [settled, setSettled] = useState<Record<number, PopupAnswer>>(
+    () => ({ ...(initialAnswers ?? {}) }),
+  )
   const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({})
   const [typed, setTyped] = useState<Record<number, string>>({})
   // `onComplete` must fire exactly once even though settling state and firing
@@ -126,6 +152,9 @@ export function QuestionPopup({
   const settle = (i: number, answer: PopupAnswer) => {
     const next = { ...settled, [i]: answer }
     setSettled(next)
+    // The host's draft hook — BEFORE the possible finish, so the last answer
+    // is in the draft even if `onComplete`'s submission then fails.
+    onProgress?.(i, answer)
     const open = nextOpen(next, count, i)
     if (open === -1) finish(next)
     else setIndex(open)
