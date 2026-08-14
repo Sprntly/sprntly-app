@@ -46,6 +46,7 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onChangeTicketsTemplate: vi.fn(),
     onCreateArtifact: vi.fn(),
     onAssignTickets: vi.fn(),
+    onListArtifacts: vi.fn(),
     onAnswer: vi.fn(),
   }
 }
@@ -178,6 +179,40 @@ describe("dispatchChatIntent — change_tickets_template routes on ITS OWN targe
   })
 })
 
+describe("dispatchChatIntent — list_artifacts routes on the PRESENCE of rows, empty included", () => {
+  it("a populated listing hits onListArtifacts with the envelope", () => {
+    const ex = executors()
+    const env = envelope({
+      intent: "list_artifacts", list_kind: "prd",
+      artifact_list: [{
+        type: "prd", id: 7, title: "Checkout", status: "ready",
+        created_at: null, brief_anchored: false, source: {}, open: { prd_id: 7 },
+      }],
+    })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onListArtifacts).toHaveBeenCalledWith(env)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("an EMPTY listing still routes — 'none yet' is the listing's own answer", () => {
+    const ex = executors()
+    const env = envelope({ intent: "list_artifacts", list_kind: "all", artifact_list: [] })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onListArtifacts).toHaveBeenCalledWith(env)
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("an ABSENT artifact_list (older backend) falls through to onAnswer", () => {
+    const ex = executors()
+    const env = envelope({ intent: "list_artifacts", list_kind: "prd" })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onListArtifacts).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+})
+
 describe("dispatchChatIntent — edit_prd falls through without a resolvable target or instruction (AC12)", () => {
   it("no resolvable target (hasEditTarget: false) → onAnswer, not onEditPrd", () => {
     const ex = executors()
@@ -247,6 +282,7 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
     expect(ex.onChangeTicketsTemplate).not.toHaveBeenCalled()
     expect(ex.onCreateArtifact).not.toHaveBeenCalled()
     expect(ex.onAssignTickets).not.toHaveBeenCalled()
+    expect(ex.onListArtifacts).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
   })

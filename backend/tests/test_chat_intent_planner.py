@@ -55,6 +55,11 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # resolves the company's active format exactly as it always has.
         "artifact_template_id": None,
         "artifact_template_name": None,
+        # And list_artifacts' KIND + COUNT, on the same
+        # present-on-every-verdict terms.
+        "list_kind": None,
+        "list_limit": None,
+        "list_mode": None,
         "reason": "asked for a spec",
         "source": "planner",
     }
@@ -196,6 +201,31 @@ def test_a_tickets_switch_naming_an_unknown_format_asks_which():
 
     assert envelope["intent"] == "answer"
     assert envelope["source"] == "template_not_found"
+
+
+def test_a_listing_verdict_reaches_the_client_with_its_kind():
+    """list_artifacts is a client intent — the rows are attached by the ROUTE
+    (where tenancy lives), so the adapter's whole job is passing the intent,
+    the kind and the asked-for count through un-downgraded. No PRD gate:
+    listing needs no target."""
+    envelope = ci._plan_to_envelope(
+        _plan("list_artifacts", action_confidence=0.9, list_kind="prd",
+              constraints={"top_n": 5}),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "list_artifacts"
+    assert envelope["list_kind"] == "prd"
+    # "my last 5 PRDs" — the count rides the envelope so the route can trim.
+    assert envelope["list_limit"] == 5
+
+
+def test_a_count_extracted_for_an_answer_never_leaks_into_the_listing_field():
+    envelope = ci._plan_to_envelope(
+        _plan("answer", constraints={"top_n": 3}),
+        prd_id=None,
+    )
+    assert envelope["list_limit"] is None
 
 
 def test_the_format_reason_wins_over_a_low_confidence_downgrade():

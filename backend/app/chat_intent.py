@@ -509,6 +509,14 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # switch for exactly the sets that need it. A thread with neither falls
     # through to the grounded ask on the client, same as any unhandled intent.
     "change_tickets_template",
+    # "What are my PRDs / tickets / reports?" — list what the user has CREATED,
+    # as clickable items. Retrieval like open_artifact: the route attaches the
+    # actual rows under `artifact_list` (the tenant-scoped lookup lives where
+    # the tenant scope lives — routes/chat.py), and the client renders them and
+    # opens a click into the artifact's own thread. Listed here for exactly the
+    # reason create_artifact's comment records: this set is the wire, and an
+    # action missing from it is a silent half-feature, not an error.
+    "list_artifacts",
 }
 
 
@@ -582,6 +590,24 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # take on trust.
         "artifact_template_id": plan.artifact_template_id,
         "artifact_template_name": plan.artifact_template_name,
+        # `list_artifacts` only: which kind of the user's own creations to
+        # list ("all" | "prd" | "evidence" | "prototype" | "report" |
+        # "ticket_set" | "custom_artifact"). None on every other intent; the
+        # rows themselves are attached by the route, where tenancy lives.
+        "list_kind": plan.list_kind,
+        # And whether the ask was HOW MANY rather than WHICH ONES — "count"
+        # makes the route attach per-day tallies (`artifact_counts`) so the
+        # client can answer with the numbers instead of a wall of cards.
+        "list_mode": plan.list_mode,
+        # And how many they asked for ("my last 5 PRDs" → 5, "the latest PRD"
+        # → 1), from the planner's gated constraints. None — the common case —
+        # means the route's own cap. Scoped to the intent like list_kind, so a
+        # top_n extracted for an ordinary answer never leaks in here.
+        "list_limit": (
+            plan.constraints.get("top_n")
+            if intent == "list_artifacts" and isinstance(plan.constraints, dict)
+            else None
+        ),
         "reason": plan.reason or "",
         "source": "planner",
     }

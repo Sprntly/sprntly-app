@@ -571,6 +571,9 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // primitive's guard never fires) — required by the interface, and
             // honest about what this surface would do anyway.
             onChangeTicketsTemplate: () => void runAsk(),
+            // No artifact-card surface in this thin thread either — the
+            // grounded ask can still answer in prose.
+            onListArtifacts: () => void runAsk(),
             onCreateArtifact: () => void runAsk(),
             // Same reasoning as onOpenArtifact/onChangeTemplate: this thread
             // has no ticket-assignment surface — fall back to the grounded

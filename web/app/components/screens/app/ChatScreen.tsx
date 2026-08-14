@@ -44,7 +44,7 @@ import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -65,6 +65,8 @@ import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "..
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
+import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
+import { ArtifactListCards } from "../../shared/ArtifactListCards"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -140,6 +142,12 @@ type ThreadTurn = {
    *  streaming fields below are stripped), so the chips are still answerable
    *  after a reload instead of leaving an unanswerable question behind. */
   openCandidates?: OpenArtifactCandidate[]
+  /** "What are my PRDs?" — the user's own artifacts, rendered as clickable
+   *  cards under this turn's reply. Same contract as `openCandidates`: each
+   *  card carries the artifact's ids and OPENS it on click (in its own thread
+   *  when one survives), never re-sends its label as a message. Persisted
+   *  with the turn, so the listing is still clickable after a reload. */
+  artifactList?: ChatArtifactItem[]
   /** The 12-minute client budget expired while the job was still generating.
    *  NOT a failure — the persisted ask_id is deliberately left in place, so a
    *  reload re-attaches and picks the answer up. Transient: after a reload the
@@ -4110,6 +4118,26 @@ export function ChatScreen() {
       }
       const prdId = candidate.prd_id ?? candidate.id
       if (prdId == null) return false
+      // The PRD's own THREAD outranks a panel-beside-this-chat open (owner
+      // decision, 2026-08-14): when the conversation that produced the
+      // document survives, "open the PRD" means going back to that chat —
+      // history restored, PRD panel over it — exactly like clicking the same
+      // row on the Artifacts screen. Both halves must be present (a
+      // title-less id means the chat row is gone), and an uploaded or
+      // brief-generated PRD carries neither, so it keeps today's panel-only
+      // open — never a fake history.
+      if (candidate.conversation_id != null && candidate.conversation_title) {
+        try {
+          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+            dbId: candidate.conversation_id,
+            title: candidate.conversation_title,
+            fallbackTurns: [],
+            prdId,
+          }))
+          checkResume()
+          return true
+        } catch { /* storage unavailable → the panel-only open below */ }
+      }
       // Reuse BY PRD ID, never by title. A tab already holding this document
       // wins over the tab the user is typing in, so opening a PRD that is
       // already open focuses it instead of spawning a second tab for the same
@@ -4162,7 +4190,7 @@ export function ChatScreen() {
       seedCommandTurn(req, tabId)
       return true
     },
-    [openPrdInTab, reusableActiveTab, seedCommandTurn],
+    [openPrdInTab, reusableActiveTab, seedCommandTurn, checkResume],
   )
 
   /** Post an assistant turn that opens NOTHING — the ambiguous and not-found
@@ -4262,6 +4290,166 @@ export function ChatScreen() {
     },
     [openArtifactInPanel, postOpenArtifactReply],
   )
+
+  // ── One artifact-list card → its own thread ────────────────────────────────
+  // The chat-side twin of ArtifactsScreen.openArtifact, per kind: an artifact
+  // whose chat survives opens THAT thread (history restored, its panel over
+  // it); one without a thread opens standalone — panel, page or canvas — and
+  // never a fake history. The scope-clearing rules are the Artifacts screen's,
+  // for the Artifacts screen's reasons.
+  const openChatArtifactItem = useCallback((a: ChatArtifactItem) => {
+    const convId = a.source.conversation_id ?? null
+    const convTitle = a.source.conversation_title || null
+    const writeResume = (prdId: number | null): boolean => {
+      if (convId == null || !convTitle) return false
+      try {
+        localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+          dbId: convId, title: convTitle, fallbackTurns: [], prdId,
+        }))
+        return true
+      } catch { return false }
+    }
+    // Opening anything that isn't a report retires the standalone-report
+    // pointer; same for the ticket set on screen (it decides whether the
+    // Tickets tab appears at all) — see ArtifactsScreen.openArtifact.
+    if (a.type !== "report") {
+      setContent({ reportFocusId: null, reportFocusStandalone: false })
+    }
+    if (a.type !== "ticket_set") {
+      setContent({ ticketSet: null, ticketSetGenerating: false, ticketSetStandalone: false })
+    }
+    if (a.type === "prd" || a.type === "evidence") {
+      // openArtifactInPanel already carries BOTH halves — the resume-first
+      // thread open for a PRD with a surviving chat, and the panel fallback —
+      // so the card hands it a candidate and inherits the same behavior.
+      const opened = openArtifactInPanel({
+        type: a.type,
+        id: a.id,
+        title: a.title,
+        status: a.status,
+        prd_id: a.open.prd_id ?? null,
+        brief_id: a.open.brief_id ?? null,
+        insight_index: a.open.insight_index ?? null,
+        brief_anchored: a.brief_anchored,
+        week_label: a.source.week_label ?? null,
+        conversation_id: convId,
+        conversation_title: convTitle,
+      })
+      if (!opened) showToast("Couldn't open artifact", "Try it from the Artifacts tab.")
+      return
+    }
+    if (a.type === "report" && a.open.report_id != null) {
+      if (writeResume(a.source.prd_id ?? null)) {
+        setPendingReportFocus({ conversationId: convId!, reportId: a.open.report_id })
+        checkResume()
+        return
+      }
+      // No surviving chat → the same panel, standalone (ArtifactsScreen's
+      // fallback, verbatim).
+      setContent({
+        conversationId: null,
+        reportFocusId: a.open.report_id,
+        reportFocusStandalone: true,
+      })
+      openContentPanel("reports")
+      return
+    }
+    if (a.type === "ticket_set" && a.open.ticket_set_id != null) {
+      if (writeResume(null)) {
+        setPendingTicketSetFocus({ conversationId: convId!, ticketSetId: a.open.ticket_set_id })
+        checkResume()
+        return
+      }
+      setContent({ ticketSetStandalone: true })
+      openContentPanel("tickets")
+      void loadTicketSet(a.open.ticket_set_id, setContent)
+      return
+    }
+    if (a.type === "custom_artifact" && a.open.custom_artifact_id != null) {
+      // A document opens its own PAGE (it is written, not read beside a chat).
+      router.push(documentPath(a.open.custom_artifact_id))
+      return
+    }
+    if (a.type === "prototype" && a.open.prd_id != null) {
+      router.push(prototypePath(a.open.prd_id))
+      return
+    }
+    showToast("Couldn't open artifact", "Try it from the Artifacts tab.")
+  }, [setContent, openArtifactInPanel, setPendingReportFocus, setPendingTicketSetFocus,
+      checkResume, openContentPanel, router, showToast])
+
+  /** "What are my PRDs?" → a reply naming the count plus the clickable cards.
+   *  Mirrors postOpenArtifactReply's seeding (rail + Supabase persistence, the
+   *  prose only — the cards are a live affordance riding the turn). */
+  const listArtifactsFlow = useCallback((seedQuery: string, envelope: ChatIntentEnvelope) => {
+    const items = envelope.artifact_list ?? []
+    const kind = envelope.list_kind && envelope.list_kind !== "all" ? envelope.list_kind : null
+    const kindNoun: Record<string, [string, string]> = {
+      prd: ["PRD", "PRDs"],
+      evidence: ["evidence document", "evidence documents"],
+      prototype: ["prototype", "prototypes"],
+      report: ["report", "reports"],
+      ticket_set: ["ticket set", "ticket sets"],
+      custom_artifact: ["document", "documents"],
+    }
+    const [one, many] = kind ? kindNoun[kind] ?? ["artifact", "artifacts"] : ["artifact", "artifacts"]
+    // A HOW-MANY ask leads with the NUMBERS — computed server-side over the
+    // whole library, never counted off the capped card list (the reported
+    // "12 cards for a today-vs-yesterday question" bug). The cards still
+    // render under it as the click-to-open affordance.
+    const counts = envelope.list_mode === "count" ? envelope.artifact_counts : null
+    // "your N newest", never "the N you've created": the rows are capped
+    // (backend cap, or the count the user asked for), so claiming they are
+    // everything would be wrong the moment the library outgrows the cap —
+    // the reported bug's phrasing half. The asked-for count ALSO names the
+    // request back ("your last 5 PRDs"), so an honoured ask is visible.
+    const answer = counts
+      ? [
+          `You've created ${counts.today} ${counts.today === 1 ? one : many} today and ${counts.yesterday} yesterday`,
+          counts.total > counts.today + counts.yesterday
+            ? ` — ${counts.total} in total.`
+            : ".",
+          items.length ? ` The newest are below — click one to open it with its chat.` : "",
+        ].join("")
+      : items.length === 0
+        ? `You haven't created any ${many} yet — generate one from a chat or the Top Insights brief and it'll show up here.`
+        : items.length === 1
+          ? `Here's your most recent ${one} — click it to open it with its chat.`
+          : `Here are your ${items.length} newest ${many} — click one to open it with its chat.`
+    const activeId = activeTabIdRef.current
+    const inTab = activeId && activeId !== BRIEF_TAB_ID
+      ? tabsRef.current.find((t) => t.id === activeId)
+      : undefined
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const reply: AskResponse = {
+      answer, sources: [], follow_ups: [], key_points: [], citations: [],
+      confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = {
+      id: turnId,
+      query: seedQuery,
+      reply,
+      ...(items.length ? { artifactList: items } : {}),
+    }
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+    let tabId: string
+    if (inTab) {
+      tabId = inTab.id
+      setTabs((prev) => prev.map((t) => t.id === inTab.id
+        ? {
+            ...t,
+            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+            thread: [...t.thread, seedTurn],
+          }
+        : t))
+      setDraft("")
+    } else {
+      tabId = openTab(handle, [seedTurn])
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
+    void finalizeConversationTurn(turnId, { reply }, tabId)
+  }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
@@ -4555,6 +4743,13 @@ export function ChatScreen() {
                   trimmed, activeTab!.id, target,
                   env.artifact_template_id!, env.artifact_template_name,
                 )
+                settlePendingSend()
+              },
+              onListArtifacts: (env) => {
+                // "What are my PRDs?" — the rows rode the envelope; render
+                // them as clickable cards (empty included: "none yet" is the
+                // listing's own honest answer, not a fall-through).
+                listArtifactsFlow(trimmed, env)
                 settlePendingSend()
               },
               onCreateArtifact: (env) => {
@@ -4981,7 +5176,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -6985,6 +7180,19 @@ export function ChatScreen() {
                                 candidates={turn.openCandidates}
                                 disabled={busy}
                                 onOpen={(candidate) => { openArtifactInPanel(candidate) }}
+                              />
+                            ) : null}
+                            {/* "What are my PRDs?" — the user's own artifacts
+                                as clickable cards. Same contract as the chips
+                                above: each card OPENS its artifact (its own
+                                thread when one survives), never re-sends its
+                                label. Persisted with the turn, so still
+                                clickable after a reload. */}
+                            {turn.artifactList?.length ? (
+                              <ArtifactListCards
+                                items={turn.artifactList}
+                                disabled={busy}
+                                onOpen={openChatArtifactItem}
                               />
                             ) : null}
                             {isLast && turn.reply && activeTab?.prdCommandThinking ? (
