@@ -306,6 +306,10 @@ export async function runAskGeneration(
     conversation_id?: number
     pinned_skill?: string
     prd_id?: number
+    /** Individual project chat: folds the project's memory into this turn
+     *  server-side. Passed straight through to `askApi.start` — see its own
+     *  doc for the membership-gate contract. */
+    project_id?: number
     /** Standalone-artifact grounding — the open evidence report / ticket set,
      *  mutually exclusive with prd_id (the tab has one primary artifact). */
     evidence_id?: number

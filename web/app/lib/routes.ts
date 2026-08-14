@@ -42,6 +42,27 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
   return Number.isSafeInteger(id) && id > 0 ? id : null
 }
 
+/** Base path for the flat Projects surface (AD-P14 — `?id=<id>` query param,
+ *  no `[id]` dynamic segment; mirrors `PROTOTYPE_PATH`). */
+export const PROJECTS_PATH = "/projects"
+
+/** Build the projects path, threading a project id as `?id=<id>` when
+ *  present (opens the detail view). With no id it returns the bare
+ *  `/projects` list route. `opts.chat` additionally appends `&chat=` —
+ *  which chat tab to land on (`"individual"` for the fork-to-private-chat
+ *  nav; `"group"` for parity) — but ONLY when a project id is present; with
+ *  no id, `chat` is ignored (there is no detail view to select a tab on).
+ *  The no-`opts` call is byte-identical to the base single-arg form — every
+ *  existing caller is unaffected. Pure → unit-testable. */
+export function projectPath(
+  projectId?: number | string | null,
+  opts?: { chat?: "group" | "individual" },
+): string {
+  if (projectId == null || projectId === "") return PROJECTS_PATH
+  const base = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+  return opts?.chat ? `${base}&chat=${opts.chat}` : base
+}
+
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
@@ -77,6 +98,10 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   ideation: "/ideation",
   templates: "/templates",
   skills: "/skills",
+  // Flat route + `?id=<id>` (AD-P14) — no per-id dynamic segment, exactly the
+  // `/prototype?prd=<id>` pattern above. `ProjectsScreen` (list) renders when
+  // there is no `id`; the `?id=<id>` → detail branch lands with a follow-up ticket.
+  projects: "/projects",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -98,6 +123,9 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/ideation": "ideation",
   "/templates": "templates",
   "/skills": "skills",
+  // The `?id=` query param rides on top of this same path — pathname-based
+  // screen derivation ignores it, same as `/prototype`'s `?prd=`.
+  "/projects": "projects",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

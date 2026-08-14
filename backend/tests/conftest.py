@@ -659,6 +659,11 @@ CREATE TABLE workspace_invites (
     job_role      TEXT,
     invited_by    TEXT,
     workspace_ids TEXT NOT NULL DEFAULT '[]',
+    -- Project association (mirrors 20260813140200_workspace_invites_project.sql):
+    -- when set, accept auto-adds the accepter to project_members (Extension B).
+    -- No FK here: workspace_invites is created before the projects table below,
+    -- and the fake schema mirrors columns, not constraint ordering.
+    project_id    INTEGER,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, email)
 );
@@ -746,6 +751,9 @@ CREATE TABLE IF NOT EXISTS profiles (
     avatar_url   TEXT,
     -- Registration-spec v5 (mirrors 20260716120000_account_type_onboarding_v5.sql).
     account_type TEXT,
+    -- Free-text job designation captured at onboarding (mirrors
+    -- 20260525150000_onboarding_workspace.sql's `profiles.role` column).
+    role         TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -1454,12 +1462,22 @@ CREATE TABLE conversations (
     -- 20260731090000: Evidence half of the conversation<->artifact binding
     -- (mirrors prd_id above).
     evidence_id INTEGER,
+    -- Additive group-chat columns (mirrors
+    -- 20260813130100_conversations_project_columns.sql). Every pre-existing
+    -- + future per-user chat keeps project_id NULL / kind='individual' by
+    -- default, so the untouched per-user ownership path is unaffected.
+    project_id  INTEGER REFERENCES projects (id) ON DELETE SET NULL,
+    kind        TEXT NOT NULL DEFAULT 'individual'
+                  CHECK (kind IN ('individual', 'group')),
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
 CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
 CREATE INDEX conversations_evidence_idx ON conversations (evidence_id);
+CREATE INDEX idx_conversations_project ON conversations (project_id, kind, updated_at);
+CREATE UNIQUE INDEX uq_one_group_chat_per_project
+    ON conversations (project_id) WHERE kind = 'group';
 
 CREATE TABLE conversation_turns (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1469,6 +1487,10 @@ CREATE TABLE conversation_turns (
     -- Extracted attachment texts [{name, content}] persisted with the turn
     -- (20260723170000_conversation_turn_attachments.sql).
     attachments     TEXT,
+    -- Which human posted this turn (mirrors
+    -- 20260813130100_conversations_project_columns.sql). NULL for
+    -- assistant turns and every pre-existing single-owner-chat turn.
+    author_user_id  TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
@@ -1523,6 +1545,122 @@ CREATE TABLE artifact_share_joins (
     joined_workspace_id TEXT NOT NULL,
     joined_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (share_id, joined_user_id)
+);
+
+-- Projects + collaboration layer (mirrors 20260813130000_projects.sql,
+-- 20260813130100_conversations_project_columns.sql [conversations/
+-- conversation_turns columns are ALTERed onto those tables above],
+-- 20260813130200_project_memory.sql). No FK on company_id/workspace_id
+-- here — same reasoning as the `workspaces` table comment above: route
+-- tests routinely fabricate tenant ids that have no `companies`/
+-- `workspaces` row, and require_workspace's self-heal must be able to
+-- insert for them.
+CREATE TABLE projects (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    origin       TEXT NOT NULL DEFAULT 'manual'
+                   CHECK (origin IN ('manual', 'prd_auto', 'artifact')),
+    created_by   TEXT NOT NULL,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_projects_company_ws ON projects (company_id, workspace_id, updated_at);
+
+CREATE TABLE project_members (
+    project_id INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE project_artifacts (
+    project_id    INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    artifact_type TEXT NOT NULL
+                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set')),
+    artifact_id   INTEGER NOT NULL,
+    added_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, artifact_type, artifact_id)
+);
+CREATE INDEX idx_project_artifacts_lookup ON project_artifacts (project_id, added_at);
+
+CREATE TABLE project_chat_members (
+    conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    user_id         TEXT NOT NULL,
+    joined_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, user_id)
+);
+
+CREATE TABLE project_memory_entries (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id             INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    body                   TEXT NOT NULL,
+    author_user_id         TEXT,
+    promoted_by            TEXT CHECK (promoted_by IN ('agent')),
+    source_conversation_id INTEGER REFERENCES conversations (id),
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    CHECK ((author_user_id IS NOT NULL) <> (promoted_by IS NOT NULL))
+);
+CREATE INDEX idx_pme_project ON project_memory_entries (project_id, updated_at);
+
+CREATE TABLE project_memory_summary (
+    project_id   INTEGER PRIMARY KEY REFERENCES projects (id) ON DELETE CASCADE,
+    summary_md   TEXT NOT NULL,
+    entry_count  INTEGER NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    stale        INTEGER NOT NULL DEFAULT 0
+);
+
+-- Mirrors 20260813130300_project_delegations.sql. No FK on
+-- assigner/assignee user_id — same reasoning as project_members above,
+-- these are auth.users ids the fake DB never seeds a row for.
+CREATE TABLE project_delegations (
+    id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id                INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
+    assigner_user_id          TEXT NOT NULL,
+    assignee_user_id          TEXT NOT NULL,
+    task_summary              TEXT NOT NULL,
+    source_conversation_id    INTEGER REFERENCES conversations (id),
+    source_turn_id            INTEGER,
+    delivered_conversation_id INTEGER REFERENCES conversations (id),
+    delivered_turn_id         INTEGER,
+    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id, created_at);
+CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
+CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
+
+-- Mirrors 20260813140100_delegation_events.sql. No FK on actor_user_id —
+-- same reasoning as project_delegations above (auth.users ids the fake
+-- DB never seeds a row for). The migration's own CHECK constraint and
+-- `v_delegation_status` left-join-lateral view are NOT mirrored here —
+-- sqlite cannot enforce/evaluate either; those are proven by the real
+-- local-Supabase round-trip (test_delegation_events.py). This mirror
+-- exists only so the genesis-emit fast-lane tests in
+-- test_project_delegation.py can insert against FakeSupabaseClient.
+CREATE TABLE delegation_events (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    delegation_id INTEGER NOT NULL REFERENCES project_delegations (id) ON DELETE CASCADE,
+    event         TEXT NOT NULL,
+    actor_user_id TEXT NOT NULL,
+    note          TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_delegation_events_delegation ON delegation_events (delegation_id, id);
+
+-- Mirrors 20260813130400_conversation_read_cursors.sql. Inputs-only read
+-- cursor (AD-P3/AD-P20) — no `unread` boolean/count column anywhere;
+-- unread is derived at read time by the db helper. No FK on user_id —
+-- same reasoning as project_delegations above (auth.users ids the fake
+-- DB never seeds a row for).
+CREATE TABLE conversation_read_cursors (
+    conversation_id   INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    user_id           TEXT NOT NULL,
+    last_read_turn_id INTEGER NOT NULL DEFAULT 0,
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, user_id)
 );
 
 -- Mirrors supabase/migrations/20260812130000_call_transcripts.sql (SQLite-ized:
@@ -1783,6 +1921,158 @@ def _no_referent_adjudication(request, monkeypatch):
     monkeypatch.setattr(
         mod, "adjudicate", lambda **kw: None, raising=False
     )
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_memory_synthesis(request, monkeypatch):
+    """Keep a project-memory mutation from firing a REAL Anthropic request.
+
+    `schedule_regen` (`app.project_memory`) runs `regenerate_summary` INLINE
+    under pytest by design (the writer's own contract), and EVERY
+    `add_memory`/`update_memory`/`delete_memory` route call triggers it —
+    not just the tests that mean to exercise synthesis. Without this guard,
+    every existing memory-CRUD test (`test_project_memory_entries.py`, and
+    any other route test that adds/edits/deletes a memory entry in passing)
+    would fire a real `call_md` request against Anthropic using the suite's
+    fake API key — the exact hazard class `_no_background_template_compile`/
+    `_no_referent_adjudication` above exist for.
+
+    A test that means to drive synthesis (`test_project_memory.py`) patches
+    `app.project_memory.call_md` itself; that patch runs AFTER this autouse
+    fixture and wins for that test (same ordering the two guards above rely
+    on). Opt out with `@pytest.mark.real_memory_synthesis` — the dedicated
+    real-LLM live suite drives an UNSTUBBED `call_md` instead.
+    """
+    if request.node.get_closest_marker("real_memory_synthesis"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return "Autouse placeholder synthesis summary for isolated tests."
+
+    try:
+        mod = importlib.import_module("app.project_memory")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_md", _fake_call_md, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_origin_seed(request, monkeypatch):
+    """Keep the project-origin-seed's summarizer call from firing a REAL
+    Anthropic request.
+
+    `maybe_auto_create_project_for_prd`'s new-project branch calls
+    `seed_project_origin_memory`, which makes ONE bounded `call_json` call —
+    not just from the tests that mean to exercise the seed itself. ANY test
+    that creates a `prd_auto` project (via `/v1/prd/generate-from-task`,
+    `/v1/prd/import`, or the helper called directly — e.g.
+    `test_project_from_prd.py`'s existing suite) would otherwise fire a real
+    Anthropic request using the suite's fake API key — the same hazard class
+    `_no_background_memory_synthesis`/`_no_background_interjection_gate`
+    above exist for. Confirmed empirically: without this guard, the existing
+    `test_project_from_prd.py` suite still passes (the seed's own AD-P7
+    fallback swallows the failed call), but it does so only because this
+    sandbox has no network egress — a CI runner with egress would instead
+    round-trip a real 401 against Anthropic on every such test, or worse,
+    spend real credit if a valid key ever leaked into the test environment.
+
+    Defaults to a blank brief/decisions so the seed's own deterministic
+    PRD-derived fallback brief still writes (never an empty-memory surprise
+    for an unrelated test that happens to assert on entry counts). A test
+    that means to drive the seed itself (`test_project_origin_seed.py`)
+    patches `app.project_origin_seed.call_json` directly; that patch runs
+    AFTER this autouse fixture and wins for that test (same ordering the
+    sibling guards rely on). Opt out with
+    `@pytest.mark.real_origin_seed_synthesis` — the dedicated real-LLM live
+    suite drives an UNSTUBBED `call_json` instead."""
+    if request.node.get_closest_marker("real_origin_seed_synthesis"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_json(*, system, user, model, schema=None, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return {"brief_summary": "", "decisions": []}
+
+    try:
+        mod = importlib.import_module("app.project_origin_seed")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _no_background_interjection_gate(request, monkeypatch):
+    """Keep a non-mention group turn from firing a REAL Anthropic request.
+
+    `post_group_turn_route` consults `project_group_gate.should_respond` on
+    EVERY non-mention group turn that clears the gate's own cheap
+    pre-filter — not just the tests that mean to exercise the gate.
+    Without this guard, an existing group-chat/memory-CRUD test that posts
+    a non-trivial non-mention turn (e.g. `test_group_chat_turns.py`'s "a
+    turn nobody should log verbatim", or `test_project_memory_promotion.py`'s
+    "morning team, nothing to see here") would fire a real `call_json`
+    request against Anthropic using the suite's fake API key — the same
+    hazard class `_no_background_memory_synthesis` above exists for.
+
+    Defaults to `{"respond": False}` — the gate's own conservative
+    default — so the stub can never manufacture a spurious interjection in
+    an unrelated test. A test that means to drive the gate itself
+    (`test_project_group_gate.py`) patches `app.project_group_gate.call_json`
+    directly; that patch runs AFTER this autouse fixture and wins for that
+    test (same ordering `_no_background_memory_synthesis` relies on). Opt
+    out with `@pytest.mark.real_interjection_gate` — the dedicated
+    real-LLM live tier drives an UNSTUBBED `call_json` instead."""
+    if request.node.get_closest_marker("real_interjection_gate"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_json(*, system, user, model, schema=None, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return {"respond": False}
+
+    try:
+        mod = importlib.import_module("app.project_group_gate")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
     yield
 
 
@@ -2120,6 +2410,11 @@ def _enable_supabase_bearer(monkeypatch) -> None:
     monkeypatch.setattr(
         auth_mod.settings, "supabase_jwt_secret", _TEST_SUPABASE_SECRET, raising=False
     )
+    # `tenant_client`-based suites hit real `/v1/projects/...` routes too; the
+    # router-level gate 404s them all when unset, so flip it on here — the
+    # second of the two independent client-building seams (the other is
+    # `setup_supabase_auth` in `_company_helpers.py`).
+    monkeypatch.setenv("PROJECTS_ENABLED", "1")
 
 
 @pytest.fixture

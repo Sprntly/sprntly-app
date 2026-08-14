@@ -2156,3 +2156,125 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
 
     assert seen["kg_question"] == "turn that into a plan"
     assert seen["docs_question"] == "turn that into a plan"
+
+
+# ── ★ project-scoped ask gates the connector-lookup interceptors ─────────────
+# The individual PROJECT chat sends /v1/ask with a project_id; routes/ask.py
+# folds an AUTHORITATIVE project-facts block into the history, and the worker
+# sets ask_runner's request-scoped `active_project_id`. `answer()` reads it via
+# `_project_scoped_ask()` to SKIP the tracker / named-source / document-lookup
+# interceptors so a project-meta question ("who's on this project?", "what
+# tasks are open?", "how many PRDs?") falls through to route()->compose where
+# the folded block is the grounding — instead of being hijacked into a "connect
+# a connector" deflection. The default (no project_id set) is None, so EVERY
+# non-project ask routes byte-for-byte as before. Both directions are proved.
+
+
+def _stub_answer_generation(monkeypatch):
+    """Stub the router + the (expensive) answer-generation call so a
+    fell-through turn returns fast with a recognisable answer."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
+            "answer": "grounded-from-project-block", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+
+
+def test_project_scoped_ask_bypasses_tracker_interceptor_but_non_project_still_fires(monkeypatch):
+    import app.ask_runner as ask_runner
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    # Force the tracker interceptor's precondition to hold: the question looks
+    # like a tracker lookup AND a tracker is "connected", so on the ordinary
+    # path it claims the turn.
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: True)
+    monkeypatch.setattr(tracker_mod, "any_connected", lambda eid: True)
+    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: ["jira"])
+    monkeypatch.setattr(
+        tracker_mod, "answer",
+        lambda **k: {
+            "answer": "connect a tracker", "_skill_source": "connector-lookup",
+            "_skill_action": "Tracker lookup",
+        },
+    )
+    q = "what is the status of the onboarding ticket?"
+
+    # NON-project ask (active_project_id() is None, the default): interceptor
+    # fires exactly as before.
+    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    assert out_np.get("_skill_source") == "connector-lookup", out_np
+    assert out_np.get("_skill_action") == "Tracker lookup", out_np
+
+    # PROJECT-scoped ask: interceptor skipped, turn falls through to the
+    # folded-block-grounded compose path.
+    tok = ask_runner.set_active_project_id(123)
+    try:
+        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    finally:
+        ask_runner.reset_active_project_id(tok)
+    assert out_p.get("_skill_source") != "connector-lookup", out_p
+    assert out_p.get("answer") == "grounded-from-project-block", out_p
+
+
+def test_project_scoped_ask_bypasses_named_source_interceptor_but_non_project_still_fires(monkeypatch):
+    import app.ask_runner as ask_runner
+    import app.connector_lookup.registry as registry_mod
+
+    _stub_answer_generation(monkeypatch)
+    # is_jira_lookup off so the named-source (is_connector_lookup) interceptor
+    # is the one under test.
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
+    monkeypatch.setattr(qa, "is_connector_lookup", lambda text, history=None: {"slack"})
+    monkeypatch.setattr(
+        registry_mod, "answer_for_hints",
+        lambda **k: {
+            "answer": "read from slack", "_skill_source": "connector-lookup",
+            "_skill_action": "Named source lookup",
+        },
+    )
+    q = "what did slack say about the pricing change?"
+
+    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    assert out_np.get("_skill_source") == "connector-lookup", out_np
+
+    tok = ask_runner.set_active_project_id(7)
+    try:
+        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    finally:
+        ask_runner.reset_active_project_id(tok)
+    assert out_p.get("_skill_source") != "connector-lookup", out_p
+    assert out_p.get("answer") == "grounded-from-project-block", out_p
+
+
+def test_project_scoped_ask_bypasses_document_lookup_interceptor_but_non_project_still_fires(monkeypatch):
+    import app.ask_runner as ask_runner
+    import app.connector_lookup.registry as registry_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
+    monkeypatch.setattr(qa, "is_connector_lookup", lambda text, history=None: None)
+    monkeypatch.setattr(qa, "document_lookup_candidates", lambda text: {"confluence"})
+    monkeypatch.setattr(registry_mod, "connected_providers", lambda eid: ["confluence"])
+    monkeypatch.setattr(
+        registry_mod, "answer_for_hints",
+        lambda **k: {
+            "answer": "read the wiki", "_skill_source": "connector-lookup",
+            "_skill_action": "Document lookup",
+        },
+    )
+    q = "what does our onboarding runbook say?"
+
+    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    assert out_np.get("_skill_source") == "connector-lookup", out_np
+
+    tok = ask_runner.set_active_project_id(9)
+    try:
+        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
+    finally:
+        ask_runner.reset_active_project_id(tok)
+    assert out_p.get("_skill_source") != "connector-lookup", out_p
+    assert out_p.get("answer") == "grounded-from-project-block", out_p

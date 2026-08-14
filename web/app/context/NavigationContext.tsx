@@ -8,6 +8,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  type MutableRefObject,
   type ReactNode,
 } from "react"
 import { usePathname, useRouter } from "next/navigation"
@@ -240,6 +241,16 @@ interface NavigationContextType {
   toggleAiPanelCollapsed: () => void
   /** Expand the right assistant rail (no-op on bottom layout / when AI bar hidden). */
   expandAiPanel: () => void
+
+  /** One-shot guard, mirroring `skipPanelCloseOnNavRef` exactly: set `true`
+   *  by `ChatScreen`'s fork-to-private-chat nav (`goToProjectPrivateChat`)
+   *  immediately before its synchronous `router.push`, and consumed
+   *  (read + reset) by the globally-mounted `useArtifactUrlSync`'s `?prd=`
+   *  reflect effect — which would otherwise `router.replace` the just-
+   *  generated PRD back onto the URL a tick after the push, reverting the
+   *  fork nav. Scoped to that ONE reflect arm only; every other consumer of
+   *  this context is unaffected by its presence. */
+  skipArtifactReflectOnNavRef: MutableRefObject<boolean>
 }
 
 const NavigationContext = createContext<NavigationContextType | null>(null)
@@ -281,6 +292,11 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   /** Previous pathname, so the route-change effect can tell a genuine navigation
    *  from a no-op re-run and only act on real changes. */
   const prevPathnameRef = useRef(pathname)
+  /** One-shot fork-nav guard (mirrors `skipPanelCloseOnNavRef` immediately
+   *  above) — see the `NavigationContextType` field doc comment. Purely
+   *  additive: only `ChatScreen`'s fork-nav sets it, only
+   *  `useArtifactUrlSync`'s `?prd=` reflect effect reads/resets it. */
+  const skipArtifactReflectOnNavRef = useRef(false)
 
   useEffect(() => {
     try {
@@ -574,6 +590,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         aiPanelCollapsed,
         toggleAiPanelCollapsed,
         expandAiPanel,
+        skipArtifactReflectOnNavRef,
       }}
     >
       {children}

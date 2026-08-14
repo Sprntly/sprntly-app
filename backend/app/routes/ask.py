@@ -126,6 +126,12 @@ class AskIn(BaseModel):
     # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
     # tickets, prototype). Ownership-gated in the route.
     prd_id: int | None = Field(default=None, ge=1)
+    # Optional individual project chat: when set, the caller's project
+    # memory (summary + top-N entries) and job_role are folded into this
+    # turn's context. Membership-gated in the route — a foreign-tenant
+    # project 404s, a same-tenant non-member 403s. Omitted: `/v1/ask`
+    # behaves exactly as it does today (no project block).
+    project_id: int | None = Field(default=None, ge=1)
     # Standalone-artifact grounding, same idea for the tabs that hold an
     # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
     # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
@@ -300,6 +306,23 @@ async def ask(
         if get_set(company.company_id, body.ticket_set_id) is None:
             raise HTTPException(404, "Ticket set not found")
 
+    # Individual project chat (AD-P2/AD-P8/AD-P11): the project must belong
+    # to the caller's company/workspace (404 on a foreign-tenant id, same
+    # non-disclosure posture as the dataset/prd gates above), AND the caller
+    # must be a MEMBER of it (403 — a same-tenant non-member must not have
+    # the project's memory folded into an answer just by knowing its id;
+    # this is the same IDOR class the other project membership gates close).
+    # Both checks run BEFORE any project memory is read.
+    if body.project_id is not None:
+        from app.db.projects import is_project_member, project_belongs_to_company
+
+        if not project_belongs_to_company(
+            body.project_id, company.company_id, company.workspace_id
+        ):
+            raise HTTPException(404, "Project not found")
+        if not is_project_member(body.project_id, company.user_id):
+            raise HTTPException(403, "Not a member of this project")
+
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already
     # holds an assistant turn must not be served a cache hit that never read
@@ -310,6 +333,65 @@ async def ask(
     with timed("route:ask.history"):
         history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
+    # Project context fold-in (AD-P8 — the bounded-assembly pattern, not the
+    # KG tables): the project's memory summary + top-N entries + the
+    # caller's job_role, prepended onto `history` as one extra "context" row
+    # ahead of the real turns — the SAME mechanism `_load_history` already
+    # uses to fold attachment text in, so every existing prompt-assembly
+    # site (`qa_agent._render_history` / `ask_runner.compose_ask_answer`)
+    # picks it up unmodified. Best-effort (AD-P7): a failure here (missing
+    # summary row, a DB hiccup) degrades to no project block — it must never
+    # block the answer. An empty/new project also yields no block.
+    if body.project_id is not None:
+        try:
+            from app.project_group_context import assemble_private_project_context
+
+            # Same breadth the @Sprntly group agent gets — memory summary +
+            # roster + task-ledger digest + artifact manifest, plus the
+            # caller's own memory entries/job_role. Breadth only: single-shot,
+            # no read tools / no tool loop / no write path.
+            project_block = assemble_private_project_context(
+                body.project_id, company.user_id, body.dataset, enterprise_id
+            )
+        except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+            logger.warning(
+                "assemble_private_project_context failed project_id=%s",
+                body.project_id, exc_info=True,
+            )
+            project_block = ""
+        if project_block:
+            # AUTHORITATIVE framing (not a passive "Context:" turn): ASK_SYSTEM
+            # tells the model to answer from connected sources and to deflect
+            # ("connect a connector") when a workspace-meta question — who is on
+            # the project, its tasks/delegations, its PRDs/artifacts — isn't in
+            # those sources. This block IS the source of truth for those, so the
+            # header explicitly tells the model to answer them from it and NOT
+            # to deflect. Breadth only; stays a single injected row (no tools).
+            project_preamble = (
+                "[Project workspace facts — AUTHORITATIVE for THIS project, and "
+                "the source of truth for anything about the project itself. The "
+                "lines below are the real members (and their roles), the real "
+                "task/delegation ledger, and the real artifacts (PRDs, "
+                "prototypes, evidence, reports, ticket sets) of the project this "
+                "chat belongs to. When asked who is on this project, what tasks "
+                "are open / who is doing what, or how many / which PRDs or "
+                "artifacts exist, answer directly and specifically from these "
+                "facts. Do NOT say you cannot see them and do NOT tell the user "
+                "to connect a data source for them — this block IS that source.]"
+            )
+            history = [
+                {"role": "context", "content": f"{project_preamble}\n{project_block}"}
+            ] + history
+        # Best-effort bind (first-write-wins, mirrors bind_conversation_to_prd):
+        # navigating away mid-generation must not orphan the conversation ↔
+        # project link. Never blocks the answer on failure.
+        if body.conversation_id is not None:
+            from app.db.conversations import bind_conversation_to_project
+
+            bind_conversation_to_project(
+                body.conversation_id, body.project_id, enterprise_id, company.user_id
+            )
+
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
     # cached answer onto an immediately-`ready` ask job (rather than returning it
@@ -318,6 +400,8 @@ async def ask(
     # user-visible result is identical (same payload, same synthetic delay).
     # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
     # so it would serve a context-free answer for a question about the open PRD.
+    # SKIPPED for project-scoped asks, same reason: a cache hit never read the
+    # project's memory block just folded into `history` above.
     # SKIPPED for a mid-thread ask, for the same reason: a thread that already
     # holds an assistant turn has context a cache hit never read. A FIRST-TURN
     # ask deliberately stays eligible even though `conversation_id` is already
@@ -329,6 +413,9 @@ async def ask(
         await _timed_cache_resolve(body.dataset, body.question)
         if (
             body.prd_id is None
+            # SKIPPED for project-scoped asks too: a cache hit never read the
+            # project's memory block just folded into `history` above.
+            and body.project_id is None
             # An artifact-tab ask is context-bound for the same reason a
             # PRD-tab one is: the cache never read the open document.
             and body.evidence_id is None
@@ -360,6 +447,13 @@ async def ask(
         pinned_skill=body.pinned_skill,
         prd_id=body.prd_id,
     )
+    if body.project_id is not None:
+        # Identifiers only — never the memory/PRD body the answer was
+        # grounded on (see `assemble_project_context`'s docstring).
+        logger.info(
+            "ask.project_context ask_id=%s project_id=%s conversation_id=%s",
+            ask_id, body.project_id, body.conversation_id,
+        )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
         # requests, so a fire-and-forget create_task would never run and the
@@ -387,6 +481,10 @@ async def ask(
             # ownership (see app.ask_runner.set_active_conversation).
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook (project_memory
+            # build spec §5.3) — None on every non-project ask, so the hook
+            # never fires for them.
+            project_id=body.project_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -407,6 +505,8 @@ async def ask(
             # The caller's own identity — see above.
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook — see above.
+            project_id=body.project_id,
         )
     )
     _inflight_tasks.add(task)

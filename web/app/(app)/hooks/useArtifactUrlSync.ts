@@ -78,7 +78,7 @@ export function useArtifactUrlSync() {
   const router = useRouter()
   const pathname = usePathname()
   const searchParams = useSearchParams()
-  const { openPrdTab, contentPanelTab } = useNavigation()
+  const { openPrdTab, contentPanelTab, skipArtifactReflectOnNavRef } = useNavigation()
   const { content, setContent } = useContent()
 
   // `/prototype` pre-dates this hook and owns `?prd=` for an unrelated
@@ -274,6 +274,21 @@ export function useArtifactUrlSync() {
       had[want.key as "prd" | "evidence" | "ticket"] === want.value
       && Object.entries(had).every(([k, v]) => k === want.key || v == null)
     if (alreadyCorrect) return
+
+    // A fork-to-private-chat nav (`ChatScreen.goToProjectPrivateChat`) just
+    // navigated away from `/` on purpose — this reflect would otherwise
+    // `router.replace` the just-generated PRD back onto the URL a tick
+    // later, reverting that push (the deterministic replacement for the
+    // rig's 300ms timing band-aid). Scoped to the PRD/tickets arm ONLY: the
+    // `contentPanelTab == null` strip-all branch returns before `want` is
+    // even computed, and the `EVIDENCE_PARAM` arm never reaches this line —
+    // both are provably untouched by this guard. One-shot: consume + reset
+    // so only the ONE reflect immediately following the fork nav is
+    // skipped, mirroring how `skipPanelCloseOnNavRef` is consumed above.
+    if (want.key === PRD_PARAM && skipArtifactReflectOnNavRef.current) {
+      skipArtifactReflectOnNavRef.current = false
+      return
+    }
 
     // Mark this value as already-consumed BEFORE writing it, so the
     // URL→drawer effects above don't mistake our own reflected write for a

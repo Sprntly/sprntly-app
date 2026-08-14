@@ -69,10 +69,18 @@ def _token_hash(token: str) -> str:
 
 class PublicReport(BaseModel):
     """The entire public projection of a report. Adding a field here widens what
-    an anonymous visitor can see — do it deliberately."""
+    an anonymous visitor can see — do it deliberately.
+
+    `skill` is the raw skill id (not a secret — `kind` already discloses its
+    humanised form): the viewer needs it as a DISCRIMINATOR, not a label, to
+    tell a `saved-chat` report (raw markdown in `html`, rendered with
+    `SavedChatMarkdown`) apart from every other report (a self-contained HTML
+    document, rendered in `HtmlReportView`'s sandboxed iframe) — `html` alone
+    no longer says which shape it is."""
 
     title: str
     kind: str
+    skill: str
     html: str
     created_at: str | None = None
 
@@ -123,6 +131,7 @@ def _projection(row: dict) -> PublicReport:
     return PublicReport(
         title=row.get("title") or "Report",
         kind=humanize_label(row.get("skill") or "") or "Report",
+        skill=row.get("skill") or "",
         html=row.get("html") or "",
         created_at=row.get("created_at"),
     )

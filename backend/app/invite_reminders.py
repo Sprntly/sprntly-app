@@ -201,6 +201,17 @@ def _accept_link() -> str:
     return f"{base}/sign-in"
 
 
+def _project_line(project_name: str | None) -> str:
+    """The one extra sentence naming the project a project-carrying invite
+    (AD-TNM3) was raised on. Empty for a plain workspace/team invite, so its
+    copy stays byte-identical. NAME only — never any project content
+    (AD-TNM2)."""
+    name = (project_name or "").strip()
+    if not name:
+        return ""
+    return f"You were invited to collaborate on the {name} project in Sprntly."
+
+
 def render_reminder(
     step: ReminderStep,
     *,
@@ -208,40 +219,62 @@ def render_reminder(
     inviter_first_name: str,
     workspace_name: str,
     accept_link: str | None = None,
+    project_name: str | None = None,
 ) -> tuple[str, str, str]:
     """Fill a step's placeholders. Returns (subject, body_text, body_html).
 
     Empty names degrade to friendly fallbacks so a missing profile never yields
-    "Hi ,". Deterministic given the config resolved at call time."""
+    "Hi ,". Deterministic given the config resolved at call time.
+
+    When `project_name` is set (a project-carrying invite, AD-TNM3), one extra
+    sentence naming the project is woven into the body; a project-less invite
+    passes no name and its copy is unchanged (NAME only — never content,
+    AD-TNM2)."""
     ctx = {
         "first_name": (first_name or "").strip() or _DEFAULT_FIRST,
         "inviter_first_name": (inviter_first_name or "").strip() or _DEFAULT_INVITER,
         "workspace_name": (workspace_name or "").strip() or _DEFAULT_WORKSPACE,
         "accept_link": accept_link or _accept_link(),
     }
+    project_line = _project_line(project_name)
     subject = step.subject.format(**ctx)
     body_text = step.body_text.format(**ctx)
-    body_html = _render_html(step, ctx)
+    if project_line:
+        # Weave the project sentence in after the greeting (first paragraph),
+        # keeping the sign-off + accept link where they are.
+        parts = body_text.split("\n\n", 1)
+        body_text = (
+            f"{parts[0]}\n\n{project_line}\n\n{parts[1]}" if len(parts) == 2
+            else f"{body_text}\n\n{project_line}"
+        )
+    body_html = _render_html(step, ctx, project_line=project_line)
     return subject, body_text, body_html
 
 
-def _render_html(step: ReminderStep, ctx: dict) -> str:
+def _render_html(step: ReminderStep, ctx: dict, *, project_line: str = "") -> str:
     """Branded HTML: paper background, white card, serif headline, prose
     paragraphs, a green CTA to the accept link. Prose is filled then escaped
-    (names are user data)."""
+    (names are user data). A non-empty `project_line` is rendered as one extra
+    escaped paragraph directly under the heading (AD-TNM3 project context)."""
     base = (config_mod.settings.frontend_url or "").rstrip("/") or (
         "https://app.sprntly.ai"
     )
     accept = html_mod.escape(ctx["accept_link"], quote=True)
     heading = html_mod.escape(step.subject.format(**ctx))
 
-    paras_html = ""
-    for tpl in step.html_paras:
-        para = html_mod.escape(tpl.format(**ctx))
-        paras_html += (
+    def _para(text: str) -> str:
+        return (
             f'<p style="margin:0 0 16px;font-family:{_SANS};font-size:15px;'
-            f'line-height:1.65;color:#41444f">{para}</p>'
+            f'line-height:1.65;color:#41444f">{html_mod.escape(text)}</p>'
         )
+
+    paras_html = ""
+    # The project sentence is NOT a template (it carries a raw project name that
+    # could contain a literal brace) — escape it as-is, never `.format()` it.
+    if project_line:
+        paras_html += _para(project_line)
+    for tpl in step.html_paras:
+        paras_html += _para(tpl.format(**ctx))
 
     cta_label = html_mod.escape(step.cta_label)
     return f"""\
@@ -304,11 +337,13 @@ def send_reminder_email(
     first_name: str,
     inviter_first_name: str,
     workspace_name: str,
+    project_name: str | None = None,
 ) -> bool:
     """Send one invite reminder via Resend. Returns True iff Resend accepted it.
 
     Best-effort: every failure (missing key, network, non-2xx) is caught and
-    returned as False. Mirrors drip_email.send_drip_email."""
+    returned as False. Mirrors drip_email.send_drip_email. `project_name`
+    (AD-TNM3) is woven into the copy when set; unset leaves the copy unchanged."""
     api_key = getattr(config_mod.settings, "resend_api_key", "") or ""
     if not api_key:
         logger.info(
@@ -323,6 +358,7 @@ def send_reminder_email(
         first_name=first_name,
         inviter_first_name=inviter_first_name,
         workspace_name=workspace_name,
+        project_name=project_name,
     )
     try:
         resp = httpx.post(
@@ -397,6 +433,7 @@ def run_invite_reminder_cycle() -> dict:
     # supabase monkeypatch are in effect before db helpers resolve a client,
     # exactly like drip_email/scheduler do.
     from app.db import invite_reminders as inv_db
+    from app.db import projects as projects_db
     from app.db.team import member_exists_for_email
 
     summary = {"invites": 0, "sent": 0, "skipped": 0, "steps_considered": 0}
@@ -459,12 +496,25 @@ def run_invite_reminder_cycle() -> dict:
             step, _target = due
             summary["steps_considered"] += 1
 
+            # A project-carrying invite (AD-TNM3) names its project in the copy;
+            # resolved best-effort — a lookup miss simply falls back to the
+            # unchanged, project-less copy (never fails the sweep).
+            project_name = ""
+            pid = inv.get("project_id")
+            if pid is not None:
+                try:
+                    proj = projects_db.get_project(pid)
+                    project_name = (proj or {}).get("name") or ""
+                except Exception:  # noqa: BLE001 — best-effort project-name fold
+                    project_name = ""
+
             ok = send_reminder_email(
                 to_email=email,
                 step=step,
                 first_name=invitee_names.get(email.lower(), ""),
                 inviter_first_name=inviter_names.get(inv.get("invited_by"), ""),
                 workspace_name=workspace_names.get(company_id, ""),
+                project_name=project_name,
             )
             status = "sent" if ok else "skipped"
             inv_db.record_reminder_sent(

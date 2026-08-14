@@ -43,7 +43,16 @@ import { PublicReportViewer } from "../PublicReportViewer"
 const REPORT = {
   title: "Voice of Customer · Q2",
   kind: "Voice of customer report",
+  skill: "voice-of-customer-report",
   html: "<!DOCTYPE html><html><body><h1>VoC</h1></body></html>",
+  created_at: "2026-07-30T10:00:00+00:00",
+}
+
+const SAVED_CHAT_REPORT = {
+  title: "Saved from chat",
+  kind: "Saved chat",
+  skill: "saved-chat",
+  html: "# Prioritization\n\n**Ship A** first",
   created_at: "2026-07-30T10:00:00+00:00",
 }
 
@@ -73,6 +82,29 @@ describe("PublicReportViewer", () => {
     const frame = document.querySelector("iframe") as HTMLIFrameElement
     expect(frame.getAttribute("srcdoc")).toContain("<h1>VoC</h1>")
     expect(screen.getByText("Voice of Customer · Q2")).toBeTruthy()
+  })
+
+  it("renders a skill='saved-chat' report as markdown, not the HTML iframe", async () => {
+    publicGet.mockResolvedValue(SAVED_CHAT_REPORT)
+
+    await mount()
+
+    await waitFor(() => expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy())
+    const body = screen.getByTestId("saved-chat-markdown")
+    expect(body.querySelector("h1")?.textContent).toBe("Prioritization")
+    expect(body.querySelector("strong")?.textContent).toBe("Ship A")
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+
+  it("still renders a non-'saved-chat' shared report in the sandboxed iframe, unchanged", async () => {
+    publicGet.mockResolvedValue(REPORT)
+
+    await mount()
+
+    await waitFor(() => expect(screen.getByTestId("public-report")).toBeTruthy())
+    const frame = document.querySelector("iframe") as HTMLIFrameElement
+    expect(frame.getAttribute("srcdoc")).toContain("<h1>VoC</h1>")
+    expect(screen.queryByTestId("saved-chat-markdown")).toBeNull()
   })
 
   it("never shows internal provenance to an outsider", async () => {

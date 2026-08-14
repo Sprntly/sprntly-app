@@ -15,10 +15,18 @@ text-only answer while the document never changed. Contract under test:
 
 The editor is mocked at the module seam (app.prd_questions.apply_chat_edit —
 the route lazy-imports it per call, so patching the source module works).
+
+Also covers the §A extraction's byte-identical guard: the route delegates to
+the shared `apply_chat_edit_scoped(project_id=None)` (AC1), and that guard-off
+path never touches the ★ cross-project gate (AC3) — `test_project_chat_edit.py`
+covers the gate ON (project_id set) side of the same shared callable.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import app.prd_questions as prd_questions
+import app.project_chat_edit as pce
 from app.db.client import require_client
 
 
@@ -169,3 +177,43 @@ def test_chat_edit_validates_instruction(tenant_client, isolated_settings, monke
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "ab"}
     ).status_code == 422
     assert called == []
+
+
+# ── AC1 — the route delegates to the shared callable, guard off ──────────────
+def test_chat_edit_route_delegates_guard_off(tenant_client, isolated_settings, monkeypatch):
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_prd(isolated_settings["db"])
+    seen = {}
+
+    def _spy(prd_id_, instruction, company, *, project_id=None, dataset=None):
+        seen.update(
+            prd_id=prd_id_, instruction=instruction,
+            company_id=company.company_id, project_id=project_id, dataset=dataset,
+        )
+        return {"prd": {"payload_md": "ok"}, "sections_changed": [], "summary": ""}
+
+    monkeypatch.setattr(pce, "apply_chat_edit_scoped", _spy)
+    resp = t.client.post(f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "shorten it"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"prd": {"payload_md": "ok"}, "sections_changed": [], "summary": ""}
+    assert seen == {
+        "prd_id": prd_id, "instruction": "shorten it",
+        "company_id": t.company_id, "project_id": None, "dataset": None,
+    }
+
+
+# ── AC3 — guard-off never calls the ★ cross-project gate ─────────────────────
+def test_scoped_edit_guard_off_never_calls_project_gate(tenant_client, isolated_settings, monkeypatch):
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_prd(isolated_settings["db"])
+    gate_called = []
+    monkeypatch.setattr(pce, "assert_prd_on_project", lambda **kw: gate_called.append(kw))
+    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+        "html": "<html><body><h1>Doc v2</h1></body></html>",
+        "sections_changed": [], "summary": "no-op",
+    })
+    company = SimpleNamespace(company_id=t.company_id, workspace_id=None, user_id="u1", user_email=None)
+
+    result = pce.apply_chat_edit_scoped(prd_id, "looks fine", company, project_id=None)
+    assert gate_called == []
+    assert result["sections_changed"] == []

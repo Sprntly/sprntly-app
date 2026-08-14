@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { HtmlReportView } from "../components/shared/HtmlReportView"
+import { SavedChatMarkdown } from "../components/shared/SavedChatMarkdown"
 import { saveBlob } from "../lib/saveBlob"
 import { ApiError, publicReportsApi, type PublicReport } from "../lib/api"
 import { reportTokenFromLocation } from "./reportTokenFromPathname"
@@ -80,7 +81,13 @@ export function PublicReportView({
           {downloading ? "Preparing…" : "Download PDF"}
         </button>
       </header>
-      <HtmlReportView html={report.html} title={report.title} watermark />
+      {/* "saved-chat" is the one skill whose `html` holds raw markdown
+          rather than a self-contained document — see
+          `project_artifact_capture.py`. Every other shared report still
+          renders in the sandboxed iframe, unchanged. */}
+      {report.skill === "saved-chat"
+        ? <SavedChatMarkdown markdown={report.html} />
+        : <HtmlReportView html={report.html} title={report.title} watermark />}
     </div>
   )
 }

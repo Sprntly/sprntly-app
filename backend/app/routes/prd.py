@@ -38,6 +38,7 @@ from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
 from app.db.conversations import bind_conversation_to_prd
 from app.db.evidences import find_existing_evidence_for_theme
+from app.project_from_prd import maybe_auto_create_project_for_prd
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
@@ -432,16 +433,26 @@ async def generate_from_task(
         if existing:
             # Re-issuing the command resolves the SAME PRD — the new chat still
             # needs to point at it, or reopening that chat shows no PRD at all.
+            auto_project_id = None
             if body.conversation_id is not None:
                 bind_conversation_to_prd(
                     body.conversation_id, existing["id"],
                     company.company_id, company.user_id,
+                )
+                auto_project_id = maybe_auto_create_project_for_prd(
+                    company_id=company.company_id, workspace_id=company.workspace_id,
+                    user_id=company.user_id, prd_id=existing["id"],
+                    prd_title=existing["title"], conversation_id=body.conversation_id,
                 )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                # The project this PRD's originating chat was forked into (new
+                # or pre-existing), so the client can land the user in that
+                # project's private chat. None when nothing was forked.
+                "project_id": auto_project_id,
             }
 
     # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
@@ -474,9 +485,15 @@ async def generate_from_task(
 
     # Link the commanding chat to this PRD NOW — before the (multi-second)
     # generation runs and before the client could navigate away.
+    auto_project_id = None
     if body.conversation_id is not None:
         bind_conversation_to_prd(
             body.conversation_id, prd_id, company.company_id, company.user_id
+        )
+        auto_project_id = maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=body.conversation_id,
         )
 
     # Documents attached earlier in the chat thread ride along as authoritative
@@ -518,6 +535,10 @@ async def generate_from_task(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        # The project this PRD's originating chat was forked into (new or
+        # pre-existing), so the client can land the user in that project's
+        # private chat. None when nothing was forked.
+        "project_id": auto_project_id,
     }
 
 
@@ -675,6 +696,11 @@ async def import_prd(
     if conversation_id is not None:
         bind_conversation_to_prd(
             conversation_id, prd_id, company.company_id, company.user_id
+        )
+        maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=conversation_id,
         )
 
     task = asyncio.create_task(
@@ -1168,44 +1194,19 @@ def chat_edit(
     panel can refresh live. Before this endpoint, an edit-phrased chat message
     on a PRD tab was answered in text only and the document never changed
     (issue b of the chat→PRD bug set).
+
+    Delegates to the shared `apply_chat_edit_scoped` (`project_chat_edit.py`)
+    guard-off (`project_id=None`) — this is the byte-identical main-chat hot
+    path; the project-scoped write (with the ★ cross-project IDOR gate) lives
+    on `POST /v1/projects/{id}/prd/chat-edit` instead. Request model, response
+    keys, and status codes (200 / 409 empty PRD / 502 edit failure) are
+    unchanged by the extraction.
     """
-    from app.prd_questions import apply_chat_edit
+    from app.project_chat_edit import apply_chat_edit_scoped
 
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-
-    # Edit the RAW payload_md (the pure PRD HTML) — same discipline as the
-    # input-answer editor: design-agent 'applied' patches are folded on read by
-    # get_prd_rendered, so editing the raw doc keeps them folding once.
-    prd_html = (row.get("payload_md") or "").strip()
-    if not prd_html:
-        raise HTTPException(409, "PRD has no content to edit yet")
-
-    try:
-        edit = apply_chat_edit(
-            prd_html, body.instruction, enterprise_id=company.company_id
-        )
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Could not apply the edit: {exc}")
-
-    if edit["sections_changed"]:
-        # Snapshot the pre-edit content so the change is undoable (mirrors
-        # PUT /{id} and the input-answer path).
-        try:
-            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
-        except Exception:
-            logger.warning(
-                "auto-version snapshot failed for prd_id=%s before chat edit "
-                "(undo point not captured)", prd_id, exc_info=True,
-            )
-        update_prd_content(prd_id, row.get("title", ""), edit["html"])
-    # No sections changed → the editor judged the instruction wasn't an edit;
-    # leave the stored document untouched (no snapshot, no write).
-
-    return {
-        "prd": get_prd_rendered(prd_id),
-        "sections_changed": edit["sections_changed"],
-        "summary": edit["summary"],
-    }
+    return apply_chat_edit_scoped(
+        prd_id, body.instruction, company, project_id=None
+    )
 
 
 class ChangeTemplateIn(BaseModel):
