@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 //
-// DelegationActions — the shared party/state-aware action affordance. Proves
-// AC-3 (only party- and state-appropriate buttons, NEVER an illegal-edge or
-// wrong-party button) and AC-4 (a click emits the right event; Decline passes
-// a note). `test_legal_actions_map_matches_transition_edges` pins the client
-// `LEGAL_ACTIONS` mirror against the server graph
+// DelegationActions — the shared party/state-aware action affordance for the
+// SIMPLIFIED state model (no approve/reject; the agent owns follow-through
+// once assigned; `cleared` is the assigner's one terminal kill switch).
+// Proves AC1/AC2 (only party- and state-appropriate buttons ever render),
+// AC3 (no decline-note form exists anymore), AC4 (every `LEGAL_ACTIONS`
+// entry is a legal server edge), and AC5 (terminal statuses render null).
+// `test_legal_actions_are_server_legal_edges` pins the client `LEGAL_ACTIONS`
+// mirror against the server graph
 // (`backend/app/db/delegation_events.py`'s `TRANSITIONS`/`EVENT_PARTY`),
-// transcribed here as the reference edge list — every client button must be a
-// legal server edge emittable by that party.
+// transcribed here as the reference edge list.
 import * as React from "react"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -22,21 +24,15 @@ afterEach(() => cleanup())
 // backend/app/db/delegation_events.py — the sole authority. The client map is
 // a SUBSET of these edges (never a superset), filtered to the party.
 const TRANSITIONS: Record<string, string[]> = {
-  assigned: ["accepted", "in_progress", "declined", "cancelled"],
-  accepted: ["in_progress", "completed", "declined", "cancelled"],
-  in_progress: ["completed", "declined", "cancelled"],
-  completed: ["reopened"],
-  declined: ["reopened", "cancelled"],
-  cancelled: ["reopened"],
-  reopened: ["accepted", "in_progress", "declined", "cancelled"],
+  assigned: ["in_progress", "completed", "cleared"],
+  in_progress: ["completed", "cleared"],
+  completed: [],
+  cleared: [],
 }
 const EVENT_PARTY: Record<string, ViewerParty> = {
-  accepted: "assignee",
   in_progress: "assignee",
   completed: "assignee",
-  declined: "assignee",
-  cancelled: "assigner",
-  reopened: "assigner",
+  cleared: "assigner",
 }
 
 function events(party: ViewerParty, status: string): string[] {
@@ -52,49 +48,64 @@ function events(party: ViewerParty, status: string): string[] {
   return btns.map((b) => (b.getAttribute("data-testid") ?? "").replace("delegation-action-", ""))
 }
 
-describe("DelegationActions — assignee visibility (AC3)", () => {
-  it("test_assignee_assigned_shows_accept_decline_only — Accept + Decline; no Mark done/Cancel/Reopen", () => {
-    expect(new Set(events("assignee", "assigned"))).toEqual(new Set(["accepted", "declined"]))
-  })
+describe("DelegationActions — assignee visibility (AC1)", () => {
+  it("test_assignee_actions_progress_and_done_only — Mark in progress + Mark done for `assigned`; Mark done only for `in_progress`; no Accept/Decline ever", () => {
+    expect(new Set(events("assignee", "assigned"))).toEqual(new Set(["in_progress", "completed"]))
+    cleanup()
+    expect(new Set(events("assignee", "in_progress"))).toEqual(new Set(["completed"]))
 
-  it("test_assignee_accepted_shows_markdone_decline — Mark done + Decline (+ In progress)", () => {
-    expect(new Set(events("assignee", "accepted"))).toEqual(new Set(["in_progress", "completed", "declined"]))
-  })
-
-  it("test_assignee_in_progress_shows_markdone_decline — Mark done + Decline, no In progress edge", () => {
-    expect(new Set(events("assignee", "in_progress"))).toEqual(new Set(["completed", "declined"]))
-  })
-
-  it("test_assignee_closed_shows_no_buttons — completed/declined/cancelled → none", () => {
-    for (const status of ["completed", "declined", "cancelled"]) {
+    for (const status of ["assigned", "in_progress", "completed", "cleared"]) {
       cleanup()
-      expect(events("assignee", status)).toEqual([])
+      const shown = events("assignee", status)
+      expect(shown).not.toContain("accepted")
+      expect(shown).not.toContain("declined")
     }
   })
 })
 
-describe("DelegationActions — assigner visibility (AC3)", () => {
-  it("test_assigner_open_shows_cancel — an assigner on any open state sees Cancel only", () => {
-    for (const status of ["assigned", "accepted", "in_progress", "reopened"]) {
+describe("DelegationActions — assigner visibility (AC2)", () => {
+  it("test_assigner_action_clear_only — Clear task for `assigned`/`in_progress`; no Cancel/Reopen ever", () => {
+    for (const status of ["assigned", "in_progress"]) {
       cleanup()
-      expect(events("assigner", status)).toEqual(["cancelled"])
+      expect(events("assigner", status)).toEqual(["cleared"])
     }
-  })
-
-  it("test_assigner_closed_shows_reopen — completed/cancelled → Reopen", () => {
-    for (const status of ["completed", "cancelled"]) {
+    for (const status of ["assigned", "in_progress", "completed", "cleared"]) {
       cleanup()
-      expect(events("assigner", status)).toEqual(["reopened"])
+      const shown = events("assigner", status)
+      expect(shown).not.toContain("cancelled")
+      expect(shown).not.toContain("reopened")
     }
-  })
-
-  it("test_assigner_declined_shows_reopen_and_cancel — declined → Reopen + Cancel", () => {
-    expect(new Set(events("assigner", "declined"))).toEqual(new Set(["reopened", "cancelled"]))
   })
 })
 
-describe("DelegationActions — client map mirrors the server graph (AC3)", () => {
-  it("test_legal_actions_map_matches_transition_edges — every client button is a legal, party-appropriate server edge", () => {
+describe("DelegationActions — no decline-note form (AC3)", () => {
+  it("test_no_decline_note_form — clicking any rendered action never mounts delegation-decline-form", () => {
+    for (const [party, status] of [
+      ["assignee", "assigned"],
+      ["assignee", "in_progress"],
+      ["assigner", "assigned"],
+      ["assigner", "in_progress"],
+    ] as [ViewerParty, string][]) {
+      cleanup()
+      const onEmit = vi.fn()
+      render(
+        React.createElement(DelegationActions, {
+          delegationId: 2,
+          status,
+          viewerParty: party,
+          onEmit,
+        }),
+      )
+      for (const btn of screen.queryAllByTestId(/^delegation-action-/)) {
+        fireEvent.click(btn)
+      }
+      expect(screen.queryByTestId("delegation-decline-form")).toBeNull()
+    }
+  })
+})
+
+describe("DelegationActions — client map mirrors the server graph (AC4)", () => {
+  it("test_legal_actions_are_server_legal_edges — every client button is a legal, party-appropriate server edge", () => {
     let checked = 0
     for (const party of ["assignee", "assigner"] as ViewerParty[]) {
       for (const [status, actions] of Object.entries(LEGAL_ACTIONS[party])) {
@@ -124,22 +135,46 @@ describe("DelegationActions — client map mirrors the server graph (AC3)", () =
   })
 })
 
-describe("DelegationActions — emit wiring (AC4)", () => {
-  it("test_action_click_calls_emit — a button calls onEmit(event) with the right event", () => {
-    const onEmit = vi.fn()
-    render(
-      React.createElement(DelegationActions, {
-        delegationId: 3,
-        status: "assigned",
-        viewerParty: "assignee",
-        onEmit,
-      }),
-    )
-    fireEvent.click(screen.getByTestId("delegation-action-accepted"))
-    expect(onEmit).toHaveBeenCalledWith("accepted")
+describe("DelegationActions — terminal statuses render nothing (AC5)", () => {
+  it("test_terminal_status_renders_null — completed and cleared render nothing for both parties", () => {
+    for (const party of ["assignee", "assigner"] as ViewerParty[]) {
+      for (const status of ["completed", "cleared"]) {
+        cleanup()
+        const { container } = render(
+          React.createElement(DelegationActions, {
+            delegationId: 4,
+            status,
+            viewerParty: party,
+            onEmit: vi.fn(),
+          }),
+        )
+        expect(container.firstChild).toBeNull()
+      }
+    }
   })
 
-  it("test_decline_passes_note — Decline reveals the input and onEmit('declined', note) carries the note", () => {
+  it("degrades a legacy (pre-simplification) status to no actions rather than crashing", () => {
+    for (const party of ["assignee", "assigner"] as ViewerParty[]) {
+      for (const status of ["accepted", "declined", "cancelled", "reopened"]) {
+        cleanup()
+        expect(() =>
+          render(
+            React.createElement(DelegationActions, {
+              delegationId: 5,
+              status,
+              viewerParty: party,
+              onEmit: vi.fn(),
+            }),
+          ),
+        ).not.toThrow()
+        expect(screen.queryAllByTestId(/^delegation-action-/)).toEqual([])
+      }
+    }
+  })
+})
+
+describe("DelegationActions — emit wiring", () => {
+  it("test_action_click_calls_emit — a button calls onEmit(event) with the right event, no note", () => {
     const onEmit = vi.fn()
     render(
       React.createElement(DelegationActions, {
@@ -149,27 +184,21 @@ describe("DelegationActions — emit wiring (AC4)", () => {
         onEmit,
       }),
     )
-    // Clicking Decline reveals the note input rather than emitting immediately.
-    fireEvent.click(screen.getByTestId("delegation-action-declined"))
-    expect(onEmit).not.toHaveBeenCalled()
-    const note = screen.getByTestId("delegation-decline-note")
-    fireEvent.change(note, { target: { value: "wrong team" } })
-    fireEvent.click(screen.getByTestId("delegation-decline-confirm"))
-    expect(onEmit).toHaveBeenCalledWith("declined", "wrong team")
+    fireEvent.click(screen.getByTestId("delegation-action-in_progress"))
+    expect(onEmit).toHaveBeenCalledWith("in_progress")
   })
 
-  it("Decline with an empty note passes undefined (optional note)", () => {
+  it("the assigner's Clear task button emits `cleared`", () => {
     const onEmit = vi.fn()
     render(
       React.createElement(DelegationActions, {
         delegationId: 3,
         status: "assigned",
-        viewerParty: "assignee",
+        viewerParty: "assigner",
         onEmit,
       }),
     )
-    fireEvent.click(screen.getByTestId("delegation-action-declined"))
-    fireEvent.click(screen.getByTestId("delegation-decline-confirm"))
-    expect(onEmit).toHaveBeenCalledWith("declined", undefined)
+    fireEvent.click(screen.getByTestId("delegation-action-cleared"))
+    expect(onEmit).toHaveBeenCalledWith("cleared")
   })
 })

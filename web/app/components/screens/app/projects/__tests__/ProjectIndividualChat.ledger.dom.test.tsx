@@ -137,7 +137,7 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
-  it("test_matched_brief_turn_renders_actions — a matched brief turn renders compact DelegationActions and emits on click", async () => {
+  it("test_inline_brief_actions_no_accept_decline — a matched brief turn renders compact DelegationActions with only in_progress/completed, no accepted/declined, and emits on click", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockResolvedValue([ledgerRow({ delegation_id: 5, delivered_turn_id: 42, status: "assigned" })])
 
@@ -148,15 +148,17 @@ describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
     const agentTurn = screen.getByTestId("ic-history-agent")
     // The affordance renders INSIDE the brief turn, not as a floating element.
     expect(agentTurn.contains(affordance)).toBe(true)
-    // Assignee on an `assigned` row → Accept + Decline.
-    expect(within(affordance).getByTestId("delegation-action-accepted")).toBeTruthy()
-    expect(within(affordance).getByTestId("delegation-action-declined")).toBeTruthy()
+    // Assignee on an `assigned` row → Mark in progress + Mark done only.
+    expect(within(affordance).getByTestId("delegation-action-in_progress")).toBeTruthy()
+    expect(within(affordance).getByTestId("delegation-action-completed")).toBeTruthy()
+    expect(within(affordance).queryByTestId("delegation-action-accepted")).toBeNull()
+    expect(within(affordance).queryByTestId("delegation-action-declined")).toBeNull()
 
     // The ledger read is scoped to the caller's assigned view.
     expect(ledgerMock).toHaveBeenCalledWith(1, "assigned_to_me")
 
-    fireEvent.click(within(affordance).getByTestId("delegation-action-accepted"))
-    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith(1, 5, "accepted", undefined))
+    fireEvent.click(within(affordance).getByTestId("delegation-action-in_progress"))
+    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith(1, 5, "in_progress", undefined))
   })
 
   it("test_unmatched_turn_has_no_affordance — a non-matching turn renders unchanged; send path + subscription untouched", async () => {

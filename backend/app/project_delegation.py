@@ -359,7 +359,7 @@ def handle_delegate_task(
     *,
     project_id: int,
     assigner_user_id: str | None,
-    source_conversation_id: int,
+    source_conversation_id: int | None,
     source_turn_id: int | None,
     roster: list[dict],
     dataset: str,

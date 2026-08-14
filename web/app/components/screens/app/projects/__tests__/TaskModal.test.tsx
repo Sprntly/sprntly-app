@@ -33,7 +33,7 @@ vi.mock("../../../../../lib/api", async () => {
   }
 })
 
-import { TaskModalView, TaskModal } from "../TaskModal"
+import { TaskModalView, TaskModal, STATUS_LABEL } from "../TaskModal"
 import type { DelegationLedgerRow } from "../../../../../lib/api"
 
 const row = (overrides: Partial<DelegationLedgerRow>): DelegationLedgerRow => ({
@@ -95,7 +95,7 @@ describe("TaskModalView — data-bound sections (AC1, AC2)", () => {
     expect(r1.textContent).toContain("Assigned")
   })
 
-  it("test_no_illegal_edge_button — an assigned assignee row shows Accept/Decline only, never Cancel/Reopen/Mark done", async () => {
+  it("test_no_illegal_edge_button — an assigned assignee row shows Mark in progress/Mark done only, never accepted/declined/cancelled/reopened", async () => {
     ledgerMock.mockImplementation((_id: unknown, view: string) =>
       view === "assigned_to_me"
         ? Promise.resolve([row({ delegation_id: 1, status: "assigned", bucket: "open" })])
@@ -104,11 +104,33 @@ describe("TaskModalView — data-bound sections (AC1, AC2)", () => {
     render(React.createElement(TaskModalView, { open: true, projectId: "p1", onClose: () => {} }))
     await waitFor(() => expect(screen.getByTestId("ledger-row-1")).toBeTruthy())
     const r1 = screen.getByTestId("ledger-row-1")
-    expect(within(r1).getByTestId("delegation-action-accepted")).toBeTruthy()
-    expect(within(r1).getByTestId("delegation-action-declined")).toBeTruthy()
-    expect(within(r1).queryByTestId("delegation-action-completed")).toBeNull()
+    expect(within(r1).getByTestId("delegation-action-in_progress")).toBeTruthy()
+    expect(within(r1).getByTestId("delegation-action-completed")).toBeTruthy()
+    expect(within(r1).queryByTestId("delegation-action-accepted")).toBeNull()
+    expect(within(r1).queryByTestId("delegation-action-declined")).toBeNull()
     expect(within(r1).queryByTestId("delegation-action-cancelled")).toBeNull()
     expect(within(r1).queryByTestId("delegation-action-reopened")).toBeNull()
+  })
+})
+
+describe("TaskModalView — cleared status (AC6)", () => {
+  it("test_status_label_cleared — STATUS_LABEL['cleared'] === 'Cleared'", () => {
+    expect(STATUS_LABEL.cleared).toBe("Cleared")
+  })
+
+  it("test_cleared_row_in_done_section — a cleared/bucket:done row renders under ledger-section-done labelled Cleared", async () => {
+    ledgerMock.mockImplementation((_id: unknown, view: string) =>
+      view === "assigned_to_me"
+        ? Promise.resolve([row({ delegation_id: 9, task_summary: "Stopped mid-flight", status: "cleared", bucket: "done" })])
+        : Promise.resolve([]),
+    )
+    render(React.createElement(TaskModalView, { open: true, projectId: "p1", onClose: () => {} }))
+    await waitFor(() => expect(screen.getByTestId("ledger-row-9")).toBeTruthy())
+
+    const doneSection = screen.getByTestId("ledger-section-done")
+    expect(doneSection).toBeTruthy()
+    const r9 = screen.getByTestId("ledger-row-9")
+    expect(r9.textContent).toContain("Cleared")
   })
 })
 
@@ -125,26 +147,25 @@ describe("TaskModalView — action wiring (AC4, AC5)", () => {
     // Two reads on open (assigned_to_me + waiting_on).
     expect(ledgerMock).toHaveBeenCalledTimes(2)
 
-    fireEvent.click(screen.getByTestId("delegation-action-accepted"))
-    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith("p9", 7, "accepted", undefined))
+    fireEvent.click(screen.getByTestId("delegation-action-in_progress"))
+    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith("p9", 7, "in_progress", undefined))
     // After a successful emit the affected view refetches (no full reload).
     await waitFor(() => expect(ledgerMock).toHaveBeenCalledTimes(4))
   })
 
-  it("test_decline_passes_note_through_modal — Decline reveals a note input and carries the typed note", async () => {
+  it("test_assigner_row_clear_emits — an open Waiting-on row shows Clear task and clicking emits `cleared`", async () => {
     ledgerMock.mockImplementation((_id: unknown, view: string) =>
       view === "assigned_to_me"
-        ? Promise.resolve([row({ delegation_id: 5, status: "assigned", bucket: "open" })])
-        : Promise.resolve([]),
+        ? Promise.resolve([])
+        : Promise.resolve([row({ delegation_id: 5, status: "assigned", bucket: "open", other_party_name: "Shristi" })]),
     )
     render(React.createElement(TaskModalView, { open: true, projectId: "p1", onClose: () => {} }))
     await waitFor(() => expect(screen.getByTestId("ledger-row-5")).toBeTruthy())
 
-    fireEvent.click(screen.getByTestId("delegation-action-declined"))
-    const note = screen.getByTestId("delegation-decline-note")
-    fireEvent.change(note, { target: { value: "not my area" } })
-    fireEvent.click(screen.getByTestId("delegation-decline-confirm"))
-    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith("p1", 5, "declined", "not my area"))
+    const r5 = screen.getByTestId("ledger-row-5")
+    expect(within(r5).getByTestId("delegation-action-cleared")).toBeTruthy()
+    fireEvent.click(within(r5).getByTestId("delegation-action-cleared"))
+    await waitFor(() => expect(emitDelegationEventMock).toHaveBeenCalledWith("p1", 5, "cleared", undefined))
   })
 })
 
