@@ -24,9 +24,15 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration, changeTemplate } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration, changeTemplate, ticketsChangeTemplate } = vi.hoisted(() => ({
   changeTemplate: vi.fn().mockResolvedValue({
     prd_id: 501, status: "generating", artifact_template_id: "tpl-acme",
+  }),
+  // The tickets switch (POST /v1/stories/change-template) — synchronous:
+  // the response IS the re-laid set, no job to poll.
+  ticketsChangeTemplate: vi.fn().mockResolvedValue({
+    status: "ready", artifact_template_id: "tpl-tick",
+    artifact_template_name: "Acme Tickets", stories: [],
   }),
   runTicketSetGeneration: vi.fn().mockResolvedValue({
     ok: true,
@@ -52,6 +58,7 @@ vi.mock("../../../../lib/api", () => {
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
     prdApi: { generateFromTask, classifyCommand, clarifyTask, changeTemplate },
+    storiesApi: { changeTemplate: ticketsChangeTemplate },
     chatIntentApi: { resolve: resolveIntent },
     // The thread-resume probe reads this on every chat open; it must find a
     // callable here even in a suite that is not about ticket sets.
@@ -155,6 +162,8 @@ beforeEach(() => {
   clarifyTask.mockClear()
   clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
   changeTemplate.mockClear()
+  ticketsChangeTemplate.mockClear()
+  runTicketSetGeneration.mockClear()
   resolveIntent.mockReset()
   resolveIntent.mockResolvedValue({
     intent: "answer", confidence: 0.9, task: null, instruction: null,
@@ -273,6 +282,75 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(2))
     expect(changeTemplate).not.toHaveBeenCalled()
+  })
+
+  it("change_tickets_template on a PRD thread re-lays that PRD's tickets", async () => {
+    renderChat()
+    // First turn creates the tab — the switch needs an active tab to act on.
+    await typeAndSend("what changed for enterprise users last week?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    resolveIntent.mockResolvedValue({
+      intent: "change_tickets_template", confidence: 0.95, task: null, instruction: null,
+      artifact_template_id: "tpl-tick", artifact_template_name: "Acme Tickets",
+      reason: "ticket format switch", source: "planner", prd_id: 501, prd_title: "Dark mode",
+    })
+    await typeAndSend("change the ticket template to Acme")
+
+    // The PRD-shaped target: no set on this thread, so the envelope's PRD is
+    // whose tickets switch.
+    await waitFor(() =>
+      expect(ticketsChangeTemplate).toHaveBeenCalledWith({ prdId: 501 }, "tpl-tick"),
+    )
+    // Synchronous flow: the completed switch is confirmed in the thread.
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("the tickets now use “Acme Tickets”"),
+    )
+    expect(runAskGeneration).toHaveBeenCalledTimes(1)
+    expect(changeTemplate).not.toHaveBeenCalled() // never the PRD switch
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("change_tickets_template prefers the thread's STANDALONE set over the tab PRD", async () => {
+    // Build a standalone set first — the tab records its ticketSetId, and a
+    // later switch must target THAT set (its tickets are what is on screen),
+    // never the envelope's PRD.
+    resolveIntent.mockResolvedValue({
+      intent: "generate_tickets", confidence: 0.9, task: "the webhook retry work",
+      instruction: null, reason: "tickets", source: "llm", prd_id: null, prd_title: null,
+    })
+    renderChat()
+    await typeAndSend("break this into work items")
+    await waitFor(() => expect(runTicketSetGeneration).toHaveBeenCalledTimes(1))
+
+    resolveIntent.mockResolvedValue({
+      intent: "change_tickets_template", confidence: 0.95, task: null, instruction: null,
+      artifact_template_id: "tpl-tick", artifact_template_name: "Acme Tickets",
+      reason: "ticket format switch", source: "planner", prd_id: 501, prd_title: null,
+    })
+    await typeAndSend("change the ticket template to Acme")
+
+    await waitFor(() =>
+      expect(ticketsChangeTemplate).toHaveBeenCalledWith({ ticketSetId: 7 }, "tpl-tick"),
+    )
+  })
+
+  it("change_tickets_template with no format id falls through to the grounded ask", async () => {
+    // The backend downgrades these itself (no_target_format); this covers the
+    // older-backend edge where the intent arrives bare.
+    renderChat()
+    await typeAndSend("what changed for enterprise users last week?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+
+    resolveIntent.mockResolvedValue({
+      intent: "change_tickets_template", confidence: 0.95, task: null, instruction: null,
+      artifact_template_id: null, artifact_template_name: null,
+      reason: "switch, no target", source: "planner", prd_id: 501, prd_title: null,
+    })
+    await typeAndSend("change the ticket template")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(2))
+    expect(ticketsChangeTemplate).not.toHaveBeenCalled()
   })
 
   it("generate_tickets with no PRD on the tab builds a STANDALONE ticket set", async () => {

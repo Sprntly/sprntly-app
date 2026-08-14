@@ -500,6 +500,15 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # comment records: this set is the wire, and an action missing from it is
     # a silent half-feature, not an error.
     "assign_tickets",
+    # The tickets counterpart of change_prd_template — dispatches
+    # POST /v1/stories/change-template with the envelope's
+    # `artifact_template_id`. The TARGET is resolved client-side (the thread's
+    # standalone ticket set, else the tab PRD's tickets), because a standalone
+    # set has no prd_id for `_NEEDS_PRD` to check — which is why this intent is
+    # deliberately NOT in that set: downgrading on "no PRD" would kill the
+    # switch for exactly the sets that need it. A thread with neither falls
+    # through to the grounded ask on the client, same as any unhandled intent.
+    "change_tickets_template",
 }
 
 
@@ -614,13 +623,16 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # must reach it as `answer`, never as an open of nothing.
         envelope.update(intent="answer", source="no_artifact_query")
     if (
-        envelope["intent"] == "change_prd_template"
+        envelope["intent"] in ("change_prd_template", "change_tickets_template")
         and not envelope["artifact_template_id"]
     ):
         # Re-applied like open_artifact above: the planner downgrades a
         # switch with no target itself, but this function owns what the client
         # is told to do, and a change-template dispatch with no format id would
-        # be an executor call with nothing to execute.
+        # be an executor call with nothing to execute. Covers both switches —
+        # the tickets one included, even though its ticket-set target is
+        # resolved client-side, because the FORMAT argument is the backend's to
+        # gate either way.
         envelope.update(intent="answer", source="no_target_format")
     return envelope
 

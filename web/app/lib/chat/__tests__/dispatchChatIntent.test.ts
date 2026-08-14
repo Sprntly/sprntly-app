@@ -1,6 +1,21 @@
 import { describe, expect, it, vi } from "vitest"
-import { dispatchChatIntent, type ChatIntentExecutors } from "../dispatchChatIntent"
+import {
+  dispatchChatIntent,
+  type ChatIntentExecutors,
+  type DispatchChatIntentContext,
+} from "../dispatchChatIntent"
 import type { ChatIntentEnvelope } from "../../api"
+
+function ctx(
+  overrides: Partial<DispatchChatIntentContext> = {},
+): DispatchChatIntentContext {
+  return {
+    hasEditTarget: false,
+    editTargetPrdId: null,
+    ticketsTarget: null,
+    ...overrides,
+  }
+}
 
 function envelope(overrides: Partial<ChatIntentEnvelope> = {}): ChatIntentEnvelope {
   return {
@@ -28,6 +43,7 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onGeneratePrd: vi.fn(),
     onOpenArtifact: vi.fn(),
     onChangeTemplate: vi.fn(),
+    onChangeTicketsTemplate: vi.fn(),
     onCreateArtifact: vi.fn(),
     onAssignTickets: vi.fn(),
     onAnswer: vi.fn(),
@@ -38,7 +54,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("generate_tickets always hits onGenerateTickets, carrying the envelope", () => {
     const ex = executors()
     const env = envelope({ intent: "generate_tickets", task: "the webhook retry work" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onGenerateTickets).toHaveBeenCalledWith(env)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -47,7 +63,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("generate_prd always hits onGeneratePrd, carrying the envelope", () => {
     const ex = executors()
     const env = envelope({ intent: "generate_prd", task: "dark mode on mobile" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onGeneratePrd).toHaveBeenCalledWith(env)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -56,7 +72,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("edit_prd with a resolvable target + instruction hits onEditPrd with both", () => {
     const ex = executors()
     const env = envelope({ intent: "edit_prd", instruction: "shorten it", prd_id: 77 })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onEditPrd).toHaveBeenCalledWith("shorten it", 77)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -66,7 +82,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
     const ex = executors()
     const open = { status: "resolved" as const, artifact_type: "prd" as const, query: "onboarding", artifact: null, candidates: [] }
     const env = envelope({ intent: "open_artifact", open })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onOpenArtifact).toHaveBeenCalledWith(open)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -75,7 +91,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("create_artifact always hits onCreateArtifact, carrying the envelope", () => {
     const ex = executors()
     const env = envelope({ intent: "create_artifact", artifact_kind: "leadership update" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onCreateArtifact).toHaveBeenCalledWith(env)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -84,7 +100,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("change_prd_template with a resolvable target + format hits onChangeTemplate with the resolved prd id", () => {
     const ex = executors()
     const env = envelope({ intent: "change_prd_template", prd_id: 77, artifact_template_id: "acme" })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onChangeTemplate).toHaveBeenCalledWith(env, 77)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -93,7 +109,7 @@ describe("dispatchChatIntent — routes to the executor only when the guard hold
   it("assign_tickets with a resolvable target + instruction hits onAssignTickets with both", () => {
     const ex = executors()
     const env = envelope({ intent: "assign_tickets", instruction: "give the login ticket to Dave", prd_id: 77 })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onAssignTickets).toHaveBeenCalledWith("give the login ticket to Dave", 77)
     expect(ex.onAnswer).not.toHaveBeenCalled()
     expect(result).toEqual({ handled: true })
@@ -104,7 +120,7 @@ describe("dispatchChatIntent — change_prd_template falls through without a res
   it("no resolvable target (hasEditTarget: false) → onAnswer, not onChangeTemplate", () => {
     const ex = executors()
     const env = envelope({ intent: "change_prd_template", artifact_template_id: "acme" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onChangeTemplate).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -113,8 +129,50 @@ describe("dispatchChatIntent — change_prd_template falls through without a res
   it("no artifact_template_id, even with a resolvable target → onAnswer, not onChangeTemplate", () => {
     const ex = executors()
     const env = envelope({ intent: "change_prd_template", prd_id: 77, artifact_template_id: null })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onChangeTemplate).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+})
+
+describe("dispatchChatIntent — change_tickets_template routes on ITS OWN target, not hasEditTarget", () => {
+  it("a standalone-set target + format hits onChangeTicketsTemplate with the set target", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_tickets_template", artifact_template_id: "acme-t" })
+    // hasEditTarget deliberately false: the set target must be sufficient.
+    const result = dispatchChatIntent(env, ctx({ ticketsTarget: { ticketSetId: 7 } }), ex)
+    expect(ex.onChangeTicketsTemplate).toHaveBeenCalledWith(env, { ticketSetId: 7 })
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("a PRD target + format hits onChangeTicketsTemplate with the prd target", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_tickets_template", prd_id: 77, artifact_template_id: "acme-t" })
+    const result = dispatchChatIntent(
+      env,
+      ctx({ hasEditTarget: true, editTargetPrdId: 77, ticketsTarget: { prdId: 77 } }),
+      ex,
+    )
+    expect(ex.onChangeTicketsTemplate).toHaveBeenCalledWith(env, { prdId: 77 })
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("no tickets target → onAnswer, even with an edit target present", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_tickets_template", artifact_template_id: "acme-t" })
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
+    expect(ex.onChangeTicketsTemplate).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("no artifact_template_id, even with a target → onAnswer", () => {
+    const ex = executors()
+    const env = envelope({ intent: "change_tickets_template", artifact_template_id: null })
+    const result = dispatchChatIntent(env, ctx({ ticketsTarget: { ticketSetId: 7 } }), ex)
+    expect(ex.onChangeTicketsTemplate).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
   })
@@ -124,7 +182,7 @@ describe("dispatchChatIntent — edit_prd falls through without a resolvable tar
   it("no resolvable target (hasEditTarget: false) → onAnswer, not onEditPrd", () => {
     const ex = executors()
     const env = envelope({ intent: "edit_prd", instruction: "shorten it" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onEditPrd).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -133,7 +191,7 @@ describe("dispatchChatIntent — edit_prd falls through without a resolvable tar
   it("empty instruction, even with a resolvable target → onAnswer, not onEditPrd", () => {
     const ex = executors()
     const env = envelope({ intent: "edit_prd", instruction: null, prd_id: 77 })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onEditPrd).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -144,7 +202,7 @@ describe("dispatchChatIntent — assign_tickets falls through without a resolvab
   it("no resolvable target (hasEditTarget: false) → onAnswer, not onAssignTickets", () => {
     const ex = executors()
     const env = envelope({ intent: "assign_tickets", instruction: "assign it to Dave" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onAssignTickets).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -153,7 +211,7 @@ describe("dispatchChatIntent — assign_tickets falls through without a resolvab
   it("empty instruction, even with a resolvable target → onAnswer, not onAssignTickets", () => {
     const ex = executors()
     const env = envelope({ intent: "assign_tickets", instruction: null, prd_id: 77 })
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 77 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 77 }), ex)
     expect(ex.onAssignTickets).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -164,7 +222,7 @@ describe("dispatchChatIntent — open_artifact falls through without a lookup (A
   it("no envelope.open → onAnswer, not onOpenArtifact", () => {
     const ex = executors()
     const env = envelope({ intent: "open_artifact" })
-    const result = dispatchChatIntent(env, { hasEditTarget: false, editTargetPrdId: null }, ex)
+    const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onOpenArtifact).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
@@ -180,12 +238,13 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
   ])("%s → onAnswer, no structured executor", (_label, overrides) => {
     const ex = executors()
     const env = envelope(overrides)
-    const result = dispatchChatIntent(env, { hasEditTarget: true, editTargetPrdId: 1 }, ex)
+    const result = dispatchChatIntent(env, ctx({ hasEditTarget: true, editTargetPrdId: 1 }), ex)
     expect(ex.onEditPrd).not.toHaveBeenCalled()
     expect(ex.onGenerateTickets).not.toHaveBeenCalled()
     expect(ex.onGeneratePrd).not.toHaveBeenCalled()
     expect(ex.onOpenArtifact).not.toHaveBeenCalled()
     expect(ex.onChangeTemplate).not.toHaveBeenCalled()
+    expect(ex.onChangeTicketsTemplate).not.toHaveBeenCalled()
     expect(ex.onCreateArtifact).not.toHaveBeenCalled()
     expect(ex.onAssignTickets).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)

@@ -231,6 +231,14 @@ _ACTIONS: frozenset[str] = frozenset({
     # argument is a FORMAT (artifact_template_id / template_query, gated by
     # `_gate_template`), never a task or an instruction.
     "change_prd_template",
+    # The same switch for the thread's TICKETS (POST /v1/stories/
+    # change-template). Its own action rather than a shading of
+    # change_prd_template for the reported reason: "change the ticket template
+    # to Acme" had no action that could take a TICKET format, so `_gate_template`
+    # refused the id (wrong artifact_type for a PRD switch) and the request
+    # died as a which-did-you-mean answer about a format the user had already
+    # named correctly. Same argument contract as change_prd_template.
+    "change_tickets_template",
 })
 
 #: Actions that need a `task` brief, and ones that need an `instruction`. An
@@ -369,12 +377,13 @@ _PLANNER_SCHEMA: dict = {
         "artifact_template_id": {
             "type": ["string", "null"],
             "description": (
-                "generate_prd / generate_tickets / change_prd_template only: "
-                "the exact id from \"Company formats\" when the message asks "
-                "for that format BY NAME. null is the normal answer and means "
-                "the company's active format is used — never name one the user "
-                "did not ask for. For change_prd_template it is the TARGET, "
-                "and one of this pair is required."
+                "generate_prd / generate_tickets / change_prd_template / "
+                "change_tickets_template only: the exact id from \"Company "
+                "formats\" when the message asks for that format BY NAME. null "
+                "is the normal answer and means the company's active format is "
+                "used — never name one the user did not ask for. For the two "
+                "change_*_template actions it is the TARGET, and one of this "
+                "pair is required."
             ),
         },
         "template_query": {
@@ -576,6 +585,13 @@ or wants an answer.
   Sprntly's own default/built-in format rather than an uploaded one, set
   `template_query` to their words — the assistant explains the PRD panel's
   Format control, which handles that switch.
+- change_tickets_template — the same switch for the thread's TICKETS: "change
+  the ticket template to Acme", "switch the tickets to our new format",
+  "re-format these tickets". Same argument contract as change_prd_template
+  (`artifact_template_id` from "Company formats" — a TICKET format this time —
+  or `template_query`; no task, no instruction; the built-in sets
+  `template_query`, and the assistant points at the Tickets panel's Format
+  control).
 - create_artifact — write a DOCUMENT OF ANY OTHER KIND and keep it in the
   team's shared library: a leadership update, a launch plan, a postmortem, a
   customer FAQ, a board memo, release notes, an onboarding guide. There is no
@@ -621,6 +637,12 @@ Rules that decide the close calls:
   FORMAT/template the document is written in → change_prd_template — "change
   the template", "use the Acme format for this", "switch this to the new
   format" are format switches even though they sound like edits.
+- change_prd_template vs change_tickets_template: WHICH ARTIFACT decides it.
+  "the ticket template" / "the tickets' format" → change_tickets_template;
+  "the template" / "the PRD's format" → change_prd_template. When the message
+  names neither artifact, the thread decides: a switch asked right after
+  tickets were generated or while tickets are on screen is about the tickets;
+  otherwise it is about the document.
 - DIRECTION decides edit_prd vs update_ticket, and the same words run both ways.
   "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
   "Update the ticket with the PRD details" changes the TICKET → update_ticket.
@@ -904,10 +926,10 @@ When a "Company formats" list is present in the input, two fields act on it:
   they meant.
 
 Never set both, and never set either when the message names no format at all.
-The one exception to "no format named → neither" is change_prd_template: its
-whole point is the format, so a switch request that names none (or names the
-built-in) sets template_query to the user's words and the assistant asks which
-— see the action's own bullet above.
+The one exception to "no format named → neither" is the two change_*_template
+actions: their whole point is the format, so a switch request that names none
+(or names the built-in) sets template_query to the user's words and the
+assistant asks which — see the actions' own bullets above.
 
 Each line in the list also carries a short description of what that format
 contains. Answer "what's in the Acme format" / "how is X structured" from
@@ -1396,6 +1418,8 @@ _TEMPLATE_ACTIONS: dict[str, str] = {
     # Switching an existing PRD's format validates against the same rows a
     # PRD build does — the target must be a usable PRD format.
     "change_prd_template": "prd",
+    # And a tickets switch against the rows a tickets build does.
+    "change_tickets_template": "tickets",
     "generate_prd": "prd",
     "generate_tickets": "tickets",
 }
@@ -1608,7 +1632,7 @@ def apply_gates(
     # library is forced along so the answer can list what they DO have and
     # point at the PRD panel's Format control.
     _switch_without_target = (
-        action == "change_prd_template"
+        action in ("change_prd_template", "change_tickets_template")
         and not artifact_template_id
         and not template_query
     )

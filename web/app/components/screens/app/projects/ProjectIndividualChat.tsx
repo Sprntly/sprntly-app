@@ -551,8 +551,10 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           // The write target is resolved SERVER-side (`_resolve_prd_id` over
           // THIS project's own PRDs) — never a client-trusted id — so there
           // is nothing to pre-resolve here; the route itself degrades to a
-          // no-edit reply on 0/ambiguous PRDs.
-          { hasEditTarget: true, editTargetPrdId: null },
+          // no-edit reply on 0/ambiguous PRDs. `ticketsTarget` is null on
+          // purpose: this thin thread has no tickets surface, so a ticket
+          // format switch can only ever fall through to the grounded ask.
+          { hasEditTarget: true, editTargetPrdId: null, ticketsTarget: null },
           {
             onEditPrd: (instruction) => void runEditPrd(instruction),
             onGenerateTickets: () => void runGenerateTickets(),
@@ -565,6 +567,10 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // control and no document-authoring surface — fall back to the
             // grounded ask rather than silently dropping the message.
             onChangeTemplate: () => void runAsk(),
+            // Unreachable in practice (ticketsTarget is null above, so the
+            // primitive's guard never fires) — required by the interface, and
+            // honest about what this surface would do anyway.
+            onChangeTicketsTemplate: () => void runAsk(),
             onCreateArtifact: () => void runAsk(),
             // Same reasoning as onOpenArtifact/onChangeTemplate: this thread
             // has no ticket-assignment surface — fall back to the grounded
