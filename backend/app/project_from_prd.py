@@ -134,9 +134,16 @@ def maybe_auto_create_project_for_prd(
 
     Two dedup keys, by whether a source conversation exists:
 
-    - WITH a `conversation_id` (chat / `from_task` path): dedup on the
-      conversation→project binding (`_conversation_project_id`) and bind the
-      conversation to the new project. Behavior here is UNCHANGED.
+    - WITH a `conversation_id` (chat / `from_task` path): a conversation
+      binds to exactly ONE project for its lifetime, so every distinct PRD
+      generated in that conversation belongs in the same project, not just
+      the first. Dedup on the conversation→project binding
+      (`_conversation_project_id`): the first PRD in a conversation still
+      CREATES the project (below); every subsequent PRD in that same
+      conversation is instead ATTACHED to the already-bound project as a
+      `project_artifacts` row (`add_artifact` upserts on the
+      `(project_id, artifact_type, artifact_id)` primary key, so re-attaching
+      a PRD already on the project is a no-op — no duplicate row).
 
     - WITHOUT a `conversation_id`, only when `allow_without_conversation` is
       set (the ideation `/generate-from-ideation` and weekly-brief `/generate`
@@ -155,6 +162,10 @@ def maybe_auto_create_project_for_prd(
         if conversation_id is not None:
             existing_project_id = _conversation_project_id(conversation_id, company_id)
             if existing_project_id is not None:
+                # A later, distinct PRD generated in an already-bound
+                # conversation joins the same project instead of being
+                # orphaned from it.
+                add_artifact(existing_project_id, "prd", prd_id)
                 return existing_project_id
         else:
             # Conversation-less fork: the PRD-artifact ref is the only shared

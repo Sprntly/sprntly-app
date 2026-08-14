@@ -4814,6 +4814,10 @@ export type ConversationRecord = {
   pinned: boolean
   /** The PRD this conversation is about, when opened from a PRD tab (else null). */
   prd_id?: number | null
+  /** The project this conversation is bound to (fork or explicit join), when
+   *  one exists (else null/absent). Lets a reopened thread restore the
+   *  project-menu affordance it had when the binding was made. */
+  project_id?: number | null
   created_at: string
   updated_at: string
 }
