@@ -210,7 +210,7 @@ def _render_decision_user(
 def _unanswered_dm_count(delegation_id: int, events: list[dict]) -> int:
     """How many prior `channel='dm'` sends have gone unanswered — a DM
     counts as answered once an `in_progress`/`completed` event lands
-    after it (status-ingestion, TE-03, already advances/clears status on
+    after it (status-ingestion already advances/clears status on
     any substantive reply). With no status-changing event at all, every
     prior DM is unanswered."""
     dm_sends = sends_db.sends_for_delegation(delegation_id, channel="dm")

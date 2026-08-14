@@ -114,7 +114,7 @@ def list_due_followups(now: datetime) -> list[dict]:
     pending_done_since, status`. `pending_done_since` rides along (the
     sweep's step-0 soft-done short-circuit needs it) even though a
     soft-done task's derived status is still open (`done_inferred` never
-    emits a `completed` event — TE-03's soft-done design)."""
+    emits a `completed` event — the soft-done design)."""
     client = require_client()
     due_rows = (
         client.table("delegation_followups")

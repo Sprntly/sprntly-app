@@ -697,7 +697,7 @@ def test_scheduler_preexisting_jobs_intact():
 
 
 def test_delegation_followups_writers_unchanged(isolated_settings, monkeypatch):
-    """TE-03's `upsert_followup`/`get_followup` still round-trip untouched
+    """the cadence-spine `upsert_followup`/`get_followup` still round-trip untouched
     by the appended `list_due_followups`/`timezones_for_user_ids` — the
     same partial-merge contract `test_delegation_followups.py`'s real-DB
     suite proves, checked here fast-lane against `FakeSupabaseClient`."""
