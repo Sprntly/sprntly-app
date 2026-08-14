@@ -124,22 +124,46 @@ def maybe_auto_create_project_for_prd(
     prd_id: int,
     prd_title: str,
     conversation_id: int | None,
+    allow_without_conversation: bool = False,
 ) -> int | None:
     """Create-if-unbound: a project (`origin='prd_auto'`) + the PRD as its
-    first artifact + bind the source conversation. First-write-wins (a
-    conversation already bound to a project is left alone — no duplicate
-    project for a re-issued generate). Never raises: any failure is logged
-    and swallowed, returning None — PRD generation is unaffected either way.
+    first artifact + (when there is one) bind the source conversation.
+    First-write-wins — no duplicate project for a re-issued generate. Never
+    raises: any failure is logged and swallowed, returning None — PRD
+    generation is unaffected either way.
 
-    Skips entirely (returns None, no project) when `conversation_id` is
-    None: an unbound generate has no thread to fork, so it is not
-    force-forked into a project it never asked for."""
-    if conversation_id is None:
+    Two dedup keys, by whether a source conversation exists:
+
+    - WITH a `conversation_id` (chat / `from_task` path): dedup on the
+      conversation→project binding (`_conversation_project_id`) and bind the
+      conversation to the new project. Behavior here is UNCHANGED.
+
+    - WITHOUT a `conversation_id`, only when `allow_without_conversation` is
+      set (the ideation `/generate-from-ideation` and weekly-brief `/generate`
+      paths, which have no chat thread): dedup on the PRD-artifact fact
+      (`find_existing_prd_auto_project`) so re-generating the SAME PRD returns
+      the SAME project instead of spawning a duplicate. No conversation is
+      bound and origin-memory seeding (which reads chat turns) is skipped —
+      there is no thread to summarize.
+
+    Skips entirely (returns None, no project) when `conversation_id` is None
+    AND `allow_without_conversation` is False — the original guard, so the
+    chat path and older clients that omit `conversation_id` are unaffected."""
+    if conversation_id is None and not allow_without_conversation:
         return None
     try:
-        existing_project_id = _conversation_project_id(conversation_id, company_id)
-        if existing_project_id is not None:
-            return existing_project_id
+        if conversation_id is not None:
+            existing_project_id = _conversation_project_id(conversation_id, company_id)
+            if existing_project_id is not None:
+                return existing_project_id
+        else:
+            # Conversation-less fork: the PRD-artifact ref is the only shared
+            # fact to dedup on (mirrors the create-modal's "Auto · from PRD"
+            # tab), so a repeated conversation-less generate of the same PRD
+            # reuses its project.
+            existing_project_id = find_existing_prd_auto_project(prd_id, company_id)
+            if existing_project_id is not None:
+                return existing_project_id
 
         project = create_project(
             company_id=company_id,
@@ -150,19 +174,21 @@ def maybe_auto_create_project_for_prd(
         )
         project_id = project["id"]
         add_artifact(project_id, "prd", prd_id)
-        bind_conversation_to_project(conversation_id, project_id, company_id, user_id)
-        # Seed the NEW project's memory with the origin context — the
-        # decisions/reasoning from the originating chat + a brief of what the
-        # PRD is. Best-effort and self-contained: it never raises, so a
-        # summarizer failure can't turn a created project into a None return
-        # (this runs ONLY in the new-project branch — an already-bound
-        # conversation returned above and is never re-seeded).
-        seed_project_origin_memory(
-            project_id=project_id,
-            prd_id=prd_id,
-            prd_title=prd_title,
-            conversation_id=conversation_id,
-        )
+        if conversation_id is not None:
+            bind_conversation_to_project(conversation_id, project_id, company_id, user_id)
+            # Seed the NEW project's memory with the origin context — the
+            # decisions/reasoning from the originating chat + a brief of what
+            # the PRD is. Best-effort and self-contained: it never raises, so a
+            # summarizer failure can't turn a created project into a None return
+            # (this runs ONLY in the new-project branch — an already-bound
+            # conversation returned above and is never re-seeded). Skipped for
+            # the conversation-less path: there is no chat thread to read.
+            seed_project_origin_memory(
+                project_id=project_id,
+                prd_id=prd_id,
+                prd_title=prd_title,
+                conversation_id=conversation_id,
+            )
         return project_id
     except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
         logger.warning(

@@ -1049,6 +1049,20 @@ def list_group_turns_route(
     return {"turns": conversations_db.list_group_turns(conversation["id"], since=since)}
 
 
+def _is_solo_project(project_id: int) -> bool:
+    """True when the project has exactly ONE human member — the user plus the
+    virtual Sprntly agent, no other people. `projects_db.list_members` returns
+    HUMAN members only (the AD-P6 agent member is prepended at the route layer,
+    never stored), so its length IS the human count and no agent-exclusion is
+    needed. Best-effort: any read failure returns False, falling back to the
+    normal gate (never widens Sprntly's participation on error)."""
+    try:
+        return len(projects_db.list_members(project_id)) == 1
+    except Exception:  # noqa: BLE001 — a roster read failure must not break the post
+        logger.warning("solo_project_check_failed project_id=%s", project_id)
+        return False
+
+
 @router.post("/{project_id}/group/turns")
 def post_group_turn_route(
     project_id: int,
@@ -1062,12 +1076,17 @@ def post_group_turn_route(
     persisted so a gate/reply failure can never block the post:
 
       1. `@Sprntly` mention → reply, deterministic, no classifier call.
-      2. No mention → consult `project_group_gate.should_respond` over the
-         recent clamped transcript; `True` replies, `False` leaves the
-         human turn standing (the UI's existing "stayed out" affordance
-         shows).
+      2. Solo project (exactly one human member) → reply, deterministic, no
+         classifier call: with no other human present, every message is for
+         Sprntly, so it never "stays out" (fixes the unaddressed-opener
+         silence). This bypasses the gate exactly like the mention path.
+      3. No mention, multi-human project → consult
+         `project_group_gate.should_respond` over the recent clamped
+         transcript; `True` replies, `False` leaves the human turn standing
+         (the UI's existing "stayed out" affordance shows). The gate's
+         conservative AD-P10 posture is unchanged for these projects.
 
-    Either path triggers AT MOST one best-effort agent reply."""
+    Every path triggers AT MOST one best-effort agent reply."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
     turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
@@ -1078,6 +1097,16 @@ def post_group_turn_route(
     _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
         _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind="mention")
+    elif _is_solo_project(project_id):
+        # Solo project (exactly ONE human member + the virtual Sprntly agent):
+        # Sprntly responds to EVERY message, no @mention needed and never
+        # "stays out" — there is no other human the turn could be addressed to,
+        # so the interjection gate's conservative stay-out default is wrong
+        # here (an unaddressed opener in a solo project was getting silence).
+        # This short-circuits the gate exactly like `mention`/`continuation`.
+        # Multi-human projects fall through to the unchanged gate below, so the
+        # AD-P10 conservative posture is preserved wherever it still applies.
+        _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind="solo")
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
         # The turn just posted is `recent[-1]`; `recent[-2]` (if any) is the
@@ -1295,6 +1324,11 @@ _ADDRESSING_NOTES = {
         "last message (a reply or follow-up to what you just said) — it is "
         "clearly directed at you. Answer it directly; do NOT ask whether "
         "it is meant for you."
+    ),
+    "solo": (
+        "ADDRESSING: You are the only non-human member of this project and "
+        "there is exactly one human here, so every message is for you. Answer "
+        "it directly; do NOT ask whether it is meant for you."
     ),
     "gate": (
         "ADDRESSING: The latest turn did not tag you with @Sprntly and is "

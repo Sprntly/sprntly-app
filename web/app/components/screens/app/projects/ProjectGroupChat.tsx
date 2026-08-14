@@ -217,12 +217,37 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   // advances `cursorRef` past ids it actually applies (AD-P22).
   const knownTurnIdsRef = useRef<Set<number>>(new Set())
 
+  // Optimistic-send bookkeeping. A placeholder turn gets a decrementing
+  // NEGATIVE id so it never collides with a real turn id (all positive) and
+  // never enters `knownTurnIdsRef`/`cursorRef` — the real turn still applies,
+  // and `applyTurns` swaps the placeholder out when it arrives. `myUserIdRef`
+  // lets the empty-dep `applyTurns` recognise "my own" real turn without
+  // taking `myUserId` as a dep (which would re-subscribe the realtime channel).
+  const optimisticIdRef = useRef(-1)
+  const myUserIdRef = useRef(myUserId)
+  useEffect(() => {
+    myUserIdRef.current = myUserId
+  }, [myUserId])
+
   const applyTurns = useCallback((incoming: GroupTurn[]) => {
     if (incoming.length === 0) return
     const fresh = incoming.filter((t) => !knownTurnIdsRef.current.has(t.id))
     if (fresh.length === 0) return
     for (const t of fresh) knownTurnIdsRef.current.add(t.id)
-    setTurns((prev) => [...prev, ...fresh])
+    setTurns((prev) => {
+      // Reconcile optimistic placeholders: when the poster's OWN real turn
+      // arrives (via broadcast OR the post-send reconcile), drop the matching
+      // negative-id placeholder so the sender's turn doesn't duplicate. Match
+      // by author + content, removing the oldest matching placeholder first.
+      let next = prev
+      for (const t of fresh) {
+        if (t.role === "user" && t.author_user_id != null && t.author_user_id === myUserIdRef.current) {
+          const idx = next.findIndex((x) => x.id < 0 && x.role === "user" && x.content === t.content)
+          if (idx !== -1) next = next.filter((_, i) => i !== idx)
+        }
+      }
+      return [...next, ...fresh]
+    })
     const maxFreshId = Math.max(...fresh.map((t) => t.id))
     if (cursorRef.current == null || maxFreshId > cursorRef.current) {
       cursorRef.current = maxFreshId
@@ -521,6 +546,24 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     // post_group_turn_route), so waiting that long left the box holding
     // stale text through the whole round trip.
     setDraft("")
+    // Optimistic turn: render the sender's OWN turn the INSTANT they hit
+    // send — the POST resolves only after a best-effort agent reply runs, so
+    // with a degraded transport the human turn was invisible for seconds. The
+    // negative id keeps it out of `knownTurnIdsRef`/`cursorRef`; `applyTurns`
+    // swaps it for the real turn when it lands (broadcast or reconcile), so
+    // there is no duplicate.
+    const tempId = optimisticIdRef.current
+    optimisticIdRef.current -= 1
+    const optimisticTurn: GroupTurn = {
+      id: tempId,
+      role: "user",
+      content,
+      author_user_id: myUserId,
+      author_name: myName,
+      author_job_role: null,
+      created_at: new Date().toISOString(),
+    }
+    setTurns((prev) => [...prev, optimisticTurn])
     projectsApi
       .postGroupTurn(projectId, content)
       .then(() => {
@@ -533,6 +576,8 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .then(applyTurns)
       .catch(() => {
         setError("Couldn't send that. Try again.")
+        // Roll back the optimistic turn so a failed POST leaves no ghost.
+        setTurns((prev) => prev.filter((t) => t.id !== tempId))
         // Restore ONLY if the box is still empty — a message typed during
         // the wait must never be clobbered by the restore.
         setDraft((cur) => (cur === "" ? content : cur))
@@ -540,7 +585,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .finally(() => {
         setPosting(false)
       })
-  }, [draft, posting, projectId, applyTurns])
+  }, [draft, posting, projectId, applyTurns, myUserId, myName])
 
   // Idempotent per-turn save (UI-side guard — the backend does not dedupe
   // this endpoint). A turn already saved or already in flight is a no-op.
@@ -569,7 +614,11 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   // one still awaiting whatever comes next — v1 has no should-respond
   // classifier (AD-P10 is a later phase), so this is informational ("no
   // reply yet"), never a claim that the agent considered and declined.
-  const showStayedOut = !!lastTurn && lastTurn.role === "user"
+  // Suppressed while a send is in flight: during `posting` a reply may
+  // still be generating (the POST runs the best-effort reply before it
+  // resolves), so showing "stayed out" then is wrong — it's pending, not
+  // declined. The badge returns once posting settles and no reply arrived.
+  const showStayedOut = !!lastTurn && lastTurn.role === "user" && !posting
 
   const rows = useMemo(
     () =>
