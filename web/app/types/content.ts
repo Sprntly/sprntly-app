@@ -840,6 +840,12 @@ export interface AppContentState {
      *  message. The panel maps the kind to its own copy, so a stack trace or a
      *  provider error string can never reach the screen. */
     error?: TicketSetFailureKind | null
+    /** Which uploaded TICKET format rendered this set (null = Sprntly's
+     *  built-in), with its server-resolved display name — what the Tickets
+     *  footer's "Format: {name}" label and switch control read. Undefined on
+     *  slices written mid-run (the stamp lands with the terminal read). */
+    artifactTemplateId?: string | null
+    artifactTemplateName?: string | null
   } | null
   /** True from kick-off until the run reaches a terminal state. Distinct from
    *  `ticketSet.status`: the slice may not exist at all yet (the create call is
@@ -853,6 +859,13 @@ export interface AppContentState {
    *  brand-new chat tab also has a null conversation id, and reading that null
    *  as "standalone" is a bug this codebase has already shipped once. */
   ticketSetStandalone?: boolean
+  /** Bumped (any new value) to make the Tickets tab RE-READ a PRD's persisted
+   *  tickets — the in-place format switch persists re-laid stories server-side
+   *  and the tab's cache-first effect would otherwise keep rendering the copy
+   *  it already loaded. A re-read, never a regeneration: the switch leaves
+   *  `content_hash` untouched, so the re-run serves the fresh cache with no
+   *  LLM call. Standalone sets don't need it (their slice IS the data). */
+  ticketsRefreshNonce?: number
 }
 
 /** How a standalone ticket-set run ended badly. A KIND, not a message: the

@@ -185,6 +185,8 @@ export async function runTicketSetGeneration(
     let status = "ready"
     let convo = conversationId
     let sourceText = task
+    let templateId: string | null = null
+    let templateName: string | null = null
     try {
       const rec = await ticketSetsApi.get(setId)
       title = rec.title
@@ -192,6 +194,8 @@ export async function runTicketSetGeneration(
       status = rec.status || "ready"
       convo = rec.conversation_id
       sourceText = rec.source_text || task
+      templateId = rec.artifact_template_id ?? null
+      templateName = rec.artifact_template_name ?? null
     } catch {
       /* keep what the job produced — an unnamed set beats a lost one */
     }
@@ -206,6 +210,8 @@ export async function runTicketSetGeneration(
       stubs: [],
       progress: null,
       error: null,
+      artifactTemplateId: templateId,
+      artifactTemplateName: templateName,
     }
     setContent({ ticketSet: set, ticketSetGenerating: false })
     return { ok: true, set }
@@ -290,6 +296,8 @@ export async function loadTicketSet(
     stories: GeneratedStory[]
     conversation_id: number | null
     source_text: string
+    artifact_template_id?: string | null
+    artifact_template_name?: string | null
   }): TicketSetSlice => ({
     id: rec.id,
     title: rec.title,
@@ -300,6 +308,8 @@ export async function loadTicketSet(
     stubs: [],
     progress: null,
     error: null,
+    artifactTemplateId: rec.artifact_template_id ?? null,
+    artifactTemplateName: rec.artifact_template_name ?? null,
   })
 
   const fail = (kind: TicketSetFailureKind, known: TicketSetSlice | null): TicketSetGenResult => {

@@ -1128,7 +1128,15 @@ def generate_from_input(
     #
     # `artifact_template_id`, when the caller passed one, names the format this
     # run was ASKED for and outranks the active one.
-    layout, _template_id = resolve_ticket_layout(enterprise_id, artifact_template_id)
+    layout, resolved_template_id = resolve_ticket_layout(
+        enterprise_id, artifact_template_id
+    )
+    # Surface the resolver's answer to the persisting caller via `stats_out` —
+    # the id of the format that actually rendered this run (override, active,
+    # or None for the built-in). It is what gets stamped on the stored set so
+    # the panel can name the current format and the in-place switch can no-op.
+    if stats_out is not None:
+        stats_out["template_id"] = resolved_template_id
     hint = layout_prompt_hint(layout)
     if hint:
         prd_input = "\n\n".join([prd_input, hint])
@@ -1331,6 +1339,7 @@ def generate_user_stories(
                 prd_id,
                 hash_prd_row(prd if body_changed or current is None else current),
                 [s.to_dict() for s in stories],
+                artifact_template_id=stats.get("template_id"),
             )
         except Exception:  # noqa: BLE001
             logger.exception("persisting prd_tickets failed (continuing)")
@@ -1361,7 +1370,9 @@ def generate_user_stories(
                 else ""
             )
             finish_set(
-                ticket_set_id, title=title, stories=[s.to_dict() for s in stories]
+                ticket_set_id, title=title,
+                stories=[s.to_dict() for s in stories],
+                artifact_template_id=stats.get("template_id"),
             )
         except Exception:  # noqa: BLE001
             logger.exception("persisting ticket_set %s failed (continuing)",

@@ -185,12 +185,24 @@ def _preview(row: dict) -> dict:
     (a v3 PRD is a self-contained HTML page); tickets and engineering specs are
     markdown.
 
+    TICKET formats never expose `compiled` directly: their compiled artifact is
+    the internal `[{label, source}]` layout JSON, and serving that as the
+    preview body put a page of raw JSON in front of the user (the reported
+    bug — a PRD format previewed as a document, a ticket format as its own
+    plumbing). The body and the section map are both RENDERED from the layout
+    instead (`_ticket_preview`), so the two panes read exactly as they do for
+    a PRD format: a sample document on the left, a mapping table on the right.
+
     Available at ANY compile status, including `failed` — the preview is the
     primary diagnostic for a format that didn't map cleanly, so refusing it for
     a non-ready row would take the diagnosis away exactly when it is needed.
     `body` is "" until a compiler has run; the client renders that as "we
     couldn't build a preview from this format yet", not as an error."""
     artifact_type = row.get("artifact_type") or ""
+    body = row.get("compiled") or ""
+    section_map = normalize_section_map(row.get("section_map"))
+    if artifact_type == "tickets":
+        body, section_map = _ticket_preview(row)
     return {
         "id": row["id"],
         "name": row.get("name") or "",
@@ -198,9 +210,101 @@ def _preview(row: dict) -> dict:
         "compile_status": row.get("compile_status") or "pending",
         "compile_notes": normalize_compile_notes(row.get("compile_notes")),
         "format": PREVIEW_FORMATS.get(artifact_type, "markdown"),
-        "body": row.get("compiled") or "",
-        "section_map": normalize_section_map(row.get("section_map")),
+        "body": body,
+        "section_map": section_map,
     }
+
+
+#: One entry per canonical ticket section: the house name the mapping table
+#: shows, the ghost placeholder the sample ticket renders, and the form label.
+#: One table so the two panes can never describe the same section differently.
+_TICKET_SECTION_PREVIEW: dict[str, tuple[str, str, str]] = {
+    "what": (
+        "What — the change, in plain words",
+        "{{What this ticket changes, in a sentence or two}}",
+        "prose",
+    ),
+    "why_now": (
+        "Why now — the reason this matters",
+        "{{Why this work matters right now}}",
+        "prose",
+    ),
+    "user_story": (
+        "User story",
+        "{{As a <user>, I want <capability>, so that <outcome>}}",
+        "stories",
+    ),
+    "scope": (
+        "Scope — what the ticket must cover",
+        "- {{One concrete thing this ticket must cover}}\n- {{Another}}",
+        "bullets",
+    ),
+    "out_of_scope": (
+        "Out of scope",
+        "{{What this ticket deliberately leaves out}}",
+        "prose",
+    ),
+}
+
+_EMPTY_SECTION_MAP: dict = {
+    "sections": [], "unmapped_house": [], "extra_sections": [],
+}
+
+
+def _ticket_preview(row: dict) -> tuple[str, dict]:
+    """A ticket format's preview: ONE sample ticket rendered in the stored
+    layout, plus a section map synthesized from the same layout.
+
+    Rendered here rather than stored at compile time so every already-compiled
+    row previews correctly without a re-compile. The layout goes through
+    `resolve_layout` — the same normalisation every real renderer applies — and
+    a compiled artifact that cannot yield the customer's OWN layout previews as
+    empty (`""` → the client's "couldn't build a preview yet" copy), never as
+    the built-in shape wearing their name."""
+    import json as _json
+
+    from app.stories.layout import DEFAULT_LAYOUT, resolve_layout
+
+    compiled = (row.get("compiled") or "").strip()
+    if not compiled:
+        return "", _EMPTY_SECTION_MAP
+    try:
+        entries = resolve_layout(_json.loads(compiled))
+    except (TypeError, ValueError):
+        return "", _EMPTY_SECTION_MAP
+    # `resolve_layout` falls back to DEFAULT_LAYOUT for an unusable layout —
+    # right for rendering real tickets (fail open), wrong for a preview that
+    # claims to show THEIR format. The sentinel is identity-compared, the same
+    # trick `layout_prompt_hint` uses.
+    if entries is DEFAULT_LAYOUT:
+        return "", _EMPTY_SECTION_MAP
+
+    lines: list[str] = ["# {{Short ticket title, names the change}}", ""]
+    sections: list[dict] = []
+    for i, entry in enumerate(entries):
+        if entry.is_custom:
+            house = "Your own section — written from the ticket's content"
+            ghost = f"{{{{{entry.push_label} — filled from what the ticket itself says}}}}"
+            form = "prose"
+        else:
+            house, ghost, form = _TICKET_SECTION_PREVIEW[entry.source]
+        lines += [f"**{entry.push_label}**", ghost, ""]
+        sections.append({
+            "id": f"t{i + 1}",
+            "customer": entry.push_label,
+            "house": house,
+            "order": i + 1,
+            "form": form,
+        })
+    # Every generated ticket carries acceptance criteria whatever the layout
+    # says — shown in the sample so the preview is honest about the whole
+    # description, kept OUT of the mapping table because that table is "your
+    # sections", and this one is Sprntly's.
+    lines += [
+        "**Acceptance criteria**",
+        "- {{Given <state>, When <action>, Then <outcome>}}",
+    ]
+    return "\n".join(lines), {**_EMPTY_SECTION_MAP, "sections": sections}
 
 
 def _store_error_status(exc: TemplateStoreError) -> int:

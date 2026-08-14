@@ -63,6 +63,10 @@ def _public_set(row: dict) -> dict:
         "conversation_id": row.get("conversation_id"),
         "source_text": row.get("source_text") or "",
         "created_at": row.get("created_at"),
+        # Which ticket format rendered this set (None = the built-in). The
+        # display name is resolved where the company scope lives (the route
+        # below), not here — this helper has no company in hand.
+        "artifact_template_id": row.get("artifact_template_id") or None,
     }
 
 
@@ -112,6 +116,14 @@ def get_ticket_set(
         company.company_id, set_id, out["stories"]
     )
     out["ticket_count"] = len(out["stories"])
+    # The stamp's display name, resolved server-side so the panel's "Format:
+    # {name}" label needs no second fetch — same contract as GET /v1/prd/{id}
+    # and GET /v1/stories/for-prd/{prd_id}.
+    from app.routes.stories import _template_display_name
+
+    out["artifact_template_name"] = _template_display_name(
+        company.company_id, out["artifact_template_id"]
+    )
     return out
 
 

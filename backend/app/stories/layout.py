@@ -139,6 +139,16 @@ def _source_for_heading(heading: str) -> str | None:
 _HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
 _BOLD_LINE_RE = re.compile(r"^\s*\*\*(.+?)\*\*\s*:?\s*$")
 
+#: Slugs that are EXTRACTION ARTIFACTS, not sections. A PDF has no heading
+#: concept, and the converter emits its pagination as heading-shaped lines —
+#: observed live as a format that compiled to `Page 1 / Page 2 / Page 3`
+#: sections and rendered every ticket with page numbers for structure. Matched
+#: on the slug so `Page 1`, `page-2` and `PAGE  3` all fall together. A format
+#: that is ONLY pagination then compiles to zero sections and fails with the
+#: honest "we couldn't find any sections" message instead of succeeding as
+#: junk.
+_ARTIFACT_HEADING_RE = re.compile(r"^(page|sheet|slide)_?\d{1,4}$")
+
 
 def compile_ticket_layout(source_md: str) -> list[dict]:
     """An uploaded ticket format (markdown) → an ordered description layout.
@@ -165,6 +175,10 @@ def compile_ticket_layout(source_md: str) -> list[dict]:
         if source is None:
             key = _slug(label)
             if not key:
+                continue
+            # Pagination masquerading as structure (see _ARTIFACT_HEADING_RE):
+            # skipped entirely, never a custom section.
+            if _ARTIFACT_HEADING_RE.fullmatch(key):
                 continue
             source = f"{_CUSTOM_PREFIX}{key}"
         # First heading wins for a given section: a format that mentions

@@ -76,7 +76,10 @@ def _prune_jobs() -> None:
 # forever over a run that finished. These two helpers are the guarantee.
 
 
-def _settle_ticket_set(company_id: str, set_id: int, stories: list) -> None:
+def _settle_ticket_set(
+    company_id: str, set_id: int, stories: list,
+    artifact_template_id: str | None = None,
+) -> None:
     """Ensure a set that finished generating is no longer 'generating'.
 
     Normally a no-op: app.stories.generate already wrote the row (with its
@@ -102,6 +105,11 @@ def _settle_ticket_set(company_id: str, set_id: int, stories: list) -> None:
             set_id,
             title=(row.get("title") or "").strip() or _fallback_set_title(row, payload),
             stories=payload,
+            # The validated OVERRIDE, not the resolver's answer (this backstop
+            # never saw the run) — right whenever a format was named, and for
+            # the active-format case the normal write inside the worker already
+            # stamped correctly before this could fire.
+            artifact_template_id=artifact_template_id,
         )
     except Exception:  # noqa: BLE001 — never turn a completed run into a 500
         logger.exception("settling ticket set %s failed (continuing)", set_id)
@@ -376,7 +384,8 @@ async def generate(
             # reopen path must never produce.
             if ticket_set_id is not None:
                 await asyncio.to_thread(
-                    _settle_ticket_set, company.company_id, ticket_set_id, stories
+                    _settle_ticket_set, company.company_id, ticket_set_id,
+                    stories, template_id,
                 )
             # Pre-warm the Implementation Spec (Part B) AFTER the run so the
             # NEXT regenerate can INHERIT acceptance criteria from it. This used
@@ -465,12 +474,171 @@ def tickets_for_prd(
         # racing save_tickets used to flip this false with no real PRD change.
         and prd_hash_matches(prd_id, row.get("content_hash"))
     )
+    template_id = row.get("artifact_template_id") or None
     return {
         "status": row.get("status") or "ready",
         "fresh": fresh,
         "stories": _apply_lifecycle(company.company_id, prd_id,
                                     row.get("stories") or []),
         "generated_at": row.get("generated_at"),
+        # Which ticket format rendered this set, with its display name resolved
+        # server-side (same contract as GET /v1/prd/{id}) so the panel's
+        # "Format: {name}" label needs no second fetch. None = the built-in —
+        # including legacy rows stamped before the column existed.
+        "artifact_template_id": template_id,
+        "artifact_template_name": _template_display_name(
+            company.company_id, template_id
+        ),
+    }
+
+
+def _template_display_name(company_id: str, template_id: str | None) -> str | None:
+    """A format's display name for a stored stamp, or None.
+
+    Best-effort, exactly like the PRD route's lookup: None both for an
+    unstamped set (the built-in — the client renders its own label) and for a
+    stamp whose format was since deleted (the stamp survives deletion by
+    design). A lookup hiccup costs the label, never the tickets."""
+    if not template_id:
+        return None
+    try:
+        from app.db.artifact_templates import get_template_by_id
+
+        row = get_template_by_id(company_id, template_id)
+        return row.get("name") if row else None
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "format-name lookup failed for template=%s", template_id, exc_info=True
+        )
+        return None
+
+
+class ChangeTicketTemplateIn(BaseModel):
+    """Exactly one of `prd_id` / `ticket_set_id` names WHOSE tickets switch —
+    a PRD's persisted set or a standalone chat-born set. Same operation, same
+    engine; only the storage row differs."""
+
+    prd_id: int | None = Field(default=None, ge=1)
+    ticket_set_id: int | None = Field(default=None, ge=1)
+    # The target format's id — or null for Sprntly's built-in layout, which is
+    # a real choice here (a stamped set switching BACK), not the "no
+    # preference" it means on the generate route.
+    artifact_template_id: str | None = Field(default=None, max_length=64)
+
+
+@router.post("/change-template")
+def change_template(
+    body: ChangeTicketTemplateIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Re-lay an existing ticket set into a different ticket format, in place.
+
+    The tickets counterpart of POST /v1/prd/{id}/change-template — but a
+    re-LAYOUT, not a regeneration (see app/stories/relayout.py): a ticket
+    format governs only the description layout, so the switch re-stamps each
+    story's `description_layout`, fills any custom sections the target format
+    asks for from the ticket's own content (one batched LLM call, fail-open),
+    and preserves every ticket's identity — tracker mappings, edits and
+    comments stay attached. That identity preservation is why this never runs
+    the generator: a fresh generation would orphan every synced issue.
+
+    Synchronous, unlike the PRD switch: the swap is instant and the fill is one
+    bounded call, so the response carries the re-laid stories directly and the
+    client re-renders — no job to poll, no `generating` state to strand.
+
+    Ordered gates, every one answered before anything is written: ownership
+    (404, indistinguishable from missing) → the set must be `ready` with
+    tickets in it (409) → the target format must be usable
+    (`_requested_template_id`: 404 foreign / 409 wrong-type-or-uncompiled;
+    null passes through as the built-in) → already in that format is a no-op
+    the response states rather than an error.
+    """
+    if (body.prd_id is None) == (body.ticket_set_id is None):
+        raise HTTPException(400, "provide exactly one of prd_id or ticket_set_id")
+
+    # Validated BEFORE anything loads or writes — a format the caller cannot
+    # use must be a refusal they can act on. Reuses the PRD route's helper so
+    # both switches refuse with the same status ladder and the same copy.
+    from app.routes.prd import _requested_template_id
+
+    template_id = _requested_template_id(
+        company.company_id, body.artifact_template_id, "tickets"
+    )
+
+    if body.prd_id is not None:
+        from app.db.prd_tickets import get_tickets
+
+        row = get_tickets(company.company_id, body.prd_id)
+        if row is None:
+            raise HTTPException(404, "No tickets found for this PRD")
+    else:
+        from app.db.ticket_sets import get_set
+
+        row = get_set(company.company_id, body.ticket_set_id)
+        if row is None:
+            raise HTTPException(404, "Ticket set not found")
+
+    if row.get("status") != "ready":
+        raise HTTPException(
+            409, "These tickets are still being worked on — try again when "
+                 "they're ready.",
+        )
+    stories = [s for s in (row.get("stories") or []) if isinstance(s, dict)]
+    if not stories:
+        raise HTTPException(409, "There are no tickets to re-format yet.")
+
+    current = row.get("artifact_template_id") or None
+    if (template_id or None) == current:
+        # Already true — stated, not 409'd: "make it X" when it is X is a
+        # satisfied request, and the client reads `unchanged` to skip the
+        # re-render entirely.
+        return {
+            "status": "ready",
+            "unchanged": True,
+            "artifact_template_id": current,
+            "artifact_template_name": _template_display_name(
+                company.company_id, current
+            ),
+        }
+
+    from app.stories.relayout import (
+        TicketRelayoutError,
+        layout_for_template,
+        relayout_stories,
+    )
+
+    try:
+        layout = layout_for_template(company.company_id, template_id)
+    except TicketRelayoutError as exc:
+        raise HTTPException(409, str(exc))
+
+    relaid = relayout_stories(company.company_id, stories, layout)
+
+    if body.prd_id is not None:
+        from app.db.prd_tickets import set_tickets_template
+
+        set_tickets_template(
+            company.company_id, body.prd_id, relaid, template_id
+        )
+        out_stories = _apply_lifecycle(company.company_id, body.prd_id, relaid)
+    else:
+        from app.db.ticket_sets import set_set_template
+        from app.routes.ticket_sets import _apply_set_lifecycle
+
+        set_set_template(
+            company.company_id, body.ticket_set_id, relaid, template_id
+        )
+        out_stories = _apply_set_lifecycle(
+            company.company_id, body.ticket_set_id, relaid
+        )
+
+    return {
+        "status": "ready",
+        "artifact_template_id": template_id,
+        "artifact_template_name": _template_display_name(
+            company.company_id, template_id
+        ),
+        "stories": out_stories,
     }
 
 

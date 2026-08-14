@@ -112,9 +112,16 @@ def find_ticket_story(
 
 
 def save_tickets(
-    company_id: str, prd_id: int, content_hash: str, stories: list[dict]
+    company_id: str, prd_id: int, content_hash: str, stories: list[dict],
+    artifact_template_id: str | None = None,
 ) -> None:
-    """Upsert the generated stories for a PRD (one row per prd_id)."""
+    """Upsert the generated stories for a PRD (one row per prd_id).
+
+    `artifact_template_id` is the ticket format that RENDERED this set — the
+    resolver's answer, whether the run was told a format or fell to the active
+    one. None = the built-in layout. Stamped so the panel can name the current
+    format and the in-place switch can no-op on "make it X" when it is X.
+    """
     c = require_client()
     c.table("prd_tickets").upsert(
         {
@@ -122,9 +129,33 @@ def save_tickets(
             "prd_id": prd_id,
             "content_hash": content_hash,
             "stories": stories,
+            "artifact_template_id": artifact_template_id,
             "status": "ready",
             "error": None,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         },
         on_conflict="prd_id",
     ).execute()
+
+
+@retry_on_disconnect
+def set_tickets_template(
+    company_id: str, prd_id: int, stories: list[dict],
+    artifact_template_id: str | None,
+) -> None:
+    """Persist an in-place format switch: the re-laid stories + the new stamp.
+
+    Deliberately does NOT touch `content_hash`: the tickets still describe the
+    same PRD content, and rewriting the hash here would either fake freshness
+    (for a stale set) or break it (for a fresh one). Layout is orthogonal to
+    the staleness contract."""
+    c = require_client()
+    (
+        c.table("prd_tickets")
+        .update(
+            {"stories": stories, "artifact_template_id": artifact_template_id}
+        )
+        .eq("company_id", company_id)
+        .eq("prd_id", prd_id)
+        .execute()
+    )

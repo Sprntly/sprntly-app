@@ -72,8 +72,16 @@ def create_set(
 
 
 @retry_on_disconnect
-def finish_set(set_id: int, *, title: str, stories: list[dict]) -> None:
+def finish_set(
+    set_id: int, *, title: str, stories: list[dict],
+    artifact_template_id: str | None = None,
+) -> None:
     """Flip a set to `ready` with its generated tickets.
+
+    `artifact_template_id` is the ticket format that rendered this set (the
+    resolver's answer, None = built-in) — same stamp `prd_tickets` carries and
+    for the same two readers: the panel's "Format" label and the in-place
+    switch's no-op check.
 
     An EMPTY `stories` is allowed here, unlike the PRD path. `prd_tickets` is a
     cache keyed by a content hash: an empty row there wedges the Tickets tab on
@@ -89,11 +97,35 @@ def finish_set(set_id: int, *, title: str, stories: list[dict]) -> None:
         {
             "title": title,
             "stories": stories,
+            "artifact_template_id": artifact_template_id,
             "status": "ready",
             "error": None,
             "updated_at": utc_now(),
         }
     ).eq("id", set_id).execute()
+
+
+@retry_on_disconnect
+def set_set_template(
+    company_id: str, set_id: int, stories: list[dict],
+    artifact_template_id: str | None,
+) -> None:
+    """Persist an in-place format switch on a standalone set: the re-laid
+    stories + the new stamp. Company-filtered in the query — same posture as
+    `get_set`, and this is a WRITE, so the filter is non-negotiable."""
+    (
+        require_client().table("ticket_sets")
+        .update(
+            {
+                "stories": stories,
+                "artifact_template_id": artifact_template_id,
+                "updated_at": utc_now(),
+            }
+        )
+        .eq("company_id", company_id)
+        .eq("id", set_id)
+        .execute()
+    )
 
 
 @retry_on_disconnect

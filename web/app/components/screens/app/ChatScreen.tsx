@@ -3726,6 +3726,66 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
 
+  // ── Change the TICKETS' format from chat ────────────────────────────────────
+  // "Change the ticket template to Acme". The tickets counterpart of
+  // prdChangeTemplateFlow, but synchronous end to end: the backend re-LAYS the
+  // existing tickets (identity, edits and tracker links preserved — never a
+  // regeneration) and answers with the re-laid set, so there is no generating
+  // state to drive and no poll. `target` is the thread's standalone set when it
+  // has one, else the tab PRD's persisted tickets — resolved by the caller,
+  // because the backend cannot see a set from a prd_id-shaped envelope.
+  const ticketsChangeTemplateFlow = useCallback(async (
+    query: string, targetTabId: string,
+    target: { ticketSetId: number } | { prdId: number },
+    templateId: string, templateName: string | null,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    const asReply = (answer: string) => ({
+      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    const label = templateName ? `“${templateName}”` : "that format"
+    try {
+      const { storiesApi } = await import("../../../lib/api")
+      const res = await storiesApi.changeTemplate(target, templateId)
+      if (res.unchanged) {
+        finalize(asReply(`These tickets are already written in ${label} — nothing to change.`))
+        return
+      }
+      finalize(asReply(
+        `Done — the tickets now use ${label}. Every ticket kept its content, edits and tracker links; only the description layout changed. They're in the panel on the right.`,
+      ))
+      // Re-render the panel from the persisted truth. A standalone set is
+      // re-read through its one owner (loadTicketSet republishes the slice);
+      // a PRD's tickets re-read via the tab's cache-first effect on the nonce.
+      if (targetTabId === activeTabIdRef.current) {
+        if ("ticketSetId" in target) {
+          void loadTicketSet(target.ticketSetId, setContent)
+        } else {
+          setContent({ ticketsRefreshNonce: Date.now() })
+        }
+        openContentPanel("tickets")
+      }
+      showToast("Format switched", `These tickets now use ${templateName || "the new format"}.`)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize(asReply(`I couldn't switch the ticket format — ${msg}. The tickets are unchanged.`))
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+
   // ── Assign tickets from chat ────────────────────────────────────────────────
   // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".
   // POST /v1/tickets/assign-plan resolves the sentence against the thread PRD's
@@ -4676,6 +4736,27 @@ export function ChatScreen() {
             }
             // No target/format → grounded ask (the library block lets it say
             // what formats exist and where the panel's Format control lives).
+          } else if (envelope.intent === "change_tickets_template") {
+            // The tickets' in-place format switch. TARGET RESOLUTION IS OURS:
+            // the thread's standalone set outranks the tab PRD's tickets,
+            // because a thread that generated a set has that set on screen —
+            // its tickets are what "the tickets" means here. The backend
+            // downgrades a format-less request to `answer` before this.
+            const setId = activeTab?.ticketSetId ?? null
+            const targetPrd = envelope.prd_id ?? tabPrdId
+            const target = setId != null
+              ? { ticketSetId: setId } as const
+              : targetPrd != null ? { prdId: targetPrd } as const : null
+            if (!docFile && activeTab && target && envelope.artifact_template_id) {
+              void ticketsChangeTemplateFlow(
+                trimmed, activeTab.id, target,
+                envelope.artifact_template_id, envelope.artifact_template_name,
+              )
+              settlePendingSend()
+              return
+            }
+            // No target/format → grounded ask (it can at least say what
+            // formats exist and where the Tickets panel's Format control is).
           } else if (envelope.intent === "assign_tickets") {
             // Change who OWNS tickets. The backend downgrades a PRD-less or
             // instruction-less request to `answer` before it reaches here, so
@@ -5112,7 +5193,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

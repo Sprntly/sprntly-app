@@ -152,6 +152,52 @@ def test_a_format_switch_with_no_target_at_all_never_reaches_the_client():
     assert envelope["source"] == "no_target_format"
 
 
+def test_a_tickets_format_switch_reaches_the_client_with_its_target():
+    """change_tickets_template dispatches POST /v1/stories/change-template with
+    the envelope's artifact_template_id — and it is deliberately NOT gated on
+    prd_id: the target may be a standalone ticket set, which the backend cannot
+    see from a prd_id-shaped envelope, so target resolution is the client's.
+    prd_id=None here IS the standalone-set case, and the switch must survive it
+    (the exact downgrade that would kill it is what change_prd_template gets)."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_tickets_template", action_confidence=0.9,
+            artifact_template_id="tpl-t1",
+            artifact_template_name="Acme Tickets",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "change_tickets_template"
+    assert envelope["artifact_template_id"] == "tpl-t1"
+    assert envelope["artifact_template_name"] == "Acme Tickets"
+
+
+def test_a_tickets_switch_with_no_format_never_reaches_the_client():
+    """Same rule as the PRD switch: a change-template dispatch with no format
+    id is an executor call with nothing to execute."""
+    envelope = ci._plan_to_envelope(
+        _plan("change_tickets_template", action_confidence=0.9),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_format"
+
+
+def test_a_tickets_switch_naming_an_unknown_format_asks_which():
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_tickets_template", action_confidence=0.9,
+            template_query="the Contoso ticket format",
+        ),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "template_not_found"
+
+
 def test_the_format_reason_wins_over_a_low_confidence_downgrade():
     """Both land on `answer`; only one of them tells the user something they can
     act on."""
