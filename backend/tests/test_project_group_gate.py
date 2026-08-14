@@ -54,6 +54,7 @@ import pytest
 
 from app import project_group_gate
 from app import project_memory
+from app.db import projects as projects_db
 from app.routes import projects as projects_route
 from tests._company_helpers import company_client
 
@@ -145,12 +146,105 @@ def test_mention_bypasses_gate(isolated_settings, monkeypatch, caplog):
     assert [t["role"] for t in turns] == ["user", "assistant"]
 
 
+# ── Solo-project auto-respond (bypasses the gate like a mention) ────────
+#
+# A project with exactly ONE human member has nobody else the turn could be
+# addressed to, so an unaddressed opener should trigger the agent instead of
+# "staying out" — same deterministic bypass as the @mention path, just
+# reached via `_is_solo_project` instead of the `@Sprntly` regex. Multi-human
+# projects fall through unchanged to the `should_respond` gate.
+
+
+def test_solo_project_bypasses_gate_with_unaddressed_turn(isolated_settings, monkeypatch, caplog):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)  # single human member (the creator)
+    reply_calls = _stub_reply_path(monkeypatch)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
+        r = ctx.client.post(
+            f"/v1/projects/{project['id']}/group/turns",
+            json={"content": "kicking this off — anyone around?"},
+        )
+    assert r.status_code == 200
+    assert gate_calls == [], "a solo project must never consult the classifier"
+    assert len(reply_calls) == 1, "a solo project must always get a reply"
+
+    # The solo-specific addressing note reached the reply prompt.
+    assert "only non-human member" in reply_calls[0]["system"]
+
+    from app.db import conversations as conversations_db
+
+    conv = conversations_db.get_group_chat(project["id"])
+    turns = conversations_db.list_group_turns(conv["id"])
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+
+
+def test_multi_human_project_still_routes_through_gate(isolated_settings, monkeypatch):
+    """The SAME unaddressed content in a project with a SECOND human member
+    must NOT take the solo shortcut — it still consults `should_respond`,
+    byte-for-byte the pre-existing gate path."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    projects_db.add_member(project["id"], "second-human")
+    reply_calls = _stub_reply_path(monkeypatch)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": False},  # noqa: ARG005
+    )
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "is anyone able to help debug the deploy pipeline today?"},
+    )
+    assert r.status_code == 200
+    assert len(gate_calls) == 1, "a multi-human project must still consult the classifier"
+    assert reply_calls == [], "the gate said stay-out, so no reply"
+
+
+def test_is_solo_project_counts_only_humans(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    from app.routes.projects import _is_solo_project
+
+    assert _is_solo_project(project["id"]) is True
+
+    projects_db.add_member(project["id"], "second-human")
+    assert _is_solo_project(project["id"]) is False
+
+
+def test_is_solo_project_read_error_falls_back_to_false(isolated_settings, monkeypatch):
+    """A roster-read failure must never widen Sprntly's participation — it
+    fails SAFE to the normal (conservative) gate, not to auto-respond."""
+    def _boom(_project_id):
+        raise RuntimeError("simulated roster read failure")
+
+    monkeypatch.setattr(projects_db, "list_members", _boom)
+
+    from app.routes.projects import _is_solo_project
+
+    assert _is_solo_project(1) is False
+
+
 # ── Gate decision wiring (AC2/AC3) ──────────────────────────────────────
 
 
 def test_gate_respond_true_triggers_single_reply(isolated_settings, monkeypatch, caplog):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # A SECOND human member so this exercises the actual gate decision — a
+    # solo (single-human) project now bypasses the gate entirely (the
+    # solo-project auto-respond fix), which would otherwise make this test
+    # pass for the wrong reason.
+    projects_db.add_member(project["id"], "second-human")
     reply_calls = _stub_reply_path(monkeypatch)
     monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(True))
 
@@ -173,6 +267,8 @@ def test_gate_respond_true_triggers_single_reply(isolated_settings, monkeypatch,
 def test_gate_respond_false_no_reply(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # Second human member — see test_gate_respond_true_triggers_single_reply.
+    projects_db.add_member(project["id"], "second-human")
     reply_calls = _stub_reply_path(monkeypatch)
     monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(False))
 
@@ -202,6 +298,8 @@ def test_gate_failure_defaults_stay_out(isolated_settings, monkeypatch):
     proof."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # Second human member — see test_gate_respond_true_triggers_single_reply.
+    projects_db.add_member(project["id"], "second-human")
     reply_calls = _stub_reply_path(monkeypatch)
 
     def _boom(**kwargs):  # noqa: ARG001
@@ -237,6 +335,8 @@ def test_gate_failure_defaults_stay_out(isolated_settings, monkeypatch):
 def test_prefilter_short_ack_no_call(isolated_settings, monkeypatch, caplog):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # Second human member — see test_gate_respond_true_triggers_single_reply.
+    projects_db.add_member(project["id"], "second-human")
     reply_calls = _stub_reply_path(monkeypatch)
 
     gate_calls: list[dict] = []
@@ -267,6 +367,8 @@ def test_prefilter_short_ack_no_call(isolated_settings, monkeypatch, caplog):
 def test_prefilter_covers_common_acks(isolated_settings, monkeypatch, ack):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # Second human member — see test_gate_respond_true_triggers_single_reply.
+    projects_db.add_member(project["id"], "second-human")
     _stub_reply_path(monkeypatch)
 
     gate_calls: list[dict] = []
@@ -285,6 +387,8 @@ def test_prefilter_covers_common_acks(isolated_settings, monkeypatch, ack):
 def test_gate_emits_single_cost_line(isolated_settings, monkeypatch, caplog):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    # Second human member — see test_gate_respond_true_triggers_single_reply.
+    projects_db.add_member(project["id"], "second-human")
     _stub_reply_path(monkeypatch)
     monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(False))
 
@@ -673,6 +777,12 @@ def test_gate_live_responds_to_addressed_question(client, fixture_ids, project_i
         "/v1/projects", json={"name": f"Live gate respond {uuid.uuid4().hex[:8]}"}
     ).json()
     project_ids.append(project["id"])
+    # A SECOND human member — see test_gate_live_stays_out_of_human_backforth;
+    # otherwise the solo-project auto-respond shortcut answers this without
+    # ever consulting the real classifier this test means to exercise.
+    sb.table("project_members").insert(
+        {"project_id": project["id"], "user_id": f"live-gate-second-human-{uuid.uuid4().hex[:8]}"}
+    ).execute()
 
     r = client.post(
         f"/v1/projects/{project['id']}/group/turns",
@@ -706,6 +816,13 @@ def test_gate_live_stays_out_of_human_backforth(client, fixture_ids, project_ids
         "/v1/projects", json={"name": f"Live gate stay-out {uuid.uuid4().hex[:8]}"}
     ).json()
     project_ids.append(project["id"])
+    # A SECOND human member — a solo (single-human) project now bypasses the
+    # gate entirely and always replies (the solo-project auto-respond fix),
+    # so this human-to-human scenario needs a real second person for the
+    # gate to be consulted at all.
+    sb.table("project_members").insert(
+        {"project_id": project["id"], "user_id": f"live-gate-second-human-{uuid.uuid4().hex[:8]}"}
+    ).execute()
 
     client.post(
         f"/v1/projects/{project['id']}/group/turns",

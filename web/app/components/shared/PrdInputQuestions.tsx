@@ -31,7 +31,7 @@ import {
   type PrdInputQuestionsList,
   type PrdRecord,
 } from "../../lib/api"
-import { QuestionPopup } from "./QuestionPopup"
+import { QuestionPopup, type PopupAnswer } from "./QuestionPopup"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import type { PrdState } from "../../types/content"
 import { IconSparkle } from "./app-icons"
@@ -275,6 +275,56 @@ export type PrdInputQuestionsProps = {
 const EXTRACT_POLL_MS = 2500
 const EXTRACT_POLL_MAX = 24 // ≈60s
 
+// ── the stepper's draft — what makes interruption non-lossy ──────────────────
+//
+// The popup batch submits ONCE, when the last question settles (the owner's
+// finish-everything-first directive). Before this draft existed, everything up
+// to that point lived in component state only — so a tab switch, the dock
+// being claimed by a higher-priority batch (clarify/assign), or a panel
+// refresh mid-batch silently discarded every answer given, and the next open
+// re-asked from 1/N. Answering "over and over" with nothing ever reaching the
+// backend was the reported bug, and the six-hour request log confirming ZERO
+// answer submissions was the diagnosis.
+//
+// Every settle (answer or skip) now writes here, keyed by QUESTION ID — ids
+// are stable for stored rows, and a re-extraction (a regenerated PRD) mints
+// new ids, so its draft entries simply never match and stale drafts die with
+// their questions. Cleared when the batch submits.
+
+type QuestionDraft = Record<number, PopupAnswer>
+
+const draftKey = (prdId: number) => `sprntly_prd_qdraft_${prdId}`
+
+function loadQuestionDraft(prdId: number): QuestionDraft {
+  try {
+    const raw = localStorage.getItem(draftKey(prdId))
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === "object" ? (parsed as QuestionDraft) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveQuestionDraftEntry(
+  prdId: number, questionId: number, answer: PopupAnswer,
+) {
+  try {
+    const draft = loadQuestionDraft(prdId)
+    draft[questionId] = answer
+    localStorage.setItem(draftKey(prdId), JSON.stringify(draft))
+  } catch {
+    /* best-effort — a full store just loses the resume, as before */
+  }
+}
+
+export function clearQuestionDraft(prdId: number) {
+  try {
+    localStorage.removeItem(draftKey(prdId))
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Public component. Loads the PRD's input questions and renders each pending one
  * as an agent-style chat message with answer affordances. Answering routes
@@ -329,6 +379,21 @@ export function PrdInputQuestions({
             ? { questions: res, extracting: false }
             : { questions: res.questions ?? [], extracting: !!res.extracting }
           setQuestions(qs)
+          // Skips PERSIST across opens (the draft) — a question skipped in a
+          // previous sitting renders as its inline card instead of re-opening
+          // the stepper on every open of this PRD, which is the second half
+          // of the "they keep coming" bug. Draft entries whose ids no longer
+          // exist (a re-extracted set) simply never match.
+          const draft = loadQuestionDraft(prdId)
+          const persistedSkips: Record<number, boolean> = {}
+          for (const q of qs) {
+            if (q.status === "pending" && draft[q.id]?.skipped) {
+              persistedSkips[q.id] = true
+            }
+          }
+          if (Object.keys(persistedSkips).length) {
+            setPopupSkipped((prev) => ({ ...persistedSkips, ...prev }))
+          }
           if (extracting && polls < EXTRACT_POLL_MAX) {
             polls += 1
             timer = setTimeout(load, EXTRACT_POLL_MS)
@@ -473,6 +538,23 @@ export function PrdInputQuestions({
               })),
             }))}
             fallbackHeader="PRD question"
+            // The previous sitting's answers, restored by question id — the
+            // stepper resumes at the first open question instead of re-asking
+            // from 1/N after every interruption (the reported bug).
+            initialAnswers={(() => {
+              const draft = loadQuestionDraft(prdId)
+              const seeded: Record<number, PopupAnswer> = {}
+              batch.forEach((q, i) => {
+                const entry = draft[q.id]
+                if (entry && !entry.skipped && entry.answer) seeded[i] = entry
+              })
+              return seeded
+            })()}
+            // Every settle persists — NOT a submit; the one batch submit below
+            // is unchanged. This is only what makes an unmount recoverable.
+            onProgress={(i, a) => {
+              if (batch[i]) saveQuestionDraftEntry(prdId, batch[i].id, a)
+            }}
             onComplete={(answers) => {
               // Skips fall back to their inline cards; everything answered
               // goes out as ONE batch, submitted only now — never mid-stepper.
@@ -483,6 +565,16 @@ export function PrdInputQuestions({
                 })
                 return next
               })
+              // The draft's ANSWER entries are spent (they ride the submit);
+              // its SKIP entries persist so a skipped question stays inline
+              // across opens rather than re-opening the stepper forever.
+              try {
+                const remaining: QuestionDraft = {}
+                answers.forEach((a, i) => {
+                  if (a.skipped && batch[i]) remaining[batch[i].id] = a
+                })
+                localStorage.setItem(draftKey(prdId), JSON.stringify(remaining))
+              } catch { /* best-effort */ }
               setBatch(null)
               void submitBatch(
                 answers.flatMap((a, i) =>

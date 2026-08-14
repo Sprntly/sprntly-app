@@ -226,6 +226,10 @@ export interface ConversationRow {
    *  null). Carried from `ConversationRecord.prd_id` so resuming a PRD chat from
    *  history can re-bind the tab to its PRD and reopen the content panel. */
   prd_id?: number | null
+  /** The project this conversation is bound to (else null). Carried from
+   *  `ConversationRecord.project_id` so resuming a project-bound chat from
+   *  history restores the project-menu affordance in the content panel. */
+  project_id?: number | null
 }
 
 export interface TeamMemberRow {
@@ -727,6 +731,13 @@ export interface AppContentState {
    *  conversation's captured reports; null (a brand-new chat with nothing
    *  persisted yet, or the brief tab) means there is no thread to list. */
   conversationId: number | null
+  /** The project a main-chat-generated PRD silently forked into (server-side
+   *  `maybe_auto_create_project_for_prd`, returned on the generate response).
+   *  Non-null ONLY while the current thread is bound to a project — it gates the
+   *  project-menu affordance in the content panel header. Null (the normal state
+   *  for every non-project chat) leaves the panel byte-identical to before. Cleared
+   *  on thread-switch / new-chat alongside the other thread-scoped fields. */
+  activeProjectId: number | null
   /** A specific report to open in the Reports tab, set when the user arrived by
    *  clicking that exact document (e.g. an Artifacts row). The tab consumes it
    *  once — selecting the report and clearing this — so the user lands on what

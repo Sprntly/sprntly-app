@@ -56,6 +56,7 @@ const EMPTY: AppContentState = {
   evidenceGenerating: false,
   evidencePartialHtml: null,
   conversationId: null,
+  activeProjectId: null,
   reportFocusId: null,
   reportFocusStandalone: false,
   // The team document open in the panel's Document tab, or null when the

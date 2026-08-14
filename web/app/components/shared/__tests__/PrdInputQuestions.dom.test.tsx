@@ -25,6 +25,10 @@ import type { PrdInputQuestion, PrdRecord } from "../../../lib/api"
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  // The stepper now persists per-PRD answer/skip drafts; every test here
+  // reuses prdId 1, so a leaked draft would bleed one test's skips into the
+  // next one's popup-open decision.
+  localStorage.clear()
 })
 
 const escalateQ: PrdInputQuestion = {
@@ -365,6 +369,90 @@ describe("PrdInputQuestions container", () => {
 
     // Skipping is "not in a stepper", never "gone": the question resurfaces as
     // the inline chat card it always was, still answerable.
+    await waitFor(() => expect(screen.getByTestId("prd-input-question")).toBeTruthy())
+    expect(screen.queryByTestId("question-popup")).toBeNull()
+    document.body.removeChild(host)
+  })
+
+  it("an interrupted batch RESUMES where it left off — answers survive the unmount", async () => {
+    // THE reported bug: five questions, four answered, then a tab switch — and
+    // everything silently discarded, so every open re-asked from 1/N and the
+    // backend never saw a single answer. The draft makes the unmount
+    // recoverable: the remount seeds the previous sitting's answers and the
+    // stepper opens at the first OPEN question.
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    const listQuestions = vi.fn().mockResolvedValue([escalateQ, needWithOptionsQ])
+    const answerQuestionsBatch = vi.fn().mockResolvedValue({
+      prd: answeredRecord,
+      questions: [
+        { ...escalateQ, status: "answered", answer: "On" },
+        { ...needWithOptionsQ, status: "answered", answer: "0–20%" },
+      ],
+      sections_changed: ["Requirements"],
+      summary: "s",
+    })
+
+    const first = render(
+      <PrdInputQuestions
+        prdId={1}
+        listQuestions={listQuestions}
+        answerQuestionsBatch={answerQuestionsBatch}
+        popupHost={host}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+    // Answer question 1, then the interruption: unmount mid-batch.
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    })
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+    first.unmount()
+    expect(answerQuestionsBatch).not.toHaveBeenCalled()
+
+    // The next open: the stepper resumes AT QUESTION 2 — never back to 1/2.
+    render(
+      <PrdInputQuestions
+        prdId={1}
+        listQuestions={listQuestions}
+        answerQuestionsBatch={answerQuestionsBatch}
+        popupHost={host}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+
+    // Settling the one remaining question submits the WHOLE batch — the
+    // restored first answer included.
+    await act(async () => {
+      fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    })
+    await waitFor(() =>
+      expect(answerQuestionsBatch).toHaveBeenCalledWith(1, [
+        { question_id: 11, answer: "On" },
+        { question_id: 13, answer: "0–20%" },
+      ]))
+    document.body.removeChild(host)
+  })
+
+  it("a skip persists across opens — the stepper stops re-asking it", async () => {
+    const host = document.createElement("div")
+    document.body.appendChild(host)
+    const listQuestions = vi.fn().mockResolvedValue([escalateQ])
+
+    const first = render(
+      <PrdInputQuestions prdId={1} listQuestions={listQuestions} popupHost={host} />,
+    )
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
+    await waitFor(() => expect(screen.getByTestId("prd-input-question")).toBeTruthy())
+    first.unmount()
+
+    // Reopen: NO popup — the skipped question renders as its inline card,
+    // still answerable, instead of nagging the stepper open on every open.
+    render(
+      <PrdInputQuestions prdId={1} listQuestions={listQuestions} popupHost={host} />,
+    )
     await waitFor(() => expect(screen.getByTestId("prd-input-question")).toBeTruthy())
     expect(screen.queryByTestId("question-popup")).toBeNull()
     document.body.removeChild(host)

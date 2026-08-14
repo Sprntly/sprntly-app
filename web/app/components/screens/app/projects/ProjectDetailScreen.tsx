@@ -31,7 +31,6 @@ import Link from "next/link"
 import { AppLayout } from "../AppLayout"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { ConfirmDialog } from "../../../shared/ConfirmDialog"
-import { useNavigation } from "../../../../context/NavigationContext"
 import { useAuth } from "../../../../lib/auth"
 import { PROJECTS_PATH } from "../../../../lib/routes"
 import {
@@ -51,6 +50,7 @@ import { ProjectMainThread } from "./ProjectMainThread"
 import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
 import { AddArtifactModal } from "./AddArtifactModal"
+import { ProjectInviteModal } from "./ProjectInviteModal"
 import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
@@ -663,13 +663,13 @@ export function ProjectDetailScreen({
    *  Defaults to the shell's own `"group"` default when absent. */
   initialChat?: ActiveChat
 }) {
-  const { openModal } = useNavigation()
   const auth = useAuth()
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railCollapsed, setRailCollapsed] = useState(false)
   const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
   const [railModal, setRailModal] = useState<OpenModal>(null)
+  const [inviteOpen, setInviteOpen] = useState(false)
   const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
@@ -903,7 +903,10 @@ export function ProjectDetailScreen({
   }, [projectId])
 
   const onToggleRail = useCallback(() => setRailCollapsed((v) => !v), [])
-  const onInvite = useCallback(() => openModal("invite"), [openModal])
+  // The project rail's Invite opens the PROJECT-scoped surface — the
+  // current-members list + real `/tag` add — NOT the global mock InviteModal
+  // (empty email rows + toast stub), which stays for its other call sites.
+  const onInvite = useCallback(() => setInviteOpen(true), [])
   // The memory/artifacts/task/add-artifact modals below are this ticket's
   // bodies for these rail-card triggers.
   const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
@@ -1087,6 +1090,13 @@ export function ProjectDetailScreen({
         existingKeys={new Set(state.artifacts.map((a) => `${a.type}-${a.id}`))}
         onClose={onCloseRailModal}
         onAdded={refetchArtifacts}
+      />
+      <ProjectInviteModal
+        projectId={projectId}
+        members={state.project.members}
+        open={inviteOpen}
+        onClose={() => setInviteOpen(false)}
+        onInvited={refetchProject}
       />
     </AppLayout>
   )

@@ -134,8 +134,14 @@ def _group_turns(project_id):
 
 # ── AC1 — classify only after should_respond/mention ─────────────────────────
 def test_group_classifies_only_after_should_respond(tenant_client, isolated_settings, monkeypatch):
+    from app.db import projects as projects_db
+
     t = tenant_client.make(slug="acme")
     project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
+    # A SECOND human member so this actually exercises `should_respond` — a
+    # solo (single-human) project now bypasses the gate entirely (the
+    # solo-project auto-respond fix) and always replies.
+    projects_db.add_member(project_id, "second-human")
     monkeypatch.setattr(projects_route, "should_respond", lambda *a, **kw: False)
     classify_calls = []
     monkeypatch.setattr(

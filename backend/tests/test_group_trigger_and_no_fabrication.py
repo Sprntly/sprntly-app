@@ -77,6 +77,12 @@ def test_agent_spoke_last_derivation(tenant_client, isolated_settings, monkeypat
     False."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
+    # A SECOND human member — a solo (single-human) project now bypasses the
+    # gate entirely (the solo-project auto-respond fix) and `should_respond`
+    # is never consulted, which this test needs to observe.
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project_id, "second-human")
 
     calls: list[bool] = []
     monkeypatch.setattr(
@@ -114,6 +120,12 @@ def test_trigger_kind_mention_continuation_gate(tenant_client, isolated_settings
     respond=True with no prior agent turn -> "gate"."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
+    # A SECOND human member — see test_agent_spoke_last_derivation above; the
+    # "gate"/"continuation" trigger kinds are only reachable through a
+    # multi-human project now that solo projects short-circuit to "solo".
+    from app.db import projects as projects_db
+
+    projects_db.add_member(project_id, "second-human")
 
     kinds: list[str] = []
     monkeypatch.setattr(
@@ -453,9 +465,14 @@ def test_respond_selects_addressing_note_by_trigger_kind(
     assert r.status_code == 200, r.text
     assert projects_route._ADDRESSING_NOTES["mention"] in systems[-1]
 
-    # gate -> gate note (fresh project, no prior turns).
+    # gate -> gate note (fresh project, no prior turns). A SECOND human
+    # member is required — a solo project short-circuits to the "solo" note
+    # instead of ever reaching `should_respond`.
+    from app.db import projects as projects_db
+
     monkeypatch.setattr(projects_route, "should_respond", lambda *a, **kw: True)
     project_gate = _seed_project(t, isolated_settings, name="gate project")
+    projects_db.add_member(project_gate, "second-human")
     r2 = t.client.post(
         f"/v1/projects/{project_gate}/group/turns",
         json={"content": "is anyone free to help today?"},
@@ -463,8 +480,10 @@ def test_respond_selects_addressing_note_by_trigger_kind(
     assert r2.status_code == 200, r2.text
     assert projects_route._ADDRESSING_NOTES["gate"] in systems[-1]
 
-    # continuation -> continuation note (fresh project, seeded assistant turn).
+    # continuation -> continuation note (fresh project, seeded assistant
+    # turn). Same second-member requirement as the gate case above.
     project_cont = _seed_project(t, isolated_settings, name="continuation project")
+    projects_db.add_member(project_cont, "second-human")
     from app.db import conversations as conversations_db
 
     conv = conversations_db.create_group_chat(project_cont, t.user_id)

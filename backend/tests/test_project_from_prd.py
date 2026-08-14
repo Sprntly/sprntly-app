@@ -111,6 +111,9 @@ def test_auto_create_names_from_prd_title(tenant_client, isolated_settings):
 
 
 def test_auto_create_first_write_wins(tenant_client, isolated_settings):
+    """A conversation binds to exactly one project. A second, distinct PRD
+    generated in that same conversation does not spawn a second project —
+    it joins the first one as an additional artifact."""
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
@@ -136,7 +139,8 @@ def test_auto_create_first_write_wins(tenant_client, isolated_settings):
     )
     assert len(projects) == 1
 
-    # The second PRD was never attached to the (unchanged) project.
+    # The second, distinct PRD is now attached to the same project alongside
+    # the first — both accumulate rather than the second being orphaned.
     artifacts = (
         require_client()
         .table("project_artifacts")
@@ -145,7 +149,88 @@ def test_auto_create_first_write_wins(tenant_client, isolated_settings):
         .execute()
         .data
     )
-    assert [a["artifact_id"] for a in artifacts] == [prd_id]
+    assert {a["artifact_id"] for a in artifacts} == {prd_id, second_prd_id}
+
+
+def test_auto_create_attaches_second_distinct_prd_to_bound_project(tenant_client, isolated_settings):
+    """A distinct PRD generated in a conversation already bound to project P
+    is attached to P — P ends up with two `prd` artifacts and no new
+    project is created."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    first_prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=first_prd_id, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    second_prd_id = _seed_brief_and_prd(db_mod, "acme", title="Offline mode")
+    result = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=second_prd_id, prd_title="Offline mode", conversation_id=conv_id,
+    )
+    assert result == project_id
+
+    projects = (
+        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+    )
+    assert len(projects) == 1
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_type, artifact_id")
+        .eq("project_id", project_id)
+        .execute()
+        .data
+    )
+    assert {(a["artifact_type"], a["artifact_id"]) for a in artifacts} == {
+        ("prd", first_prd_id),
+        ("prd", second_prd_id),
+    }
+
+
+def test_auto_create_attach_to_bound_project_is_idempotent(tenant_client, isolated_settings):
+    """Attaching a PRD that is already on the bound project (e.g. a
+    re-issued generate of the same PRD) does not create a duplicate
+    artifact row — exactly one row for it, no matter how many times it is
+    re-attached."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    prd_id = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    for _ in range(2):
+        result = maybe_auto_create_project_for_prd(
+            company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+            prd_id=prd_id, prd_title="Dark mode", conversation_id=conv_id,
+        )
+        assert result == project_id
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_id")
+        .eq("project_id", project_id)
+        .eq("artifact_type", "prd")
+        .eq("artifact_id", prd_id)
+        .execute()
+        .data
+    )
+    assert len(artifacts) == 1
 
 
 def test_auto_create_none_conversation_skips(tenant_client, isolated_settings):
@@ -164,6 +249,173 @@ def test_auto_create_none_conversation_skips(tenant_client, isolated_settings):
         require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
     )
     assert projects == []
+
+
+def test_auto_create_none_conversation_still_skips_with_flag_explicitly_false(tenant_client, isolated_settings):
+    """Same as above, but pins the default explicitly — `allow_without_
+    conversation=False` is byte-for-byte the original (pre-this-ticket)
+    guard, so the chat path's behavior is provably unchanged."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme")
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    result = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Dark mode PRD", conversation_id=None,
+        allow_without_conversation=False,
+    )
+    assert result is None
+
+    projects = (
+        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+    )
+    assert projects == []
+
+
+# ── prd-auto project for briefs/ideation (conversation-less fork) ──────────
+# The weekly-brief `/generate` and ideation `/generate-from-ideation` paths
+# have no chat thread to fork from, so `allow_without_conversation=True`
+# dedups on the PRD-artifact fact (`find_existing_prd_auto_project`) instead
+# of a conversation binding, and skips conversation-bind + origin-memory
+# seeding entirely (nothing to seed from).
+
+
+def test_allow_without_conversation_creates_prd_auto_project(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme", title="Weekly-brief PRD")
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Weekly-brief PRD", conversation_id=None,
+        allow_without_conversation=True,
+    )
+    assert project_id is not None
+
+    client = require_client()
+    project = client.table("projects").select("*").eq("id", project_id).execute().data[0]
+    assert project["origin"] == "prd_auto"
+    assert project["name"] == "Weekly-brief PRD"
+
+    artifacts = client.table("project_artifacts").select("*").eq("project_id", project_id).execute().data
+    assert len(artifacts) == 1
+    assert artifacts[0]["artifact_type"] == "prd"
+    assert artifacts[0]["artifact_id"] == prd_id
+
+    # No conversation to bind — the member roster still seeds the creator
+    # (create_project's own contract), but no `conversations` row is touched.
+    members = client.table("project_members").select("*").eq("project_id", project_id).execute().data
+    assert [m["user_id"] for m in members] == [t.user_id]
+
+
+def test_allow_without_conversation_dedups_same_prd_to_same_project(tenant_client, isolated_settings):
+    """A second conversation-less generate of the SAME PRD reuses the SAME
+    project instead of spawning a duplicate (dedup on the PRD-artifact
+    fact, since there is no conversation to key on)."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme", title="Weekly-brief PRD")
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    first = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Weekly-brief PRD", conversation_id=None,
+        allow_without_conversation=True,
+    )
+    second = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Weekly-brief PRD", conversation_id=None,
+        allow_without_conversation=True,
+    )
+    assert second == first
+
+    projects = (
+        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+    )
+    assert len(projects) == 1
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_id")
+        .eq("project_id", first)
+        .execute()
+        .data
+    )
+    assert len(artifacts) == 1  # not re-attached on the dedup hit
+
+
+def test_generate_route_returns_project_id_and_attaches_prd(tenant_client, isolated_settings):
+    """Route-level (AC2): `/v1/prd/generate`'s FRESH-create branch returns a
+    `project_id` and the resulting project holds the generated PRD."""
+    t = tenant_client.make(slug="acme")
+    brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
+
+    resp = t.client.post("/v1/prd/generate", json={"brief_id": brief_id, "insight_index": 0})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project_id"] is not None
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_id, artifact_type")
+        .eq("project_id", body["project_id"])
+        .execute()
+        .data
+    )
+    assert [(a["artifact_id"], a["artifact_type"]) for a in artifacts] == [(body["prd_id"], "prd")]
+
+
+def test_generate_route_existing_prd_branch_returns_project_id(tenant_client, isolated_settings):
+    """Route-level (AC2): the EXISTING-PRD early-return branch of `/generate`
+    also forks/reuses a project — re-issuing the same generate is not force,
+    so it hits `find_existing_prd`'s early return, which must still resolve
+    (and dedupe against) the conversation-less project."""
+    t = tenant_client.make(slug="acme")
+    brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
+
+    first = t.client.post("/v1/prd/generate", json={"brief_id": brief_id, "insight_index": 0}).json()
+    second = t.client.post("/v1/prd/generate", json={"brief_id": brief_id, "insight_index": 0}).json()
+
+    assert second["prd_id"] == first["prd_id"]
+    assert second["project_id"] == first["project_id"]
+
+    projects = (
+        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+    )
+    assert len(projects) == 1
+
+
+def test_generate_from_ideation_route_returns_project_id_and_attaches_prd(tenant_client, isolated_settings):
+    """Route-level (AC2): `/v1/prd/generate-from-ideation`'s fresh-create
+    branch also returns a `project_id` with the PRD attached."""
+    from app.db import ideation as ideation_db
+
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+    ideation_db.upsert_ideation_item(
+        t.company_id, theme_id="theme-x", title="Bulk onboarding",
+        rank=4, score=9.0, shortlisted=True, reasoning="Churn evidence.",
+    )
+    item = next(i for i in ideation_db.list_ideation_items(t.company_id) if i["theme_id"] == "theme-x")
+
+    resp = t.client.post("/v1/prd/generate-from-ideation", json={"ideation_item_id": item["id"]})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["project_id"] is not None
+
+    artifacts = (
+        require_client()
+        .table("project_artifacts")
+        .select("artifact_id, artifact_type")
+        .eq("project_id", body["project_id"])
+        .execute()
+        .data
+    )
+    assert [(a["artifact_id"], a["artifact_type"]) for a in artifacts] == [(body["prd_id"], "prd")]
 
 
 # ── Error handling (mutation-proofed, AC3) ─────────────────────────────────
@@ -224,28 +476,43 @@ def test_auto_create_swallows_failure_direct_call_returns_none(tenant_client, is
 
 
 def test_prd_generate_unbroken(tenant_client, isolated_settings, repo_root):
-    """AC6 — the hook wiring didn't touch bind_conversation_to_prd's call
-    sites (still exactly 3) and generate's response shape is unchanged.
-    `generate`/`generate_from_ideation` carry no `conversation_id` and get
-    no hook (structurally excluded, AC5) — no auto-project results."""
+    """AC6 — the hook wiring didn't touch `bind_conversation_to_prd`'s call
+    sites (still exactly 3, the conversation-bound `generate-from-task` /
+    `import_prd` paths) and `generate`'s response shape is unchanged aside
+    from the new `project_id` key.
+
+    UPDATED invariant (prd-auto project for briefs/ideation): `generate`
+    and `generate-from-ideation` now EACH carry two conversation-less
+    `maybe_auto_create_project_for_prd(..., conversation_id=None,
+    allow_without_conversation=True)` calls (the existing-PRD early-return
+    branch + the fresh-create branch), on top of the 3 pre-existing
+    conversation-bound call sites — 7 total, not 3. This assertion was
+    bumped from the prior `== 3` closed-world count to reflect that real
+    change (not narrowed to force green); `bind_conversation_to_prd`'s
+    count is untouched by this ticket and stays pinned at 3."""
     import re
 
     prd_src = (repo_root / "app" / "routes" / "prd.py").read_text()
     assert len(re.findall(r"bind_conversation_to_prd\(", prd_src)) == 3
-    assert len(re.findall(r"maybe_auto_create_project_for_prd\(", prd_src)) == 3
+    assert len(re.findall(r"maybe_auto_create_project_for_prd\(", prd_src)) == 7
 
     t = tenant_client.make(slug="acme")
     brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
     resp = t.client.post("/v1/prd/generate", json={"brief_id": brief_id, "insight_index": 0})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body.keys()) >= {"prd_id", "status"}
+    assert set(body.keys()) >= {"prd_id", "status", "project_id"}
 
-    # No conversation_id on GenerateIn at all — no project, ever, from this path.
+    # `generate` carries no conversation_id — but it DOES now fork a
+    # conversation-less `prd_auto` project (this ticket's change): exactly
+    # one project, holding the generated PRD as its only artifact.
+    assert body["project_id"] is not None
     projects = (
-        require_client().table("projects").select("id").eq("company_id", t.company_id).execute().data
+        require_client().table("projects").select("id, origin").eq("company_id", t.company_id).execute().data
     )
-    assert projects == []
+    assert len(projects) == 1
+    assert projects[0]["origin"] == "prd_auto"
+    assert projects[0]["id"] == body["project_id"]
 
 
 def test_generate_from_task_new_prd_branch_creates_prd_auto_project(tenant_client, isolated_settings):
@@ -616,3 +883,85 @@ def test_auto_create_names_from_prd_title_live(sb, live_ids, _project_ids, _clea
 
     project = sb.table("projects").select("name").eq("id", project_id).execute().data[0]
     assert project["name"] == live_ids["prd_title"]
+
+
+@live
+def test_auto_create_attaches_second_distinct_prd_to_bound_project_live(
+    sb, live_ids, _project_ids, _cleanup_live_projects
+):
+    """Real-Postgres round-trip: a second, distinct PRD generated in a
+    conversation already bound to project P is attached to P via a real
+    `project_artifacts` upsert (no duplicate row on re-attach, no second
+    project)."""
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+        user_id=live_ids["user_id"], prd_id=live_ids["prd_id"],
+        prd_title=live_ids["prd_title"], conversation_id=live_ids["conversation_id"],
+    )
+    assert project_id is not None
+    _project_ids.append(project_id)
+
+    second_brief = sb.table("briefs").insert(
+        {
+            "dataset": f"live-pfp-attach-{uuid.uuid4().hex[:8]}",
+            "week_label": "Live auto-create-from-prd (second)",
+            "payload": {},
+            "is_current": False,
+        }
+    ).execute().data[0]
+    second_prd = sb.table("prds").insert(
+        {
+            "brief_id": second_brief["id"],
+            "insight_index": 0,
+            "title": f"Live second PRD {uuid.uuid4().hex[:8]}",
+            "status": "ready",
+        }
+    ).execute().data[0]
+
+    try:
+        result = maybe_auto_create_project_for_prd(
+            company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+            user_id=live_ids["user_id"], prd_id=second_prd["id"],
+            prd_title=second_prd["title"], conversation_id=live_ids["conversation_id"],
+        )
+        assert result == project_id
+
+        projects = (
+            sb.table("projects").select("id").eq("company_id", live_ids["company_id"]).execute().data
+        )
+        assert project_id in {p["id"] for p in projects}
+
+        artifacts = (
+            sb.table("project_artifacts")
+            .select("artifact_type, artifact_id")
+            .eq("project_id", project_id)
+            .execute()
+            .data
+        )
+        assert {(a["artifact_type"], a["artifact_id"]) for a in artifacts} == {
+            ("prd", live_ids["prd_id"]),
+            ("prd", second_prd["id"]),
+        }
+
+        # Re-attaching the same second PRD is idempotent — still one row.
+        again = maybe_auto_create_project_for_prd(
+            company_id=live_ids["company_id"], workspace_id=live_ids["workspace_id"],
+            user_id=live_ids["user_id"], prd_id=second_prd["id"],
+            prd_title=second_prd["title"], conversation_id=live_ids["conversation_id"],
+        )
+        assert again == project_id
+        artifacts_after = (
+            sb.table("project_artifacts")
+            .select("artifact_id")
+            .eq("project_id", project_id)
+            .eq("artifact_type", "prd")
+            .eq("artifact_id", second_prd["id"])
+            .execute()
+            .data
+        )
+        assert len(artifacts_after) == 1
+    finally:
+        sb.table("prds").delete().eq("id", second_prd["id"]).execute()
+        sb.table("briefs").delete().eq("id", second_brief["id"]).execute()
