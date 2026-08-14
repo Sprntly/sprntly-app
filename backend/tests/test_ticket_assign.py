@@ -206,6 +206,42 @@ def test_deleted_tickets_are_not_offered(tenant_client, monkeypatch):
     assert "prd-7-s2" not in seen["input"]
 
 
+def test_category_rule_rides_in_the_prompt(tenant_client, monkeypatch):
+    """"assign all backend related tickets to myself" must be classified by
+    the model, never bounced back as a select-which-ones-are-backend quiz
+    (live session, 2026-08-14). The rule lives ONLY in `_SYSTEM`, so this
+    guards its load-bearing phrases the way the deleted-tickets test guards
+    the ticket list: a prompt rewrite that drops the category rule fails here
+    before a user rediscovers the quiz."""
+    t = tenant_client.make(slug="acme")
+    _seed_tickets(t.company_id, 7, [{"id": "s1", "title": "Login flow"}])
+    _seed_member(t.company_id, "u-dave", "Dave Okafor", "dave@acme.com")
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({
+            "assignments": [{"ticket_key": "prd-7-s1", "user_id": "u-dave"}],
+            "questions": [],
+            "note": "“Login flow” is the only backend-ish ticket; the rest are process work.",
+        })
+
+    monkeypatch.setattr(ticket_assign, "llm_call", _capture)
+    body = t.client.post(
+        "/v1/tickets/assign-plan",
+        json={"prd_id": 7, "instruction": "assign all backend related tickets to Dave"},
+    ).json()
+    # The rule's three anchors: category selection is the model's call, the
+    # verdict lands in `note`, and the user is never handed the sorting.
+    assert "TOPIC or CATEGORY" in seen["system"]
+    assert "Never ask the user to sort tickets into the category" in seen["system"]
+    assert seen["prompt_version"] == ticket_assign.PLAN_PROMPT_VERSION == "ticket-assign-v2"
+    # And a category verdict rides out as plain assignments plus the note.
+    assert [a["ticket_key"] for a in body["assignments"]] == ["prd-7-s1"]
+    assert body["questions"] == []
+    assert "only backend-ish" in body["note"]
+
+
 def test_no_tickets_short_circuits_without_an_llm_call(tenant_client, monkeypatch):
     t = tenant_client.make(slug="acme")
     _seed_member(t.company_id, "u-dave", "Dave Okafor", "dave@acme.com")
