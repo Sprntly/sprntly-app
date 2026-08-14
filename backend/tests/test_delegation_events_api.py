@@ -134,22 +134,38 @@ def _install_fake_ledger_views(monkeypatch) -> None:
     monkeypatch.setattr(delegation_events_db, "list_status_for_assigner", _list_for_assigner)
 
 
-# ── State machine (pure — AC1, AC4, AC5, AC9) ────────────────────────────
+# ── State machine (pure — AC1-AC4, simplified no-approve/reject model) ───
 
 
 def test_legal_edges_accepted():
+    # Pins the WHOLE graph by exact equality first — `is_legal_transition`
+    # is literally `event in TRANSITIONS.get(current, frozenset())`, so a
+    # loop over TRANSITIONS' own contents alone is tautological and can
+    # never catch a wrong graph (Gate-1 fix-on-build). This assertion is the
+    # one that can actually fail (AC2).
+    assert delegation_events_db.TRANSITIONS == {
+        "assigned": frozenset({"in_progress", "completed", "cleared"}),
+        "in_progress": frozenset({"completed", "cleared"}),
+        "completed": frozenset(),
+        "cleared": frozenset(),
+    }
     for current, events in delegation_events_db.TRANSITIONS.items():
         for event in events:
             assert delegation_events_db.is_legal_transition(current, event), (current, event)
+    # AC3 — the exact spec-named cases.
+    assert delegation_events_db.is_legal_transition("assigned", "cleared") is True
+    assert delegation_events_db.is_legal_transition("in_progress", "cleared") is True
+    assert delegation_events_db.is_legal_transition("assigned", "accepted") is False
+    assert delegation_events_db.is_legal_transition("completed", "reopened") is False
 
 
 @pytest.mark.parametrize(
     "current,event",
     [
-        ("completed", "accepted"),
-        ("cancelled", "completed"),
-        ("assigned", "reopened"),
-        ("assigned", "completed"),
+        ("assigned", "accepted"),
+        ("assigned", "declined"),
+        ("in_progress", "reopened"),
+        ("cleared", "completed"),
         ("completed", "completed"),
     ],
 )
@@ -158,21 +174,79 @@ def test_illegal_edges_rejected(current, event):
 
 
 def test_event_party_map_excludes_server_event():
+    assert delegation_events_db.EVENT_PARTY == {
+        "in_progress": "assignee",
+        "completed": "assignee",
+        "cleared": "assigner",
+    }
     assert "assigned" not in delegation_events_db.EVENT_PARTY
     assignee_events = {e for e, p in delegation_events_db.EVENT_PARTY.items() if p == "assignee"}
     assigner_events = {e for e, p in delegation_events_db.EVENT_PARTY.items() if p == "assigner"}
-    assert assignee_events == {"accepted", "in_progress", "completed", "declined"}
-    assert assigner_events == {"cancelled", "reopened"}
-    assert delegation_events_db.EVENT_PARTY["reopened"] == "assigner"
+    assert assignee_events == {"in_progress", "completed"}
+    assert assigner_events == {"cleared"}
 
 
 def test_open_closed_state_partition():
-    assert delegation_events_db.OPEN_STATES == {"assigned", "accepted", "in_progress", "reopened"}
-    assert delegation_events_db.CLOSED_STATES == {"completed", "declined", "cancelled"}
+    assert delegation_events_db.OPEN_STATES == {"assigned", "in_progress"}
+    assert {"completed", "cleared"} <= delegation_events_db.CLOSED_STATES
     assert delegation_events_db.OPEN_STATES.isdisjoint(delegation_events_db.CLOSED_STATES)
-    assert delegation_events_db.OPEN_STATES | delegation_events_db.CLOSED_STATES == {
-        "assigned", "accepted", "in_progress", "reopened", "completed", "declined", "cancelled",
-    }
+
+
+# ── Emit route — simplified model (fast, FakeSupabaseClient) ─────────────
+
+
+def test_emit_cleared_by_assigner_succeeds(isolated_settings, monkeypatch):
+    _install_fake_ledger_views(monkeypatch)
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id, _ = _seed_member(ctx, project["id"])
+    deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
+
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "cleared"})
+    assert r.status_code == 200
+    assert r.json() == {"delegation_id": deleg["id"], "status": "cleared"}
+
+
+def test_emit_cleared_by_assignee_forbidden(isolated_settings, monkeypatch):
+    _install_fake_ledger_views(monkeypatch)
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id, assignee_headers = _seed_member(ctx, project["id"])
+    deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
+
+    r = ctx.client.post(
+        _events_url(project["id"], deleg["id"]), json={"event": "cleared"}, headers=assignee_headers
+    )
+    assert r.status_code == 403
+    assert delegation_events_db.list_events(deleg["id"]) == []
+
+
+@pytest.mark.parametrize("event", ["accepted", "declined", "cancelled", "reopened"])
+def test_emit_removed_events_unprocessable(isolated_settings, monkeypatch, event):
+    _install_fake_ledger_views(monkeypatch)
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id, _ = _seed_member(ctx, project["id"])
+    deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
+
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": event})
+    assert r.status_code == 422
+    assert delegation_events_db.list_events(deleg["id"]) == []
+
+
+def test_emit_completed_after_cleared_illegal(isolated_settings, monkeypatch):
+    _install_fake_ledger_views(monkeypatch)
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id, assignee_headers = _seed_member(ctx, project["id"])
+    deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
+    delegation_events_db.record_event(delegation_id=deleg["id"], event="cleared", actor_user_id=ctx.user_id)
+
+    r = ctx.client.post(
+        _events_url(project["id"], deleg["id"]), json={"event": "completed"}, headers=assignee_headers
+    )
+    assert r.status_code == 409
+    assert len(delegation_events_db.list_events(deleg["id"])) == 1  # only the seeded "cleared"
 
 
 # ── Four-gate authz (fake-DB, mutation-proofed — the load-bearing tests) ──
@@ -190,12 +264,12 @@ def test_non_member_403_no_write(isolated_settings, monkeypatch):
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers)
     assert r.status_code == 403
     assert delegation_events_db.list_events(deleg["id"]) == []
 
     monkeypatch.setattr(projects_db, "is_project_member", lambda *a, **kw: True)
-    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers)
     assert r2.status_code == 200
     assert len(delegation_events_db.list_events(deleg["id"])) == 1
 
@@ -224,7 +298,7 @@ def test_delegation_not_in_project_404_no_write(isolated_settings, monkeypatch):
     deleg = _seed_delegation(other_project["id"], ctx.user_id, assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers)
     assert r.status_code == 404
     assert delegation_events_db.list_events(deleg["id"]) == []
 
@@ -235,7 +309,7 @@ def test_delegation_not_in_project_404_no_write(isolated_settings, monkeypatch):
         return {**row, "project_id": project["id"]} if row is not None else None
 
     monkeypatch.setattr(delegation_events_db, "load_delegation_for_authz", _forced_equal_project)
-    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers)
     assert r2.status_code == 200
     assert len(delegation_events_db.list_events(deleg["id"])) == 1
 
@@ -249,14 +323,14 @@ def test_wrong_party_assigner_emits_assignee_event_403(isolated_settings, monkey
     project = _create_project(ctx)
     assignee_id, _ = _seed_member(ctx, project["id"])
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
-    # Prime the delegation into "accepted" so "completed" is a LEGAL edge —
+    # Prime the delegation into "in_progress" so "completed" is a LEGAL edge —
     # this test isolates gate 3 (party), not gate 4 (legality).
-    delegation_events_db.record_event(delegation_id=deleg["id"], event="accepted", actor_user_id=assignee_id)
+    delegation_events_db.record_event(delegation_id=deleg["id"], event="in_progress", actor_user_id=assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
     r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "completed"})
     assert r.status_code == 403
-    assert len(delegation_events_db.list_events(deleg["id"])) == 1  # only the seeded "accepted"
+    assert len(delegation_events_db.list_events(deleg["id"])) == 1  # only the seeded "in_progress"
 
     orig_load = delegation_events_db.load_delegation_for_authz
 
@@ -279,7 +353,7 @@ def test_wrong_party_assignee_emits_assigner_event_403(isolated_settings, monkey
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "cancelled"}, headers=assignee_headers)
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "cleared"}, headers=assignee_headers)
     assert r.status_code == 403
     assert delegation_events_db.list_events(deleg["id"]) == []
 
@@ -294,7 +368,7 @@ def test_neither_party_member_403(isolated_settings, monkeypatch):
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    for event in ("accepted", "cancelled"):
+    for event in ("in_progress", "cleared"):
         r = ctx.client.post(
             _events_url(project["id"], deleg["id"]), json={"event": event}, headers=witness_headers
         )
@@ -317,9 +391,9 @@ def test_server_event_and_unknown_422(isolated_settings, monkeypatch):
 
 def test_illegal_transition_409_no_write(isolated_settings, monkeypatch):
     """The correct party (the assignee), but the delegation is already
-    `completed` — `completed -> accepted` is not a legal edge. Flipping
-    gate 4 (`is_legal_transition`) to always-legal then lets the write
-    through (AC5, AC6)."""
+    `completed` (terminal) — `completed -> completed` is not a legal edge.
+    Flipping gate 4 (`is_legal_transition`) to always-legal then lets the
+    write through (AC9)."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
     assignee_id, assignee_headers = _seed_member(ctx, project["id"])
@@ -327,12 +401,12 @@ def test_illegal_transition_409_no_write(isolated_settings, monkeypatch):
     delegation_events_db.record_event(delegation_id=deleg["id"], event="completed", actor_user_id=assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "completed"}, headers=assignee_headers)
     assert r.status_code == 409
     assert len(delegation_events_db.list_events(deleg["id"])) == 1  # only the seeded "completed"
 
     monkeypatch.setattr(delegation_events_db, "is_legal_transition", lambda *a, **kw: True)
-    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "completed"}, headers=assignee_headers)
     assert r2.status_code == 200
     assert len(delegation_events_db.list_events(deleg["id"])) == 2
 
@@ -344,15 +418,15 @@ def test_correct_party_legal_edge_writes(isolated_settings, monkeypatch):
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
     _install_fake_ledger_views(monkeypatch)
 
-    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers)
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers)
     assert r.status_code == 200
-    assert r.json() == {"delegation_id": deleg["id"], "status": "accepted"}
+    assert r.json() == {"delegation_id": deleg["id"], "status": "in_progress"}
     events = delegation_events_db.list_events(deleg["id"])
     assert len(events) == 1
-    assert events[0]["event"] == "accepted"
+    assert events[0]["event"] == "in_progress"
     assert events[0]["actor_user_id"] == assignee_id
 
-    # assigned -> accepted -> completed is legal end to end (AC1).
+    # assigned -> in_progress -> completed is legal end to end (AC2).
     r2 = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "completed"}, headers=assignee_headers)
     assert r2.status_code == 200
     assert r2.json() == {"delegation_id": deleg["id"], "status": "completed"}
@@ -433,7 +507,7 @@ def test_ledger_row_dto_shape_and_bucket(isolated_settings, monkeypatch):
     ).execute()
 
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id, task_summary="Draft the pricing page")
-    delegation_events_db.record_event(delegation_id=deleg["id"], event="accepted", actor_user_id=assignee_id)
+    delegation_events_db.record_event(delegation_id=deleg["id"], event="in_progress", actor_user_id=assignee_id)
     delegation_events_db.record_event(delegation_id=deleg["id"], event="completed", actor_user_id=assignee_id)
 
     r = ctx.client.get(
@@ -457,11 +531,10 @@ def test_counts_open_only(isolated_settings, monkeypatch):
     assignee_id, assignee_headers = _seed_member(ctx, project["id"])
 
     _seed_delegation(project["id"], ctx.user_id, assignee_id, task_summary="open")
-    reopened = _seed_delegation(project["id"], ctx.user_id, assignee_id, task_summary="reopened")
-    delegation_events_db.record_event(delegation_id=reopened["id"], event="completed", actor_user_id=assignee_id)
-    delegation_events_db.record_event(delegation_id=reopened["id"], event="reopened", actor_user_id=ctx.user_id)
+    in_progress = _seed_delegation(project["id"], ctx.user_id, assignee_id, task_summary="in_progress")
+    delegation_events_db.record_event(delegation_id=in_progress["id"], event="in_progress", actor_user_id=assignee_id)
     closed = _seed_delegation(project["id"], ctx.user_id, assignee_id, task_summary="closed")
-    delegation_events_db.record_event(delegation_id=closed["id"], event="declined", actor_user_id=assignee_id)
+    delegation_events_db.record_event(delegation_id=closed["id"], event="cleared", actor_user_id=ctx.user_id)
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/delegations/counts", headers=assignee_headers)
     assert r.json() == {"assigned_to_me_open": 2, "waiting_on_open": 0}
@@ -482,7 +555,7 @@ def test_no_llm_cost_line_emitted(isolated_settings, monkeypatch, caplog):
 
     with caplog.at_level(logging.INFO):
         r = ctx.client.post(
-            _events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers
+            _events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers
         )
     assert r.status_code == 200
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
@@ -499,7 +572,7 @@ def test_no_note_text_in_logs(isolated_settings, monkeypatch, caplog):
     with caplog.at_level(logging.INFO):
         r = ctx.client.post(
             _events_url(project["id"], deleg["id"]),
-            json={"event": "accepted", "note": "SECRET_NOTE_DO_NOT_LOG"},
+            json={"event": "in_progress", "note": "SECRET_NOTE_DO_NOT_LOG"},
             headers=assignee_headers,
         )
     assert r.status_code == 200

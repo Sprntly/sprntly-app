@@ -180,6 +180,135 @@ def test_individual_loop_raise_degrades_to_single_shot(monkeypatch):
     assert called["n"] == 1
 
 
+# ── AC10-AC13, AC16 — delegate_task wiring, roster injection, identity ───────
+def test_respond_individual_registers_delegate_task_tool(monkeypatch):
+    captured = {}
+
+    def _fake_loop(*, tools, **kw):
+        captured["names"] = [t["name"] for t in tools]
+        return "ok"
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(pia.projects_db, "list_members", lambda pid: [])
+    pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="q",
+        history=[], single_shot=_single_shot_stub(),
+    )
+    assert "delegate_task" in captured["names"]
+
+
+def test_respond_individual_delegate_routes_to_handler_with_identity(monkeypatch):
+    seen = {}
+
+    def _fake_handle(**kw):
+        seen.update(kw)
+        return "Sent the brief to Fortune's chat."
+
+    def _fake_loop(*, dispatch, **kw):
+        return dispatch("delegate_task", {"assignee": "Fortune", "task_summary": "Draft the brief"})
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(pia.projects_db, "list_members", lambda pid: [])
+    monkeypatch.setattr(pia.project_delegation, "handle_delegate_task", _fake_handle)
+
+    payload = pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="send this to Fortune",
+        history=[], single_shot=_single_shot_stub(),
+        assigner_user_id="u-assigner", source_conversation_id=77,
+    )
+    assert seen["assigner_user_id"] == "u-assigner"
+    assert seen["source_conversation_id"] == 77
+    assert seen["project_id"] == 9
+    assert payload["answer"] == "Sent the brief to Fortune's chat."
+
+
+def test_respond_individual_exposes_task_ledger_tool(monkeypatch):
+    captured = {}
+
+    def _fake_loop(*, tools, **kw):
+        captured["names"] = [t["name"] for t in tools]
+        return "ok"
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(pia.projects_db, "list_members", lambda pid: [])
+    pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="q",
+        history=[], single_shot=_single_shot_stub(),
+    )
+    assert "get_task_ledger" in captured["names"]
+
+
+def test_respond_individual_system_prompt_includes_roster(monkeypatch):
+    captured = {}
+
+    def _fake_loop(*, system, **kw):
+        captured["system"] = system
+        return "ok"
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        pia.projects_db, "list_members",
+        lambda pid: [{"user_id": "u1", "name": "Fortune Adeyemi", "job_role": "Designer"}],
+    )
+    pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="q",
+        history=[], single_shot=_single_shot_stub(),
+    )
+    assert "PROJECT ROSTER:" in captured["system"]
+    assert "Fortune" in captured["system"]
+
+
+def test_respond_individual_delegate_declines_without_assigner(monkeypatch):
+    called = {"n": 0}
+
+    def _spy_record(**kw):
+        called["n"] += 1
+        raise AssertionError("record_delegation must not be called")
+
+    def _fake_loop(*, dispatch, **kw):
+        return dispatch("delegate_task", {"assignee": "Fortune", "task_summary": "Draft the brief"})
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(pia.projects_db, "list_members", lambda pid: [])
+    monkeypatch.setattr(pia.project_delegation, "record_delegation", _spy_record)
+
+    payload = pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="send this to Fortune",
+        history=[], single_shot=_single_shot_stub(),
+        assigner_user_id=None, source_conversation_id=None,
+    )
+    assert called["n"] == 0
+    assert isinstance(payload["answer"], str)
+
+
+def test_respond_individual_emits_single_cost_line(monkeypatch):
+    logged = []
+
+    def _fake_log(**kw):
+        logged.append(kw)
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("delegate_task", {"assignee": "Fortune", "task_summary": "x"})
+        return "Sent the brief to Fortune's chat."
+
+    monkeypatch.setattr(pia, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(pia, "log_llm_run", _fake_log)
+    monkeypatch.setattr(pia.projects_db, "list_members", lambda pid: [])
+    monkeypatch.setattr(
+        pia.project_delegation, "handle_delegate_task",
+        lambda **kw: "Sent the brief to Fortune's chat.",
+    )
+
+    payload = pia.respond_individual(
+        project_id=9, dataset="d", company_id="c1", question="send this to Fortune",
+        history=[], single_shot=_single_shot_stub(),
+        assigner_user_id="u1", source_conversation_id=5,
+    )
+    reply_lines = [c for c in logged if c.get("operation") == "projects.individual_chat.reply"]
+    assert len(reply_lines) == 1
+    assert payload["answer"] == "Sent the brief to Fortune's chat."
+
+
 def test_respond_individual_no_propose_tool(monkeypatch):
     # §C de-wiring — the propose-PRD-patch tool is never registered (belt) and
     # an edit-phrased turn that reaches this responder anyway creates no
@@ -257,3 +386,32 @@ def test_project_ask_routes_through_respond_individual(isolated_settings, monkey
     assert seen["project_id"] == 9
     assert seen["company_id"] == "ent-co"
     assert "allow_prd_edit" not in seen
+
+
+def test_project_ask_passes_identity_to_respond_individual(isolated_settings, monkeypatch):
+    # AC14 — ask_job_runner threads BOTH the caller's user_id (as
+    # assigner_user_id) and conversation_id (as source_conversation_id) into
+    # respond_individual, so a delegate_task call issued from the private
+    # chat carries the real caller identity.
+    seen = {}
+
+    def _spy(**kw):
+        seen.update(kw)
+        return {"answer": "project answer", "citations": []}
+
+    monkeypatch.setattr(pia, "respond_individual", _spy)
+    monkeypatch.setattr(ajr.qa_agent, "answer",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("no single-shot")))
+    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: completed.setdefault(i, p))
+    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    import app.project_memory as pm
+    monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
+
+    completed: dict = {}
+    asyncio.run(ajr.run_ask_job(
+        ask_id=3, enterprise_id="ent-co", question="q", dataset="ds",
+        conversation_id=5, user_id="user-77", project_id=9,
+    ))
+    assert completed[3]["answer"] == "project answer"
+    assert seen["assigner_user_id"] == "user-77"
+    assert seen["source_conversation_id"] == 5
