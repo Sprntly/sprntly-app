@@ -226,6 +226,10 @@ export interface ConversationRow {
    *  null). Carried from `ConversationRecord.prd_id` so resuming a PRD chat from
    *  history can re-bind the tab to its PRD and reopen the content panel. */
   prd_id?: number | null
+  /** The project this conversation is bound to (else null). Carried from
+   *  `ConversationRecord.project_id` so resuming a project-bound chat from
+   *  history restores the project-menu affordance in the content panel. */
+  project_id?: number | null
 }
 
 export interface TeamMemberRow {

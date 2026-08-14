@@ -2515,6 +2515,10 @@ export function ChatScreen() {
   // and keying on activeTabId alone would leave the panel on a stale thread.
   const activeConvId = tabs.find((t) => t.id === activeTabId)?.dbConvId ?? null
   const prevConvForFocusRef = useRef(activeConvId)
+  // A loaded thread's project binding, keyed by its DB conversation id —
+  // populated by checkResume from the resume payload the instant it's
+  // parsed, read by the restore effect just below the reset effect.
+  const threadProjectIdByConvIdRef = useRef<Map<number, number | null>>(new Map())
   useEffect(() => {
     // A genuine thread change retires the report POINTER along with the thread.
     // `content.reportFocusId` is written from four places (a report card in the
@@ -2549,6 +2553,24 @@ export function ChatScreen() {
           documentGenerating: false,
         }
       : { conversationId: activeConvId })
+  }, [activeConvId, setContent])
+
+  // Restore the project-menu affordance on a REVISITED thread — the binding
+  // itself is a THREAD attribute (unlike the fork bind above, which is a
+  // one-shot signal from a just-completed generation and has no restore
+  // path — see ChatScreen.active-project-reset.dom.test.tsx). checkResume
+  // records a loaded conversation's project id here, keyed by its DB id, the
+  // moment the resume payload is parsed; this effect re-applies it every time
+  // that conversation becomes active again, ON TOP of the clear above (same
+  // activeConvId dependency, declared immediately after it, so effects for
+  // the same commit run in this order — the derive is never clobbered by the
+  // reset it follows). A conversation with no recorded binding is a no-op:
+  // activeProjectId stays whatever the reset above just set it to (null).
+  useEffect(() => {
+    if (activeConvId == null) return
+    const projectId = threadProjectIdByConvIdRef.current.get(activeConvId)
+    if (projectId == null) return
+    setContent({ activeProjectId: projectId })
   }, [activeConvId, setContent])
 
 
@@ -2754,6 +2776,16 @@ export function ChatScreen() {
          *  so the "View PRD" button renders and the content panel auto-reopens —
          *  without it, a resumed PRD chat came back as a plain, PRD-less tab. */
         prdId?: number | null
+        /** The project this conversation is bound to (from
+         *  ConversationRecord.project_id), when one exists. Recorded into
+         *  threadProjectIdByConvIdRef so the restore effect can bring back the
+         *  project-menu affordance the next time this thread becomes active —
+         *  without it, revisiting a project-bound chat came back with no
+         *  project-menu at all until another fork rebound it. */
+        projectId?: number | null
+      }
+      if (data.projectId != null) {
+        threadProjectIdByConvIdRef.current.set(data.dbId, data.projectId)
       }
       // Re-bind a resumed tab to its PRD: set prdId (only when still null so a
       // reused, live tab is never clobbered) and rehydrate the PRD's saved thread

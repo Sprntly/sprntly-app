@@ -1,13 +1,23 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — `content.activeProjectId` is thread-scoped, the same rule as
-// the report-focus pointer and the document id it sits beside in the
-// thread-change reset effect. A project bound to one thread (the main-chat
-// PRD-fork path, see ChatScreen.project-bind.dom.test.tsx) must not survive a
-// switch to another thread — otherwise a brand-new/unrelated chat would show
-// the PREVIOUS thread's project-menu affordance in the content panel header.
+// ChatScreen — reopening a thread from Chat history restores its project-menu
+// affordance.
+//
+// `content.activeProjectId` is set when a main-chat PRD generation forks a
+// project (ChatScreen.project-bind.dom.test.tsx) — but that bind is a
+// one-shot signal, cleared on every genuine thread change
+// (ChatScreen.active-project-reset.dom.test.tsx) with no restore path. So
+// reopening a thread that IS bound to a project (from Chat history, or any
+// other caller of the `sprntly_resume_conv` hand-off) came back with no
+// project-menu at all — the folder-icon affordance only ever showed up right
+// after the fork, never again once you navigated away and came back.
+//
+// The hand-off now carries `projectId` (from ConversationRecord.project_id),
+// and checkResume records it so the thread-change effect can re-apply it the
+// moment this conversation becomes active — on top of the clear, not racing
+// it.
 import * as React from "react"
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -99,10 +109,11 @@ import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
-const TAB_A_TITLE = "Dark mode on mobile"
+const BOUND_TITLE = "Dark mode on mobile"
+const UNBOUND_TITLE = "Onboarding copy tweaks"
 
 function Harness() {
-  const { content, setContent } = useContent()
+  const { content } = useContent()
   return React.createElement(
     React.Fragment,
     null,
@@ -110,13 +121,6 @@ function Harness() {
       content.activeProjectId != null ? String(content.activeProjectId) : "none"),
     React.createElement("div", { "data-testid": "conv-probe" },
       content.conversationId != null ? String(content.conversationId) : "none"),
-    // Stands in for the ChatScreen-internal bind (already covered end-to-end
-    // by ChatScreen.project-bind.dom.test.tsx) — this suite is ONLY about the
-    // reset effect, so it seeds the bound state directly.
-    React.createElement("button", {
-      "data-testid": "seed-active-project",
-      onClick: () => setContent({ activeProjectId: 555 }),
-    }, "seed"),
     React.createElement(ChatScreen),
   )
 }
@@ -133,12 +137,8 @@ function mountApp() {
 
 const activeProjectProbe = () => screen.getByTestId("active-project-probe").textContent
 const convProbe = () => screen.getByTestId("conv-probe").textContent
-const newChatBtn = () =>
-  within(screen.getByTestId("chat-tab-bar")).getByLabelText("New chat")
-const tabChip = (title: string) =>
-  within(screen.getByTestId("chat-tab-bar")).getByText(title)
 
-function seedResume(dbId: number, title: string, projectId: number | null = null) {
+function seedResume(dbId: number, title: string, projectId: number | null) {
   localStorage.setItem("sprntly_resume_conv", JSON.stringify({
     dbId, title, fallbackTurns: [], prdId: null, projectId,
   }))
@@ -153,10 +153,6 @@ function seedThreadTurns() {
   })
 }
 
-async function settle() {
-  await act(async () => { await new Promise((r) => setTimeout(r, 30)) })
-}
-
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
@@ -167,51 +163,25 @@ afterEach(() => {
   localStorage.clear()
 })
 
-describe("ChatScreen — activeProjectId is cleared on a genuine thread change", () => {
-  it("a new chat beside a project-bound thread starts with no active project", async () => {
+describe("ChatScreen — activeProjectId is derived from a revisited thread's project binding", () => {
+  it("opening a thread whose conversation IS project-bound restores the project-menu affordance", async () => {
     seedThreadTurns()
     listForConversation.mockResolvedValue([])
-    seedResume(77, TAB_A_TITLE)
+    seedResume(77, BOUND_TITLE, 555)
 
     await act(async () => { mountApp() })
     await waitFor(() => expect(convProbe()).toBe("77"))
 
-    await act(async () => { fireEvent.click(screen.getByTestId("seed-active-project")) })
     expect(activeProjectProbe()).toBe("555")
-
-    await act(async () => { fireEvent.click(newChatBtn()) })
-    await settle()
-
-    // A brand-new tab has no conversation yet, and inherits nothing from the
-    // thread it sits beside — the project-menu affordance must not leak in.
-    expect(convProbe()).toBe("none")
-    expect(activeProjectProbe()).toBe("none")
   })
 
-  it("switching back to a thread with NO recorded project binding does not resurrect a stray fork-bind from a stale render", async () => {
-    // The reset effect only ever CLEARS `activeProjectId` on a thread change.
-    // There IS a restore path now (see
-    // ChatScreen.resume-history-project.dom.test.tsx) — but it only ever
-    // re-applies a binding checkResume actually recorded for that DB
-    // conversation id at load time. Conversation 77 here was never resumed
-    // with a `projectId`, so the button below simulates an ad-hoc fork bind
-    // that was never persisted as this thread's actual binding — coming back
-    // to tab A after a switch away must still land with no active project.
+  it("opening a thread with NO project binding leaves activeProjectId null — the additive-null invariant holds", async () => {
     seedThreadTurns()
     listForConversation.mockResolvedValue([])
-    seedResume(77, TAB_A_TITLE)
+    seedResume(78, UNBOUND_TITLE, null)
 
     await act(async () => { mountApp() })
-    await waitFor(() => expect(convProbe()).toBe("77"))
-    await act(async () => { fireEvent.click(screen.getByTestId("seed-active-project")) })
-    expect(activeProjectProbe()).toBe("555")
-
-    await act(async () => { fireEvent.click(newChatBtn()) })
-    await settle()
-    expect(activeProjectProbe()).toBe("none")
-
-    await act(async () => { fireEvent.click(tabChip(TAB_A_TITLE)) })
-    await waitFor(() => expect(convProbe()).toBe("77"))
+    await waitFor(() => expect(convProbe()).toBe("78"))
 
     expect(activeProjectProbe()).toBe("none")
   })
