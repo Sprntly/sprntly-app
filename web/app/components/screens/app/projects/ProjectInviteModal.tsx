@@ -21,7 +21,7 @@
 // of the add section. This surface prioritises: show current members + add an
 // existing in-tenant candidate for real.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { projectsApi, type ProjectMember } from "../../../../lib/api"
+import { projectsApi } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { personAvatarStyle } from "./avatarColor"
 import { isEmailNeedle } from "./mentions"
@@ -45,9 +45,6 @@ function emailFailed(status: string | undefined): boolean {
 
 export type ProjectInviteModalProps = {
   projectId: number | string
-  /** The project's current roster (humans + the virtual agent), already
-   *  loaded by `ProjectDetailScreen` — no second fetch. */
-  members: ProjectMember[]
   open: boolean
   onClose: () => void
   /** Fired after a successful add/invite so the caller re-fetches the roster
@@ -55,7 +52,7 @@ export type ProjectInviteModalProps = {
   onInvited: () => void
 }
 
-export function ProjectInviteModal({ projectId, members, open, onClose, onInvited }: ProjectInviteModalProps) {
+export function ProjectInviteModal({ projectId, open, onClose, onInvited }: ProjectInviteModalProps) {
   const [query, setQuery] = useState("")
   const [candidates, setCandidates] = useState<CandidateRow[]>([])
   const [candLoading, setCandLoading] = useState(false)
@@ -66,20 +63,12 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
 
-  const humans = useMemo(
-    () => members.filter((m): m is Extract<ProjectMember, { kind: "human" }> => m.kind === "human"),
-    [members],
-  )
-  const agent = useMemo(
-    () => members.find((m): m is Extract<ProjectMember, { kind: "agent" }> => m.kind === "agent"),
-    [members],
-  )
-
-  // Reset transient state each time the modal (re)opens.
+  // Reset transient state each time the modal (re)opens. Candidates are NOT
+  // cleared here — the fetch effect below immediately re-populates them
+  // (empty-query fetch, on open).
   useEffect(() => {
     if (!open) return
     setQuery("")
-    setCandidates([])
     setCandLoading(false)
     setCandError(false)
     setAddingNeedle(null)
@@ -101,40 +90,57 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
 
   useEscapeToClose(open, onClose)
 
-  // Debounced candidate typeahead — the SAME tenant-scoped read the group
-  // chat's mention picker uses (`candidateSearch`), degraded to an in-body
-  // error rather than a throw.
+  // Candidate fetch — the SAME tenant-scoped read the group chat's mention
+  // picker uses (`candidateSearch`), degraded to an in-body error rather
+  // than a throw. On OPEN with an EMPTY query this fetches the workspace
+  // non-member list (the primary "add someone" picker) rather than
+  // clearing/bailing — an empty query on an open modal MUST populate the
+  // list. A non-empty query (the user typing) debounces as before; the
+  // empty-on-open fetch fires immediately (no debounce needed).
   useEffect(() => {
-    const q = query.trim()
-    if (!open || q.length === 0) {
+    if (!open) {
       setCandidates([])
       setCandLoading(false)
       setCandError(false)
       return
     }
+    const q = query.trim()
     setCandLoading(true)
     setCandError(false)
     let cancelled = false
-    const timer = setTimeout(() => {
-      projectsApi
-        .candidateSearch(projectId, q)
-        .then((rows) => {
-          if (cancelled) return
-          setCandidates(rows)
-          setCandLoading(false)
-        })
-        .catch(() => {
-          if (cancelled) return
-          setCandidates([])
-          setCandError(true)
-          setCandLoading(false)
-        })
-    }, 150)
+    const timer = setTimeout(
+      () => {
+        projectsApi
+          .candidateSearch(projectId, q)
+          .then((rows) => {
+            if (cancelled) return
+            setCandidates(rows)
+            setCandLoading(false)
+          })
+          .catch(() => {
+            if (cancelled) return
+            setCandidates([])
+            setCandError(true)
+            setCandLoading(false)
+          })
+      },
+      q.length === 0 ? 0 : 150,
+    )
     return () => {
       cancelled = true
       clearTimeout(timer)
     }
   }, [query, projectId, open])
+
+  // The primary "add someone" list on open (empty query): workspace
+  // non-members only — a member already on the project never appears here
+  // (that is how "already-in-project members drop off"). Same-company/
+  // other-workspace (`kind:"company"`) rows stay reachable via the
+  // typeahead below, not this primary list.
+  const workspaceCandidates = useMemo(
+    () => candidates.filter((c) => c.kind === "workspace"),
+    [candidates],
+  )
 
   // Add/invite via the REAL `/tag` path (AD-TNM6 — never throw/block; a
   // refuse degrades to one opaque message). On success the caller refetches
@@ -211,38 +217,7 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
         </div>
 
         <div className="modal-body" data-testid="project-invite-modal-body">
-          <div className={detailStyles.railSectionLabel} data-testid="project-invite-members-label">
-            On this project
-            <span className={detailStyles.railSectionCount}>{members.length}</span>
-          </div>
-          <div data-testid="project-invite-members">
-            {humans.map((m) => (
-              <div className={detailStyles.memberRow} key={m.user_id} data-testid="project-invite-member-row">
-                <span className={detailStyles.memberAv} aria-hidden="true" style={personAvatarStyle(m.user_id, m.name)}>
-                  {initials(m.name)}
-                </span>
-                <div className={detailStyles.memberMain}>
-                  <div className={detailStyles.memberName}>{m.name ?? "Unnamed member"}</div>
-                  <div className={detailStyles.memberRole}>{m.email || m.job_role || "Member"}</div>
-                </div>
-              </div>
-            ))}
-            {agent ? (
-              <div className={`${detailStyles.memberRow} ${detailStyles.memberRowAgent}`} data-testid="project-invite-member-row-agent">
-                <span className={detailStyles.agentAv} aria-hidden="true">
-                  s
-                </span>
-                <div className={detailStyles.memberMain}>
-                  <div className={detailStyles.memberName}>
-                    {agent.name} <span className={detailStyles.agentTag}>Agent</span>
-                  </div>
-                  <div className={detailStyles.memberRole}>{agent.role_label}</div>
-                </div>
-              </div>
-            ) : null}
-          </div>
-
-          <div className={detailStyles.railSectionLabel} style={{ marginTop: 18 }}>
+          <div className={detailStyles.railSectionLabel}>
             Add someone
           </div>
           <input
@@ -255,11 +230,7 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
             data-testid="project-invite-search"
           />
 
-          {q.length === 0 ? (
-            <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-hint">
-              Start typing to find a teammate, or enter an email to invite someone new.
-            </p>
-          ) : candLoading ? (
+          {candLoading ? (
             <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-loading">
               Searching…
             </p>
@@ -269,7 +240,11 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
             </p>
           ) : (
             <div style={{ marginTop: 10 }} data-testid="project-invite-results">
-              {candidates.map((c) => {
+              {/* Empty query (on open): the primary "add someone" picker —
+                  workspace non-members only, a member already on the project
+                  never appears. Non-empty query: the typeahead over the full
+                  candidate set (member/workspace/company), unchanged. */}
+              {(q.length === 0 ? workspaceCandidates : candidates).map((c) => {
                 const label = c.name ?? c.email ?? "Unknown"
                 const needle = c.email ?? c.name ?? ""
                 const isMember = c.kind === "member"
@@ -300,6 +275,11 @@ export function ProjectInviteModal({ projectId, members, open, onClose, onInvite
                   </div>
                 )
               })}
+              {q.length === 0 && workspaceCandidates.length === 0 ? (
+                <p className="modal-sub" data-testid="project-invite-empty-workspace">
+                  Everyone in this workspace is already on the project — invite someone new by email below.
+                </p>
+              ) : null}
               {showInviteByEmail ? (
                 <div className={detailStyles.memberRow} data-testid="project-invite-by-email-row">
                   <div className={detailStyles.memberMain}>

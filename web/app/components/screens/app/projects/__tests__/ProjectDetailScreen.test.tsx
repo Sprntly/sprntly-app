@@ -26,6 +26,11 @@ const markIndividualReadMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
 const emitDelegationEventMock = vi.fn()
+// The invite modal (mounted, unmocked) now fetches on open — default to an
+// empty candidate list so tests that never touch the invite surface aren't
+// affected; the one test that opens it sets its own resolved value.
+const candidateSearchMock = vi.fn()
+const tagCandidateMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
 // listed human member — lets the container-level tests exercise the
 // "removable" branch (u2/Shristi) without also tripping the self-removal
@@ -64,6 +69,8 @@ vi.mock("../../../../../lib/api", () => {
       ledgerCounts: (...a: unknown[]) => ledgerCountsMock(...a),
       ledger: (...a: unknown[]) => ledgerMock(...a),
       emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
+      candidateSearch: (...a: unknown[]) => candidateSearchMock(...a),
+      tagCandidate: (...a: unknown[]) => tagCandidateMock(...a),
     },
     // Real implementation (no API call, no side effect) — mirrors
     // lib/api.ts's own five-value check, kept here rather than importing the
@@ -236,7 +243,6 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onCloseArtifactDrawer: noop,
     onAddExistingArtifact: noop,
     onOpenMemory: noop,
-    onAddMemory: noop,
     onOpenTasks: noop,
     onInvite: noop,
     currentUserId: "current-viewer",
@@ -263,6 +269,9 @@ afterEach(() => {
   ledgerMock.mockResolvedValue([])
   emitDelegationEventMock.mockReset()
   emitDelegationEventMock.mockResolvedValue({ delegation_id: 1, status: "accepted" })
+  candidateSearchMock.mockReset()
+  candidateSearchMock.mockResolvedValue([])
+  tagCandidateMock.mockReset()
   authMock.mockReset()
   authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })
@@ -292,6 +301,13 @@ describe("ProjectDetailView — right rail structure", () => {
       .map((el) => (el.textContent?.trim().match(/^[A-Za-z]+/) ?? [""])[0])
     expect(labels).toEqual(["Artifacts", "Project", "Members"])
     expect(screen.queryByText("Overview")).toBeNull()
+  })
+
+  it("test_detail_rail_section_reads_project_settings — the memory-card rail section is labelled Project Settings", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const labels = screen.getAllByTestId("rail-section-label").map((el) => el.textContent?.trim())
+    expect(labels).toContain("Project Settings")
+    expect(labels).not.toContain("Project")
   })
 
   it("renders the Sprntly AGENT member row with the green working status, from the virtual member", () => {
@@ -403,23 +419,23 @@ describe("ProjectDetailView — right rail structure", () => {
     expect(onOpenArtifacts).not.toHaveBeenCalled()
   })
 
-  it("Project-memory card teaser is the summary's first sentence, with the entry count and View all/Add", () => {
+  it("test_detail_memory_card_heading_reads_memory — memory-card <h4> reads Memory, not Project memory", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
+    const card = screen.getByTestId("memory-card")
+    expect(card.querySelector("h4")?.textContent?.trim()).toBe("Memory")
+  })
+
+  it("test_detail_memory_card_summary_only — no Add button; teaser present; View memory (no 'insight' copy) opens the modal", () => {
+    const onOpenMemory = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenMemory })))
     const card = screen.getByTestId("memory-card")
     expect(within(card).getByText(/A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds\./)).toBeTruthy()
     expect(within(card).getByText("24")).toBeTruthy()
-    expect(screen.getByTestId("memory-view-all").textContent).toContain("24")
-    expect(screen.getByTestId("memory-add")).toBeTruthy()
-  })
-
-  it("clicking View all / Add on the memory card invokes their callbacks", () => {
-    const onOpenMemory = vi.fn()
-    const onAddMemory = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onOpenMemory, onAddMemory })))
-    fireEvent.click(screen.getByTestId("memory-view-all"))
-    fireEvent.click(screen.getByTestId("memory-add"))
+    expect(screen.queryByTestId("memory-add")).toBeNull()
+    const viewAll = screen.getByTestId("memory-view-all")
+    expect(viewAll.textContent?.toLowerCase()).not.toContain("insight")
+    fireEvent.click(viewAll)
     expect(onOpenMemory).toHaveBeenCalledTimes(1)
-    expect(onAddMemory).toHaveBeenCalledTimes(1)
   })
 
   it("the task-ledger rail card is un-mounted from the rail (non-destructive — see the source-scan test below)", () => {
@@ -655,9 +671,9 @@ describe("ProjectDetailScreen source — never touches ChatScreen.tsx", () => {
   })
 })
 
-// ── ProjectDetailScreen — loading state (skeleton, not bare text) ──
+// ── ProjectDetailScreen — loading state (spinner, not skeleton/bare text) ──
 describe("ProjectDetailScreen — loading state", () => {
-  it("test_loading_renders_skeleton_not_text — the loading branch renders a skeleton node under project-detail-loading, not the literal 'Loading…' string", async () => {
+  it("test_detail_loading_renders_spinner_not_skeleton — the loading branch renders project-detail-loading + aria-busy with a spinner (auth-btn-spin), no skeleton", async () => {
     // A never-resolving fetch keeps the container in the "loading" branch
     // for the duration of this assertion.
     getMock.mockReturnValue(new Promise(() => {}))
@@ -667,7 +683,8 @@ describe("ProjectDetailScreen — loading state", () => {
     render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     const wrap = screen.getByTestId("project-detail-loading")
     expect(wrap.getAttribute("aria-busy")).toBe("true")
-    expect(screen.getByTestId("project-detail-loading-skeleton")).toBeTruthy()
+    expect(wrap.querySelector(".auth-btn-spin")).toBeTruthy()
+    expect(screen.queryByTestId("project-detail-loading-skeleton")).toBeNull()
     expect(wrap.textContent).not.toContain("Loading…")
   })
 
@@ -757,22 +774,22 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(openModalMock).not.toHaveBeenCalled()
   })
 
-  it("the project invite modal lists the project's current members", async () => {
+  it("the project invite modal no longer renders the 'On this project' current-members block", async () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
+    candidateSearchMock.mockResolvedValue([])
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
     await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
     fireEvent.click(screen.getByTestId("invite-button"))
 
-    const rows = screen.getAllByTestId("project-invite-member-row")
-    expect(rows.map((r) => r.textContent)).toEqual(
-      expect.arrayContaining([expect.stringContaining("David M."), expect.stringContaining("Shristi")]),
-    )
-    expect(screen.getByTestId("project-invite-member-row-agent").textContent).toContain("Sprntly")
+    expect(screen.queryByTestId("project-invite-members-label")).toBeNull()
+    expect(screen.queryByTestId("project-invite-members")).toBeNull()
+    expect(screen.queryByTestId("project-invite-member-row")).toBeNull()
+    expect(screen.queryByTestId("project-invite-member-row-agent")).toBeNull()
   })
 
   // ── Remove member: confirm → DELETE call → roster refetch (AC3) ──

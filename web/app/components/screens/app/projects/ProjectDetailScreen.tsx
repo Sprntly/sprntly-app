@@ -29,6 +29,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { AppLayout } from "../AppLayout"
+import { Spinner } from "../../../auth/icons"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { ConfirmDialog } from "../../../shared/ConfirmDialog"
 import { useAuth } from "../../../../lib/auth"
@@ -290,7 +291,6 @@ export type ProjectDetailViewProps = {
    *  existing artifact rather than generating a new one (Deliverables). */
   onAddExistingArtifact: () => void
   onOpenMemory: () => void
-  onAddMemory: () => void
   onOpenTasks: () => void
   onInvite: () => void
   /** The cross-chat INSIGHT turn (design-spec AC7), fed from
@@ -332,7 +332,6 @@ export function ProjectDetailView({
   onCloseArtifactDrawer,
   onAddExistingArtifact,
   onOpenMemory,
-  onAddMemory,
   onOpenTasks,
   onInvite,
   insightNote,
@@ -531,13 +530,13 @@ export function ProjectDetailView({
             </button>
 
             <div className={styles.railSectionLabel} data-testid="rail-section-label">
-              Project
+              Project Settings
             </div>
             <div className={styles.card} data-testid="memory-card">
               <div className={styles.cardHead}>
                 <h4>
                   <ClockIcon />
-                  Project memory
+                  Memory
                 </h4>
                 <span className={styles.cardCount}>{memory.entry_count}</span>
               </div>
@@ -547,10 +546,7 @@ export function ProjectDetailView({
               </div>
               <div className={styles.cardActions}>
                 <button type="button" className={styles.viewAllBtn} onClick={onOpenMemory} data-testid="memory-view-all">
-                  View all {memory.entry_count} insight{memory.entry_count === 1 ? "" : "s"}
-                </button>
-                <button type="button" className={styles.addBtn} onClick={onAddMemory} title="Add a memory entry" data-testid="memory-add">
-                  <PlusIcon /> Add
+                  View memory
                 </button>
               </div>
             </div>
@@ -925,7 +921,6 @@ export function ProjectDetailScreen({
   const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
   const onAddExistingArtifact = useCallback(() => setRailModal({ kind: "add-artifact" }), [])
   const onOpenMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
-  const onAddMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
   // Re-fetches ONLY the project's artifact list — the AddArtifactModal's
   // `onAdded` callback (a pick just wrote `project_artifacts` rows
@@ -997,17 +992,11 @@ export function ProjectDetailScreen({
     return (
       <AppLayout hideChromeStrip mainStyle={{ padding: 0, display: "flex", flexDirection: "column", minHeight: 0, flex: "1 1 auto" }}>
         <div className={styles.stateWrap} style={{ padding: 24 }} aria-busy="true" data-testid="project-detail-loading">
-          {/* Skeleton, not a bare "Loading…" string — same skeleton-card
-           *  language `ProjectsScreen.tsx` already ships (duplicated
-           *  locally per this file's existing precedent: TYPE_BADGE,
-           *  relativeTime, etc. are all copied verbatim rather than
-           *  imported across Projects surfaces). */}
-          <div className={styles.loadingSkeleton} data-testid="project-detail-loading-skeleton">
-            <div className={styles.skeletonTopBar} />
-            <div className={styles.skeletonBody}>
-              <div className={styles.skeletonMain} />
-              <div className={styles.skeletonRail} />
-            </div>
+          {/* Standard app spinner (reused, not a bespoke skeleton/keyframe —
+           *  DRY / Check-25): `Spinner` from `components/auth/icons.tsx`,
+           *  rotation via the shared `.auth-btn-spin` class in globals.css. */}
+          <div className={styles.spinnerWrap}>
+            <Spinner width={28} height={28} />
           </div>
         </div>
       </AppLayout>
@@ -1061,7 +1050,6 @@ export function ProjectDetailScreen({
         onCloseArtifactDrawer={onCloseArtifactDrawer}
         onAddExistingArtifact={onAddExistingArtifact}
         onOpenMemory={onOpenMemory}
-        onAddMemory={onAddMemory}
         onOpenTasks={onOpenTasks}
         onInvite={onInvite}
         currentUserId={currentUserId}
@@ -1106,7 +1094,6 @@ export function ProjectDetailScreen({
       />
       <ProjectInviteModal
         projectId={projectId}
-        members={state.project.members}
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         onInvited={refetchProject}
