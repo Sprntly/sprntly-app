@@ -1564,7 +1564,8 @@ CREATE TABLE projects (
                    CHECK (origin IN ('manual', 'prd_auto', 'artifact')),
     created_by   TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    instructions TEXT
 );
 CREATE INDEX idx_projects_company_ws ON projects (company_id, workspace_id, updated_at);
 

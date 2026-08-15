@@ -264,6 +264,12 @@ class AddMemberRequest(BaseModel):
     email: str = Field(min_length=1)
 
 
+class SetInstructionsRequest(BaseModel):
+    # Empty string is allowed — it clears the saved value (db.projects.
+    # set_instructions normalizes it to NULL).
+    instructions: str = Field(max_length=2000)
+
+
 class TagCandidateRequest(BaseModel):
     # A name (picked from the roster/picker) OR an email (invite-by-email).
     # `resolve_candidate` decides which shape it is and classifies the tier.
@@ -386,6 +392,31 @@ def get_project(project_id: int, ctx: WorkspaceContext = Depends(require_workspa
         "members": [dict(_AGENT_MEMBER), *members],
         "group_chat_id": group_chat_id,
     }
+
+
+@router.get("/{project_id}/instructions")
+def get_instructions_route(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
+    """The project's saved instructions, or `null` when nothing has been
+    set. Membership-gated like `get_project` (403 same-tenant non-member,
+    404 foreign-tenant/absent, AD-TNM1)."""
+    _require_project_member(project_id, ctx)
+    return {"instructions": projects_db.get_instructions(project_id)}
+
+
+@router.put("/{project_id}/instructions")
+def set_instructions_route(
+    project_id: int,
+    body: SetInstructionsRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Persist the project's instructions (any member may write — v1
+    membership = access, AD-P11; no per-project role tier). An empty/
+    whitespace-only body clears the saved value. Never logs the body
+    itself — identifiers only."""
+    _require_project_member(project_id, ctx)
+    projects_db.set_instructions(project_id, body.instructions)
+    logger.info("project_instructions_set project_id=%s", project_id)
+    return {"instructions": projects_db.get_instructions(project_id)}
 
 
 @router.post("/{project_id}/members")
@@ -1495,6 +1526,15 @@ def _respond_as_group_agent(
         system_parts = [_group_system_with_roster(roster), addressing]
         if edit_note:
             system_parts.append(edit_note)
+        from app.project_group_context import _instructions_block
+
+        try:
+            instructions = projects_db.get_instructions(project_id)
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            instructions = None
+        instr_block = _instructions_block(instructions)
+        if instr_block:
+            system_parts.append(instr_block)
 
         # LT-8 input-shape switch (build-spec §Group) — `question` is either
         # the full attributed transcript or just the latest triggering

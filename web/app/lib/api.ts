@@ -5812,6 +5812,10 @@ export type ProjectChatEditResult =
   | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
   | { edited: false; answer: string }
 
+/** Response from `GET`/`PUT /v1/projects/{id}/instructions` — `null` means
+ *  nothing has been saved yet (or the value was cleared). */
+export type ProjectInstructions = { instructions: string | null }
+
 export const projectsApi = {
   /** Projects in the caller's active workspace, recency-ordered, scoped to
    *  the caller's memberships by the backend — no `dataset`/company arg
@@ -6093,5 +6097,20 @@ export const projectsApi = {
     api.post<{ id: number; title: string; payload_md: string }>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/content`,
       { prd_id: prdId, title, html },
+    ),
+  /** The project's saved free-text instructions for the Sprntly agent
+   *  (`GET /v1/projects/{id}/instructions`) — `null` when nothing has
+   *  been set. Membership-gated (403 same-tenant non-member, 404
+   *  foreign-tenant/absent) — callers must handle both without crashing. */
+  instructions: (id: number | string) =>
+    api.get<ProjectInstructions>(`/v1/projects/${encodeURIComponent(String(id))}/instructions`),
+  /** Persist the project's instructions (`PUT /v1/projects/{id}/instructions`).
+   *  An empty/whitespace-only string clears the saved value; the server
+   *  echoes back the saved (possibly cleared) value. Throws `ApiError`
+   *  `.status` 422 over the 2000-char cap. */
+  setInstructions: (id: number | string, instructions: string) =>
+    api.put<ProjectInstructions>(
+      `/v1/projects/${encodeURIComponent(String(id))}/instructions`,
+      { instructions },
     ),
 }

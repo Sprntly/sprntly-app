@@ -343,6 +343,30 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "that same exemption. See that entry for the deterministic "
         "backstop."
     ),
+    ("test_project_instructions.py", "RUN_PROJECT_INSTRUCTIONS_LIVE"): (
+        "Gates two tiers in this file: (a) four migration/storage round-trip "
+        "tests that need a real local Supabase (PostgREST + Postgres) to "
+        "apply/re-apply the raw ALTER TABLE and prove the column reads back "
+        "null-by-default — the fake Supabase client has no SQL engine behind "
+        "it and cannot run DDL; (b) the two real-LLM 'instructions reach the "
+        "model's reply' tests (also gated on ANTHROPIC_API_KEY below). "
+        "Deterministic backstop: the rest of this file drives get_instructions/"
+        "set_instructions round-trip semantics indirectly via the route/IDOR "
+        "tests against FakeSupabaseClient, a builder-lane static proxy "
+        "(test_migration_is_idempotent_by_construction) proving the ALTER "
+        "TABLE is IF-NOT-EXISTS-guarded without touching any Supabase "
+        "instance, the private/group context-fold tests (monkeypatched "
+        "get_instructions, truncation-at-cap, best-effort-on-raise), and the "
+        "main-chat isolation mutation-proof — all in the fast lane. Run this "
+        "suite locally against the dev rig when touching the migration, "
+        "db/projects.py's instructions helpers, or the instructions fold."
+    ),
+    ("test_project_instructions.py", "ANTHROPIC_API_KEY"): (
+        "Same two live-LLM tests as RUN_PROJECT_INSTRUCTIONS_LIVE above — "
+        "both variables gate the identical tests, so this is the other half "
+        "of that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
     ("test_project_ledger_live.py", "RUN_PROJECT_LEDGER_LIVE"): (
         "Needs a real local Supabase (PostgREST + Postgres) to evaluate the "
         "`v_delegation_status` left-join-lateral derive-at-read view through "

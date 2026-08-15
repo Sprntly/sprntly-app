@@ -15,6 +15,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 const candidateSearchMock = vi.fn()
 const tagCandidateMock = vi.fn()
+// Every render (any tab) triggers the Instructions tab's GET-on-open effect
+// — give it a safe default up front (not just in afterEach) so the very
+// FIRST test in the file doesn't call `.then()` on an unconfigured mock's
+// `undefined` return.
+const instructionsMock = vi.fn().mockResolvedValue({ instructions: null })
+const setInstructionsMock = vi.fn()
 
 vi.mock("../../../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/api")>("../../../../../lib/api")
@@ -24,6 +30,8 @@ vi.mock("../../../../../lib/api", async () => {
       ...actual.projectsApi,
       candidateSearch: (...a: unknown[]) => candidateSearchMock(...a),
       tagCandidate: (...a: unknown[]) => tagCandidateMock(...a),
+      instructions: (...a: unknown[]) => instructionsMock(...a),
+      setInstructions: (...a: unknown[]) => setInstructionsMock(...a),
     },
   }
 })
@@ -100,7 +108,17 @@ afterEach(() => {
   candidateSearchMock.mockReset()
   candidateSearchMock.mockResolvedValue([])
   tagCandidateMock.mockReset()
+  instructionsMock.mockReset()
+  instructionsMock.mockResolvedValue({ instructions: null })
+  setInstructionsMock.mockReset()
 })
+
+// The GET-on-open fires from a `useEffect`; every test that cares about its
+// resolved value needs the mount to have flushed before asserting, mirroring
+// `waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())` above.
+async function waitForInstructionsLoaded() {
+  await waitFor(() => expect(instructionsMock).toHaveBeenCalled())
+}
 
 describe("ProjectSettingsModal — creation / tabs", () => {
   it("test_settings_modal_renders_four_tabs_in_order — the four role=tab labels are exactly Instructions, Memory, Members, Invite, in order (AC5)", () => {
@@ -122,6 +140,13 @@ describe("ProjectSettingsModal — creation / tabs", () => {
     fireEvent.click(screen.getByTestId("settings-tab-members"))
     expect(screen.getByTestId("settings-panel-members")).toBeTruthy()
     expect(screen.queryByTestId("settings-panel-instructions")).toBeNull()
+  })
+
+  it("test_settings_modal_is_modal_md_not_modal_lg — the dialog wrapper carries modal-md, matching the mockup's 580px width, not modal-lg's 980px", () => {
+    render(React.createElement(ProjectSettingsModal, modalProps()))
+    const dialog = screen.getByTestId("project-settings-modal")
+    expect(dialog.className).toContain("modal-md")
+    expect(dialog.className).not.toContain("modal-lg")
   })
 
   it("test_settings_modal_is_dialog — role=dialog + aria-modal=true and Escape calls onClose (AC1)", () => {
@@ -272,23 +297,79 @@ describe("ProjectSettingsModal — Memory tab", () => {
   })
 })
 
-describe("ProjectSettingsModal — Instructions tab (shell)", () => {
-  it("test_settings_instructions_textarea_and_count — settings-instructions-input renders and settings-instructions-count updates on type (AC10)", () => {
+describe("ProjectSettingsModal — Instructions tab (persistence)", () => {
+  it("test_settings_instructions_textarea_and_count — settings-instructions-input renders and settings-instructions-count updates on type (AC10/AC12)", async () => {
     render(React.createElement(ProjectSettingsModal, modalProps()))
+    await waitForInstructionsLoaded()
     const textarea = screen.getByTestId("settings-instructions-input")
     expect(screen.getByTestId("settings-instructions-count").textContent).toContain("0")
     fireEvent.change(textarea, { target: { value: "Priced quotes must return in under 60s." } })
-    expect(screen.getByTestId("settings-instructions-count").textContent).toContain("40")
+    // NOTE (fixed a pre-existing false-positive): the string is 39 chars —
+    // the old `.toContain("40")` only ever passed because it was matching
+    // the "40" prefix of the (then) 4000-char max in "39 / 4000 characters",
+    // not the actual count. Now that INSTRUCTIONS_MAX is 2000 (matching the
+    // server cap), "39 / 2000 characters" exposes the real assertion needed.
+    expect(screen.getByTestId("settings-instructions-count").textContent).toContain("39")
   })
 
-  it("test_settings_instructions_save_disabled_and_no_network — settings-instructions-save is disabled and a spied fetch/api is never called from the Instructions panel (AC10)", () => {
-    const fetchSpy = vi.spyOn(globalThis, "fetch")
+  it("test_settings_instructions_loads_saved_value — on open, the textarea is populated from a mocked projectsApi.instructions GET (AC12)", async () => {
+    instructionsMock.mockResolvedValue({ instructions: "Ship pricing under 60s." })
     render(React.createElement(ProjectSettingsModal, modalProps()))
+    expect(instructionsMock).toHaveBeenCalledWith(101)
+    const textarea = await screen.findByDisplayValue("Ship pricing under 60s.")
+    expect(textarea).toBe(screen.getByTestId("settings-instructions-input"))
+  })
+
+  it("test_settings_instructions_save_enabled_and_puts — Save is enabled after a change and clicking it calls projectsApi.setInstructions with the field value (AC12)", async () => {
+    instructionsMock.mockResolvedValue({ instructions: "" })
+    setInstructionsMock.mockResolvedValue({ instructions: "New guidance for the team." })
+    render(React.createElement(ProjectSettingsModal, modalProps()))
+    await waitForInstructionsLoaded()
+
     const save = screen.getByTestId("settings-instructions-save")
     expect(save).toHaveProperty("disabled", true)
-    fireEvent.change(screen.getByTestId("settings-instructions-input"), { target: { value: "hello" } })
-    expect(fetchSpy).not.toHaveBeenCalled()
-    expect(candidateSearchMock).not.toHaveBeenCalled()
-    fetchSpy.mockRestore()
+
+    fireEvent.change(screen.getByTestId("settings-instructions-input"), {
+      target: { value: "New guidance for the team." },
+    })
+    expect(save).toHaveProperty("disabled", false)
+
+    await act(async () => {
+      fireEvent.click(save)
+      await Promise.resolve()
+    })
+    expect(setInstructionsMock).toHaveBeenCalledWith(101, "New guidance for the team.")
+  })
+
+  it("test_settings_instructions_save_disabled_when_unchanged_or_over_cap — Save is disabled when the field equals the loaded value and when it exceeds 2000 chars (AC12)", async () => {
+    instructionsMock.mockResolvedValue({ instructions: "baseline" })
+    render(React.createElement(ProjectSettingsModal, modalProps()))
+    await waitForInstructionsLoaded()
+    await screen.findByDisplayValue("baseline")
+
+    const textarea = screen.getByTestId("settings-instructions-input")
+    const save = screen.getByTestId("settings-instructions-save")
+    expect(save).toHaveProperty("disabled", true)
+
+    // Changed -> enabled.
+    fireEvent.change(textarea, { target: { value: "baseline plus more" } })
+    expect(save).toHaveProperty("disabled", false)
+
+    // Reverted back to the loaded value -> disabled again (unchanged).
+    fireEvent.change(textarea, { target: { value: "baseline" } })
+    expect(save).toHaveProperty("disabled", true)
+
+    // Over the 2000-char cap -> disabled even though it differs from the
+    // loaded value.
+    fireEvent.change(textarea, { target: { value: "x".repeat(2001) } })
+    expect(save).toHaveProperty("disabled", true)
+  })
+
+  it("test_settings_instructions_load_failure_shows_error_not_crash — a rejected GET renders an in-tab error line instead of crashing (AC12)", async () => {
+    instructionsMock.mockRejectedValue(new Error("network down"))
+    render(React.createElement(ProjectSettingsModal, modalProps()))
+    expect(await screen.findByTestId("settings-instructions-error")).toBeTruthy()
+    // The panel is still usable — textarea/save render normally.
+    expect(screen.getByTestId("settings-instructions-input")).toBeTruthy()
   })
 })

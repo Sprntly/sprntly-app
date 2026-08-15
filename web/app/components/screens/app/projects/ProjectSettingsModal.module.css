@@ -74,9 +74,8 @@
   background: var(--surface-2);
 }
 
-/* ── Instructions tab (SHELL only — no persistence this ticket) ────────
- * Scope boundary: GET/PUT + folding into the agent context is a follow-up
- * ticket. This tab's state is purely local (see ProjectSettingsModal.tsx). */
+/* ── Instructions tab — persists via GET/PUT, folds into agent context
+ * server-side (see ProjectSettingsModal.tsx). */
 
 .fieldLabel {
   display: block;
@@ -123,6 +122,12 @@
 .charCount {
   font-size: 11.5px;
   color: var(--ink-4);
+}
+
+.instructionsError {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--danger);
 }
 
 .feedsNote {

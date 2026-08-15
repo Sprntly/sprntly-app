@@ -87,13 +87,20 @@ def _build_private_scope(
     empty roster rather than breaking the ask."""
     from app import project_delegation, project_task_execution
     from app.db import projects as projects_db
-    from app.project_group_context import read_tools
+    from app.project_group_context import _instructions_block, read_tools
 
     try:
         roster = projects_db.list_members(project_id)
     except Exception:  # noqa: BLE001 — best-effort, AD-P7
         roster = []
+    try:
+        instructions = projects_db.get_instructions(project_id)
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        instructions = None
     system_addendum = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
+    instr_block = _instructions_block(instructions)
+    if instr_block:
+        system_addendum = f"{system_addendum}\n\n{instr_block}"
     post_turn = (
         (lambda content: post_individual_turn(conversation_id, "assistant", content))
         if conversation_id is not None else None
