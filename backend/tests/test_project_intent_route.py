@@ -248,7 +248,7 @@ def test_group_classify_unchanged(tenant_client, isolated_settings, monkeypatch)
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
+        "app.llm.run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
     )
 
     resp = t.client.post(
@@ -295,7 +295,7 @@ def test_group_and_private_share_the_resolve_helper(
             )
         return "unused"
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/chat/intent", json={"message": "what's next?"},

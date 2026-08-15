@@ -1789,6 +1789,12 @@ def _try_scoped_tool_answer(
         "projects.individual_chat.reply" if scope.surface == Surface.project_private
         else "projects.group_chat.mention_reply"
     )
+    # Identifiers only — matches each surface's pre-collapse identifier
+    # shape exactly (private: project_id alone; group: + conversation_id,
+    # threaded through `assigner_identity` alongside the delegation fields).
+    identifier: dict = {"project_id": scope.project_id}
+    if scope.surface == Surface.project_group and "conversation_id" in identity:
+        identifier["conversation_id"] = identity["conversation_id"]
     usage = RunUsage(
         cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
         cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
@@ -1797,7 +1803,7 @@ def _try_scoped_tool_answer(
     )
     log_llm_run(
         operation=operation,
-        identifier={"project_id": scope.project_id},
+        identifier=identifier,
         usage=usage,
         duration_ms=int((time.monotonic() - start) * 1000),
         status="complete",

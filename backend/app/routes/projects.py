@@ -1518,6 +1518,10 @@ def _respond_as_group_agent(
             assigner_identity={
                 "assigner_user_id": assigner_user_id,
                 "source_turn_id": source_turn_id,
+                # Carried for the cost-log identifier only (qa_agent's
+                # sixth branch) — matches the pre-collapse group log line's
+                # identifier shape (project_id + conversation_id).
+                "conversation_id": conversation_id,
             },
             post_turn=lambda content: conversations_db.post_group_turn(
                 conversation_id, None, content, role="assistant"
