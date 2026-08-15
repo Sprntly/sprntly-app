@@ -329,3 +329,63 @@ def test_artifact_manifest_gate_is_load_bearing(monkeypatch):
         lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
     )
     assert "can't find that artifact" in _read_artifact("prd", 4242).lower()
+
+
+# ── custom_artifact read branch — the always-in-context wire ─────────────────
+
+
+def test_artifact_content_for_custom_artifact_returns_body(monkeypatch):
+    import app.db.custom_artifacts as custom_artifacts_db
+
+    monkeypatch.setattr(
+        custom_artifacts_db, "get_artifact",
+        lambda company_id, artifact_id: {"body_html": "the launch plan body"} if artifact_id == 1 else None,
+    )
+    assert pgc._artifact_content_for("custom_artifact", 1, "c1") == "the launch plan body"
+
+
+def test_artifact_content_for_custom_artifact_not_found_returns_none(monkeypatch):
+    import app.db.custom_artifacts as custom_artifacts_db
+
+    monkeypatch.setattr(custom_artifacts_db, "get_artifact", lambda company_id, artifact_id: None)
+    assert pgc._artifact_content_for("custom_artifact", 999, "c1") is None
+
+
+def test_artifact_content_for_custom_artifact_empty_body(monkeypatch):
+    import app.db.custom_artifacts as custom_artifacts_db
+
+    monkeypatch.setattr(
+        custom_artifacts_db, "get_artifact",
+        lambda company_id, artifact_id: {"body_html": "   "},
+    )
+    assert pgc._artifact_content_for("custom_artifact", 1, "c1") == "(empty document)"
+
+
+def test_get_artifact_content_custom_artifact_gated_by_manifest(monkeypatch):
+    """The manifest gate applies to `custom_artifact` reads exactly like
+    every other type — off-manifest refused, on-manifest returns the body.
+    RED->GREEN mutation proof: flip the manifest to include the id and the
+    same content returns, proving the manifest check (not something else)
+    is what refuses."""
+    import app.db.custom_artifacts as custom_artifacts_db
+
+    monkeypatch.setattr(
+        custom_artifacts_db, "get_artifact",
+        lambda company_id, artifact_id: {"body_html": "TOP-SECRET document body"} if artifact_id == 7 else None,
+    )
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
+    refused = _read_artifact("custom_artifact", 7)
+    assert "TOP-SECRET" not in refused
+    assert "can't find that artifact" in refused.lower()
+
+    # RED->GREEN: put the id on the manifest — the gate now lets it through.
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "custom_artifact", "id": 7, "title": "Our document"}],
+    )
+    allowed = _read_artifact("custom_artifact", 7)
+    assert "TOP-SECRET document body" in allowed
+
+
+def test_type_labels_has_documents_label():
+    assert pgc._TYPE_LABELS["custom_artifact"] == "Documents"

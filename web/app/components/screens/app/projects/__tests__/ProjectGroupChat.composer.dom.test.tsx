@@ -11,7 +11,7 @@
 // button, a second, DIFFERENT draft must be sendable immediately, and a
 // double-submit of the exact SAME draft must still be blocked.
 import * as React from "react"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -33,6 +33,7 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 const groupTurnsMock = vi.fn()
 const postGroupTurnMock = vi.fn()
 const saveChatArtifactMock = vi.fn()
+const uploadDocumentMock = vi.fn()
 
 vi.mock("../../../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/api")>("../../../../../lib/api")
@@ -43,6 +44,7 @@ vi.mock("../../../../../lib/api", async () => {
       groupTurns: (...a: unknown[]) => groupTurnsMock(...a),
       postGroupTurn: (...a: unknown[]) => postGroupTurnMock(...a),
       saveChatArtifact: (...a: unknown[]) => saveChatArtifactMock(...a),
+      uploadDocument: (...a: unknown[]) => uploadDocumentMock(...a),
     },
   }
 })
@@ -51,7 +53,7 @@ vi.mock("../../../../../lib/auth", () => ({
 }))
 
 import { ProjectGroupChat } from "../ProjectGroupChat"
-import type { GroupTurn } from "../../../../../lib/api"
+import { ApiError, type GroupTurn } from "../../../../../lib/api"
 
 const turn = (overrides: Partial<GroupTurn>): GroupTurn => ({
   id: 1,
@@ -68,6 +70,7 @@ beforeEach(() => {
   groupTurnsMock.mockReset()
   postGroupTurnMock.mockReset()
   saveChatArtifactMock.mockReset()
+  uploadDocumentMock.mockReset()
 })
 afterEach(() => cleanup())
 
@@ -205,5 +208,38 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
       resolvePost(turn({ id: 5, content: "hi team" }))
       await Promise.resolve()
     })
+  })
+})
+
+describe("ProjectGroupChat — composer Attach mints a durable project document (AC19)", () => {
+  it("test_group_composer_attach_mints_durable_document — file select calls projectsApi.uploadDocument with the project id, not the transient inline path", async () => {
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await act(async () => {})
+
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+
+    expect(uploadDocumentMock).toHaveBeenCalledWith(101, file)
+  })
+
+  it("a failed upload (413) shows the mapped inline error via the composer's existing error region", async () => {
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await act(async () => {})
+
+    uploadDocumentMock.mockRejectedValue(new ApiError(413, "File too large"))
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["x"], "big.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(screen.getByTestId("gc-error").textContent).toContain("too large"))
   })
 })

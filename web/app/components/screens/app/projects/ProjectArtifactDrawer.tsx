@@ -26,6 +26,7 @@ import remarkGfm from "remark-gfm"
 import Link from "next/link"
 import {
   ApiError,
+  customArtifactsApi,
   evidenceApi,
   isProjectArtifactType,
   prdApi,
@@ -55,12 +56,13 @@ const TYPE_BADGE: Record<ProjectArtifactType, { label: string; bg: string; color
 }
 
 /** `TYPE_BADGE`'s fallback for a type outside `ProjectArtifactType` —
- *  unreachable today (this drawer only ever opens a project's own,
- *  DB-constrained artifacts), but `ArtifactItem["type"]` is statically
- *  wider, so both `TYPE_BADGE[a.type]` lookups below go through
- *  `badgeFor` rather than assuming the narrower set. */
+ *  reachable now for exactly one case, an uploaded document
+ *  (`custom_artifact`), special-cased below to a neutral DOCUMENT badge;
+ *  any OTHER outside type stays a generic fallback. */
 const UNKNOWN_TYPE_BADGE = { label: "Artifact", bg: "var(--info-soft)", color: "var(--info)" }
+const DOCUMENT_TYPE_BADGE = { label: "Document", bg: "var(--info-soft)", color: "var(--info)" }
 function badgeFor(type: ArtifactItem["type"]): { label: string; bg: string; color: string } {
+  if (type === "custom_artifact") return DOCUMENT_TYPE_BADGE
   return isProjectArtifactType(type) ? TYPE_BADGE[type] : UNKNOWN_TYPE_BADGE
 }
 
@@ -386,6 +388,14 @@ export function ProjectArtifactDrawer({
             }
           : { kind: "empty", note: "This prototype has no canvas to open." },
       )
+    } else if (artifact.type === "custom_artifact") {
+      customArtifactsApi
+        .get(artifact.open.custom_artifact_id)
+        .then((d) => {
+          if (cancelled) return
+          setBody(bodyFromMd(d.title || artifactTitle(artifact), d.body_html ?? "", "This document is empty."))
+        })
+        .catch(fail)
     } else {
       // ticket_set — a standalone set has no single-document body to render here.
       setBody({ kind: "empty", note: "Ticket sets open from the Tickets workspace." })
@@ -450,6 +460,11 @@ export function ProjectArtifactDrawer({
           <span className={styles.title} data-testid="project-artifact-drawer-title">
             {artifactTitle(artifact)}
           </span>
+          {artifact.type === "custom_artifact" ? (
+            <span className={styles.inContextPill} data-testid="project-artifact-drawer-in-context">
+              IN CONTEXT
+            </span>
+          ) : null}
           <button
             type="button"
             className={styles.close}

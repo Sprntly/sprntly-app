@@ -62,6 +62,21 @@
   white-space: nowrap;
 }
 
+/* Passive "this document is always readable by the agent" pill — no toggle,
+   no off state (an uploaded document is in context by being in the
+   project, the same invariant the manifest fold already carries). */
+.inContextPill {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 3px 9px;
+  flex-shrink: 0;
+}
+
 .close {
   flex-shrink: 0;
   width: 30px;

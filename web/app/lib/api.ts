@@ -5976,6 +5976,21 @@ export const projectsApi = {
     api
       .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)
       .then((r) => r.artifacts),
+  /** Upload a document (pdf/docx/pptx/xlsx/txt/md) and attach it to the
+   *  project as a `custom_artifact` (`POST /v1/projects/{id}/documents`,
+   *  multipart). Bypasses `addArtifact`/`AddArtifactRequest` entirely — the
+   *  route mints the `custom_artifacts` row itself and attaches it directly,
+   *  so no `ProjectArtifactType` widening is needed here. Returns the SAME
+   *  fan-out-shaped item `GET .../artifacts` would show, so a caller can
+   *  insert it into a list without a refetch. Throws `ApiError` with
+   *  `.status` 400 (empty file) / 413 (too large, either the upload itself
+   *  or the extracted text) / 422 (no extractable text) — callers must map
+   *  these to the same inline copy `askApi.extractFile` maps them to. */
+  uploadDocument: (id: number | string, file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<ArtifactItem>(`/v1/projects/${encodeURIComponent(String(id))}/documents`, form)
+  },
   /** The cached project-memory summary — read-only, no LLM call. */
   memorySummary: (id: number | string) =>
     api.get<ProjectMemorySummary>(`/v1/projects/${encodeURIComponent(String(id))}/memory/summary`),

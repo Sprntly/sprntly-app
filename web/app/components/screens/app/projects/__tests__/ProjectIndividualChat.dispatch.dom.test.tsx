@@ -30,6 +30,7 @@ const runAskGenerationMock = vi.fn()
 const resolveIntentMock = vi.fn()
 const prdChatEditMock = vi.fn()
 const addArtifactMock = vi.fn()
+const uploadDocumentMock = vi.fn()
 const individualChatMock = vi.fn((id: number) =>
   Promise.resolve({
     id: 9001, project_id: id, user_id: "u1", kind: "individual" as const,
@@ -73,6 +74,7 @@ vi.mock("../../../../../lib/api", async () => {
       ledger: (...a: unknown[]) => ledgerMock(...a),
       prdChatEdit: (...a: unknown[]) => prdChatEditMock(...a),
       addArtifact: (...a: unknown[]) => addArtifactMock(...a),
+      uploadDocument: (...a: unknown[]) => uploadDocumentMock(...a),
       // Same `resolveIntentMock` the pre-fix suite mounted on
       // `chatIntentApi.resolve` — re-mounted here because the component
       // now classifies via the project-scoped resolver instead. Mock-
@@ -113,12 +115,14 @@ vi.mock("../../../../../context/NavigationContext", () => ({
 }))
 
 import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ApiError } from "../../../../../lib/api"
 
 beforeEach(() => {
   runAskGenerationMock.mockReset()
   resolveIntentMock.mockReset()
   prdChatEditMock.mockReset()
   addArtifactMock.mockReset()
+  uploadDocumentMock.mockReset()
   individualChatMock.mockClear()
   individualTurnsMock.mockReset().mockResolvedValue([])
   ledgerMock.mockReset().mockResolvedValue([])
@@ -313,5 +317,34 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     expect(resolveIntentMock).toHaveBeenCalledWith(
       202, "what's the status?", { conversationId: 9001 },
     )
+  })
+})
+
+describe("ProjectIndividualChat — composer Attach mints a durable project document (AC19)", () => {
+  it("test_individual_composer_attach_mints_durable_document — file select calls projectsApi.uploadDocument with the project id, not the transient inline path", async () => {
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+
+    expect(uploadDocumentMock).toHaveBeenCalledWith(202, file)
+  })
+
+  it("a failed upload (413) shows the mapped inline error", async () => {
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+
+    uploadDocumentMock.mockRejectedValue(new ApiError(413, "File too large"))
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["x"], "big.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(screen.getByTestId("ic-upload-error").textContent).toContain("too large"))
   })
 })

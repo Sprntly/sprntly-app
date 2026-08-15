@@ -34,6 +34,7 @@ import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
 import {
+  ApiError,
   projectsApi,
   type AskResponse,
   type GroupTurn,
@@ -598,6 +599,36 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       })
   }, [draft, projectId, applyTurns, myUserId, myName])
 
+  // Composer Attach → mint a DURABLE project document (custom_artifact),
+  // NOT the transient one-turn inline path main chat's `ChatScreen` uses
+  // (`extractFile` + inline text, gone after the turn). Reuses the SAME
+  // upload orchestration the Artifacts modal's "Upload document" menu item
+  // calls, so an attach here shows up in the project's artifact library and
+  // is readable by the agent going forward. Reuses the composer's own error
+  // affordance region (`setError`/`styles.error`) for a failed upload.
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files
+      const file = files && files.length > 0 ? files[0] : null
+      e.target.value = ""
+      if (!file) return
+      setError(null)
+      projectsApi.uploadDocument(projectId, file).catch((err: unknown) => {
+        const status = err instanceof ApiError ? err.status : 0
+        setError(
+          status === 400
+            ? "That file is empty."
+            : status === 413
+              ? "That file is too large (max 25 MB)."
+              : status === 422
+                ? "Couldn't read any text — scanned/image-only PDFs and legacy .ppt aren't supported. Export to PDF or .pptx."
+                : "Couldn't upload that file. Try again.",
+        )
+      })
+    },
+    [projectId],
+  )
+
   const lastTurn = turns[turns.length - 1]
   // "Sprntly stayed out" (design-spec AC8): the most recent turn is a human
   // one still awaiting whatever comes next — v1 has no should-respond
@@ -888,7 +919,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           onCloseMenu={() => {}}
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
-          onFileSelect={() => {}}
+          onFileSelect={handleFileSelect}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>

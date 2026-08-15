@@ -89,6 +89,17 @@
   background: var(--surface);
 }
 
+/* Composer-Attach failed-upload inline error (mirrors ProjectGroupChat's
+   own .error region — same tokens, same posture). */
+.uploadError {
+  font-size: 12px;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  padding: 8px 14px;
+  margin: 0 16px;
+  border-radius: var(--radius-sm);
+}
+
 /* The on-join greeting's Show more/less toggle — tokens only. */
 .showMore {
   margin-top: 6px;

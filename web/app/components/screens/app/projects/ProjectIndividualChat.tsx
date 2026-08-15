@@ -69,6 +69,7 @@ import {
 import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
+  ApiError,
   askApi,
   projectsApi,
   storiesApi,
@@ -208,6 +209,10 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
   // read-only convenience: the Task-ledger modal is the authoritative surface
   // (AD-P28); an unmatched turn renders exactly as before, no affordance.
   const [delegationsByTurn, setDelegationsByTurn] = useState<Map<number, DelegationLedgerRow>>(new Map())
+  // Composer-Attach upload state — a failed upload's inline error (mapped
+  // from the endpoint status, same copy the Artifacts modal's upload strip
+  // uses). null the rest of the time.
+  const [uploadError, setUploadError] = useState<string | null>(null)
 
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -698,6 +703,35 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
     }
   }, [activeCompany, tabId])
 
+  // Composer Attach → mint a DURABLE project document (custom_artifact),
+  // NOT the transient one-turn inline path main chat's `ChatScreen` uses.
+  // Same convergence as `ProjectGroupChat`'s own `handleFileSelect` — reuses
+  // the Artifacts modal's upload orchestration so an attach here shows up
+  // in the project's artifact library and is readable by the agent going
+  // forward.
+  const handleFileSelect = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files
+      const file = files && files.length > 0 ? files[0] : null
+      e.target.value = ""
+      if (!file) return
+      setUploadError(null)
+      projectsApi.uploadDocument(projectId, file).catch((err: unknown) => {
+        const status = err instanceof ApiError ? err.status : 0
+        setUploadError(
+          status === 400
+            ? "That file is empty."
+            : status === 413
+              ? "That file is too large (max 25 MB)."
+              : status === 422
+                ? "Couldn't read any text — scanned/image-only PDFs and legacy .ppt aren't supported. Export to PDF or .pptx."
+                : "Couldn't upload that file. Try again.",
+        )
+      })
+    },
+    [projectId],
+  )
+
   return (
     <div className={styles.thread} data-testid="project-individual-chat">
       <div className={styles.scroll} data-testid="individual-chat-scroll">
@@ -837,6 +871,12 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
         })()}
       </div>
 
+      {uploadError ? (
+        <div className={styles.uploadError} role="alert" data-testid="ic-upload-error">
+          {uploadError}
+        </div>
+      ) : null}
+
       <div className={styles.composerWrap}>
         <ChatComposer
           busy={busy}
@@ -864,7 +904,7 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           onCloseMenu={() => {}}
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
-          onFileSelect={() => {}}
+          onFileSelect={handleFileSelect}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>

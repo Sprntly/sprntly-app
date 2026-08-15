@@ -55,6 +55,7 @@ _TYPE_LABELS = {
     "evidence": "Evidence",
     "report": "Reports",
     "ticket_set": "Ticket sets",
+    "custom_artifact": "Documents",
 }
 
 
@@ -400,6 +401,13 @@ def _artifact_content_for(atype: str, artifact_id: int, company_id: str) -> str 
             "This is a set of tickets generated from a chat. Open it in the app "
             "to view the individual tickets."
         )
+    if atype == "custom_artifact":
+        from app.db.custom_artifacts import get_artifact
+
+        row = get_artifact(company_id, artifact_id)  # company-scoped (double-gated: manifest + company)
+        if not row:
+            return None
+        return (row.get("body_html") or "").strip() or "(empty document)"
     return None
 
 

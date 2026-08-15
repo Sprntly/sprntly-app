@@ -23,11 +23,16 @@ import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./ArtifactsModal.module.css"
 
-type ArtifactFilter = "all" | ProjectArtifactType
+// Local extension only — NOT a widen of `ProjectArtifactType` in api.ts (that
+// stays narrow; upload is the only path a `custom_artifact` reaches this
+// modal through, and it goes through `projectsApi.uploadDocument`, never
+// `addArtifact`).
+type ArtifactFilter = "all" | ProjectArtifactType | "custom_artifact"
 
 /** Verbatim order from `ArtifactsScreen.tsx`'s `ARTIFACT_FILTERS` — the
  *  app's real filter set (Reports included; the "Tickets" qualifier is the
- *  same one that file uses). */
+ *  same one that file uses) — plus a "Documents" chip for uploaded
+ *  `custom_artifact` rows. */
 const FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "report", label: "Reports" },
@@ -35,7 +40,13 @@ const FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
+  { id: "custom_artifact", label: "Documents" },
 ]
+
+/** The upload strip's accepted formats — copied verbatim from
+ *  `shared/ChatComposer.tsx`'s file input, the same extraction pipeline
+ *  (`app.ingest.convert`) reads. */
+const UPLOAD_ACCEPT = ".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx"
 
 /** Verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` — the app's real
  *  per-type palette (same duplication precedent as
@@ -48,13 +59,16 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
 }
 
-/** `BADGE`'s fallback for a type outside `ProjectArtifactType` —
- *  unreachable today (a project's own artifacts are DB-constrained to the
- *  five keys above), but `ArtifactItem["type"]` is statically wider, so
- *  every `BADGE[a.type]` lookup below goes through `badgeFor` rather than
- *  assuming the narrower set. */
+/** `BADGE`'s fallback for a type outside `ProjectArtifactType` — reachable
+ *  now for exactly one case: an uploaded document (`custom_artifact`),
+ *  special-cased to a neutral DOCUMENT badge below `isProjectArtifactType`
+ *  ever sees it. Any OTHER outside type stays a generic fallback. */
 const UNKNOWN_BADGE = { label: "ARTIFACT", bg: "var(--info-soft)", color: "var(--info)" }
+/** Neutral grey — `UNKNOWN_BADGE`'s own tone, since no dedicated
+ *  `--surface-4`/`--ink-2` document token exists in `globals.css`. */
+const DOCUMENT_BADGE = { label: "DOCUMENT", bg: "var(--info-soft)", color: "var(--info)" }
 function badgeFor(type: ArtifactItem["type"]): { label: string; bg: string; color: string } {
+  if (type === "custom_artifact") return DOCUMENT_BADGE
   return isProjectArtifactType(type) ? BADGE[type] : UNKNOWN_BADGE
 }
 
@@ -88,10 +102,9 @@ function sourceLine(a: ArtifactItem): string {
     return [count, rel].filter(Boolean).join(" · ")
   }
   if (a.type === "report") return [a.source.conversation_title ? `from ${a.source.conversation_title}` : null, rel].filter(Boolean).join(" · ")
-  // custom_artifact can't reach this modal today (project_artifacts'
-  // DB CHECK constraint has no such row to attach), but the type is
-  // reachable statically via the shared ArtifactItem union — handled here
-  // rather than assuming it away.
+  // custom_artifact DOES reach this modal now — an uploaded document,
+  // attached via `projectsApi.uploadDocument` (the migration widening
+  // project_artifacts' CHECK is what makes the attach write succeed).
   if (a.type === "custom_artifact") return [a.source.conversation_title ? `from ${a.source.conversation_title}` : null, rel].filter(Boolean).join(" · ")
   return [`from Brief ${a.source.week_label || ""}`.trim(), rel].filter(Boolean).join(" · ")
 }
@@ -222,6 +235,15 @@ function ArtifactCanvas({ artifact, onOpen }: { artifact: ArtifactItem; onOpen: 
 
 // ── Presentational list + canvas ──
 
+/** The upload strip's tri-state — idle, in flight, or a failed attempt
+ *  (mapped to inline copy by the container, keyed off the endpoint's 4xx
+ *  status). Owned by the CONTAINER (`ArtifactsModal`), which drives the
+ *  actual `projectsApi.uploadDocument` call; this View only renders it. */
+export type ArtifactUploadState =
+  | { status: "idle" }
+  | { status: "uploading"; filename: string }
+  | { status: "error"; filename: string; message: string }
+
 export type ArtifactsModalViewProps = {
   open: boolean
   status: "loading" | "forbidden" | "not_found" | "error" | "ready"
@@ -234,8 +256,19 @@ export type ArtifactsModalViewProps = {
   onClose: () => void
   /** Opens the "Add existing artifact" company-library picker
    *  (`AddArtifactModal`) — the trigger used to live in the top bar; this
-   *  ticket relocates it into the modal header, same handler underneath. */
+   *  ticket relocates it into a 2-item `+ Add ▾` menu, same handler
+   *  underneath. */
   onAddExisting: () => void
+  /** Upload strip state — see `ArtifactUploadState`. */
+  upload: ArtifactUploadState
+  /** A file was picked off the "Upload document" menu item's file input. */
+  onSelectFile: (file: File) => void
+  /** Dismiss the processing row / error state without waiting on the
+   *  in-flight request — a soft cancel (the request itself is not
+   *  aborted; its result is simply ignored when it resolves, the same
+   *  ignore-stale-response pattern this file's own fetch-on-open effect
+   *  already uses via its `cancelled` flag). */
+  onCancelUpload: () => void
 }
 
 export function ArtifactsModalView({
@@ -249,9 +282,27 @@ export function ArtifactsModalView({
   onOpen,
   onClose,
   onAddExisting,
+  upload,
+  onSelectFile,
+  onCancelUpload,
 }: ArtifactsModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
+  const [addMenuOpen, setAddMenuOpen] = useState(false)
+  const addWrapRef = useRef<HTMLDivElement>(null)
+
+  // Outside-click closes just the menu, not the whole modal (the modal's
+  // own overlay-click-to-close only fires for a literal backdrop click).
+  useEffect(() => {
+    if (!addMenuOpen) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (addWrapRef.current && !addWrapRef.current.contains(e.target as Node)) {
+        setAddMenuOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", onDocMouseDown)
+    return () => document.removeEventListener("mousedown", onDocMouseDown)
+  }, [addMenuOpen])
 
   useEffect(() => {
     if (!open) return
@@ -297,10 +348,14 @@ export function ArtifactsModalView({
   if (!open) return null
 
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
-  // A custom_artifact row can't reach this modal today (see badgeFor's own
-  // doc); skipped here rather than counted under a filter chip that has no
-  // entry for it.
+  // custom_artifact DOES reach this modal now (an uploaded document) — its
+  // own dedicated increment below, since `isProjectArtifactType` correctly
+  // excludes it from the five project-typed keys.
   for (const a of artifacts) {
+    if (a.type === "custom_artifact") {
+      counts.custom_artifact = (counts.custom_artifact ?? 0) + 1
+      continue
+    }
     if (!isProjectArtifactType(a.type)) continue
     counts[a.type] = (counts[a.type] ?? 0) + 1
   }
@@ -324,23 +379,91 @@ export function ArtifactsModalView({
             <p className="modal-sub">Everything this project has produced — click a row to preview it inline.</p>
           </div>
           <div className={styles.headActions}>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={onAddExisting}
-              data-testid="artifacts-modal-add-existing"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              Add existing artifact
-            </button>
+            <div className={styles.addWrap} ref={addWrapRef}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setAddMenuOpen((o) => !o)}
+                aria-haspopup="menu"
+                aria-expanded={addMenuOpen}
+                data-testid="artifacts-modal-add-menu-trigger"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                Add
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M6 9l6 6 6-6" />
+                </svg>
+              </button>
+              {addMenuOpen ? (
+                <div
+                  className={styles.addMenu}
+                  role="menu"
+                  aria-label="Add to project"
+                  data-testid="artifacts-modal-add-menu"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      // Close JUST the menu — stop the event before it
+                      // reaches the document-level Escape listener the
+                      // WHOLE modal uses (useEscapeToClose above).
+                      e.stopPropagation()
+                      setAddMenuOpen(false)
+                    }
+                  }}
+                >
+                  <label className={styles.addMenuItem} data-testid="artifacts-modal-upload-document">
+                    Upload document
+                    <input
+                      type="file"
+                      accept={UPLOAD_ACCEPT}
+                      style={{ display: "none" }}
+                      data-testid="artifacts-modal-file-input"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        setAddMenuOpen(false)
+                        e.target.value = ""
+                        if (file) onSelectFile(file)
+                      }}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className={styles.addMenuItem}
+                    onClick={() => {
+                      setAddMenuOpen(false)
+                      onAddExisting()
+                    }}
+                    data-testid="artifacts-modal-add-existing"
+                  >
+                    Add existing artifact
+                  </button>
+                </div>
+              ) : null}
+            </div>
             <button type="button" className="modal-close" onClick={onClose} aria-label="Close" data-testid="artifacts-modal-close">
               <IconClose size={16} title="Close" />
             </button>
           </div>
         </div>
+
+        {upload.status === "uploading" ? (
+          <div className={styles.uploadRow} data-testid="artifacts-modal-upload-processing">
+            <span>Adding {upload.filename} now · Reading &amp; indexing for Sprntly</span>
+            <button type="button" className={styles.uploadCancel} onClick={onCancelUpload} data-testid="artifacts-modal-upload-cancel">
+              Cancel
+            </button>
+          </div>
+        ) : upload.status === "error" ? (
+          <div className={styles.uploadRow} role="alert" data-testid="artifacts-modal-upload-error">
+            <span>{upload.message}</span>
+            <button type="button" className={styles.uploadCancel} onClick={onCancelUpload} data-testid="artifacts-modal-upload-dismiss">
+              Dismiss
+            </button>
+          </div>
+        ) : null}
 
         <div className="modal-body" data-testid="artifacts-modal-body">
           {status === "loading" ? (
@@ -410,6 +533,11 @@ export function ArtifactsModalView({
                                 {cfg.label}
                               </span>
                               <span className={styles.rowSrc}>{sourceLine(a)}</span>
+                              {a.type === "custom_artifact" ? (
+                                <span className={styles.inContextChip} data-testid={`artifacts-row-in-context-${artifactKey(a)}`}>
+                                  Sprntly can reference this
+                                </span>
+                              ) : null}
                             </div>
                           </div>
                         </div>
@@ -462,6 +590,46 @@ export function ArtifactsModal({
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [filter, setFilter] = useState<ArtifactFilter>(initialFilter ?? "all")
   const [selected, setSelected] = useState<ArtifactItem | null>(null)
+  const [upload, setUpload] = useState<ArtifactUploadState>({ status: "idle" })
+  // Bumped on every new upload/cancel — a resolving fetch checks its own
+  // captured token against this ref before applying state, so a cancelled
+  // or superseded upload's late result is silently ignored (no real abort;
+  // same ignore-stale-response shape the fetch-on-open effect's own
+  // `cancelled` flag uses).
+  const uploadTokenRef = useRef(0)
+
+  const handleSelectFile = useCallback(
+    (file: File) => {
+      const token = ++uploadTokenRef.current
+      setUpload({ status: "uploading", filename: file.name })
+      projectsApi
+        .uploadDocument(projectId, file)
+        .then((item) => {
+          if (uploadTokenRef.current !== token) return
+          setState((s) => (s.status === "ready" ? { status: "ready", artifacts: [item, ...s.artifacts] } : s))
+          setUpload({ status: "idle" })
+        })
+        .catch((err: unknown) => {
+          if (uploadTokenRef.current !== token) return
+          const status = err instanceof ApiError ? err.status : 0
+          const message =
+            status === 400
+              ? "That file is empty."
+              : status === 413
+                ? "That file is too large (max 25 MB)."
+                : status === 422
+                  ? "Couldn't read any text — scanned/image-only PDFs and legacy .ppt aren't supported. Export to PDF or .pptx."
+                  : "Couldn't upload that file. Try again."
+          setUpload({ status: "error", filename: file.name, message })
+        })
+    },
+    [projectId],
+  )
+
+  const handleCancelUpload = useCallback(() => {
+    uploadTokenRef.current += 1
+    setUpload({ status: "idle" })
+  }, [])
 
   // Prefer the in-place drawer (no route change). Only when no in-place handler
   // is wired do we fall back to the app's deep-link viewer (navigates to `/`),
@@ -511,6 +679,9 @@ export function ArtifactsModal({
       onOpen={handleOpen}
       onClose={onClose}
       onAddExisting={onAddExisting}
+      upload={upload}
+      onSelectFile={handleSelectFile}
+      onCancelUpload={handleCancelUpload}
     />
   )
 }

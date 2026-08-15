@@ -26,6 +26,82 @@
   overflow-y: auto;
 }
 
+/* ── + Add ▾ split menu ── */
+
+.addWrap {
+  position: relative;
+}
+
+.addMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 190px;
+  padding: 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow-md);
+}
+
+.addMenuItem {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.addMenuItem:hover {
+  background: var(--surface-3);
+}
+
+/* ── Upload processing / error row ── */
+
+.uploadRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--ink-2);
+  background: var(--surface-3);
+  padding: 8px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.uploadCancel {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.uploadCancel:hover {
+  color: var(--ink);
+}
+
+/* ── "Sprntly can reference this" passive chip (document rows) ── */
+
+.inContextChip {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-4);
+}
+
 .count {
   font-size: 12px;
   font-weight: 600;

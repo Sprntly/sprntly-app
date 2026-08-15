@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 const artifactsMock = vi.fn()
+const uploadDocumentMock = vi.fn()
 
 vi.mock("../../../../../lib/api", () => {
   class ApiError extends Error {
@@ -30,6 +31,7 @@ vi.mock("../../../../../lib/api", () => {
     ApiError,
     projectsApi: {
       artifacts: (...a: unknown[]) => artifactsMock(...a),
+      uploadDocument: (...a: unknown[]) => uploadDocumentMock(...a),
     },
     // Real implementation (no API call, no side effect) — mirrors
     // lib/api.ts's own five-value check, kept here rather than importing the
@@ -48,7 +50,12 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-import { ArtifactsModalView, ArtifactsModal, type ArtifactsModalViewProps } from "../ArtifactsModal"
+import {
+  ArtifactsModalView,
+  ArtifactsModal,
+  type ArtifactsModalViewProps,
+  type ArtifactUploadState,
+} from "../ArtifactsModal"
 import { ApiError } from "../../../../../lib/api"
 import type { ArtifactItem } from "../../../../../lib/api"
 
@@ -86,7 +93,21 @@ const ARTIFACTS: ArtifactItem[] = [
   } as ArtifactItem,
 ]
 
+const DOC: ArtifactItem = {
+  type: "custom_artifact",
+  id: 9,
+  title: "Launch plan.txt",
+  status: "ready",
+  created_at: hoursAgo(1),
+  updated_at: hoursAgo(1),
+  born_at: hoursAgo(1),
+  kind: "document",
+  source: { kind: "document", conversation_id: null, conversation_title: null },
+  open: { custom_artifact_id: 9 },
+} as ArtifactItem
+
 const noop = () => {}
+const IDLE_UPLOAD: ArtifactUploadState = { status: "idle" }
 
 function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsModalViewProps {
   return {
@@ -100,6 +121,9 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
     onOpen: noop,
     onClose: noop,
     onAddExisting: noop,
+    upload: IDLE_UPLOAD,
+    onSelectFile: noop,
+    onCancelUpload: noop,
     ...overrides,
   }
 }
@@ -107,6 +131,7 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
 afterEach(() => {
   cleanup()
   artifactsMock.mockReset()
+  uploadDocumentMock.mockReset()
 })
 
 describe("ArtifactsModalView — app-faithful list (AC7)", () => {
@@ -144,29 +169,152 @@ describe("ArtifactsModalView — app-faithful list (AC7)", () => {
   })
 })
 
-describe("ArtifactsModalView — relocated add-existing trigger (header)", () => {
-  it("test_artifacts_modal_renders_add_existing_trigger — a header button with the relocated trigger's testid/label is present, including in loading/empty states", () => {
+describe("ArtifactsModalView — + Add ▾ menu (header, AC15)", () => {
+  it("test_artifacts_modal_renders_add_existing_trigger — the + Add ▾ trigger is present, including in loading/empty states, and opens a menu containing the relocated Add-existing item", () => {
     const { unmount: unmountReady } = render(React.createElement(ArtifactsModalView, viewProps()))
+    const openTrigger = screen.getByTestId("artifacts-modal-add-menu-trigger")
+    expect(openTrigger.tagName).toBe("BUTTON")
+    fireEvent.click(openTrigger)
     const trigger = screen.getByTestId("artifacts-modal-add-existing")
     expect(trigger.tagName).toBe("BUTTON")
     expect(trigger.textContent).toContain("Add existing artifact")
     unmountReady()
 
     const { unmount: unmountLoading } = render(React.createElement(ArtifactsModalView, viewProps({ status: "loading" })))
-    expect(screen.getByTestId("artifacts-modal-add-existing")).toBeTruthy()
+    expect(screen.getByTestId("artifacts-modal-add-menu-trigger")).toBeTruthy()
     unmountLoading()
 
     render(React.createElement(ArtifactsModalView, viewProps({ artifacts: [] })))
-    expect(screen.getByTestId("artifacts-modal-add-existing")).toBeTruthy()
+    expect(screen.getByTestId("artifacts-modal-add-menu-trigger")).toBeTruthy()
+  })
+
+  it("test_add_menu_renders_two_items — opening the menu shows Upload document AND Add existing artifact", () => {
+    render(React.createElement(ArtifactsModalView, viewProps()))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
+    expect(screen.getByTestId("artifacts-modal-upload-document").textContent).toContain("Upload document")
+    expect(screen.getByTestId("artifacts-modal-add-existing").textContent).toContain("Add existing artifact")
+  })
+
+  it("test_add_existing_fires_existing_handler — clicking the menu's Add-existing item calls onAddExisting exactly once, closes the menu, and never fires onClose", () => {
+    const onAddExisting = vi.fn()
+    const onClose = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onAddExisting, onClose })))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
+    expect(onAddExisting).toHaveBeenCalledTimes(1)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("artifacts-modal-add-menu")).toBeNull()
   })
 
   it("test_artifacts_modal_add_existing_click_invokes_handler_only — clicking it calls onAddExisting exactly once and never onClose", () => {
     const onAddExisting = vi.fn()
     const onClose = vi.fn()
     render(React.createElement(ArtifactsModalView, viewProps({ onAddExisting, onClose })))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
     fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
     expect(onAddExisting).toHaveBeenCalledTimes(1)
     expect(onClose).not.toHaveBeenCalled()
+  })
+})
+
+describe("ArtifactsModalView — upload strip, DOCUMENT badge, Documents filter (AC15-18)", () => {
+  it("test_upload_document_calls_uploadDocument_and_inserts_row — selecting a file off the menu's file input calls onSelectFile", () => {
+    const onSelectFile = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onSelectFile })))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
+    const input = screen.getByTestId("artifacts-modal-file-input") as HTMLInputElement
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" })
+    fireEvent.change(input, { target: { files: [file] } })
+    expect(onSelectFile).toHaveBeenCalledWith(file)
+    // The menu closes on select.
+    expect(screen.queryByTestId("artifacts-modal-add-menu")).toBeNull()
+  })
+
+  it("a document row renders a neutral DOCUMENT badge and the 'Sprntly can reference this' chip", () => {
+    render(React.createElement(ArtifactsModalView, viewProps({ artifacts: [...ARTIFACTS, DOC] })))
+    const row = screen.getByTestId(`artifacts-row-${DOC.type}-${DOC.id}`)
+    expect(row.textContent).toContain("DOCUMENT")
+    expect(row.textContent).toContain("Sprntly can reference this")
+  })
+
+  it("the processing row shows while uploading, with a Cancel that calls onCancelUpload", () => {
+    const onCancelUpload = vi.fn()
+    render(
+      React.createElement(
+        ArtifactsModalView,
+        viewProps({ upload: { status: "uploading", filename: "notes.txt" }, onCancelUpload }),
+      ),
+    )
+    const row = screen.getByTestId("artifacts-modal-upload-processing")
+    expect(row.textContent).toContain("notes.txt")
+    fireEvent.click(screen.getByTestId("artifacts-modal-upload-cancel"))
+    expect(onCancelUpload).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_upload_failure_shows_inline_error_no_row — a failed upload renders the mapped inline error and inserts no row", () => {
+    render(
+      React.createElement(
+        ArtifactsModalView,
+        viewProps({
+          upload: { status: "error", filename: "notes.txt", message: "That file is too large (max 25 MB)." },
+        }),
+      ),
+    )
+    expect(screen.getByTestId("artifacts-modal-upload-error").textContent).toContain(
+      "That file is too large (max 25 MB).",
+    )
+    // No document row was inserted — the artifacts list is unchanged from
+    // the default fixture (no custom_artifact row present).
+    expect(screen.queryByTestId(`artifacts-row-${DOC.type}-${DOC.id}`)).toBeNull()
+  })
+
+  it("test_documents_filter_chip_lists_only_documents — the Documents chip filters to custom_artifact rows and counts them", () => {
+    render(React.createElement(ArtifactsModalView, viewProps({ artifacts: [...ARTIFACTS, DOC], filter: "custom_artifact" })))
+    expect(screen.getByTestId("artifacts-filter-custom_artifact").textContent).toContain("Documents")
+    expect(screen.getByTestId("artifacts-filter-custom_artifact").textContent).toContain("1")
+    const list = screen.getByTestId("artifacts-modal-list")
+    expect(within(list).getAllByRole("button")).toHaveLength(1)
+    expect(list.textContent).toContain("Launch plan.txt")
+  })
+})
+
+describe("ArtifactsModal container — upload wiring", () => {
+  it("a real upload calls projectsApi.uploadDocument(projectId, file) and inserts the returned row into the list without a refetch", async () => {
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    uploadDocumentMock.mockResolvedValue(DOC)
+    await act(async () => {
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
+    const input = screen.getByTestId("artifacts-modal-file-input") as HTMLInputElement
+    const file = new File(["hello"], "notes.txt", { type: "text/plain" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledWith("101", file))
+    // artifactsMock (the fetch-on-open call) is called exactly once — no
+    // refetch after a successful upload.
+    expect(artifactsMock).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(screen.getByTestId(`artifacts-row-${DOC.type}-${DOC.id}`)).toBeTruthy())
+  })
+
+  it("a failed upload (413) shows the mapped inline error and does not insert a row", async () => {
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    uploadDocumentMock.mockRejectedValue(new ApiError(413, "File too large"))
+    await act(async () => {
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
+    const input = screen.getByTestId("artifacts-modal-file-input") as HTMLInputElement
+    const file = new File(["x".repeat(30_000_000)], "big.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-upload-error")).toBeTruthy())
+    expect(screen.getByTestId("artifacts-modal-upload-error").textContent).toContain("too large")
+    expect(screen.queryByTestId(`artifacts-row-${DOC.type}-${DOC.id}`)).toBeNull()
   })
 })
 
@@ -239,10 +387,11 @@ describe("ArtifactsModalView — Tab focus-trap wraps within the dialog (regress
   it("Tab from the last focusable wraps to the first; Shift+Tab from the first wraps to the last", () => {
     render(React.createElement(ArtifactsModalView, viewProps()))
     const dialog = screen.getByRole("dialog")
-    // The relocated "Add existing artifact" trigger now precedes the close
-    // button in the header, so it — not the close button — is the dialog's
-    // first focusable element.
-    const first = screen.getByTestId("artifacts-modal-add-existing")
+    // The + Add ▾ trigger now precedes the close button in the header, so
+    // it — not the close button — is the dialog's first focusable element
+    // (the menu itself is closed by default and contributes no focusable
+    // items until opened).
+    const first = screen.getByTestId("artifacts-modal-add-menu-trigger")
     const last = screen.getByTestId(`artifacts-row-${ARTIFACTS[2].type}-${ARTIFACTS[2].id}`)
 
     last.focus()
@@ -349,6 +498,7 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
       )
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-menu-trigger"))
     fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
     expect(onAddExisting).toHaveBeenCalledTimes(1)
   })

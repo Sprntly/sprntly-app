@@ -36,6 +36,7 @@ const generateMock = vi.fn()
 const getJobMock = vi.fn()
 const byInsightMock = vi.fn()
 const designAgentGetByPrdMock = vi.fn()
+const customArtifactGetMock = vi.fn()
 
 vi.mock("../../../../../lib/api", () => {
   class ApiError extends Error {
@@ -61,6 +62,7 @@ vi.mock("../../../../../lib/api", () => {
       generate: (...a: unknown[]) => generateMock(...a),
       getJob: (...a: unknown[]) => getJobMock(...a),
     },
+    customArtifactsApi: { get: (...a: unknown[]) => customArtifactGetMock(...a) },
     // Not imported directly by the drawer (DesignAgentLauncher is module-
     // mocked below), but kept here so the mocked `lib/api` module stays a
     // faithful superset if any transitive import reaches for it.
@@ -116,6 +118,7 @@ const REPORT = { type: "report", id: 3, title: "Weekly report", status: "ready",
 const PROTOTYPE = { type: "prototype", id: 4, title: "Clickthrough", status: "ready", created_at: new Date().toISOString(), open: { prototype_id: 4, prd_id: 7 } } as unknown as ArtifactItem
 const PROTOTYPE_NO_PRD = { type: "prototype", id: 5, title: "Orphan proto", status: "ready", created_at: new Date().toISOString(), open: { prototype_id: 5, prd_id: null } } as unknown as ArtifactItem
 const TICKET_SET = { type: "ticket_set", id: 6, title: "Tickets", status: "ready", created_at: new Date().toISOString(), open: { ticket_set_id: 6 } } as unknown as ArtifactItem
+const DOCUMENT = { type: "custom_artifact", id: 8, title: "Launch plan.txt", status: "ready", created_at: new Date().toISOString(), updated_at: new Date().toISOString(), born_at: new Date().toISOString(), kind: "document", open: { custom_artifact_id: 88 } } as unknown as ArtifactItem
 
 afterEach(() => {
   cleanup()
@@ -128,6 +131,7 @@ afterEach(() => {
   getJobMock.mockReset()
   byInsightMock.mockReset()
   designAgentGetByPrdMock.mockReset()
+  customArtifactGetMock.mockReset()
 })
 
 describe("ProjectArtifactDrawer — a side-column reading pane, never a modal", () => {
@@ -224,6 +228,50 @@ describe("ProjectArtifactDrawer — per-type body routing (real GET routes)", ()
       render(React.createElement(ProjectArtifactDrawer, { artifact: PRD, projectId: PROJECT_ID, onClose: () => {} }))
     })
     await waitFor(() => expect(screen.getByTestId("project-artifact-drawer-body").textContent).toContain("isn't available"))
+  })
+})
+
+describe("ProjectArtifactDrawer — custom_artifact (uploaded document, AC17)", () => {
+  it("test_drawer_renders_custom_artifact_body_formatted — fetches via customArtifactsApi.get, shapes the body with bodyFromMd, and markdown renders FORMATTED (heading/list elements, not literal # / -)", async () => {
+    customArtifactGetMock.mockResolvedValue({
+      title: "Launch plan.txt",
+      body_html: "# Launch plan\n\n- ship the beta\n- announce",
+    })
+    await act(async () => {
+      render(React.createElement(ProjectArtifactDrawer, { artifact: DOCUMENT, projectId: PROJECT_ID, onClose: () => {} }))
+    })
+    expect(customArtifactGetMock).toHaveBeenCalledWith(88)
+    const body = await screen.findByTestId("project-artifact-drawer-body")
+    await waitFor(() => expect(body.querySelector("h1")).toBeTruthy())
+    expect(body.querySelector("h1")?.textContent).toBe("Launch plan")
+    const items = body.querySelectorAll("li")
+    expect(items.length).toBe(2)
+    // NOT the literal markdown syntax anywhere in the rendered text.
+    expect(body.textContent).not.toContain("# Launch plan")
+    expect(body.textContent).not.toContain("- ship the beta")
+  })
+
+  it("test_drawer_shows_in_context_pill_for_document — an IN CONTEXT pill shows in the header for a document, absent for other types", async () => {
+    customArtifactGetMock.mockResolvedValue({ title: "Launch plan.txt", body_html: "body" })
+    await act(async () => {
+      render(React.createElement(ProjectArtifactDrawer, { artifact: DOCUMENT, projectId: PROJECT_ID, onClose: () => {} }))
+    })
+    expect(await screen.findByTestId("project-artifact-drawer-in-context")).toBeTruthy()
+    cleanup()
+
+    prdGetMock.mockResolvedValue({ title: "T", payload_md: "body" })
+    await act(async () => {
+      render(React.createElement(ProjectArtifactDrawer, { artifact: PRD, projectId: PROJECT_ID, onClose: () => {} }))
+    })
+    expect(screen.queryByTestId("project-artifact-drawer-in-context")).toBeNull()
+  })
+
+  it("an empty document body renders the honest empty note, not a crash", async () => {
+    customArtifactGetMock.mockResolvedValue({ title: "Empty doc", body_html: "" })
+    await act(async () => {
+      render(React.createElement(ProjectArtifactDrawer, { artifact: DOCUMENT, projectId: PROJECT_ID, onClose: () => {} }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-artifact-drawer-body").textContent).toContain("This document is empty."))
   })
 })
 

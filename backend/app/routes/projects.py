@@ -30,7 +30,7 @@ import re
 import sys
 from typing import Literal, NamedTuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app import qa_agent
@@ -45,7 +45,9 @@ from app.db import team as team_db
 from app.db import workspaces as workspaces_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
 from app.db.companies import get_seat_limit
+from app.db.custom_artifacts import BodyTooLarge, create_artifact
 from app.db.prds import save_prd_version, update_prd_content
+from app.ingest import convert
 from app.team_email import send_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app import project_delegation
@@ -750,6 +752,96 @@ def add_project_artifact(
         project_id, payload.artifact_type, payload.artifact_id,
     )
     return ref
+
+
+# Same ceiling as the chat composer's own attachment parse (`routes/ask.py`'s
+# `_MAX_EXTRACT_BYTES`) — a slide deck or spec is comfortably under this.
+# A dedicated module-level const rather than importing ask.py's private one,
+# so the two ceilings can be tuned independently later without cross-module
+# coupling.
+_MAX_DOC_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def _custom_artifact_item(row: dict) -> dict:
+    """Shape a freshly-created `custom_artifacts` row into the SAME
+    fan-out-shaped dict `db/artifacts.py`'s `list_artifacts_for_company`
+    emits for a `custom_artifact` (see its own docstring for the field-by-
+    field rationale) — built from the row in hand, no re-query. Lets the FE
+    insert the returned item into its list without a refetch."""
+    return {
+        "type": "custom_artifact",
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "status": row.get("status") or "",
+        "kind": row.get("kind") or "",
+        "created_at": row.get("updated_at") or row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "born_at": row.get("created_at"),
+        "source": {
+            "kind": row.get("kind") or "",
+            "conversation_id": row.get("conversation_id"),
+            "conversation_title": None,
+        },
+        "open": {"custom_artifact_id": row["id"]},
+    }
+
+
+@router.post("/{project_id}/documents")
+async def upload_project_document(
+    project_id: int,
+    file: UploadFile = File(...),
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Upload a document (pdf/docx/pptx/xlsx/txt/md) and attach it to the
+    project as a `custom_artifact` — the always-in-context "team documents"
+    library, reused rather than a new concept (see the migration widening
+    `project_artifacts.artifact_type`'s CHECK for why the attach write needs
+    it). Text-only: the extracted markdown lands in `custom_artifacts.
+    body_html` (Postgres) — no raw bytes are staged anywhere, no
+    `document_catalog` row is created.
+
+    Membership-gated (`_require_project_member`, AD-P11) BEFORE any read or
+    write. `create_artifact` mints the document under `ctx.company_id`, so
+    it is inherently the caller's — no separate ownership re-resolve is
+    needed the way the generic `/artifacts` route's client-supplied id
+    requires. `workspace_id` is stamped from `ctx`, never a baked default.
+
+    Validation mirrors `POST /v1/ask/extract-file` exactly (empty → 400,
+    oversize → 413, no-extractable-text → 422) — convert-failure/empty
+    returns BEFORE any row is written, so there is no orphan on a rejected
+    upload. If `add_artifact` fails after `create_artifact` succeeds, the
+    document exists unattached (still reachable via the custom-artifact
+    routes) — acceptable; this does NOT compensating-delete."""
+    _require_project_member(project_id, ctx)
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_DOC_BYTES:
+        raise HTTPException(413, "File too large (max 25 MB).")
+    markdown = await asyncio.to_thread(convert, file.filename or "upload", data)
+    if not markdown.strip():
+        raise HTTPException(
+            422,
+            "Could not extract any text from the file. Scanned/image-only "
+            "PDFs and legacy .ppt are not supported — export to PDF or .pptx.",
+        )
+    try:
+        artifact = create_artifact(
+            ctx.company_id,
+            kind="document",
+            title=(file.filename or "Untitled document"),
+            body_html=markdown,
+            workspace_id=ctx.workspace_id,
+            created_by=ctx.user_id,
+        )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large to store (over 400,000 characters).")
+    projects_db.add_artifact(project_id, "custom_artifact", int(artifact["id"]))
+    logger.info(
+        "project_document_uploaded project_id=%s custom_artifact_id=%s bytes=%s",
+        project_id, artifact["id"], len(data),
+    )
+    return _custom_artifact_item(artifact)
 
 
 class ProjectChatEditIn(BaseModel):
