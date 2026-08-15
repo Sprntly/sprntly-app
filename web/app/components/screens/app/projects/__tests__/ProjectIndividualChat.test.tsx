@@ -390,3 +390,25 @@ describe("ProjectIndividualChat — cross-chat INSIGHT turn (design-spec AC7/AC1
     expect(note.textContent).not.toContain("chat with Sprntly")
   })
 })
+
+// Was `voiceSupported={false}` — the composer's shared default-on wiring now
+// offers the mic here like every other composer consumer.
+describe("ProjectIndividualChat — voice (shared composer default)", () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).webkitSpeechRecognition = class {
+      start() {}
+      stop() {}
+      abort() {}
+    }
+  })
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).webkitSpeechRecognition
+  })
+
+  it("renders a live mic — no more voiceSupported={false} hard-disable", () => {
+    const src = readFileSync(join(__dirname, "../ProjectIndividualChat.tsx"), "utf8")
+    expect(src).not.toContain("voiceSupported={false}")
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    expect(screen.getByLabelText("Dictate your question")).toBeTruthy()
+  })
+})

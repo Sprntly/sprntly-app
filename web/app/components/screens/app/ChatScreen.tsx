@@ -1,6 +1,6 @@
 "use client"
 
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -18,16 +18,11 @@ import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import {
   AssistantWaitState,
-  WaitFailedState,
-  WaitStoppedState,
-  WaitTimedOutState,
   WAIT_FAILED_TITLE,
   isLongRunningSkill,
 } from "../../shared/AssistantWaitState"
-import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import {
-  ClarifyQuestionsCard,
   type ClarifyAnswer,
   type ClarifyQuestion,
   type ClarifyResolution,
@@ -46,7 +41,6 @@ import {
   type ChatIntentEnvelope,
   ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type TicketAssignQuestion,
 } from "../../../lib/api"
-import { OpenArtifactChips } from "../../shared/OpenArtifactChips"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { useSpeechInput } from "../../../lib/useSpeechInput"
@@ -66,7 +60,8 @@ import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
 import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
-import { ArtifactListCards } from "../../shared/ArtifactListCards"
+import { ChatBubble } from "../../shared/ChatBubble"
+import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -592,62 +587,6 @@ function openFailureReply(detail: string): AskResponse {
       : "I couldn't open that PRD just now. Try again in a moment.",
     key_points: [], citations: [], confidence: 1, unanswered: "",
   } as AskResponse
-}
-
-/** File extension, upper-cased (e.g. "DOCX"). Empty string when there's none. */
-function fileTypeLabel(name: string): string {
-  const dot = name.lastIndexOf(".")
-  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : ""
-}
-
-/** Human "12 lines" / "3.4 KB" hint from the extracted text, for the card
- *  subtitle (mirrors how Claude shows a size/dimension line under a file). */
-function attachmentMeta(name: string, content?: string): string {
-  const type = fileTypeLabel(name)
-  if (!content) return type || "File"
-  const lines = content.split("\n").length
-  return [type, `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`].filter(Boolean).join(" · ")
-}
-
-/** A clickable file card on a user turn — Claude-style: an icon tile, the file
- *  name, and a type/size sub-line. Clicking opens the viewer (renders the ORIGINAL
- *  file when it was stored, else the extracted text). `downloadable` reflects that
- *  the original file was stored, so the card is viewable even with no extracted
- *  text (e.g. a PDF imported straight to a PRD). */
-function TurnAttachmentCard({
-  name,
-  content,
-  downloadable,
-  onOpen,
-}: {
-  name: string
-  content?: string
-  downloadable?: boolean
-  onOpen: () => void
-}) {
-  const viewable = !!content || !!downloadable
-  return (
-    <button
-      type="button"
-      className="bc-file-card"
-      data-testid="turn-attachment-chip"
-      onClick={viewable ? onOpen : undefined}
-      disabled={!viewable}
-      title={viewable ? `View ${name}` : name}
-      aria-label={viewable ? `View ${name}` : name}
-    >
-      <span className="bc-file-card-icon" aria-hidden>
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 8" />
-        </svg>
-      </span>
-      <span className="bc-file-card-text">
-        <span className="bc-file-card-name">{name}</span>
-        <span className="bc-file-card-meta">{attachmentMeta(name, content)}</span>
-      </span>
-    </button>
-  )
 }
 
 /** Full-screen overlay that renders an attachment. When the ORIGINAL file was
@@ -6295,44 +6234,43 @@ export function ChatScreen() {
   // rebuilds the thread from Supabase with fresh turn ids on reload, but thread[0]
   // is still the command turn, so index-anchoring survives rehydrate.
   const insightCardNode = showInsightMsg ? (
-    <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
-      <div className="bc-agent-head">
-        <span className="bc-agent-mark">
-          <IconSparkle size={14} />
-        </span>
-        <span className="bc-agent-name">{AGENT_NAME}</span>
-        <span className="bc-agent-badge">
-          <IconSparkle size={10} />
-          Product Coworker
-        </span>
-      </div>
-      <div className="bc-agent-body">
-        <div className="bc-insight-msg">
-          <span className="bc-insight-msg-kind">PRD</span>
-          <span className="bc-insight-msg-text">{insightText}</span>
-        </div>
-        {/* Insight body — the finding's content under the heading.
-            Rendered as markdown so LLM-supplied **bold** shows. */}
-        {insightBody ? (
-          <div className="bc-insight-msg-body fc-body--md">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+    <ChatBubble
+      turnId="chat-insight-msg"
+      wrapperClassName="bc-turn bc-turn--insight"
+      dataTestId="chat-insight-msg"
+      agentName={AGENT_NAME}
+      agentBadge="Product Coworker"
+      agentBodyNode={
+        <>
+          <div className="bc-insight-msg">
+            <span className="bc-insight-msg-kind">PRD</span>
+            <span className="bc-insight-msg-text">{insightText}</span>
           </div>
-        ) : null}
-      </div>
-      <ChatArtifactActions
-        evidenceExists={chatEvidenceExists}
-        prdExists={chatPrdExists}
-        prdWaiting={chatPrdCtaWaiting}
-        prdGenerating={!!activeTab?.prdGenerating}
-        prdLoading={!!activeTab?.prdLoading}
-        onViewEvidence={handleOpenEvidence}
-        onOpenPrd={handleOpenPrd}
-        prototypePrdId={chatProtoPrdId}
-        prototypeReady={chatPrototypeReady}
-        onViewPrototype={handleViewPrototype}
-        onPrototypeSettled={handlePrototypeSettled}
-      />
-    </div>
+          {/* Insight body — the finding's content under the heading.
+              Rendered as markdown so LLM-supplied **bold** shows. */}
+          {insightBody ? (
+            <div className="bc-insight-msg-body fc-body--md">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+            </div>
+          ) : null}
+        </>
+      }
+      footer={
+        <ChatArtifactActions
+          evidenceExists={chatEvidenceExists}
+          prdExists={chatPrdExists}
+          prdWaiting={chatPrdCtaWaiting}
+          prdGenerating={!!activeTab?.prdGenerating}
+          prdLoading={!!activeTab?.prdLoading}
+          onViewEvidence={handleOpenEvidence}
+          onOpenPrd={handleOpenPrd}
+          prototypePrdId={chatProtoPrdId}
+          prototypeReady={chatPrototypeReady}
+          onViewPrototype={handleViewPrototype}
+          onPrototypeSettled={handlePrototypeSettled}
+        />
+      }
+    />
   ) : null
   // "User input needed" items from the PRD, surfaced as chat messages with answer
   // buttons. Answering patches only the affected PRD sections and refreshes the
@@ -6918,311 +6856,62 @@ export function ChatScreen() {
               ) : (
                 <div className="bc-scroll">
                   <div className="bc-thread" ref={setThreadContentEl}>
-                    {/* Insight message — for a HEADER open, the chat opens with its
-                        insight as the agent's first message (a pinned heading at the
-                        top). For an IN-CHAT COMMAND open (`inlinePrdCards`) the card
-                        + questions instead render inside `thread.map`, right after
-                        the command turn — see that block below. Hosts the
-                        Generate/View PRD + Generate/View Prototype actions. */}
-                    {!inlinePrdCards ? insightCardNode : null}
-                    {!inlinePrdCards ? prdQuestionsNode : null}
-                    {/* Resumed-conversation loading state: the tab opened
-                        instantly on row click; its history is still in flight. */}
-                    {activeTab?.hydrating && thread.length === 0 ? (
-                      <div className="bc-turn" aria-busy="true">
-                        <div className="bc-agent-head">
-                          <span className="bc-agent-mark">
-                            <IconSparkle size={14} />
-                          </span>
-                          <span className="bc-agent-name">{AGENT_NAME}</span>
-                        </div>
-                        <div className="bc-agent-body">
-                          {/* Nothing is generating here — history is loading —
-                              so this keeps its own copy ("loading conversation…",
-                              which used to sit in the head above) rather than
-                              inheriting the ask's "Working on your question". */}
-                          <AssistantThinkingSkeleton compact phase="loading conversation…" />
-                        </div>
-                      </div>
-                    ) : null}
-                    {thread.map((turn, idx) => {
-                      // "Last" for the purposes of in-flight state and the
-                      // artifact-action row means the last turn a REPLY could
-                      // still land on — a pending artifact-summary placeholder
-                      // is transparent to both. Without this, appending that
-                      // placeholder while an ask is in flight stole `isLast`
-                      // from the real in-flight turn, flipping it to "No
-                      // response was generated" mid-answer and yanking the
-                      // View PRD row off screen. Identical to `isLast` whenever
-                      // no summary is pending.
-                      const isLast = idx === lastLiveTurnIdx
-                      // A turn shows the "thinking" skeleton ONLY while its ask is
-                      // genuinely in flight — the active tab is busy AND this is the
-                      // last (in-flight) turn. Any other reply-less turn is terminal:
-                      // an ask that never got a response (failed / stopped / abandoned,
-                      // or a restored orphan turn from history). Basing this on live
-                      // busy state — not merely `reply === undefined` — means a
-                      // sessionStorage-cached thread renders correctly on reload too.
-                      // A PRD generation counts as in-flight too. Its command
-                      // turn's reply is the acknowledgment, and if that reply is
-                      // missing while the PRD is still being built, "No response
-                      // was generated" is the one thing that is certainly false —
-                      // the response is what the panel is rendering right now.
-                      const isGenerating =
-                        isLast &&
-                        (busy || !!activeTab?.prdGenerating || !!activeTab?.prdCommandThinking)
-                      const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
-                      if (hasFreshReply) animatedTurnIds.current.add(turn.id)
-                      // Wait-state signals for this turn. Every one is an
-                      // observable fact, not an inference: the skill only when
-                      // the question LEADS with a known trigger, the resume flag
-                      // only when resumeAskGeneration re-attached by id.
-                      const waitSkill = skillForQuery(turn.query)
-                      const waitStartedAt = askStartRef.current.get(turn.id)
-                      const waitResumed = resumedTurnsRef.current.has(turn.id)
-                      return (
-                        <Fragment key={turn.id}>
-                        <div className="bc-turn" {...(isGenerating && !turn.reply ? { "aria-busy": true } : {})}>
-                          {/* Only when the user actually said something. A turn
-                              can be AGENT-ONLY — the clarify gate posts its
-                              questions as a turn with an empty `query` — and an
-                              unconditional header put the user's name and avatar
-                              above a message they never sent, reading as a blank
-                              question of their own. Attachments count as saying
-                              something: a file sent with no text is still the
-                              user's turn. */}
-                          {turn.query || turn.attachments?.length ? (
-                            <div className="bc-user-head">
-                              <span className="bc-avatar">{userInitials}</span>
-                              <span className="bc-user-name">{name}</span>
-                            </div>
-                          ) : null}
-                          {turn.attachments?.length ? (
-                            <div className="bc-user-attachments">
-                              {turn.attachments.map((a, i) => (
-                                <TurnAttachmentCard
-                                  key={i}
-                                  name={a.name}
-                                  content={a.content}
-                                  downloadable={!!a.key}
-                                  onOpen={() =>
-                                    setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime })
-                                  }
-                                />
-                              ))}
-                            </div>
-                          ) : null}
-                          {turn.query ? <div className="bc-user-bubble">{turn.query}</div> : null}
-                          <div className="bc-agent-head">
-                            <span className="bc-agent-mark">
-                              <IconSparkle size={14} />
-                            </span>
-                            <span className="bc-agent-name">{AGENT_NAME}</span>
-                            <span className="bc-agent-badge">
-                              <IconSparkle size={10} />
-                              Product Coworker
-                            </span>
-                          </div>
-                          <div className="bc-agent-body">
-                            {/* The failed turn is an ALERT. The chat surface had
-                                no alert, status or live region of any kind, so a
-                                screen-reader user got total silence on failure.
-                                The copy is fixed — the raw backend detail that
-                                used to render here is kept on the turn as the
-                                record, not shown as the message. */}
-                            {turn.error ? (
-                              <WaitFailedState onAskAgain={() => handleAskAgain(turn)} />
-                            ) : null}
-                            {turn.stopped && !turn.reply ? (
-                              <WaitStoppedState onAskAgain={() => handleAskAgain(turn)} />
-                            ) : null}
-                            {/* A "generate a PRD" command gets NO instant
-                                acknowledgment: half the time the real answer is
-                                questions, and "Generating a PRD…" above them was
-                                a promise the agent didn't keep. The reply is
-                                deferred until the gate settles (settleCommandAck)
-                                and this indicator carries the window — the same
-                                anti-dead-air guarantee, minus the false claim. */}
-                            {!turn.reply && !turn.error && !turn.stopped ? (
-                              turn.summaryPending ? (
-                                // The artifact is done; its chat summary is one
-                                // model call behind. Say so — a bare skeleton
-                                // here read as another full answer coming.
-                                <div data-testid="summary-pending">
-                                  <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />
-                                </div>
-                              ) : isGenerating ? (
-                                turn.partial ? (
-                                  // Rung 4/5. Live token stream: the accumulating
-                                  // answer markdown renders as the model writes
-                                  // it — no simulated typing, the stream IS the
-                                  // typing, and the poll's authoritative reply
-                                  // replaces it. The status row STAYS above it:
-                                  // the first token used to blow the whole
-                                  // indicator away, taking Stop and the clock
-                                  // with it.
-                                  <AssistantWaitState
-                                    compact
-                                    startedAt={waitStartedAt}
-                                    streaming
-                                    streamDropped={turn.streamDropped}
-                                    resumed={waitResumed}
-                                    skillLabel={waitSkill?.label ?? null}
-                                    longSkill={isLongRunningSkill(waitSkill?.id)}
-                                    onStop={handleStopAsk}
-                                  >
-                                    <div data-testid="ask-streaming-partial">
-                                      <AskReplyBody
-                                        reply={{
-                                          answer: turn.partial, key_points: [], citations: [],
-                                          confidence: 0, unanswered: "",
-                                        } as unknown as AskResponse}
-                                      />
-                                      {!turn.streamDropped ? <span className="cw-cursor" aria-hidden /> : null}
-                                    </div>
-                                  </AssistantWaitState>
-                                ) : activeTab?.prdCommandThinking ? (
-                                  // The PRD command's own window keeps its own
-                                  // honest copy — it is a sufficiency check, not
-                                  // an ask — and only gains the new shape.
-                                  <div data-testid="prd-command-thinking">
-                                    <AssistantThinkingSkeleton compact />
-                                  </div>
-                                ) : (
-                                  // Rungs 0–3.
-                                  <AssistantWaitState
-                                    compact
-                                    startedAt={waitStartedAt}
-                                    streamDropped={turn.streamDropped}
-                                    resumed={waitResumed}
-                                    skillLabel={waitSkill?.label ?? null}
-                                    longSkill={isLongRunningSkill(waitSkill?.id)}
-                                    onStop={handleStopAsk}
-                                  />
-                                )
-                              ) : turn.timedOut ? (
-                                // The 12-minute client budget, not a failure —
-                                // the server job may still land and the pending
-                                // ask_id was deliberately left in place.
-                                <div data-testid="turn-timed-out">
-                                  <WaitTimedOutState
-                                    onReload={() => window.location.reload()}
-                                    onAskAgain={() => handleAskAgain(turn)}
-                                  />
-                                </div>
-                              ) : turn.interrupted ? (
-                                // A reload killed the clarify gate mid-decision
-                                // (see the persist effect) — the truthful state,
-                                // with the way out.
-                                <div className="bc-stopped" data-testid="turn-interrupted">
-                                  That request was interrupted before I could respond — send it again and I&apos;ll pick it up.
-                                </div>
-                              ) : (
-                                <div className="bc-stopped">No response was generated for this message.</div>
-                              )
-                            ) : null}
-                            {/* Clarify-first questions render as a CARD — options
-                                as buttons, one submit for the batch — in place of
-                                the flattened numbered list that `reply.answer`
-                                carries for persistence. It stays a card after
-                                answering, as a read-only record of what was
-                                decided (and what each blank fell back to):
-                                collapsing it back to text at the moment it became
-                                an audit trail threw the structure away exactly
-                                when it was worth the most.
+                    {(() => {
+                      // The turn-render region, extracted onto the shared
+                      // `<ChatTranscript>`/`<ChatBubble>` leaves: every
+                      // in-flight signal below is computed HERE (the shell)
+                      // and handed down as a prop, never read back out of a
+                      // closure inside the leaf. Comments that used to sit
+                      // beside the inline JSX now sit beside the prop that
+                      // carries the same fact.
+                      const turns: ChatTranscriptTurn[] = thread.map((turn, idx) => {
+                        // "Last" for the purposes of in-flight state and the
+                        // artifact-action row means the last turn a REPLY could
+                        // still land on — a pending artifact-summary placeholder
+                        // is transparent to both. Without this, appending that
+                        // placeholder while an ask is in flight stole `isLast`
+                        // from the real in-flight turn, flipping it to "No
+                        // response was generated" mid-answer and yanking the
+                        // View PRD row off screen. Identical to `isLast` whenever
+                        // no summary is pending.
+                        const isLast = idx === lastLiveTurnIdx
+                        // A turn shows the "thinking" skeleton ONLY while its ask is
+                        // genuinely in flight — the active tab is busy AND this is the
+                        // last (in-flight) turn. Any other reply-less turn is terminal:
+                        // an ask that never got a response (failed / stopped / abandoned,
+                        // or a restored orphan turn from history). Basing this on live
+                        // busy state — not merely `reply === undefined` — means a
+                        // sessionStorage-cached thread renders correctly on reload too.
+                        // A PRD generation counts as in-flight too. Its command
+                        // turn's reply is the acknowledgment, and if that reply is
+                        // missing while the PRD is still being built, "No response
+                        // was generated" is the one thing that is certainly false —
+                        // the response is what the panel is rendering right now.
+                        const isGenerating =
+                          isLast &&
+                          (busy || !!activeTab?.prdGenerating || !!activeTab?.prdCommandThinking)
+                        const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
+                        if (hasFreshReply) animatedTurnIds.current.add(turn.id)
+                        // Wait-state signals for this turn. Every one is an
+                        // observable fact, not an inference: the skill only when
+                        // the question LEADS with a known trigger, the resume flag
+                        // only when resumeAskGeneration re-attached by id.
+                        const waitSkill = skillForQuery(turn.query)
+                        const waitStartedAt = askStartRef.current.get(turn.id)
+                        const waitResumed = resumedTurnsRef.current.has(turn.id)
 
-                                The interactive form is still gated on the tab's
-                                live `pendingClarify`, so a card with no answering
-                                machinery behind it (a thread rehydrated from
-                                history) can never take a dead answer — it falls
-                                through to the plain text instead. */}
-                            {turn.clarify?.length && (turn.clarifyResolved || activeTab?.pendingClarify) ? (
-                              // While the batch is OPEN and this turn is the one
-                              // the dock popup is asking from, the thread shows a
-                              // one-line pointer instead of a second copy of the
-                              // questions — one answering surface at a time. The
-                              // popup's × brings this card back (dismissed), and
-                              // resolution always lands here as the record.
-                              clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved ? (
-                                <div className="cqc-popup-note" data-testid="clarify-popup-note">
-                                  Before I write this PRD, {turn.clarify.length === 1 ? "one quick question" : `${turn.clarify.length} quick questions`} — answer in the panel below, or just type your reply here.
-                                </div>
-                              ) : (
-                                <ClarifyQuestionsCard
-                                  questions={turn.clarify}
-                                  resolved={turn.clarifyResolved}
-                                  busy={busy || !!activeTab?.prdGenerating}
-                                  onSubmit={(answers) => submitClarifyAnswers(answers)}
-                                  onSkip={() => submitClarifyAnswers([])}
-                                />
-                              )
-                            ) : turn.reply ? (
-                              <AskReplyBody
-                                reply={turn.reply}
-                                animateIn={hasFreshReply}
-                                simulateTyping={hasFreshReply}
-                                // A report answer is an ARTIFACT: it reads in the
-                                // panel's Reports tab like every other artifact of
-                                // this thread, and the turn itself is just the card
-                                // that opens it — on THIS report, not on a list.
-                                onOpenReport={openReportByTitle}
-                              />
-                            ) : null}
-                            {/* "Which PRD did you mean?" — the candidates, as
-                                buttons that OPEN their document. Rendered on
-                                the turn that asked (not in the composer's
-                                suggestion strip) because they answer that one
-                                question, and they stay clickable on older turns
-                                so scrolling back to an unanswered question
-                                still works. */}
-                            {turn.openCandidates?.length ? (
-                              <OpenArtifactChips
-                                candidates={turn.openCandidates}
-                                disabled={busy}
-                                onOpen={(candidate) => { openArtifactInPanel(candidate) }}
-                              />
-                            ) : null}
-                            {/* "What are my PRDs?" — the user's own artifacts
-                                as clickable cards. Same contract as the chips
-                                above: each card OPENS its artifact (its own
-                                thread when one survives), never re-sends its
-                                label. Persisted with the turn, so still
-                                clickable after a reload. */}
-                            {turn.artifactList?.length ? (
-                              <ArtifactListCards
-                                items={turn.artifactList}
-                                disabled={busy}
-                                onOpen={openChatArtifactItem}
-                              />
-                            ) : null}
-                            {isLast && turn.reply && activeTab?.prdCommandThinking ? (
-                              <div data-testid="prd-command-thinking">
-                                <AssistantThinkingSkeleton compact />
-                              </div>
-                            ) : null}
-                          </div>
-                          {/* Artifact-action row (Generate/View PRD + prototype)
-                              — ONLY on a PRD-bound tab whose insight card isn't
-                              showing yet (a restored PRD tab: prdId kept, prd not
-                              yet rehydrated, so showInsightMsg is transiently
-                              false). A GENERIC chat answer never shows it: a plain
-                              Q&A reply is not a PRD springboard — to make a PRD
-                              from a chat the user types the request (the "generate
-                              a PRD for …" command), which opens its own PRD tab. */}
-                          {/* The STANDALONE-set action row: one button, on a
-                              chat that has no PRD and therefore no insight card
-                              to hang the pair off. Rendered instead of the row
-                              above, never beside it — a tab is about a PRD or
-                              about a set, not both. Shown while the run is in
-                              flight too, so the chat carries the same "a run is
-                              going" signal the panel does. */}
-                          {isLast && turn.reply && activeTab?.prdId == null && ticketSetActionState ? (
+                        // Artifact-action row (Generate/View PRD + prototype) —
+                        // ONLY on a PRD-bound tab whose insight card isn't showing
+                        // yet, OR the STANDALONE-set row on a chat with no PRD —
+                        // never both, and only on the last turn once it has a
+                        // reply (the run-in-flight state shows it too).
+                        const footer =
+                          isLast && turn.reply && activeTab?.prdId == null && ticketSetActionState ? (
                             <ChatTicketSetActions
                               state={ticketSetActionState}
                               onClick={() => { void handleTicketSetAction(activeTab!.id) }}
                             />
-                          ) : null}
-                          {isLast && turn.reply && !showInsightMsg && activeTab?.prdId != null ? (
+                          ) : isLast && turn.reply && !showInsightMsg && activeTab?.prdId != null ? (
                             <ChatArtifactActions
                               evidenceExists={chatEvidenceExists}
                               prdExists={chatPrdExists}
@@ -7236,25 +6925,117 @@ export function ChatScreen() {
                               onViewPrototype={handleViewPrototype}
                               onPrototypeSettled={handlePrototypeSettled}
                             />
-                          ) : null}
-                        </div>
-                        {/* IN-CHAT COMMAND open: the insight/PRD card + clarifying
-                            questions render as the reply BELOW the command turn —
-                            `inlinePrdAnchorIdx` resolves which turn that is (the
-                            recorded command turn for same-tab generation, thread[0]
-                            for legacy command-opened tabs) — instead of being
-                            pinned above the whole conversation (the out-of-order
-                            bug). Header opens render them at the top (see the
-                            block above) and skip this. */}
-                        {inlinePrdCards && idx === inlinePrdAnchorIdx ? (
-                          <>
-                            {insightCardNode}
-                            {prdQuestionsNode}
-                          </>
-                        ) : null}
-                        </Fragment>
+                          ) : null
+
+                        // IN-CHAT COMMAND open: the insight/PRD card + clarifying
+                        // questions render as the reply BELOW the command turn —
+                        // `inlinePrdAnchorIdx` resolves which turn that is —
+                        // instead of being pinned above the whole conversation.
+                        // Header opens render them at the top (see `leading`
+                        // below) and skip this.
+                        const afterNode =
+                          inlinePrdCards && idx === inlinePrdAnchorIdx ? (
+                            <>
+                              {insightCardNode}
+                              {prdQuestionsNode}
+                            </>
+                          ) : null
+
+                        return {
+                          turnId: turn.id,
+                          // Only when the user actually said something. A turn
+                          // can be AGENT-ONLY — the clarify gate posts its
+                          // questions as a turn with an empty `query` — and an
+                          // unconditional header put the user's name and avatar
+                          // above a message they never sent. `ChatBubble`
+                          // applies the same query-or-attachments gate.
+                          user: {
+                            name,
+                            initials: userInitials,
+                            query: turn.query,
+                            attachments: turn.attachments?.map((a) => ({
+                              name: a.name, content: a.content, downloadable: !!a.key,
+                              key: a.key, mime: a.mime,
+                            })),
+                            onOpenAttachment: (a) =>
+                              setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime }),
+                          },
+                          agentName: AGENT_NAME,
+                          agentBadge: "Product Coworker",
+                          isLast,
+                          isGenerating,
+                          isAnimated: hasFreshReply,
+                          waitSkill: waitSkill ? { label: waitSkill.label, id: waitSkill.id } : null,
+                          waitStartedAt,
+                          waitResumed,
+                          partial: turn.partial,
+                          streamDropped: turn.streamDropped,
+                          error: turn.error,
+                          onAskAgain: () => handleAskAgain(turn),
+                          stopped: turn.stopped,
+                          timedOut: turn.timedOut,
+                          onReload: () => window.location.reload(),
+                          interrupted: turn.interrupted,
+                          summaryPending: turn.summaryPending,
+                          onStop: handleStopAsk,
+                          prdCommandThinking: !!activeTab?.prdCommandThinking,
+                          clarify: turn.clarify,
+                          clarifyResolved: turn.clarifyResolved,
+                          clarifyPopupNote: clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved,
+                          clarifyGateOpen: !!activeTab?.pendingClarify,
+                          clarifyBusy: busy || !!activeTab?.prdGenerating,
+                          onSubmitClarify: (answers) => submitClarifyAnswers(answers),
+                          onSkipClarify: () => submitClarifyAnswers([]),
+                          reply: turn.reply,
+                          // A report answer is an ARTIFACT: it reads in the
+                          // panel's Reports tab like every other artifact of
+                          // this thread, and the turn itself is just the card
+                          // that opens it — on THIS report, not on a list.
+                          onOpenReport: openReportByTitle,
+                          openCandidates: turn.openCandidates,
+                          onOpenCandidate: (candidate) => { openArtifactInPanel(candidate) },
+                          artifactList: turn.artifactList,
+                          onOpenArtifactItem: openChatArtifactItem,
+                          artifactsDisabled: busy,
+                          footer,
+                          afterNode,
+                        }
+                      })
+                      return (
+                        <ChatTranscript
+                          turns={turns}
+                          leading={
+                            <>
+                              {/* Insight message — for a HEADER open, the chat opens with its
+                                  insight as the agent's first message (a pinned heading at the
+                                  top). For an IN-CHAT COMMAND open (`inlinePrdCards`) the card
+                                  + questions instead render inline after the command turn
+                                  (`afterNode` above). Hosts the Generate/View PRD +
+                                  Generate/View Prototype actions. */}
+                              {!inlinePrdCards ? insightCardNode : null}
+                              {!inlinePrdCards ? prdQuestionsNode : null}
+                              {/* Resumed-conversation loading state: the tab opened
+                                  instantly on row click; its history is still in flight. */}
+                              {activeTab?.hydrating && thread.length === 0 ? (
+                                <ChatBubble
+                                  turnId="chat-hydrating"
+                                  ariaBusy
+                                  agentName={AGENT_NAME}
+                                  agentBadge={null}
+                                  agentBodyNode={
+                                    // Nothing is generating here — history is loading —
+                                    // so this keeps its own copy ("loading conversation…",
+                                    // which used to sit in the head above) rather than
+                                    // inheriting the ask's "Working on your question".
+                                    <AssistantThinkingSkeleton compact phase="loading conversation…" />
+                                  }
+                                />
+                              ) : null}
+                            </>
+                          }
+                        />
                       )
-                    })}
+                    })()}
                     {/* PENDING SEND — the user's message plus a thinking
                         skeleton, rendered from the send's own commit while the
                         dispatch decision (POST /v1/chat/intent) is still in
@@ -7263,44 +7044,35 @@ export function ChatScreen() {
                         Attachment chips are name-only and inert here, exactly
                         as the optimistic turn renders them before extraction. */}
                     {pendingSendHere && pendingSend ? (
-                      <div className="bc-turn" data-testid="pending-send" aria-busy="true">
-                        <div className="bc-user-head">
-                          <span className="bc-avatar">{userInitials}</span>
-                          <span className="bc-user-name">{name}</span>
-                        </div>
-                        {pendingSend.attachments.length ? (
-                          <div className="bc-user-attachments">
-                            {pendingSend.attachments.map((a, i) => (
-                              <TurnAttachmentCard key={i} name={a.name} onOpen={() => {}} />
-                            ))}
-                          </div>
-                        ) : null}
-                        {pendingSend.query ? (
-                          <div className="bc-user-bubble">{pendingSend.query}</div>
-                        ) : null}
-                        <div className="bc-agent-head">
-                          <span className="bc-agent-mark">
-                            <IconSparkle size={14} />
-                          </span>
-                          <span className="bc-agent-name">{AGENT_NAME}</span>
-                          <span className="bc-agent-badge">
-                            <IconSparkle size={10} />
-                            Product Coworker
-                          </span>
-                        </div>
-                        <div className="bc-agent-body">
-                          {/* The same ladder the real turn will pick up — and
-                              the same clock, handed over with the turn — so a
-                              send opens on rung 0 (nothing) rather than a
-                              spinner that flickers for 300ms on a cache hit. */}
+                      <ChatBubble
+                        turnId="pending-send"
+                        dataTestId="pending-send"
+                        ariaBusy
+                        user={{
+                          name,
+                          initials: userInitials,
+                          query: pendingSend.query,
+                          // Name-only and inert here, exactly as the optimistic
+                          // turn renders them before extraction — no `content`/
+                          // `downloadable` means ChatBubble's own card renders
+                          // non-viewable, same as this block always did.
+                          attachments: pendingSend.attachments.map((a) => ({ name: a.name })),
+                        }}
+                        agentName={AGENT_NAME}
+                        agentBadge="Product Coworker"
+                        agentBodyNode={
+                          // The same ladder the real turn will pick up — and
+                          // the same clock, handed over with the turn — so a
+                          // send opens on rung 0 (nothing) rather than a
+                          // spinner that flickers for 300ms on a cache hit.
                           <AssistantWaitState
                             compact
                             startedAt={pendingSend.startedAt}
                             skillLabel={skillForQuery(pendingSend.query)?.label ?? null}
                             longSkill={isLongRunningSkill(skillForQuery(pendingSend.query)?.id)}
                           />
-                        </div>
-                      </div>
+                        }
+                      />
                     ) : null}
                   </div>
                 </div>

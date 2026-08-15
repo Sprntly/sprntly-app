@@ -65,12 +65,18 @@ def _create_project(ctx, *, name: str = "Interjection gate project") -> dict:
 
 def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") -> list[dict]:
     """Stub BOTH downstream calls a successful `_respond_as_group_agent`
-    makes (the reply itself, `app.routes.projects.run_tool_loop`, and the
-    memory-promotion classifier it fires afterwards,
-    `app.project_memory.call_json`) so a test that lets the gate say
-    `respond=true` doesn't also reach Anthropic for those two unrelated
-    surfaces. The fake reply does NOT invoke `dispatch(...)` — none of
-    these tests exercise delegation. Returns the list of reply calls made."""
+    makes (the reply itself — patched ONE LEVEL BELOW the unified answer
+    engine, at `app.llm.run_tool_loop`, RELOCATED from the pre-collapse
+    call this stub used to patch — so the REAL `qa_agent.answer` /
+    `qa_agent._try_scoped_tool_answer` wrapper still runs, including its
+    cost-log line, exactly as it did pre-collapse; and the memory-promotion
+    classifier fired afterwards, `app.project_memory.call_json`) so a test
+    that lets the gate say `respond=true` doesn't also reach Anthropic for
+    those two unrelated surfaces. The fake reply does NOT invoke
+    `dispatch(...)` — none of these tests exercise delegation. Returns the
+    list of reply calls made, each carrying the SAME `system`/`user` kwargs
+    `run_tool_loop` always received, so every downstream
+    `reply_calls[0]["system"]` assertion keeps working unchanged."""
     calls: list[dict] = []
 
     def _fake_run_tool_loop(  # noqa: ARG001
@@ -80,16 +86,13 @@ def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") ->
         if meta_out is not None:
             meta_out.update(
                 {
-                    "model": model,
-                    "input_tokens": 40,
-                    "output_tokens": 10,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
+                    "model": model, "input_tokens": 40, "output_tokens": 10,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
                 }
             )
         return reply
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_run_tool_loop)
     monkeypatch.setattr(
         project_memory, "call_json",
         lambda **kw: {"should_promote": False, "insight": ""},  # noqa: ARG005
@@ -130,7 +133,7 @@ def test_mention_bypasses_gate(isolated_settings, monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "@Sprntly can you summarize where we left off?"},
+            json={"content": "@Sprntly please delegate the export review to Fortune"},
         )
     assert r.status_code == 200
     assert gate_calls == [], "an @Sprntly mention must never consult the classifier"
@@ -169,7 +172,7 @@ def test_solo_project_bypasses_gate_with_unaddressed_turn(isolated_settings, mon
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "kicking this off — anyone around?"},
+            json={"content": "quick one — can we assign the export review to Fortune?"},
         )
     assert r.status_code == 200
     assert gate_calls == [], "a solo project must never consult the classifier"
@@ -251,7 +254,7 @@ def test_gate_respond_true_triggers_single_reply(isolated_settings, monkeypatch,
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "is anyone able to help debug the deploy pipeline today?"},
+            json={"content": "is anyone able to help — can you assign the export review to Fortune?"},
         )
     assert r.status_code == 200
     assert len(reply_calls) == 1

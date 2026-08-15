@@ -15,6 +15,11 @@
  * Rows are buttons in a `role="group"`, not `role="list"` items, for the
  * reason documented on OpenArtifactChips: `role="listitem"` on a <button>
  * REPLACES its button role and screen readers stop announcing it pressable.
+ *
+ * A reply-adjacent card leaf, props-driven with no coupling to any one
+ * screen — `shared/ChatBubble` renders it via its `artifactList` prop, so
+ * any surface that hands ChatBubble a turn's `ChatArtifactItem[]` gets the
+ * same clickable listing, not a second implementation.
  */
 import type { ChatArtifactItem } from "../../lib/api"
 import {

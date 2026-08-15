@@ -233,6 +233,31 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "gate the identical tests, so this is the other half of that same "
         "exemption. See that entry for the deterministic backstop."
     ),
+    ("test_project_answer_collapse_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the project "
+        "chat engine collapse (LT-2..LT-9): proves multi-party speaker "
+        "attribution through the collapsed engine, project-awareness parity "
+        "(context block + 4 read tools + delegate/execute callable), a real "
+        "delegate_task call actually seeding a project_delegations row, "
+        "cancel on the plain-Q&A composer path, main-chat regression, the "
+        "backgrounded group reply not blocking the route, the LT-8 "
+        "input-shape decision, and list_artifacts parity post-ff — a stubbed "
+        "LLM can prove wiring only, never that the model actually engages "
+        "the right tool or that the router/interceptor behaviour on a "
+        "multi-speaker transcript is unchanged. Deterministic backstop: "
+        "test_surface_scope.py and test_project_answer_collapse.py cover "
+        "the byte-identity property test, the sixth-branch dispatch wiring, "
+        "all four invariant mutation proofs, the backgrounding mechanics, "
+        "and the queue-ready seams against fakes/monkeypatches in the fast "
+        "lane; this suite is the real-DB/real-LLM proof, DEFERRED-TO-STAGING "
+        "— run on staging when access lands, which also pins the LT-8 "
+        "winner before merge."
+    ),
+    ("test_project_answer_collapse_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
     ("test_project_delegations.py", "RUN_PROJECT_DELEGATIONS_ROUNDTRIP"): (
         "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
         "project_delegations migration's FK cascade/set-null behaviour, its "

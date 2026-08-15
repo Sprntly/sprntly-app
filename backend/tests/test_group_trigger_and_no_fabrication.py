@@ -55,17 +55,19 @@ def _ctx(t) -> SimpleNamespace:
 
 
 def _fake_loop_capturing(systems: list[str], *, reply: str = "unused"):
-    def _fake_loop(*, system, user, tools, dispatch, model, meta_out=None, **kw):  # noqa: ARG001
+    """Patches the unified answer engine (`qa_agent.answer`) instead of the
+    pre-collapse `run_tool_loop` call — captures the SAME assembled system
+    text (`scope.system_addendum` + `scope.context_payload`, joined exactly
+    the way `_respond_as_group_agent` builds it and the sixth ladder branch
+    reassembles it) so every EDIT STATUS / addressing-note assertion below
+    keeps working unchanged."""
+    def _fake_answer(*, enterprise_id, question, dataset, scope=None, **kw):  # noqa: ARG001
+        system = "\n\n".join(
+            p for p in ((scope.system_addendum if scope else ""), (scope.context_payload if scope else "")) if p
+        )
         systems.append(system)
-        if meta_out is not None:
-            meta_out.update(
-                {
-                    "model": model, "input_tokens": 1, "output_tokens": 1,
-                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-                }
-            )
-        return reply
-    return _fake_loop
+        return {"answer": reply, "citations": []}
+    return _fake_answer
 
 
 # ── agent_spoke_last / trigger_kind derivation (AC3) ──────────────────────
@@ -382,7 +384,7 @@ def test_fallback_edit_note_forbids_write_claim(tenant_client, isolated_settings
         lambda *a, **kw: {"intent": "edit_prd", "instruction": "do it"},
     )
     systems: list[str] = []
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop_capturing(systems))
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_loop_capturing(systems))
 
     r = t.client.post(
         f"/v1/projects/{project_id}/group/turns",
@@ -409,7 +411,7 @@ def test_done_narration_is_single_sourced():
     """The 'Done — I've updated the PRD' literal (the ternary's two
     branches both use it — with vs. without an appended summary) appears
     ONLY inside the `sections_changed`-guarded narration block of
-    `_classify_and_maybe_edit_group_prd` — the `run_tool_loop` fallback
+    `_classify_and_maybe_edit_group_prd` — the unified-engine fallback reply
     (built inside `_respond_as_group_agent`, further down the file) has no
     such literal anywhere; it only ever gets an `edit_note` steering it
     AWAY from claiming a write."""
@@ -426,7 +428,7 @@ def test_done_narration_is_single_sourced():
     assert 'result.get("sections_changed")' in classify_body
 
     assert "Done — I've updated the PRD" not in fallback_body, (
-        "the run_tool_loop fallback path must never carry the completed-"
+        "the unified-engine fallback path must never carry the completed-"
         "edit narration literal — a second producer there would let the "
         "reply fabricate a completed edit claim"
     )
@@ -455,7 +457,7 @@ def test_respond_selects_addressing_note_by_trigger_kind(
         projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"},
     )
     systems: list[str] = []
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop_capturing(systems))
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_loop_capturing(systems))
 
     # mention -> mention note.
     project_mention = _seed_project(t, isolated_settings, name="mention project")
@@ -503,10 +505,15 @@ def test_single_classify_edit_path_no_fork():
     prd` call inside `_respond_as_group_agent` — a source-scan proves
     exactly one call site (plus its one `def`), not a per-trigger-kind
     duplicate classify/edit path, and that every kind falls through to the
-    SAME `run_tool_loop` call."""
+    SAME unified-engine call (`qa_agent.answer`, RELOCATED from the former
+    `run_tool_loop` call this ticket replaces — post-collapse the literal
+    call is gone from this file; historical references survive only in
+    prose docstrings, not in any executable line)."""
     src = PROJECTS_ROUTE_SRC
     assert src.count("_classify_and_maybe_edit_group_prd(") == 2  # def + 1 call site
-    assert src.count("reply = run_tool_loop(") == 1  # one shared reply call, no fork
+    assert src.count("result = qa_agent.answer(") == 1  # one shared reply call, no fork
+    assert "reply = run_tool_loop(" not in src
+    assert "import run_tool_loop" not in src
 
 
 def test_one_resolver_shared_by_both_surfaces():

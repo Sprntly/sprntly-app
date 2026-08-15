@@ -9,12 +9,22 @@
 // blast-radius regression proof that the individual chat's composer behaves
 // identically post-extraction.
 //
-// The only addition on the move is the optional `placeholder` prop (defaults
+// The only addition on the move was the optional `placeholder` prop (defaults
 // to `COMPOSER_PLACEHOLDER`, `ChatScreen`'s original hardcoded copy — so
 // `ChatScreen`, which never passes it, is byte-for-byte unchanged) — it lets
 // the group chat swap in its own placeholder copy without a second composer.
-import { useEffect, useRef } from "react"
+//
+// Dictation moved IN here next: every drift between the three composer
+// consumers so far has been the same shape — one caller wires a capability,
+// the other two forget to. `voiceSupported`/`voiceListening`/`onToggleVoice`
+// are now optional; a caller that omits them gets a self-contained mic wired
+// to this file's OWN `useSpeechInput` instance instead of having to remember
+// to thread one. `ChatScreen` still passes all three explicitly (its own
+// wiring covers draft-join, cancel-on-send, and the composer error hint) and
+// is therefore unaffected — see the prop doc below for the override rule.
+import { useCallback, useEffect, useRef } from "react"
 import { IconMic, IconSendUp, IconStop } from "./app-icons"
+import { useSpeechInput } from "../../lib/useSpeechInput"
 
 /** The composer's outgoing-draft cap (matches the backend's own limit). */
 export const DRAFT_MAX_CHARS = 120_000
@@ -83,6 +93,7 @@ export function ChatComposer({
   voiceSupported,
   voiceListening,
   onToggleVoice,
+  disableVoice,
   placeholder,
 }: {
   home?: boolean
@@ -107,12 +118,22 @@ export function ChatComposer({
   onRemoveAttachment: (index: number) => void
   onRemoveSkill: () => void
   onFileSelect: (e: React.ChangeEvent<HTMLInputElement>) => void
-  /** The browser has the Web Speech API. False renders NO microphone at all —
-   *  Firefox ships it behind a flag, and a button that silently does nothing is
-   *  worse than an affordance that was never offered. */
-  voiceSupported: boolean
-  voiceListening: boolean
-  onToggleVoice: () => void
+  /** Dictation is default-on (drift-class fix, 2026-08): omitted by a caller,
+   *  the composer wires its OWN `useSpeechInput` instance and offers the mic
+   *  wherever the browser supports it — no consumer has to remember to thread
+   *  voice through. Pass all three of `voiceSupported`/`voiceListening`/
+   *  `onToggleVoice` explicitly (as `ChatScreen` still does, to keep its own
+   *  richer draft-join/cancel-on-send/error-hint wiring) to fully override the
+   *  internal wiring instead — `voiceSupported !== undefined` is the switch.
+   *  Firefox ships the Web Speech API behind a flag, so "not supported" (either
+   *  path) renders NO microphone at all — a button that silently does nothing
+   *  is worse than an affordance that was never offered. */
+  voiceSupported?: boolean
+  voiceListening?: boolean
+  onToggleVoice?: () => void
+  /** Explicit opt-out — renders NO microphone regardless of support. No
+   *  current consumer sets this; it exists for a future read-only surface. */
+  disableVoice?: boolean
   /** Overrides `COMPOSER_PLACEHOLDER` — the group chat's "Message the team, or
    *  @Sprntly to hand it a task…" copy. Omitted callers (ChatScreen) get the
    *  exact original text, unchanged. */
@@ -148,6 +169,46 @@ export function ChatComposer({
   const canSend = draft.trim().length >= DRAFT_MIN_CHARS
   const showCount = draft.length >= DRAFT_COUNTER_FROM
   const hasHead = !!pinnedSkill || attachments.length > 0
+
+  // ── Dictation (default-on, see the prop doc above) ───────────────────────
+  // Whatever was already typed when the mic switched on — speech APPENDS to a
+  // draft rather than replacing it, mirroring `ChatScreen`'s own pre-move
+  // wiring exactly (`voiceBaseRef`/`handleVoiceTranscript` there).
+  const voiceOverridden = voiceSupported !== undefined
+  const voiceBaseRef = useRef("")
+  const handleVoiceTranscript = useCallback(
+    (text: string) => {
+      if (!text) return
+      const next = (voiceBaseRef.current + text).slice(0, DRAFT_MAX_CHARS)
+      onInput({ target: { value: next } } as unknown as React.ChangeEvent<HTMLTextAreaElement>)
+      // The textarea's auto-grow lives in the `change` handler, which speech
+      // never fires — without this the box stays one line tall while the
+      // words pile up out of sight.
+      const ta = composerRef.current
+      if (ta) {
+        ta.style.height = "auto"
+        ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+      }
+    },
+    [onInput, composerRef],
+  )
+  // Called unconditionally (rules-of-hooks) even when a caller overrides —
+  // the resulting recognizer is simply never started on that path.
+  const internalVoice = useSpeechInput(handleVoiceTranscript)
+  const handleInternalToggleVoice = useCallback(() => {
+    if (internalVoice.listening) {
+      internalVoice.stop()
+      composerRef.current?.focus()
+      return
+    }
+    const typed = draft.trimEnd()
+    voiceBaseRef.current = typed ? `${typed} ` : ""
+    internalVoice.start()
+  }, [internalVoice, draft, composerRef])
+
+  const micSupported = disableVoice ? false : voiceOverridden ? !!voiceSupported : internalVoice.supported
+  const micListening = voiceOverridden ? !!voiceListening : internalVoice.listening
+  const handleMicToggle = voiceOverridden ? (onToggleVoice ?? (() => {})) : handleInternalToggleVoice
 
   return (
     <div className={`cx${home ? " cx--home" : ""}${busy ? " cx--busy" : ""}`}>
@@ -228,14 +289,14 @@ export function ChatComposer({
               asked. So the words land in the box, the box stays editable, and
               Enter stays the user's. Deliberately NOT swapped out while busy —
               dictating the next question during a wait is the point. */}
-          {voiceSupported ? (
+          {micSupported ? (
             <button
               type="button"
-              className={`cx-mic${voiceListening ? " is-recording" : ""}`}
-              aria-label={voiceListening ? "Stop dictating" : "Dictate your question"}
-              aria-pressed={voiceListening}
-              title={voiceListening ? "Stop dictating" : "Dictate your question"}
-              onClick={onToggleVoice}
+              className={`cx-mic${micListening ? " is-recording" : ""}`}
+              aria-label={micListening ? "Stop dictating" : "Dictate your question"}
+              aria-pressed={micListening}
+              title={micListening ? "Stop dictating" : "Dictate your question"}
+              onClick={handleMicToggle}
             >
               <IconMic size={17} />
             </button>
