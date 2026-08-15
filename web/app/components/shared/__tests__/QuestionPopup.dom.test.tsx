@@ -248,3 +248,70 @@ describe("QuestionPopup — host-shaped questions (assignment)", () => {
     expect(screen.queryByTestId("question-popup-input")).toBeNull()
   })
 })
+
+// Reported from a live session: "assign some of the tickets to me" listed all
+// ten of a PRD's tickets, and the popup grew tall enough to bury the composer.
+// Past five options the list scrolls at five rows. The pixel cap is measured
+// from the laid-out rows, which jsdom never produces — so what is asserted here
+// is the DECISION (does this question's list scroll?) and the fact that
+// scrolling caps rather than truncates. The height itself is browser-only.
+describe("QuestionPopup — long option lists scroll", () => {
+  const many = (n: number, prompt = "Which tickets would you like assigned to you?"): PopupQuestion => ({
+    prompt,
+    multiSelect: true,
+    allowOther: false,
+    options: Array.from({ length: n }, (_, i) => ({
+      label: `Ticket ${i + 1}`,
+      description: `prd-2967-${i}`,
+    })),
+  })
+
+  it("past five options the list scrolls, with every option still rendered", () => {
+    render(<QuestionPopup questions={[many(10)]} onComplete={vi.fn()} />)
+    expect(screen.getByTestId("question-popup-options").className).toContain("qpu-options--scroll")
+    // Capped, not truncated — all ten stay reachable by scrolling.
+    expect(screen.getAllByTestId("question-popup-option")).toHaveLength(10)
+  })
+
+  it("five or fewer render exactly as before", () => {
+    render(<QuestionPopup questions={[many(5)]} onComplete={vi.fn()} />)
+    const list = screen.getByTestId("question-popup-options")
+    expect(list.className).not.toContain("qpu-options--scroll")
+    expect(list.getAttribute("style")).toBeNull()
+  })
+
+  it("the decision is per question, and a new question starts at the top", () => {
+    render(
+      <QuestionPopup
+        questions={[many(10), { prompt: "Anything else?", options: [{ label: "No" }] }]}
+        onComplete={vi.fn()}
+      />,
+    )
+    const list = screen.getByTestId("question-popup-options")
+    expect(list.className).toContain("qpu-options--scroll")
+    Object.defineProperty(list, "scrollTop", { value: 140, writable: true, configurable: true })
+
+    fireEvent.click(screen.getByLabelText("Next question"))
+    const next = screen.getByTestId("question-popup-options")
+    expect(next.className).not.toContain("qpu-options--scroll")
+    // Same reused node — the short question must not inherit the long one's
+    // scroll offset and open on blank space.
+    expect(next.scrollTop).toBe(0)
+  })
+
+  it("the bottom fade lifts once the last option is in view", () => {
+    render(<QuestionPopup questions={[many(10)]} onComplete={vi.fn()} />)
+    const list = screen.getByTestId("question-popup-options")
+    // jsdom lays nothing out; stand in for the geometry a browser would give.
+    Object.defineProperty(list, "clientHeight", { value: 200, configurable: true })
+    Object.defineProperty(list, "scrollHeight", { value: 400, configurable: true })
+    Object.defineProperty(list, "scrollTop", { value: 40, writable: true, configurable: true })
+
+    fireEvent.scroll(list)
+    expect(list.getAttribute("data-scroll-end")).toBeNull()
+
+    list.scrollTop = 200
+    fireEvent.scroll(list)
+    expect(list.getAttribute("data-scroll-end")).toBe("1")
+  })
+})

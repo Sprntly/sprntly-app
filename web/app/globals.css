@@ -8371,9 +8371,34 @@
     gap: 6px;
   }
 
+  /* Past five options the list scrolls instead of growing the popup — a
+     ten-ticket "which tickets?" question used to render all ten rows and push
+     the composer off the bottom of the screen. The pixel cap itself is
+     MEASURED in the component (rows are one line, two lines, or a label plus a
+     description depending on the host, so no constant here is right twice);
+     only the scrolling and the "there is more below" cue live here. */
+  .qpu-options--scroll {
+    overflow-y: auto;
+    /* Scrollbars are transparent until the pointer is over them (see the
+       global rules at the top of this file), so at rest the fade is the ONLY
+       thing telling the user the list continues. It lifts once the last row is
+       in view so a fully-scrolled list doesn't look permanently clipped. */
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+  }
+
+  .qpu-options--scroll[data-scroll-end="1"] {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
   .qpu-option {
     display: flex;
     flex-direction: column;
+    /* Load-bearing under the cap above: a height-constrained flex column
+       SHRINKS its items to fit rather than overflowing, which would squash all
+       ten rows into the space of five instead of scrolling them. */
+    flex: 0 0 auto;
     gap: 2px;
     align-items: flex-start;
     text-align: left;
