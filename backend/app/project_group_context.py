@@ -262,16 +262,19 @@ GET_ARTIFACT_CONTENT_TOOL = {
     "name": "get_artifact_content",
     "description": (
         "Read the full content of ONE artifact on this project — e.g. a PRD's "
-        "body, an evidence brief, or a report. Pass the artifact_type and "
-        "artifact_id exactly as returned by list_project_artifacts. Call this "
-        "when asked what a specific document says or to summarize it."
+        "body, an evidence brief, a report, or an uploaded document. Pass the "
+        "artifact_type and artifact_id exactly as returned by "
+        "list_project_artifacts. Call this whenever answering the question "
+        "requires an artifact's content — including an uploaded document. "
+        "Call it NOW, in this same turn, before replying; do not tell the "
+        "user you will check or read it later."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "artifact_type": {
                 "type": "string",
-                "enum": ["prd", "prototype", "evidence", "report", "ticket_set"],
+                "enum": ["prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"],
                 "description": "the artifact's type, from list_project_artifacts",
             },
             "artifact_id": {

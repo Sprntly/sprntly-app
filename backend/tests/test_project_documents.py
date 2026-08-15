@@ -400,20 +400,62 @@ def _live_llm_project(_live_llm_fixture_ids):
         {"project_id": row["id"], "user_id": _live_llm_fixture_ids["user_id"]}
     ).execute()
     yield row
-    sb.table("custom_artifacts").delete().eq("workspace_id", row["workspace_id"]).eq(
-        "conversation_id", None
-    ).ilike("title", "distinctive-fact-%").execute()
+    # project_members/project_artifacts FK-cascade off the project row
+    # itself (see supabase/migrations/20260813130000_projects.sql) — only
+    # the project needs an explicit delete here.
     sb.table("projects").delete().eq("id", row["id"]).execute()
+
+
+@pytest.fixture
+def _live_created_custom_artifact_ids():
+    """Tests append the exact id of any `custom_artifacts` row they mint;
+    torn down by THAT id only — never a title/column scan (a title-prefix +
+    `.eq("conversation_id", None)` scan is both imprecise on a shared rig
+    and, worse, `.eq(col, None)` is not how PostgREST expresses NULL and
+    raises instead of matching anything, orphaning the row on every run)."""
+    created: list[int] = []
+    yield created
+    if not created:
+        return
+    sb = _sb()
+    for artifact_id in created:
+        sb.table("custom_artifacts").delete().eq("id", artifact_id).execute()
+
+
+def _poll_for_assistant_reply(client, project_id: int, *, before_count: int, timeout: float = 90.0, interval: float = 2.0):
+    """Poll `GET .../group/turns` until a NEW assistant-role turn appears
+    past `before_count`, or raise on timeout.
+
+    The reply is genuinely backgrounded (`_schedule_group_reply` schedules
+    an `asyncio.create_task`, not a `Response.background` callback the ASGI
+    machinery awaits before the response is sent) — asserting on the turns
+    list immediately after the POST returns races the real Anthropic call
+    and is a false negative regardless of whether the code is correct.
+    Mirrors the composer's own `sleepUntilNextPoll` cadence (~3s)."""
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        turns = client.get(f"/v1/projects/{project_id}/group/turns").json()["turns"]
+        agent_turns = [t for t in turns if t.get("role") == "assistant"]
+        if len(turns) > before_count and agent_turns:
+            return agent_turns
+        time.sleep(interval)
+    raise AssertionError(
+        f"no assistant reply arrived within {timeout}s (last poll: {len(turns)} turns)"
+    )
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not _RUN_LIVE_LLM, reason=_LIVE_LLM_SKIP_REASON)
-def test_project_agent_reads_uploaded_document_live(_live_llm_client, _live_llm_project):
+def test_project_agent_reads_uploaded_document_live(
+    _live_llm_client, _live_llm_project, _live_created_custom_artifact_ids
+):
     """Upload a document carrying a distinctive fact, ask the REAL project
-    group agent about it over a REAL Anthropic call, and assert the fact
-    appears in the reply — proves the `custom_artifact` read branch live
-    (AC14). Not run by the builder — RUN_LIVE_LLM-gated, the ship-gate
-    verifier's job (PI12)."""
+    group agent about it over a REAL Anthropic call, POLL the genuinely
+    backgrounded reply, and assert the fact appears — proves the
+    `custom_artifact` read branch live (AC14). Not run by the builder —
+    RUN_LIVE_LLM-gated, the ship-gate verifier's job (PI12)."""
     pid = _live_llm_project["id"]
     distinctive = "the launch codename is ZEBRA-NINE-QUASAR"
     upload = _live_llm_client.post(
@@ -421,14 +463,14 @@ def test_project_agent_reads_uploaded_document_live(_live_llm_client, _live_llm_
         files={"file": (f"distinctive-fact-{uuid.uuid4().hex[:8]}.txt", distinctive.encode(), "text/plain")},
     )
     assert upload.status_code == 200, upload.text
+    _live_created_custom_artifact_ids.append(upload.json()["id"])
 
+    before = _live_llm_client.get(f"/v1/projects/{pid}/group/turns").json()["turns"]
     r = _live_llm_client.post(
         f"/v1/projects/{pid}/group/turns",
         json={"content": "@Sprntly what is the launch codename mentioned in our documents?"},
     )
     assert r.status_code == 200, r.text
 
-    turns = _live_llm_client.get(f"/v1/projects/{pid}/group/turns").json()["turns"]
-    agent_turns = [t for t in turns if t.get("role") == "assistant"]
-    assert agent_turns, "no agent reply arrived"
+    agent_turns = _poll_for_assistant_reply(_live_llm_client, pid, before_count=len(before))
     assert "ZEBRA-NINE-QUASAR" in agent_turns[-1]["content"], agent_turns[-1]["content"]

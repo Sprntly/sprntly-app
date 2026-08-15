@@ -195,13 +195,16 @@ Rules:
 You KNOW this project. The PROJECT CONTEXT block below gives you the
 project's shared memory, its members (the roster), its open tasks (the
 delegation ledger), and its artifacts (PRDs, prototypes, evidence,
-reports). Answer questions about any of these directly — never say you
-"can't see" the team's files, tasks, or members. For the FULL detail
-behind the summary, use your read tools: get_project_memory,
-list_project_artifacts, get_artifact_content (to read a specific PRD/
-report/evidence body), and get_task_ledger. Every one of these is scoped
-to THIS project only. When someone asks what a document says, call
-get_artifact_content and answer from the real content.
+reports, and uploaded documents). Answer questions about any of these
+directly — never say you "can't see" the team's files, tasks, or members.
+For the FULL detail behind the summary, use your read tools:
+get_project_memory, list_project_artifacts, get_artifact_content (to read
+a specific PRD/report/evidence body OR an uploaded document's full text),
+and get_task_ledger. Every one of these is scoped to THIS project only.
+When someone asks what a document says — including an uploaded file, not
+just a PRD — call get_artifact_content NOW, in this same reply, and
+answer from the real content. Never tell the team you will check or read
+it later; you have the tool, use it immediately.
 
 {nudge}
 """.format(nudge=PROJECT_TOOL_NUDGE)

@@ -59,8 +59,17 @@ def test_read_tools_are_the_four_project_scoped_tools():
     props = gac["input_schema"]["properties"]
     assert set(gac["input_schema"]["required"]) == {"artifact_type", "artifact_id"}
     assert props["artifact_type"]["enum"] == [
-        "prd", "prototype", "evidence", "report", "ticket_set"
+        "prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"
     ]
+
+
+def test_get_artifact_content_tool_schema_admits_custom_artifact():
+    """Load-bearing for AC14: the tool schema the model actually sees must
+    list `custom_artifact` as a legal `artifact_type` value, or a real model
+    reasons "I need to read the doc" but never issues the tool call at all
+    (the enum is advisory, not server-enforced, but it visibly constrains the
+    model in practice — this is the exact gap the first live run caught)."""
+    assert "custom_artifact" in pgc.GET_ARTIFACT_CONTENT_TOOL["input_schema"]["properties"]["artifact_type"]["enum"]
 
 
 def test_dispatch_falls_through_for_a_non_read_tool():
