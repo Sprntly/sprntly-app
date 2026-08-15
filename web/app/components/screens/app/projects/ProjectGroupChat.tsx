@@ -817,6 +817,11 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                   dataTestId: "gc-msg-other",
                   showAgent: false,
                   agentName: AGENT_NAME,
+                  // A teammate's own turn, never the reader's — left-aligned,
+                  // avatar-flanked, so it reads as visually distinct from
+                  // the reader's own right-aligned turns below. Only a
+                  // group transcript's non-self human rows ever set this.
+                  humanAlign: "start",
                   speaker: turn.author_name ?? "Someone",
                   userHeadExtra: (
                     <>

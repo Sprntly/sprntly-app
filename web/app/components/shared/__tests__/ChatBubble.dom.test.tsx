@@ -117,3 +117,46 @@ describe("ChatBubble in-flight signals as props", () => {
     expect(container.querySelector(".bc-user-name")?.textContent).toBe("Devon Blake")
   })
 })
+
+describe("ChatBubble humanAlign — third-party turns in a multi-party thread", () => {
+  it("a teammate's turn (humanAlign=start) renders left/avatar-flanked, never the right-aligned lane", () => {
+    const { container } = render(
+      <ChatBubble
+        turnId="t8"
+        agentName="Sprntly"
+        showAgent={false}
+        humanAlign="start"
+        speaker="Fortune Adeyemi"
+        role="Design"
+        user={{ initials: "FA", bodyNode: "Ship it Friday." }}
+      />,
+    )
+    // The right-aligned, 1:1-surface lane (bc-user-head/bc-user-bubble,
+    // globals.css align-self: flex-end) must be absent entirely — a
+    // teammate's turn is never rendered through it.
+    expect(container.querySelector(".bc-user-bubble")).toBeNull()
+    expect(container.querySelector(".bc-user-head")).toBeNull()
+    // The dedicated left/avatar-flanked row is present instead, and still
+    // carries the name (Invariant 4 attribution survives the new layout).
+    const row = container.querySelector('[class*="otherRow"]')
+    expect(row).not.toBeNull()
+    expect(row?.querySelector(".bc-avatar")?.textContent).toBe("FA")
+    expect(row?.textContent).toContain("Fortune Adeyemi")
+    expect(row?.textContent).toContain("Ship it Friday.")
+  })
+
+  it("the reader's own turn (humanAlign unset) still renders through the right-aligned lane", () => {
+    const { container } = render(
+      <ChatBubble
+        turnId="t9"
+        agentName="Sprntly"
+        showAgent={false}
+        speaker="You"
+        user={{ initials: "ME", bodyNode: "On it." }}
+      />,
+    )
+    expect(container.querySelector(".bc-user-bubble")).not.toBeNull()
+    expect(container.querySelector('[class*="otherRow"]')).toBeNull()
+    expect(container.querySelector(".bc-user-bubble")?.textContent).toBe("On it.")
+  })
+})

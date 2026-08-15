@@ -107,6 +107,18 @@ export interface ChatBubbleProps {
    *  chat's own decorations — a mention picker has nothing to do with a
    *  single turn, so this is for turn-scoped extras only). */
   userHeadExtra?: ReactNode
+  /** Layout for a human turn rendered with no agent block (`showAgent:
+   *  false`). "end" (default, unset) is the existing shape — `bc-user-head`/
+   *  `bc-user-bubble`, right-aligned, avatar in the head — used for the
+   *  reader's OWN turns and everywhere a single human speaks 1:1 with the
+   *  agent (the main chat, the individual chat). "start" is a THIRD PARTY's
+   *  turn in a multi-party thread: left-aligned, avatar flanking a
+   *  name/role header + bubble, in its own dedicated layout so a group
+   *  chat's teammates read as visually distinct from the reader's own
+   *  turns rather than flattening onto the same right-aligned lane.
+   *  ChatScreen/ProjectIndividualChat never pass "start" — only a group
+   *  transcript's non-self human turns do. */
+  humanAlign?: "start" | "end"
 
   agentName: string
   /** Badge text next to the agent name ("Product Coworker", "AGENT"). Omit
@@ -215,6 +227,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     ariaBusy,
     user,
     userHeadExtra,
+    humanAlign,
     agentName,
     agentBadge,
     agentTimestamp,
@@ -265,50 +278,78 @@ export function ChatBubble(props: ChatBubbleProps) {
   return (
     <>
       <div className={wrapperClassName} data-testid={dataTestId} {...(busy ? { "aria-busy": true } : {})}>
-        {!user?.hideHead && user && (user.query || user.bodyNode || user.attachments?.length) ? (
-          <div className="bc-user-head">
+        {user && humanAlign === "start" ? (
+          // A third party's turn in a multi-party thread — left-aligned,
+          // avatar flanking a name/role header + bubble, deliberately its
+          // OWN layout rather than a variant of `bc-user-head`/
+          // `bc-user-bubble` above: those are hard-coded right-aligned
+          // (globals.css, shared with every 1:1 surface) and flattening a
+          // third party onto them is exactly the "everyone reads as the
+          // reader" regression this branch exists to prevent.
+          <div className={styles.otherRow}>
             <span className="bc-avatar" style={user.avatarStyle}>
               {user.initials}
             </span>
-            <span className="bc-user-name">{userHeadName}</span>
-            {userHeadExtra ?? null}
+            <div className={styles.otherBody}>
+              <div className={styles.otherHead}>
+                <span className={styles.otherName}>{userHeadName}</span>
+                {userHeadExtra ?? null}
+              </div>
+              {user.query || user.bodyNode ? (
+                <div className={user.bubbleClassName} data-testid={user.dataTestId}>
+                  {user.bodyNode ?? user.query}
+                </div>
+              ) : null}
+            </div>
           </div>
-        ) : null}
-        {user?.attachments?.length ? (
-          <div className="bc-user-attachments">
-            {user.attachments.map((a, i) => {
-              const viewable = !!a.content || !!a.downloadable
-              return (
-                <button
-                  key={i}
-                  type="button"
-                  className="bc-file-card"
-                  data-testid="turn-attachment-chip"
-                  onClick={viewable ? () => user.onOpenAttachment?.(a) : undefined}
-                  disabled={!viewable}
-                  title={viewable ? `View ${a.name}` : a.name}
-                  aria-label={viewable ? `View ${a.name}` : a.name}
-                >
-                  <span className="bc-file-card-icon" aria-hidden>
-                    <FileIcon />
-                  </span>
-                  <span className="bc-file-card-text">
-                    <span className="bc-file-card-name">{a.name}</span>
-                    <span className="bc-file-card-meta">{attachmentMeta(a.name, a.content)}</span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        ) : null}
-        {user?.query || user?.bodyNode ? (
-          <div
-            className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
-            data-testid={user.dataTestId}
-          >
-            {user.bodyNode ?? user.query}
-          </div>
-        ) : null}
+        ) : (
+          <>
+            {!user?.hideHead && user && (user.query || user.bodyNode || user.attachments?.length) ? (
+              <div className="bc-user-head">
+                <span className="bc-avatar" style={user.avatarStyle}>
+                  {user.initials}
+                </span>
+                <span className="bc-user-name">{userHeadName}</span>
+                {userHeadExtra ?? null}
+              </div>
+            ) : null}
+            {user?.attachments?.length ? (
+              <div className="bc-user-attachments">
+                {user.attachments.map((a, i) => {
+                  const viewable = !!a.content || !!a.downloadable
+                  return (
+                    <button
+                      key={i}
+                      type="button"
+                      className="bc-file-card"
+                      data-testid="turn-attachment-chip"
+                      onClick={viewable ? () => user.onOpenAttachment?.(a) : undefined}
+                      disabled={!viewable}
+                      title={viewable ? `View ${a.name}` : a.name}
+                      aria-label={viewable ? `View ${a.name}` : a.name}
+                    >
+                      <span className="bc-file-card-icon" aria-hidden>
+                        <FileIcon />
+                      </span>
+                      <span className="bc-file-card-text">
+                        <span className="bc-file-card-name">{a.name}</span>
+                        <span className="bc-file-card-meta">{attachmentMeta(a.name, a.content)}</span>
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            ) : null}
+            {user?.query || user?.bodyNode ? (
+              <div
+                className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
+                data-testid={user.dataTestId}
+              >
+                {user.bodyNode ?? user.query}
+              </div>
+            ) : null}
+          </>
+        )}
 
         {showAgent ? (
           <>
