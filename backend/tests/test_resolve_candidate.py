@@ -4,12 +4,18 @@ fail-closed tier classifier (AD-TNM1) the tag-non-members loop is built on.
 Pure unit tests, same posture as `test_resolve_member.py`: every composed
 helper (`get_project`, `list_members`, `is_project_member`,
 `list_workspace_members`, `get_workspace_member`, `list_company_members`,
-`get_member`, `user_id_for_email`, `owning_company_domain`,
-`email_belongs_to_other_company`) is monkeypatched directly on
-`app.db.projects`, so no real Supabase connection is needed. `resolve_member`
-itself is left to run FOR REAL wherever a test does not override it — it is
-composed over the same stubbed `list_members`/`is_project_member`, so the
-t_member tier is exercised end to end rather than re-stubbed.
+`get_member`, `user_id_for_email`, `email_belongs_to_other_company`) is
+monkeypatched directly on `app.db.projects`, so no real Supabase connection
+is needed. `resolve_member` itself is left to run FOR REAL wherever a test
+does not override it — it is composed over the same stubbed
+`list_members`/`is_project_member`, so the t_member tier is exercised end to
+end rather than re-stubbed.
+
+Policy match (see `resolve_candidate`'s own doc): the project invite path
+matches the admin "invite a teammate" flow — no email-domain gate. A
+non-user email at ANY domain resolves `t_newuser`; `owning_company_domain`
+is no longer consulted at all (module import removed), so it is not among
+the stubbed helpers above.
 """
 from __future__ import annotations
 
@@ -54,11 +60,6 @@ def _base_stubs(monkeypatch, *, project=PROJECT, roster=None, is_member=True):
         projects_db, "get_member", lambda *, company_id, user_id: None
     )
     monkeypatch.setattr(projects_db, "user_id_for_email", lambda email: None)
-    monkeypatch.setattr(
-        projects_db,
-        "owning_company_domain",
-        lambda cid: "example.com" if cid == COMPANY_ID else None,
-    )
     monkeypatch.setattr(
         projects_db,
         "email_belongs_to_other_company",
@@ -152,24 +153,38 @@ def test_company_member_not_in_workspace_t_company(monkeypatch):
     }
 
 
-def test_new_user_matching_domain_t_newuser(monkeypatch):
-    """AC4, AC9: no account, domain == the company's owning domain, and not
-    an other-company email -> t_newuser with the email normalized lower."""
+def test_new_email_owning_domain_is_newuser(monkeypatch):
+    """AC14a: no account, domain == the company's owning domain -> t_newuser
+    with the email normalized lower (domain ownership plays no role in the
+    verdict either way now — this is just one of the domains it can be)."""
     _base_stubs(monkeypatch)
     out = projects_db.resolve_candidate(PROJECT_ID, "New.Person@Example.COM")
     assert out == {"tier": "t_newuser", "email": "new.person@example.com"}
 
 
-# ── Cross-tenant / refuse (the load-bearing tests) ───────────────────────
-
-
-def test_foreign_domain_email_t_refuse_cross_company(monkeypatch):
-    """AC5a: an email at a domain != the company's owning domain refuses
-    cross_company (no account exists, so the domain gate is the deciding
-    check)."""
+def test_new_email_unowned_domain_is_newuser(monkeypatch):
+    """AC14b (policy match — was `t_refuse(cross_company)` pre-ticket): a
+    non-user email at a domain nobody in this tenant owns now resolves
+    `t_newuser` — the project-only same-domain gate this ticket removes was
+    the only thing that used to refuse this case."""
     _base_stubs(monkeypatch)
     out = projects_db.resolve_candidate(PROJECT_ID, "outsider@foreign.com")
-    assert out == {"tier": "t_refuse", "reason": "cross_company"}
+    assert out == {"tier": "t_newuser", "email": "outsider@foreign.com"}
+
+
+def test_new_email_other_company_domain_nonuser_is_newuser(monkeypatch):
+    """AC14c: a non-user email whose domain happens to be owned by ANOTHER
+    registered company (but the specific email is not itself a registered
+    user anywhere) also resolves `t_newuser` — domain ownership, anyone's,
+    is no longer consulted at all; only `email_belongs_to_other_company`
+    (membership-based, not domain-based) could refuse, and it doesn't fire
+    for a non-user."""
+    _base_stubs(monkeypatch)
+    out = projects_db.resolve_candidate(PROJECT_ID, "New.Hire@OtherCo.example")
+    assert out == {"tier": "t_newuser", "email": "new.hire@otherco.example"}
+
+
+# ── Cross-tenant / refuse (the load-bearing tests) ───────────────────────
 
 
 def test_other_company_account_t_refuse_other_company(monkeypatch):
@@ -206,10 +221,128 @@ def test_other_company_account_t_refuse_other_company(monkeypatch):
     assert out2 == {"tier": "t_refuse", "reason": "other_company"}
 
 
+def test_existing_user_carveout_unchanged(monkeypatch):
+    """AC15 (policy match — existing-user carve-out preserved): the
+    domain-gate removal touches ONLY the no-account tail. Every existing-user
+    path is unchanged — in-workspace -> t_workspace, same-company/
+    other-workspace -> t_company, a DIFFERENT company's existing user ->
+    t_refuse(other_company) via the `if user_id:` branch (this project's
+    live equivalent of the admin flow's `email_belongs_to_other_company`
+    409)."""
+    _base_stubs(monkeypatch)
+
+    monkeypatch.setattr(
+        projects_db,
+        "user_id_for_email",
+        lambda email: "u-priya" if email.lower() == "priya@example.com" else None,
+    )
+    ws_row = {"user_id": "u-priya", "display_name": "Priya Shah", "email": "priya@example.com"}
+    monkeypatch.setattr(
+        projects_db, "get_workspace_member", lambda wid, uid: ws_row if uid == "u-priya" else None
+    )
+    out_ws = projects_db.resolve_candidate(PROJECT_ID, "priya@example.com")
+    assert out_ws["tier"] == "t_workspace"
+
+    monkeypatch.setattr(projects_db, "get_workspace_member", lambda wid, uid: None)
+    monkeypatch.setattr(
+        projects_db,
+        "user_id_for_email",
+        lambda email: "u-jordan" if email.lower() == "jordan@example.com" else None,
+    )
+    co_row = {"user_id": "u-jordan", "display_name": "Jordan Lee", "email": "jordan@example.com"}
+    monkeypatch.setattr(
+        projects_db, "get_member", lambda *, company_id, user_id: co_row if user_id == "u-jordan" else None
+    )
+    out_co = projects_db.resolve_candidate(PROJECT_ID, "jordan@example.com")
+    assert out_co["tier"] == "t_company"
+
+    monkeypatch.setattr(projects_db, "get_member", lambda *, company_id, user_id: None)
+    monkeypatch.setattr(
+        projects_db,
+        "user_id_for_email",
+        lambda email: "u-foreign" if email.lower() == "foreign@other.com" else None,
+    )
+    out_other = projects_db.resolve_candidate(PROJECT_ID, "foreign@other.com")
+    assert out_other == {"tier": "t_refuse", "reason": "other_company"}
+
+
+def test_email_belongs_to_other_company_guard_kept(monkeypatch):
+    """AC18: `email_belongs_to_other_company` is still consulted for a
+    non-user EMAIL needle before any t_newuser verdict — the ONE guard this
+    ticket explicitly KEEPS (parity with the admin flow's cross-company
+    refuse). Grounding note (matches the ticket's own): this guard is
+    effectively inert in `resolve_candidate` today — reached only after
+    `user_id_for_email` already missed, and `email_belongs_to_other_company`
+    queries the same `profiles` table by the same email — kept for
+    behavior-parity with the admin flow's written policy, not because it
+    currently fires for a real miss."""
+    _base_stubs(monkeypatch)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        projects_db,
+        "email_belongs_to_other_company",
+        lambda **kw: calls.append(kw["email"]) or False,
+    )
+    out = projects_db.resolve_candidate(PROJECT_ID, "new.hire@example.com")
+    assert out["tier"] == "t_newuser"
+    assert calls == ["new.hire@example.com"]
+
+    # And when the guard DOES fire (kept, unchanged behavior): still refuses.
+    monkeypatch.setattr(projects_db, "email_belongs_to_other_company", lambda **kw: True)
+    out_refused = projects_db.resolve_candidate(PROJECT_ID, "blocked@example.com")
+    assert out_refused == {"tier": "t_refuse", "reason": "other_company"}
+
+
+def test_same_domain_gate_removal_is_mutation_proofed(monkeypatch):
+    """AC17 (guard mutation proof): replays the REMOVED same-domain gate's
+    classification tail locally — a verbatim mirror of the deleted branch,
+    NOT the real function — to prove AC14b/AC14c's inputs WOULD have
+    refused `cross_company` if the gate still existed (RED), then asserts
+    the real, un-mutated `resolve_candidate` no longer does (GREEN). Binds
+    behavior, not phrasing."""
+    _base_stubs(monkeypatch)
+    OWNING_DOMAIN = "example.com"  # mirrors this company's owning domain,
+    # matching what `_base_stubs` used to stub `owning_company_domain` to
+    # return before this ticket removed that call from `resolve_candidate`.
+
+    def _tail_with_reinserted_gate(email: str) -> dict:
+        if projects_db.email_belongs_to_other_company(company_id=COMPANY_ID, email=email):
+            return {"tier": "t_refuse", "reason": "other_company"}
+        domain = email.rsplit("@", 1)[-1].strip().lower()
+        if domain == OWNING_DOMAIN:
+            return {"tier": "t_newuser", "email": email.strip().lower()}
+        return {"tier": "t_refuse", "reason": "cross_company"}
+
+    unowned_domain_email = "outsider@foreign.com"
+    other_company_domain_email = "new.hire@otherco.example"
+
+    # RED — gate reinserted (replayed locally): both AC14b/AC14c inputs
+    # refuse cross_company under the removed gate's logic.
+    assert _tail_with_reinserted_gate(unowned_domain_email) == {
+        "tier": "t_refuse",
+        "reason": "cross_company",
+    }
+    assert _tail_with_reinserted_gate(other_company_domain_email) == {
+        "tier": "t_refuse",
+        "reason": "cross_company",
+    }
+
+    # GREEN — gate removed (the real, current `resolve_candidate`): both
+    # resolve t_newuser.
+    assert projects_db.resolve_candidate(PROJECT_ID, unowned_domain_email) == {
+        "tier": "t_newuser",
+        "email": unowned_domain_email,
+    }
+    assert projects_db.resolve_candidate(PROJECT_ID, other_company_domain_email) == {
+        "tier": "t_newuser",
+        "email": other_company_domain_email,
+    }
+
+
 def test_name_needle_no_in_tenant_match_t_refuse_no_match(monkeypatch):
     """AC5c: an unknown name refuses no_match and performs NO cross-company
-    or global directory read — `user_id_for_email`, `owning_company_domain`,
-    and `email_belongs_to_other_company` are never called for a NAME needle."""
+    or global directory read — `user_id_for_email` and
+    `email_belongs_to_other_company` are never called for a NAME needle."""
     _base_stubs(monkeypatch)
     global_calls: list = []
     monkeypatch.setattr(
@@ -219,11 +352,6 @@ def test_name_needle_no_in_tenant_match_t_refuse_no_match(monkeypatch):
         projects_db,
         "email_belongs_to_other_company",
         lambda **kw: global_calls.append(("other_company", kw)) or False,
-    )
-    monkeypatch.setattr(
-        projects_db,
-        "owning_company_domain",
-        lambda cid: global_calls.append(("domain", cid)) or "example.com",
     )
 
     out = projects_db.resolve_candidate(PROJECT_ID, "nobody-here")
@@ -287,11 +415,6 @@ def test_missing_project_t_refuse_no_project(monkeypatch):
     )
     monkeypatch.setattr(
         projects_db, "user_id_for_email", lambda email: reads.append("user_id_for_email") or None
-    )
-    monkeypatch.setattr(
-        projects_db,
-        "owning_company_domain",
-        lambda cid: reads.append("owning_company_domain") or None,
     )
     monkeypatch.setattr(
         projects_db,
@@ -393,7 +516,9 @@ def test_no_llm_call_no_write(monkeypatch):
     monkeypatch.setattr(projects_db, "list_company_members", lambda cid: [])
     monkeypatch.setattr(projects_db, "get_member", lambda *, company_id, user_id: None)
     assert projects_db.resolve_candidate(PROJECT_ID, "new.person@example.com")["tier"] == "t_newuser"
-    assert projects_db.resolve_candidate(PROJECT_ID, "outsider@foreign.com")["tier"] == "t_refuse"
+    # Policy match (AC14b): a non-user email at an unowned domain is now
+    # t_newuser, not t_refuse — the project-only same-domain gate is gone.
+    assert projects_db.resolve_candidate(PROJECT_ID, "outsider@foreign.com")["tier"] == "t_newuser"
     assert projects_db.resolve_candidate(999, "anyone@example.com") == {
         "tier": "t_refuse",
         "reason": "no_project",

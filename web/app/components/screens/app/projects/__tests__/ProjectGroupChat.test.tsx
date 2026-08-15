@@ -521,140 +521,30 @@ describe("ProjectGroupChat — focus-gated polling (AD-P4)", () => {
   })
 })
 
-describe("ProjectGroupChat — save as artifact (agent turns only, v1)", () => {
-  it("test_agent_turn_shows_save_control — an agent turn renders the save control", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null, content: "agent reply" }),
-    ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const agent = await screen.findByTestId("gc-msg-agent")
-    expect(within(agent).getByTestId("gc-save-artifact")).toBeTruthy()
-  })
-
-  it("test_save_control_absent_on_human_turns — gc-msg-me/gc-msg-other have no save control", async () => {
+describe("ProjectGroupChat — no save-as-artifact affordance (removed)", () => {
+  it("test_group_chat_renders_no_save_artifact_affordance — gc-save-artifact/gc-saved-artifact never render on any turn; agent turns still render AskReplyBody + OpenArtifactChips", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
+      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const other = await screen.findByTestId("gc-msg-other")
+    const agent = await screen.findByTestId("gc-msg-agent")
+    const other = screen.getByTestId("gc-msg-other")
     const me = screen.getByTestId("gc-msg-me")
-    expect(within(other).queryByTestId("gc-save-artifact")).toBeNull()
-    expect(within(me).queryByTestId("gc-save-artifact")).toBeNull()
+
+    for (const row of [agent, other, me]) {
+      expect(within(row).queryByTestId("gc-save-artifact")).toBeNull()
+      expect(within(row).queryByTestId("gc-saved-artifact")).toBeNull()
+    }
     expect(screen.queryByTestId("gc-save-artifact")).toBeNull()
-  })
+    expect(screen.queryByTestId("gc-saved-artifact")).toBeNull()
+    expect(screen.queryByTestId("gc-save-error")).toBeNull()
 
-  it("test_click_calls_save_chat_artifact — click calls saveChatArtifact once with { content }, no sourceConversationId", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
-    ])
-    saveChatArtifactMock.mockResolvedValue({ artifact_type: "report", artifact_id: 9, project_id: 101 })
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const btn = await screen.findByTestId("gc-save-artifact")
-    await act(async () => {
-      fireEvent.click(btn)
-    })
-    await waitFor(() => expect(saveChatArtifactMock).toHaveBeenCalledTimes(1))
-    const [calledProjectId, payload] = saveChatArtifactMock.mock.calls[0]
-    expect(calledProjectId).toBe(101)
-    expect(payload).toEqual({ content: "agent reply" })
-    expect(Object.prototype.hasOwnProperty.call(payload, "sourceConversationId")).toBe(false)
-  })
-
-  it("test_saving_disables_control — control disabled + Saving… while the promise is pending", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
-    ])
-    let resolveSave: (v: unknown) => void = () => {}
-    saveChatArtifactMock.mockReturnValue(
-      new Promise((resolve) => {
-        resolveSave = resolve
-      }),
-    )
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const btn = await screen.findByTestId("gc-save-artifact")
-    await act(async () => {
-      fireEvent.click(btn)
-    })
-    const pending = screen.getByTestId("gc-save-artifact") as HTMLButtonElement
-    expect(pending.disabled).toBe(true)
-    expect(pending.textContent).toBe("Saving…")
-
-    await act(async () => {
-      resolveSave({ artifact_type: "report", artifact_id: 9, project_id: 101 })
-      await Promise.resolve()
-    })
-  })
-
-  it("test_success_shows_saved_state — resolved promise shows gc-saved-artifact, no re-save", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
-    ])
-    saveChatArtifactMock.mockResolvedValue({ artifact_type: "report", artifact_id: 9, project_id: 101 })
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const btn = await screen.findByTestId("gc-save-artifact")
-    await act(async () => {
-      fireEvent.click(btn)
-    })
-    const saved = await screen.findByTestId("gc-saved-artifact")
-    expect(saved.textContent).toBe("Saved to artifacts")
-    expect(screen.queryByTestId("gc-save-artifact")).toBeNull()
-    expect(saveChatArtifactMock).toHaveBeenCalledTimes(1)
-  })
-
-  it("test_per_turn_state_isolated — saving turn A leaves turn B's control clickable/unsaved", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "reply A" }),
-      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "human turn" }),
-      turn({ id: 4, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "reply B" }),
-    ])
-    let resolveSave: (v: unknown) => void = () => {}
-    saveChatArtifactMock.mockReturnValue(
-      new Promise((resolve) => {
-        resolveSave = resolve
-      }),
-    )
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const buttons = await screen.findAllByTestId("gc-save-artifact")
-    expect(buttons).toHaveLength(2)
-
-    await act(async () => {
-      fireEvent.click(buttons[0])
-    })
-
-    // Turn A's control is still rendered (in-flight), but disabled/"Saving…";
-    // turn B's control is a wholly separate instance, untouched.
-    const afterClick = screen.getAllByTestId("gc-save-artifact") as HTMLButtonElement[]
-    expect(afterClick).toHaveLength(2)
-    expect(afterClick[0].disabled).toBe(true)
-    expect(afterClick[0].textContent).toBe("Saving…")
-    expect(afterClick[1].disabled).toBe(false)
-    expect(afterClick[1].textContent).toBe("Save as artifact")
-
-    await act(async () => {
-      resolveSave({ artifact_type: "report", artifact_id: 9, project_id: 101 })
-      await Promise.resolve()
-    })
-  })
-
-  it("test_save_failure_shows_inline_alert — rejected promise shows role=alert error, control returns to clickable, no toast", async () => {
-    groupTurnsMock.mockResolvedValue([
-      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
-    ])
-    saveChatArtifactMock.mockRejectedValue(new Error("boom"))
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    const btn = await screen.findByTestId("gc-save-artifact")
-    await act(async () => {
-      fireEvent.click(btn)
-    })
-
-    const alert = await screen.findByTestId("gc-save-error")
-    expect(alert.getAttribute("role")).toBe("alert")
-    expect(alert.textContent).toBe("Couldn't save that as an artifact. Try again.")
-
-    const retryBtn = screen.getByTestId("gc-save-artifact") as HTMLButtonElement
-    expect(retryBtn.disabled).toBe(false)
-    expect(retryBtn.textContent).toBe("Save as artifact")
+    // The agent turn's body still renders (AskReplyBody's real markdown
+    // output — this ticket removes ONLY the save affordance, not the body).
+    expect(agent.textContent).toContain("agent reply")
+    expect(saveChatArtifactMock).not.toHaveBeenCalled()
   })
 })
 

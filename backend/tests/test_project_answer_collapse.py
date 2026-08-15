@@ -221,6 +221,161 @@ def test_private_read_tools_registered_and_dispatched(monkeypatch):
     assert out["answer"] == "ledger text"
 
 
+# ── Project-content read/summary gate (Defect 2) ─────────────────────────
+# Natural read/summary questions ("summarize the PRD") were vetoed by
+# `is_project_tool_request` (delegate/execute-only) and fell through to the
+# composer, which has breadth but NO read tools — the agent could not fetch
+# memory/artifact-content/ledger on demand. `is_project_content_request`
+# is the parallel positive gate that unlocks the sixth-branch loop for
+# exactly these phrasings, ORed alongside the untouched delegate/execute
+# gate. These tests prove: (1) the real gate routes a read question into
+# the loop and dispatches a read tool; (2)/(3) `scope=None` and
+# `SurfaceScope(surface=Surface.main)` NEVER call either gate — main chat
+# stays byte-identical; (4) removing the OR disjunct (the mutation) makes
+# the SAME question fall through to the composer instead — RED — and
+# restoring it is GREEN.
+
+
+def test_project_read_question_routes_to_loop_and_dispatches_read_tool(monkeypatch):
+    """AC4: the REAL project scope (6 tools) + a natural read/summary
+    question ("summarize the PRD" — vetoed by `is_project_tool_request`,
+    matched by `is_project_content_request`) enters `_try_scoped_tool_
+    answer` and dispatches a read tool, with no streaming deltas."""
+    dispatched = []
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatched.append(dispatch("get_project_memory", {}))
+        return "here is the PRD summary"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_group_context.dispatch_read_tool",
+        lambda name, ti, **kw: "prd content" if name == "get_project_memory" else None,
+    )
+    deltas = []
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="summarize the PRD", dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == []  # the sixth-branch loop never streams
+    assert dispatched == ["prd content"]
+    assert out["answer"] == "here is the PRD summary"
+
+
+def test_main_scope_none_read_question_byte_identical(monkeypatch):
+    """AC7: `scope=None` + the same read question NEVER consults either
+    gate (both patched to raise if invoked) and streams via the untouched
+    composer, exactly like main chat before this change."""
+
+    def _raise(*a, **kw):
+        raise AssertionError("gate must not be called on the main-chat path")
+
+    monkeypatch.setattr(qa, "is_project_tool_request", _raise)
+    monkeypatch.setattr(qa, "is_project_content_request", _raise)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("streamed")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    deltas = []
+    out = qa.answer(
+        enterprise_id="c1", question="summarize the PRD", dataset="d",
+        scope=None, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == ["streamed"]
+    assert out["answer"] == "ok"
+
+
+def test_main_surface_enum_read_question_byte_identical(monkeypatch):
+    """AC7: `SurfaceScope(surface=Surface.main)` behaves identically to
+    `scope=None` — no gate calls, no sixth-branch entry."""
+
+    def _raise(*a, **kw):
+        raise AssertionError("gate must not be called on the main-chat path")
+
+    monkeypatch.setattr(qa, "is_project_tool_request", _raise)
+    monkeypatch.setattr(qa, "is_project_content_request", _raise)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("streamed")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    deltas = []
+    out = qa.answer(
+        enterprise_id="c1", question="summarize the PRD", dataset="d",
+        scope=SurfaceScope(surface=Surface.main), on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == ["streamed"]
+    assert out["answer"] == "ok"
+
+
+def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
+    """AC6 MUTATION: with the `is_project_content_request` disjunct
+    monkeypatched to always-False (the "revert" state — `is_project_tool_
+    request` already declines "summarize the PRD" on its own, so this
+    isolates the new gate's contribution), the read question no longer
+    dispatches a read tool and instead falls through to the composer and
+    streams — RED proof that the OR is load-bearing. Restoring it goes
+    GREEN."""
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    question = "summarize the PRD"
+
+    # RED: simulate the disjunct removed.
+    monkeypatch.setattr(qa, "is_project_content_request", lambda *a, **kw: False)
+    loop_calls = {"n": 0}
+
+    def _tripwire(**kw):
+        loop_calls["n"] += 1
+        return "loop ran — must not happen once the disjunct is removed"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("streamed")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    deltas = []
+    out_red = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert loop_calls["n"] == 0  # the loop is unreachable once the disjunct is gone — RED
+    assert deltas == ["streamed"]
+    assert out_red["answer"] == "ok"
+
+    # GREEN: restore the real gate; the same question now dispatches a read tool.
+    monkeypatch.undo()
+    dispatched = []
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatched.append(dispatch("get_project_memory", {}))
+        return "here is the PRD summary"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_group_context.dispatch_read_tool",
+        lambda name, ti, **kw: "prd content" if name == "get_project_memory" else None,
+    )
+    deltas2 = []
+    out_green = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, on_delta=lambda t: deltas2.append(t),
+    )
+    assert deltas2 == []
+    assert dispatched == ["prd content"]
+    assert out_green["answer"] == "here is the PRD summary"
+
+
 def test_private_context_block_reaches_engine(monkeypatch):
     """The private breadth block is folded into `history` by `routes/ask.py`
     BEFORE `run_ask_job` runs (unchanged by this ticket) — `_run_sync`

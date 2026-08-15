@@ -156,7 +156,11 @@ def fixture_ids(sb):
     company_only_email = _email_for(company_only_user_id)
 
     newuser_email = f"resolve-candidate-live-{uuid.uuid4().hex[:10]}@{owning_domain}"
-    cross_company_email = f"resolve-candidate-live-{uuid.uuid4().hex[:10]}@totally-different-domain.test"
+    # No account, foreign (unowned) domain — policy match (this ticket):
+    # now t_newuser, not a cross_company refuse. Name/comment kept
+    # descriptive of the fixture's SHAPE (a foreign-domain email), not the
+    # tier it used to produce.
+    foreign_domain_email = f"resolve-candidate-live-{uuid.uuid4().hex[:10]}@totally-different-domain.test"
 
     # A real profile, currently unaffiliated with any company, borrowed to
     # prove the "real account in a DIFFERENT company" refuse case.
@@ -242,7 +246,7 @@ def fixture_ids(sb):
         "workspace_member_email": workspace_member_email,
         "company_only_email": company_only_email,
         "newuser_email": newuser_email,
-        "cross_company_email": cross_company_email,
+        "foreign_domain_email": foreign_domain_email,
         "other_company_email": other_company_email,
         "other_company_user_id": other_company_user_id,
         "foreign_company_id": foreign_company_id,
@@ -279,9 +283,15 @@ def test_tiers_classify_against_real_membership_tables(sb, fixture_ids):
     new_out = resolve_candidate(fixture_ids["project_id"], fixture_ids["newuser_email"])
     assert new_out == {"tier": "t_newuser", "email": fixture_ids["newuser_email"].strip().lower()}
 
-    # AC5a — no account, foreign domain -> t_refuse cross_company.
-    cross_out = resolve_candidate(fixture_ids["project_id"], fixture_ids["cross_company_email"])
-    assert cross_out == {"tier": "t_refuse", "reason": "cross_company"}
+    # AC14b (policy match — was AC5a's `t_refuse(cross_company)`): no
+    # account, foreign (unowned) domain -> t_newuser. The project-only
+    # same-domain gate this ticket removes was the only thing that used to
+    # refuse this case.
+    foreign_out = resolve_candidate(fixture_ids["project_id"], fixture_ids["foreign_domain_email"])
+    assert foreign_out == {
+        "tier": "t_newuser",
+        "email": fixture_ids["foreign_domain_email"].strip().lower(),
+    }
 
     # AC5b/AC5d — a REAL account that is a member of a DIFFERENT company ->
     # t_refuse other_company, from THIS (primary) project.

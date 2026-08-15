@@ -126,6 +126,10 @@ describe("ProjectPanelSection — load states", () => {
     expect(screen.getByTestId("memory-teaser").textContent).toContain(
       "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds.",
     )
+    // Relabel (C1) + summary-only (C2): no Add button, no "insight" copy.
+    expect(screen.getByTestId("memory-card").querySelector("h4")?.textContent?.trim()).toBe("Memory")
+    expect(screen.queryByTestId("memory-add")).toBeNull()
+    expect(screen.getByTestId("memory-view-all").textContent?.toLowerCase()).not.toContain("insight")
 
     // Human members render, the virtual agent member renders separately.
     const humanRows = screen.getAllByTestId("member-row-human")
@@ -139,6 +143,32 @@ describe("ProjectPanelSection — load states", () => {
     // Invite row present.
     expect(screen.getByLabelText("Invite by email")).toBeTruthy()
     expect(screen.getByTestId("invite-button")).toBeTruthy()
+  })
+
+  it("test_panel_section_rail_and_heading_relabelled — rail section reads Project Settings, memory-card heading reads Memory", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+
+    render(<ProjectPanelSection projectId={101} />)
+    await screen.findByTestId("project-panel-section")
+
+    const labels = screen.getAllByTestId("rail-section-label").map((el) => el.textContent?.trim())
+    expect(labels).toContain("Project Settings")
+    expect(labels).not.toContain("Project")
+    expect(screen.getByTestId("memory-card").querySelector("h4")?.textContent?.trim()).toBe("Memory")
+  })
+
+  it("test_panel_section_memory_card_summary_only — no Add button; View all label carries no 'insight' copy", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+
+    render(<ProjectPanelSection projectId={101} />)
+    await screen.findByTestId("project-panel-section")
+
+    expect(screen.queryByTestId("memory-add")).toBeNull()
+    const viewAll = screen.getByTestId("memory-view-all")
+    expect(viewAll).toBeTruthy()
+    expect(viewAll.textContent?.toLowerCase()).not.toContain("insight")
   })
 
   it("a summary with no periods falls back to the whole stripped string, and a null summary shows the empty-state copy", async () => {
@@ -198,10 +228,9 @@ describe("ProjectPanelSection — invite + memory modals", () => {
 
     const lastCall = inviteModalMock.mock.calls.at(-1)?.[0]
     expect(lastCall.projectId).toBe(101)
-    expect(lastCall.members).toEqual(PROJECT.members)
   })
 
-  it("opening memory via 'View all' or 'Add' both open MemoryModal", async () => {
+  it("opening memory via 'View memory' opens MemoryModal", async () => {
     getMock.mockResolvedValue(PROJECT)
     memorySummaryMock.mockResolvedValue(MEMORY)
 

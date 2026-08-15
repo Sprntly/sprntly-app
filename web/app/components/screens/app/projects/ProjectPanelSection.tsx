@@ -59,15 +59,6 @@ function ClockIcon() {
   )
 }
 
-function PlusIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  )
-}
-
 function WarnIcon() {
   return (
     <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
@@ -149,13 +140,13 @@ export function ProjectPanelSection({ projectId }: { projectId: number }) {
       data-testid="project-panel-section"
     >
       <div className={styles.railSectionLabel} data-testid="rail-section-label">
-        Project
+        Project Settings
       </div>
       <div className={styles.card} data-testid="memory-card">
         <div className={styles.cardHead}>
           <h4>
             <ClockIcon />
-            Project memory
+            Memory
           </h4>
           <span className={styles.cardCount}>{memory.entry_count}</span>
         </div>
@@ -170,16 +161,7 @@ export function ProjectPanelSection({ projectId }: { projectId: number }) {
             onClick={() => setMemoryOpen(true)}
             data-testid="memory-view-all"
           >
-            View all {memory.entry_count} insight{memory.entry_count === 1 ? "" : "s"}
-          </button>
-          <button
-            type="button"
-            className={styles.addBtn}
-            onClick={() => setMemoryOpen(true)}
-            title="Add a memory entry"
-            data-testid="memory-add"
-          >
-            <PlusIcon /> Add
+            View memory
           </button>
         </div>
       </div>
@@ -250,7 +232,6 @@ export function ProjectPanelSection({ projectId }: { projectId: number }) {
       />
       <ProjectInviteModal
         projectId={projectId}
-        members={project.members}
         open={inviteOpen}
         onClose={() => setInviteOpen(false)}
         onInvited={load}

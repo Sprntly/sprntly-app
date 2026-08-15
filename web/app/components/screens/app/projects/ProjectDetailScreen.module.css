@@ -124,43 +124,80 @@
   outline-offset: 2px;
 }
 
-/* ── Body: main pane + right rail ───────────────────────────────────── */
+/* ── Top-bar chat switch (redesign: relocated from the standing rail) ── */
+
+.topChatToggle {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  flex-shrink: 0;
+}
+
+/* Square icon-only "Project settings" gear (redesign — top bar). */
+.gearBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.gearBtn:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.gearBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Count badge on the top-bar "Artifacts (N)" pill. */
+.topbarCount {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 2px;
+}
+
+/* ── Body: main pane (+ the in-place artifact drawer when one is open) ─ */
 
 .body {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 344px;
-}
-
-.bodyRailCollapsed {
+  /* Redesign: full-bleed chat by default — there is no standing right
+     rail any more. The only second column the grid ever gets is the
+     in-place artifact drawer (`.bodyDrawerOpen` below). */
   grid-template-columns: minmax(0, 1fr);
 }
 
 /* AD-HOC (live-rig): artifact drawer open — [ chat | drawer ] side-by-side.
-   The drawer takes the right region (wider than the rail, so the artifact is
-   readable), the chat keeps a workable min width to its left, both scroll
-   independently. Overrides both the default and rail-collapsed templates. */
+   The drawer takes a wide right region so the artifact is readable, the
+   chat keeps a workable min width to its left, both scroll independently. */
 .bodyDrawerOpen {
   grid-template-columns: minmax(360px, 1fr) minmax(420px, 600px);
 }
 
 @media (max-width: 1080px) {
-  .body {
-    grid-template-columns: minmax(0, 1fr) 300px;
-  }
   .bodyDrawerOpen {
     grid-template-columns: minmax(300px, 1fr) minmax(380px, 520px);
   }
 }
 
 @media (max-width: 960px) {
-  .body {
-    grid-template-columns: 1fr;
-  }
-  .rail {
-    display: none;
-  }
   /* Narrow viewports: the drawer takes the full width (the chat is a tap
      away behind the close control) rather than crushing both columns. */
   .bodyDrawerOpen {
@@ -328,17 +365,6 @@
   padding: 0 6px;
 }
 
-/* Compact segmented chat switcher at the rail top (redesign). Tokens only. */
-.chatToggle {
-  display: flex;
-  gap: 4px;
-  margin: 12px 10px 2px;
-  padding: 3px;
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
 .chatToggleBtn {
   flex: 1;
   display: inline-flex;
@@ -477,107 +503,6 @@
 .chatRowActive .chatRowPrivate {
   color: var(--nav-text);
   background: var(--nav-2);
-}
-
-.artifactCard {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: calc(100% - 20px);
-  margin: 3px 10px;
-  padding: 9px 11px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  cursor: pointer;
-  text-align: left;
-  font-family: var(--font-body);
-}
-
-.artifactCard:hover {
-  background: var(--surface-3);
-  border-color: var(--line-strong);
-}
-
-.artifactCard:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.artifactIcon {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.artifactMain {
-  flex: 1;
-  min-width: 0;
-}
-
-.artifactTitle {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--ink);
-}
-
-.artifactSub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 1px;
-}
-
-.artifactOpen {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--ink-3);
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  cursor: pointer;
-}
-
-.artifactOpen:hover {
-  color: var(--accent-ink);
-  background: var(--accent-muted);
-}
-
-.artifactOpen:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.artifactCreate {
-  border-style: dashed;
-  color: var(--accent-ink);
-  font-size: 12px;
-  font-weight: 600;
-  background: var(--accent-alpha-06);
-  line-height: 1.3;
-}
-
-.artifactCreate:hover {
-  background: var(--accent-muted);
-}
-
-.artifactPlus {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--accent-ink);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
 }
 
 .card {
@@ -973,44 +898,16 @@
   padding: 0 4px;
 }
 
-/* ── Loading skeleton — same skeleton-card language as ProjectsScreen's
- * `.skeletonGrid`/`.skeletonCard`, duplicated locally per this file's
- * existing precedent (see the module comment at the top). ── */
+/* ── Loading state — centered app spinner (reused `Spinner` from
+ * `components/auth/icons.tsx`, rotation via the shared `.auth-btn-spin`
+ * class in globals.css; no bespoke skeleton/keyframe here). ── */
 
-.loadingSkeleton {
+.spinnerWrap {
   display: flex;
-  flex-direction: column;
-  gap: 18px;
+  align-items: center;
+  justify-content: center;
+  min-height: 360px;
   max-width: 1220px;
   margin: 0 auto;
-}
-
-.skeletonTopBar {
-  height: 32px;
-  width: 40%;
-  min-width: 220px;
-  border-radius: var(--radius);
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-}
-
-.skeletonBody {
-  display: flex;
-  gap: 18px;
-}
-
-.skeletonMain {
-  flex: 1 1 auto;
-  height: 360px;
-  border-radius: var(--radius-lg);
-  background: var(--surface-3);
-  border: 1px solid var(--line);
-}
-
-.skeletonRail {
-  flex: 0 0 300px;
-  height: 360px;
-  border-radius: var(--radius-lg);
-  background: var(--surface-3);
-  border: 1px solid var(--line);
+  color: var(--ink-3);
 }
