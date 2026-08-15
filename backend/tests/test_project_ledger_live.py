@@ -165,7 +165,7 @@ def _seed_delegation(sb, fixture_ids, project_id: int) -> dict:
 def test_accept_complete_round_trip_through_route(
     sb, fixture_ids, assigner_client, assignee_client, project_ids
 ):
-    """assigned -> accepted -> completed through the REAL route +
+    """assigned -> in_progress -> completed through the REAL route +
     `v_delegation_status`: both parties' reads reflect the final status
     (AC1, AC7)."""
     project = assigner_client.post(
@@ -180,10 +180,10 @@ def test_accept_complete_round_trip_through_route(
 
     r1 = assignee_client.post(
         f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
-        json={"event": "accepted"},
+        json={"event": "in_progress"},
     )
     assert r1.status_code == 200, r1.text
-    assert r1.json() == {"delegation_id": deleg["id"], "status": "accepted"}
+    assert r1.json() == {"delegation_id": deleg["id"], "status": "in_progress"}
 
     r2 = assignee_client.post(
         f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
@@ -223,14 +223,18 @@ def test_accept_complete_round_trip_through_route(
         .execute()
         .data
     )
-    assert [e["event"] for e in events] == ["accepted", "completed"]
+    assert [e["event"] for e in events] == ["in_progress", "completed"]
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
 def test_illegal_edge_rejected_live(sb, fixture_ids, assigner_client, assignee_client, project_ids):
-    """A real `completed -> accepted` is rejected (409) and writes NOTHING
-    to the live table (AC5)."""
+    """A real transition off a TERMINAL status is rejected (409) and writes
+    NOTHING to the live table (AC5, AC9). `assigned -> completed` is now a
+    LEGAL edge in the simplified model (AC2) — there is no illegal-but-
+    emittable edge directly off the genesis `assigned` status any more, so
+    this proof builds up through two legal edges to a terminal `completed`
+    status first, then proves the illegal edge off THAT terminal state."""
     project = assigner_client.post(
         "/v1/projects", json={"name": f"Live ledger illegal {uuid.uuid4().hex[:8]}"}
     ).json()
@@ -243,32 +247,31 @@ def test_illegal_edge_rejected_live(sb, fixture_ids, assigner_client, assignee_c
 
     r1 = assignee_client.post(
         f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
-        json={"event": "completed"},
+        json={"event": "in_progress"},
     )
-    assert r1.status_code == 409, r1.text  # assigned -> completed is illegal
-
-    events_before = (
-        sb.table("delegation_events").select("id").eq("delegation_id", deleg["id"]).execute().data
-    )
-    assert events_before == []
+    assert r1.status_code == 200, r1.text  # assigned -> in_progress is legal
 
     r2 = assignee_client.post(
         f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
-        json={"event": "accepted"},
+        json={"event": "completed"},
     )
-    assert r2.status_code == 200, r2.text
+    assert r2.status_code == 200, r2.text  # in_progress -> completed is legal
+
+    events_before = (
+        sb.table("delegation_events")
+        .select("event")
+        .eq("delegation_id", deleg["id"])
+        .order("id")
+        .execute()
+        .data
+    )
+    assert [e["event"] for e in events_before] == ["in_progress", "completed"]
 
     r3 = assignee_client.post(
         f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
-        json={"event": "completed"},
+        json={"event": "in_progress"},
     )
-    assert r3.status_code == 200, r3.text
-
-    r4 = assignee_client.post(
-        f"/v1/projects/{project['id']}/delegations/{deleg['id']}/events",
-        json={"event": "accepted"},
-    )
-    assert r4.status_code == 409, r4.text  # completed -> accepted is illegal
+    assert r3.status_code == 409, r3.text  # completed is terminal — no outgoing edge
 
     events_after = (
         sb.table("delegation_events")
@@ -278,4 +281,4 @@ def test_illegal_edge_rejected_live(sb, fixture_ids, assigner_client, assignee_c
         .execute()
         .data
     )
-    assert [e["event"] for e in events_after] == ["accepted", "completed"]
+    assert [e["event"] for e in events_after] == ["in_progress", "completed"]  # no write on rejection

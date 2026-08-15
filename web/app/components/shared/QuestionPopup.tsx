@@ -50,6 +50,15 @@ export type PopupQuestion = {
    *  guess at the answer space, never the whole of it. Hosts whose options
    *  ARE the whole answer space (a team roster) turn it off. */
   allowOther?: boolean
+  /** The QUESTION admits several answers at once ("which tickets should X
+   *  get?") — options toggle like checkboxes and a Confirm button settles the
+   *  question with every pick on `PopupAnswer.picks`. The question's OWN
+   *  semantics decide this, host-side, never a popup-wide switch: a batch can
+   *  mix single-pick decisions with one multi-pick roster question. Skip and
+   *  the settled-once-then-submit contract are unchanged. Reported from a
+   *  live session: "assign 2 tickets to fortune" listed the tickets but only
+   *  one could be clicked. */
+  multiSelect?: boolean
 }
 
 export type PopupAnswer = {
@@ -59,6 +68,10 @@ export type PopupAnswer = {
   /** The picked option's `value`, when it carried one. Absent for typed
    *  answers and skips. */
   value?: string
+  /** Multi-select questions only: every picked option, in display order.
+   *  `answer` carries the joined labels for the thread's human record; hosts
+   *  that act on the answer read THIS, one action per pick. */
+  picks?: { label: string; value?: string }[]
 }
 
 export type QuestionPopupProps = {
@@ -131,6 +144,20 @@ export function QuestionPopup({
   )
   const [otherOpen, setOtherOpen] = useState<Record<number, boolean>>({})
   const [typed, setTyped] = useState<Record<number, string>>({})
+  // Multi-select questions: the in-progress ticks, per question index, BEFORE
+  // Confirm settles them. Seeded from a restored answer's picks so Back (and
+  // a resumed draft) shows the boxes as they were left. Kept separate from
+  // `settled` on purpose — ticking is browsing, confirming is answering, and
+  // only the confirm advances the stepper.
+  const [multiPicked, setMultiPicked] = useState<Record<number, PopupOption[]>>(
+    () => {
+      const seeded: Record<number, PopupOption[]> = {}
+      for (const [k, a] of Object.entries(initialAnswers ?? {})) {
+        if (a?.picks?.length) seeded[Number(k)] = a.picks.map((p) => ({ ...p }))
+      }
+      return seeded
+    },
+  )
   // `onComplete` must fire exactly once even though settling state and firing
   // it happen across renders.
   const [completed, setCompleted] = useState(false)
@@ -172,8 +199,36 @@ export function QuestionPopup({
     settle(index, { prompt: q.prompt, answer: "", skipped: true })
   }
 
+  const isMulti = !!q.multiSelect
+  const picked = multiPicked[index] ?? []
+  const isPicked = (opt: PopupOption) =>
+    picked.some((p) => (opt.value != null ? p.value === opt.value : p.label === opt.label))
+
+  const togglePick = (opt: PopupOption) => {
+    if (busy) return
+    setMultiPicked((prev) => {
+      const cur = prev[index] ?? []
+      const next = isPicked(opt)
+        ? cur.filter((p) => (opt.value != null ? p.value !== opt.value : p.label !== opt.label))
+        : [...cur, { label: opt.label, ...(opt.value != null ? { value: opt.value } : {}) }]
+      return { ...prev, [index]: next }
+    })
+  }
+
+  const confirmPicks = () => {
+    if (busy || picked.length === 0) return
+    settle(index, {
+      prompt: q.prompt,
+      answer: picked.map((p) => p.label).join(", "),
+      skipped: false,
+      picks: picked.map((p) => ({ ...p })),
+    })
+  }
+
   const header = (q.header || "").trim() || fallbackHeader
-  const showOther = (q.allowOther ?? true) && (q.options.length === 0 || !!otherOpen[index])
+  // Multi mode never shows the typed escape hatch: a free-text line can't be
+  // one of several ticks, and every multi host's options ARE the answer space.
+  const showOther = !isMulti && (q.allowOther ?? true) && (q.options.length === 0 || !!otherOpen[index])
 
   return (
     <div className="qpu" data-testid="question-popup" role="dialog" aria-label={q.prompt}>
@@ -230,17 +285,29 @@ export function QuestionPopup({
 
       <div className="qpu-options">
         {q.options.map((opt, oi) => {
-          const active = !record?.skipped && record?.answer === opt.label
+          // Single mode: active = the settled answer (Back shows the choice).
+          // Multi mode: active = ticked-but-not-yet-confirmed; a click
+          // TOGGLES instead of settling, and Confirm below does the settling.
+          const active = isMulti
+            ? isPicked(opt)
+            : !record?.skipped && record?.answer === opt.label
           return (
             <button
               key={`${oi}-${opt.label}`}
               type="button"
               className={`qpu-option${active ? " qpu-option--active" : ""}`}
               data-testid="question-popup-option"
-              aria-pressed={active}
+              role={isMulti ? "checkbox" : undefined}
+              aria-checked={isMulti ? active : undefined}
+              aria-pressed={isMulti ? undefined : active}
               disabled={busy}
-              onClick={() => give(opt.label, opt.value)}
+              onClick={() => (isMulti ? togglePick(opt) : give(opt.label, opt.value))}
             >
+              {isMulti ? (
+                <span className="qpu-option-tick" aria-hidden>
+                  {active ? "☑" : "☐"}
+                </span>
+              ) : null}
               <span className="qpu-option-label">{opt.label}</span>
               {opt.description ? (
                 <span className="qpu-option-desc">{opt.description}</span>
@@ -248,7 +315,7 @@ export function QuestionPopup({
             </button>
           )
         })}
-        {(q.allowOther ?? true) && q.options.length > 0 ? (
+        {!isMulti && (q.allowOther ?? true) && q.options.length > 0 ? (
           <button
             type="button"
             className={`qpu-option qpu-option--other${otherOpen[index] ? " qpu-option--active" : ""}`}
@@ -261,6 +328,24 @@ export function QuestionPopup({
           </button>
         ) : null}
       </div>
+
+      {isMulti ? (
+        <div className="qpu-other-form">
+          {/* Ticking is browsing; THIS is the answer. Disabled at zero picks —
+              "none of these" is what Skip says. */}
+          <button
+            type="button"
+            className="bc-action-btn bc-action-btn--primary qpu-multi-confirm"
+            data-testid="question-popup-confirm-picks"
+            disabled={busy || picked.length === 0}
+            onClick={confirmPicks}
+          >
+            {picked.length === 0
+              ? "Pick one or more"
+              : `Confirm ${picked.length} selected`}
+          </button>
+        </div>
+      ) : null}
 
       {showOther ? (
         <form

@@ -1844,6 +1844,72 @@ def document_lookup_candidates(question: str) -> set[str]:
     return {"confluence"}
 
 
+#: DELEGATE-shaped phrasing: hand a task to a named person. Deliberately
+#: verb-phrase-centric (there is no fixed PM noun for "give this to someone",
+#: unlike the tracker's ticket/issue/epic vocabulary) — mirrors
+#: `_JIRA_LOOKUP_VERB`'s "verb owns the match" shape.
+_PROJECT_TOOL_DELEGATE_VERB = re.compile(
+    r"\bdelegate\b|"
+    # "assign ... to" / "hand ... to", any short noun phrase in between
+    # ("assign the export section to Ada"), never crossing a sentence
+    # boundary — mirrors the tracker gate's own bounded-window shape.
+    r"\b(?:assign|hand(?:\s+off)?)\b[^.?!]{0,40}?\bto\b|"
+    r"hand\s+off\b|"
+    r"send\s+(?:this|that|it)\s+to|"
+    r"have\s+\w+\s+(?:do|handle|take|work\s+on|own)|"
+    r"ask\s+\w+\s+to\s+(?:do|handle|take|own)|"
+    r"give\s+(?:this|that|it)\s+to",
+    re.I,
+)
+
+#: EXECUTE-shaped phrasing: ask the agent itself to draft the one v1
+#: agent-doable task type (a PRD — mirrors `project_task_execution.
+#: AGENT_DOABLE_TYPES`), or a bare "execute" naming a task.
+_PROJECT_TOOL_EXECUTE_VERB = re.compile(
+    r"\b(?:draft|write(?:\s+up)?|create|prepare|generate|put\s+together|"
+    r"come\s+up\s+with)\s+(?:a|the|an)\s+prd\b"
+    r"|\bexecute\s+(?:this|that|it|the\s+task)\b",
+    re.I,
+)
+
+#: Veto: the message merely MENTIONS a person or an artifact without asking
+#: the agent to act on either — a pure read/recall/summary request. Checked
+#: FIRST so a phrasing like "what did Ada say about the PRD" never trips the
+#: positive patterns above even though it names both a person and a document.
+_PROJECT_TOOL_MENTION_VETO = re.compile(
+    r"^\s*(?:what|who|how|when|where|why|which)\b"
+    r"|\b(?:summarize|summarise|catch\s+me\s+up|what'?s?\s+(?:in|on|the\s+status\s+of)|"
+    r"tell\s+me\s+about|status\s+of|read\s+(?:me\s+)?the|what\s+does\s+the)\b",
+    re.I,
+)
+
+
+def is_project_tool_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks the project-tool loop to actually DO
+    something — hand a task to a teammate (`delegate_task`) or draft the one
+    agent-doable task type (`execute_task`, `project_task_execution.py`) —
+    rather than merely asking about the project (which the composer's folded
+    breadth block already answers, see `routes/ask.py:347`).
+
+    Sibling of `is_jira_lookup`/`is_connector_lookup`/
+    `document_lookup_candidates`: cheap regex on `routing_text`, veto-set
+    discipline over completeness. Deliberately narrow — a message this
+    declines falls through to the composer, not to a refusal, so a false
+    negative costs an un-actioned request rather than a wrong answer (see
+    the accept-with-nudge addendum this gate's decline path relies on to
+    close that gap, `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_AGENT_SYSTEM_PROMPT`).
+
+    `history` is accepted for signature parity with its sibling gates (every
+    ladder predicate above `route()` takes it) but is not consulted for
+    continuation judgments in this v1 — the gate decides on the message's
+    own words only; a future pass MAY extend it the same way
+    `is_jira_lookup`'s sticky-thread continuation does."""
+    q = question or ""
+    if _PROJECT_TOOL_MENTION_VETO.search(q):
+        return False
+    return bool(_PROJECT_TOOL_DELEGATE_VERB.search(q) or _PROJECT_TOOL_EXECUTE_VERB.search(q))
+
+
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
     """True when the message only means something as a continuation of the
     thread — its subject lives in an earlier turn, not in its own words ("can you

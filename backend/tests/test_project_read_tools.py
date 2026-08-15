@@ -2,9 +2,10 @@
 
 The project read tools (`get_project_memory`, `list_project_artifacts`,
 `get_artifact_content`, `get_task_ledger`) are MERGED and single-sourced in
-`app.project_group_context` — both the @Sprntly group agent and the private
-`project_individual_agent` responder import `read_tools`/`dispatch_read_tool`
-from there rather than forking the tenancy gate. This file pins the contract
+`app.project_group_context` — the unified answer engine's sixth ladder
+branch carries them on `SurfaceScope.extra_tools` for BOTH project surfaces
+(private and @Sprntly group), importing `read_tools`/`dispatch_read_tool`
+from here rather than forking the tenancy gate. This file pins the contract
 those importers rely on: the four-tool stable order, that
 `get_artifact_content` refuses a `(type, id)` not on THIS project's manifest
 (the read-side twin of the §C write gate — AC6, own + cross-tenant), that

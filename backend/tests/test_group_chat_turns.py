@@ -19,12 +19,15 @@ Covers:
   - observability: create/post logs carry only ids, never turn content
     (AC10)
 
-`fake_group_llm` patches `app.routes.projects.run_tool_loop` directly (NOT
-the `fake_llm` fixture in conftest, which only patches `call_json` — the
-group agent reply path uses `run_tool_loop`, AD-P15's tool-on-the-reply-call
-wiring for `delegate_task`). The fake returns plain reply text and does NOT
-invoke `dispatch(...)`, simulating a no-tool-call turn — none of these
-tests exercise delegation.
+`fake_group_llm` patches `app.llm.run_tool_loop` directly (NOT the
+`fake_llm` fixture in conftest, which only patches `call_json` — the group
+agent reply path, via the unified answer engine's sixth ladder branch,
+uses `run_tool_loop`, AD-P15's tool-on-the-reply-call wiring for
+`delegate_task`). Patched one level below the engine (rather than the
+engine's own `qa_agent.answer`) so `qa_agent`'s real wrapper — including
+its cost-log line — still runs, exactly as it did pre-collapse. The fake
+returns plain reply text and does NOT invoke `dispatch(...)`, simulating a
+no-tool-call turn — none of these tests exercise delegation.
 """
 from __future__ import annotations
 
@@ -45,11 +48,11 @@ def _create_project(ctx, *, name: str = "Group chat project") -> dict:
 @pytest.fixture
 def fake_group_llm(isolated_settings, monkeypatch):
     """Patches the ONE call site the group-agent reply path uses
-    (`app.routes.projects.run_tool_loop`) so no test ever hits Anthropic.
-    `state["calls"]` is the no-LLM-for-human-turns assertion point. The fake
-    does NOT invoke `dispatch(...)` — every test in this file simulates a
-    no-tool-call turn (delegation itself is covered in
-    `test_project_delegation.py`)."""
+    (`app.llm.run_tool_loop`, via the unified answer engine's sixth ladder
+    branch) so no test ever hits Anthropic. `state["calls"]` is the
+    no-LLM-for-human-turns assertion point. The fake does NOT invoke
+    `dispatch(...)` — every test in this file simulates a no-tool-call turn
+    (delegation itself is covered in `test_project_delegation.py`)."""
     state: dict = {
         "calls": [],
         "reply": "On it — I'll take a look and report back.",
@@ -72,9 +75,7 @@ def fake_group_llm(isolated_settings, monkeypatch):
             )
         return state["reply"]
 
-    import app.routes.projects as projects_route
-
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_run_tool_loop)
     return state
 
 
@@ -232,7 +233,7 @@ def test_mention_triggers_single_assistant_turn(
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "@Sprntly can you summarize the last decision?"},
+            json={"content": "@Sprntly please delegate this to Fortune"},
         )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1
@@ -263,7 +264,8 @@ def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_gr
     fake_group_llm["raise_error"] = True
 
     r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns", json={"content": "@Sprntly help"}
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "@Sprntly please delegate this to Fortune"},
     )
     assert r.status_code == 200  # never raises to the caller (AD-P7)
 
@@ -272,7 +274,7 @@ def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_gr
     conv = conversations_db.get_group_chat(project["id"])
     turns = conversations_db.list_group_turns(conv["id"])
     assert [t["role"] for t in turns] == ["user"]
-    assert turns[0]["content"] == "@Sprntly help"
+    assert turns[0]["content"] == "@Sprntly please delegate this to Fortune"
 
 
 @pytest.mark.parametrize("mention", ["@Sprntly", "@sprntly", "@SPRNTLY"])
@@ -281,7 +283,8 @@ def test_mention_case_insensitive(isolated_settings, monkeypatch, fake_group_llm
     project = _create_project(ctx)
 
     r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns", json={"content": f"{mention} status?"}
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": f"{mention} assign this to Fortune"},
     )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1

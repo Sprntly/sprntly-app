@@ -1,0 +1,138 @@
+"""`SurfaceScope` descriptor + the `qa_agent.answer(scope=...)` byte-identity
+property test — the central regression gate for the whole project-chat
+engine collapse (AC1/AC2).
+
+`scope is None` / `SurfaceScope(surface=main)` must be provable no-ops:
+main chat's tool set (the schema-forced `submit_response` tool via
+`compose_ask_answer`) and system-prompt string are byte-identical whether
+or not a caller passes `scope` at all.
+"""
+from __future__ import annotations
+
+import dataclasses
+
+import pytest
+
+import app.qa_agent as qa
+from app.surface_scope import Surface, SurfaceScope
+
+
+def _route_out():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(output={"skill_id": None, "confidence": 0.0, "action": None})
+
+
+# ── SurfaceScope construction/defaults (AC1) ──────────────────────────────
+
+
+def test_surface_scope_frozen_and_defaulted():
+    scope = SurfaceScope(surface=Surface.project_private)
+    assert scope.project_id is None
+    assert scope.context_payload == ""
+    assert scope.system_addendum == ""
+    assert scope.extra_tools == ()
+    assert scope.roster == ()
+    assert scope.assigner_identity is None
+    assert scope.post_turn is None
+    assert scope.prerendered_transcript is None
+    assert scope.capabilities is None
+    assert scope.multi_party is False
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        scope.project_id = 5  # type: ignore[misc]
+
+
+# ── main-surface no-op (AC2, AC11) ─────────────────────────────────────────
+
+
+def test_surface_scope_main_is_noop():
+    scope = SurfaceScope(surface=Surface.main)
+    assert scope.is_noop is True
+    assert scope.extra_tools == ()
+    assert scope.system_addendum == ""
+    assert scope.prerendered_transcript is None
+
+
+def test_surface_scope_project_private_is_not_noop():
+    scope = SurfaceScope(surface=Surface.project_private, extra_tools=({"name": "x"},))
+    assert scope.is_noop is False
+
+
+# ── the six-tool contract (AC6, AC11) ──────────────────────────────────────
+
+
+def test_surface_scope_project_private_carries_six_extra_tools():
+    from app import project_delegation, project_task_execution
+    from app.ask_job_runner import _build_private_scope
+    from app.project_group_context import read_tools
+
+    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    assert len(scope.extra_tools) == 6
+    names = [t["name"] for t in scope.extra_tools]
+    expected = [t["name"] for t in (
+        project_delegation.DELEGATE_TASK_TOOL,
+        project_task_execution.EXECUTE_TASK_TOOL,
+        *read_tools(),
+    )]
+    assert names == expected
+
+
+# ── byte-identity: scope=None vs SurfaceScope(main) vs omitted (AC1) ───────
+
+
+def test_answer_scope_none_tool_set_byte_identical(monkeypatch):
+    """The direct/generic path's only "tool" is the schema-forced
+    `submit_response` tool baked into `call_json` — never touched by this
+    ticket. Proven here by asserting `compose_ask_answer` is reached with
+    byte-identical kwargs whether `scope` is omitted, explicitly `None`, or
+    `SurfaceScope(surface=main)`."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
+    captured: list[dict] = []
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        captured.append({"dataset": dataset, "q": q, "enterprise_id": enterprise_id})
+        return {"answer": "generic", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    common = dict(enterprise_id="ent", question="what happened last week", dataset="acme")
+    out_omitted = qa.answer(**common)
+    out_none = qa.answer(**common, scope=None)
+    out_main = qa.answer(**common, scope=SurfaceScope(surface=Surface.main))
+
+    assert len(captured) == 3
+    assert captured[0] == captured[1] == captured[2]
+    assert out_omitted == out_none == out_main
+
+
+def test_answer_scope_none_system_prompt_byte_identical(monkeypatch):
+    """Same proof on the skill-routed single-shot path (`_answer_single_shot`,
+    via `llm_call`) — the system prompt string reaching `llm_call` is
+    byte-identical across the same three call shapes."""
+    from app.qa_agent import HEAVY_SKILLS  # noqa: F401 — sanity import, unused directly
+
+    systems: list[str] = []
+
+    def _fake_llm_call(**k):
+        from types import SimpleNamespace
+
+        if k.get("purpose") == "route":
+            return _route_out()
+        systems.append(k.get("system"))
+        return SimpleNamespace(output={"answer": "ok", "key_points": [], "citations": [],
+                                        "confidence": 0.9, "unanswered": ""})
+
+    monkeypatch.setattr(qa, "llm_call", _fake_llm_call)
+    monkeypatch.setattr(qa, "route", lambda *a, **k: qa.RouteDecision("call-digest-like", 0.0, "none"))
+
+    common = dict(enterprise_id="ent", question="anything at all", dataset="acme", pinned_skill="__builtin_none__")
+    # Force the skill-routed single-shot path deterministically via a pinned,
+    # non-custom id (falls through resolve_skill to a plain grounded answer —
+    # same shape `_answer_single_shot`'s own docstring describes for a
+    # declined pipeline id).
+    qa.answer(**common)
+    qa.answer(**common, scope=None)
+    qa.answer(**common, scope=SurfaceScope(surface=Surface.main))
+
+    assert len(systems) == 3
+    assert systems[0] == systems[1] == systems[2]

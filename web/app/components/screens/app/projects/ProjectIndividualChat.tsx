@@ -48,6 +48,8 @@ import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
+import { ChatBubble } from "../../../shared/ChatBubble"
+import { ChatTranscript, type ChatTranscriptTurn } from "../../../shared/ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useCompany } from "../../../../context/CompanyContext"
@@ -67,6 +69,7 @@ import {
 import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
+  askApi,
   projectsApi,
   storiesApi,
   type AskResponse,
@@ -124,6 +127,14 @@ type LocalTurn = {
   pending: boolean
   stopped: boolean
   error: string | null
+  /** Live token stream, display-only — mirrors the main chat surface's own
+   *  `onPartial` shape (its thread turn's `partial`/`streamDropped` fields).
+   *  The poll's authoritative `reply` above always replaces it once the ask
+   *  settles. */
+  partial?: string
+  /** The live preview channel dropped mid-answer while the poll carries on —
+   *  a display downgrade, never an error (the poll is still authoritative). */
+  streamDropped?: boolean
 }
 
 export type ProjectIndividualChatProps = {
@@ -438,10 +449,27 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             project_id: Number(projectId),
             conversation_id: conversationId,
             isStopped: () => stoppedRef.current,
+            // Live token stream, mirroring the main chat surface's own
+            // ask-path `onPartial` block: the accumulating answer markdown
+            // renders in place of the wait state as the model writes it.
+            // Display only — the poll's authoritative `reply` below still
+            // replaces it.
+            onPartial: (text) => {
+              setTurns((prev) => prev.map((t) =>
+                t.id === id && !t.reply && !t.stopped ? { ...t, partial: text, streamDropped: false } : t,
+              ))
+            },
+            onStreamDrop: () => {
+              setTurns((prev) => prev.map((t) =>
+                t.id === id && !t.reply && !t.stopped ? { ...t, streamDropped: true } : t,
+              ))
+            },
           }),
         )
         .then((reply) => {
-          setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
+          setTurns((prev) => prev.map((t) =>
+            t.id === id ? { ...t, reply, pending: false, partial: undefined, streamDropped: undefined } : t,
+          ))
         })
         .catch((err: unknown) => {
           if (err instanceof AskStoppedError) {
@@ -571,8 +599,12 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // primitive's guard never fires) — required by the interface, and
             // honest about what this surface would do anyway.
             onChangeTicketsTemplate: () => void runAsk(),
-            // No artifact-card surface in this thin thread either — the
-            // grounded ask can still answer in prose.
+            // ACCEPTED GAP, named explicitly (not a silent omission): this
+            // thread has no `list_artifacts` card surface — the shared card
+            // leaf (`shared/ArtifactListCards`) needs a `ChatArtifactItem[]`
+            // this thin ask-only surface never resolves — so it keeps the
+            // prose fallback and answers in the grounded ask instead of a
+            // clickable list.
             onListArtifacts: () => void runAsk(),
             onCreateArtifact: () => void runAsk(),
             // Same reasoning as onOpenArtifact/onChangeTemplate: this thread
@@ -586,9 +618,20 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       .catch(() => void runAsk())
   }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled])
 
+  // Stopping is deliberate (unlike a background unmount): it reclaims the
+  // composer's local poll AT ONCE (`stoppedRef`, checked on the poll's next
+  // tick) AND asks the backend to cancel so the worker aborts before its next
+  // LLM step and any late answer is discarded server-side — the local flag
+  // alone only silences the UI while the backend call keeps running and
+  // billing to completion. Mirrors the main chat surface's own Stop handler.
   const handleStop = useCallback(() => {
     stoppedRef.current = true
-  }, [])
+    const pending = getPendingAsk(activeCompany, tabId)
+    if (pending) {
+      const askId = Number(pending.id)
+      if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
+    }
+  }, [activeCompany, tabId])
 
   return (
     <div className={styles.thread} data-testid="project-individual-chat">
@@ -602,78 +645,114 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           </div>
         ) : null}
 
-        {history.map((h) => (
-          <div key={`history-${h.id}`} className={styles.pair}>
-            {h.role === "assistant" ? (
-              <div className={styles.agentTurn} data-testid="ic-history-agent">
-                <div className={styles.agentHead}>
-                  <span className={styles.agentName}>{AGENT_NAME}</span>
-                  <span className={styles.time}>{formatTime(new Date(h.created_at).getTime())}</span>
-                </div>
-                <AgentTurnBody content={h.content} />
-                {delegationsByTurn.has(h.id) ? (
-                  <div className={styles.delegationActions} data-testid="ic-brief-delegation-actions">
-                    <DelegationActions
-                      delegationId={delegationsByTurn.get(h.id)!.delegation_id}
-                      status={delegationsByTurn.get(h.id)!.status}
-                      viewerParty="assignee"
-                      onEmit={(event, note) =>
-                        emitOnDelegation(delegationsByTurn.get(h.id)!.delegation_id, event, note)
-                      }
-                      compact
+        {(() => {
+          // Persisted history and the current session's local turns are two
+          // different arrays with two different shapes — each maps onto its
+          // OWN set of `<ChatBubble>` props below, so the loop that used to
+          // hand-roll both is gone; only the per-state content each row was
+          // already rendering moves as-is into `agentBodyNode`/`user`.
+          const historyTurns: ChatTranscriptTurn[] = history.map((h) =>
+            h.role === "assistant"
+              ? {
+                  turnId: `history-${h.id}`,
+                  dataTestId: "ic-history-agent",
+                  agentName: AGENT_NAME,
+                  agentBadge: null,
+                  agentTimestamp: formatTime(new Date(h.created_at).getTime()),
+                  agentBodyNode: <AgentTurnBody content={h.content} />,
+                  footer: delegationsByTurn.has(h.id) ? (
+                    <div className={styles.delegationActions} data-testid="ic-brief-delegation-actions">
+                      <DelegationActions
+                        delegationId={delegationsByTurn.get(h.id)!.delegation_id}
+                        status={delegationsByTurn.get(h.id)!.status}
+                        viewerParty="assignee"
+                        onEmit={(event, note) =>
+                          emitOnDelegation(delegationsByTurn.get(h.id)!.delegation_id, event, note)
+                        }
+                        compact
+                      />
+                    </div>
+                  ) : null,
+                }
+              : {
+                  turnId: `history-${h.id}`,
+                  showAgent: false,
+                  agentName: AGENT_NAME,
+                  user: {
+                    hideHead: true,
+                    dataTestId: "ic-history-you",
+                    bodyNode: <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>,
+                  },
+                },
+          )
+
+          const sessionTurns: ChatTranscriptTurn[] = turns.map((turn) => {
+            const user = {
+              hideHead: true,
+              dataTestId: "ic-msg-you",
+              bodyNode: <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.question}</ReactMarkdown>,
+            }
+            const agentBodyNode = turn.pending ? (
+              turn.partial ? (
+                // Rung 4/5: live token stream — the accumulating answer
+                // markdown renders as the model writes it, no simulated
+                // typing. Mirrors the main chat's own streaming wait state.
+                <div data-testid="ic-msg-streaming">
+                  <AssistantWaitState compact streaming streamDropped={turn.streamDropped}>
+                    <AskReplyBody
+                      reply={{
+                        answer: turn.partial, key_points: [], citations: [],
+                        confidence: 0, unanswered: "",
+                      } as unknown as AskResponse}
                     />
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className={styles.userTurn} data-testid="ic-history-you">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{h.content}</ReactMarkdown>
-              </div>
-            )}
-          </div>
-        ))}
-
-        {resuming ? (
-          <div data-testid="ic-resuming">
-            <AssistantThinkingSkeleton phase="Picking up where you left off…" />
-          </div>
-        ) : null}
-
-        {!resuming && history.length === 0 && turns.length === 0 ? (
-          <div className={styles.empty} data-testid="individual-chat-empty">
-            Ask Sprntly anything about this project — it already knows what the team has covered.
-          </div>
-        ) : null}
-
-        {turns.map((turn) => (
-          <div key={turn.id} className={styles.pair}>
-            <div className={styles.userTurn} data-testid="ic-msg-you">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.question}</ReactMarkdown>
-            </div>
-            {turn.pending ? (
-              <div className={styles.agentTurn} data-testid="ic-msg-pending">
-                <AssistantWaitState compact />
-              </div>
-            ) : turn.stopped ? (
-              <div className={styles.agentTurn} data-testid="ic-msg-stopped">
-                You stopped this response.
-              </div>
-            ) : turn.error ? (
-              <div className={styles.agentTurn} role="alert" data-testid="ic-msg-error">
-                {turn.error}
-              </div>
-            ) : turn.reply ? (
-              <div className={styles.agentTurn} data-testid="ic-msg-agent">
-                <div className={styles.agentHead}>
-                  <span className={styles.agentName}>{AGENT_NAME}</span>
-                  <span className={styles.time}>{formatTime(Date.now())}</span>
+                  </AssistantWaitState>
                 </div>
+              ) : (
+                <div data-testid="ic-msg-pending">
+                  <AssistantWaitState compact />
+                </div>
+              )
+            ) : turn.stopped ? (
+              <div data-testid="ic-msg-stopped">You stopped this response.</div>
+            ) : turn.error ? (
+              <div role="alert" data-testid="ic-msg-error">{turn.error}</div>
+            ) : turn.reply ? (
+              <div data-testid="ic-msg-agent">
                 <AskReplyBody reply={turn.reply} />
                 <OpenArtifactChips candidates={[]} onOpen={(c) => onOpenArtifact?.(c)} />
               </div>
-            ) : null}
-          </div>
-        ))}
+            ) : null
+            return {
+              turnId: turn.id,
+              user,
+              agentName: AGENT_NAME,
+              agentBadge: null,
+              agentTimestamp: turn.reply ? formatTime(Date.now()) : null,
+              showAgent: agentBodyNode !== null,
+              agentBodyNode,
+            }
+          })
+
+          return (
+            <ChatTranscript
+              turns={[...historyTurns, ...sessionTurns]}
+              leading={
+                resuming ? (
+                  <div data-testid="ic-resuming">
+                    <AssistantThinkingSkeleton phase="Picking up where you left off…" />
+                  </div>
+                ) : null
+              }
+              trailing={
+                !resuming && history.length === 0 && turns.length === 0 ? (
+                  <div className={styles.empty} data-testid="individual-chat-empty">
+                    Ask Sprntly anything about this project — it already knows what the team has covered.
+                  </div>
+                ) : null
+              }
+            />
+          )
+        })()}
       </div>
 
       <div className={styles.composerWrap}>
@@ -704,9 +783,6 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
           onFileSelect={() => {}}
-          voiceSupported={false}
-          voiceListening={false}
-          onToggleVoice={() => {}}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>

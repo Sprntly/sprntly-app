@@ -99,6 +99,125 @@ describe("QuestionPopup — batch mode", () => {
   })
 })
 
+describe("QuestionPopup — multi-select questions", () => {
+  const MULTI: PopupQuestion[] = [
+    {
+      header: "Which tickets",
+      prompt: "Which tickets should Dave get?",
+      multiSelect: true,
+      allowOther: false,
+      options: [
+        { label: "Login flow", value: "prd-7-s1" },
+        { label: "Settings page", value: "prd-7-s2" },
+        { label: "Billing export", value: "prd-7-s3" },
+      ],
+    },
+  ]
+
+  it("options toggle like checkboxes; Confirm settles with every pick", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={MULTI} onComplete={onComplete} />)
+
+    // Zero picks → the confirm is disabled and says why; a click settles
+    // nothing (ticking is browsing, confirming is answering).
+    const confirm = screen.getByTestId("question-popup-confirm-picks") as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    expect(confirm.textContent).toContain("Pick one or more")
+
+    const options = screen.getAllByTestId("question-popup-option")
+    fireEvent.click(options[0])
+    fireEvent.click(options[2])
+    expect(onComplete).not.toHaveBeenCalled()
+    expect(options[0].getAttribute("aria-checked")).toBe("true")
+    expect(options[1].getAttribute("aria-checked")).toBe("false")
+    expect(confirm.textContent).toContain("Confirm 2 selected")
+
+    // Toggling OFF works — a mis-tick is one click to undo.
+    fireEvent.click(options[2])
+    expect(options[2].getAttribute("aria-checked")).toBe("false")
+    fireEvent.click(options[2])
+
+    fireEvent.click(confirm)
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    const [answers] = onComplete.mock.calls[0]
+    expect(answers[0].skipped).toBe(false)
+    expect(answers[0].answer).toBe("Login flow, Billing export")
+    expect(answers[0].picks).toEqual([
+      { label: "Login flow", value: "prd-7-s1" },
+      { label: "Billing export", value: "prd-7-s3" },
+    ])
+  })
+
+  it("multi hides the typed escape hatch and Skip still works", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={MULTI} onComplete={onComplete} />)
+    expect(screen.queryByTestId("question-popup-other")).toBeNull()
+    expect(screen.queryByTestId("question-popup-input")).toBeNull()
+    fireEvent.click(screen.getByTestId("question-popup-skip"))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][0][0].skipped).toBe(true)
+  })
+
+  it("a batch mixes single and multi questions without either changing", () => {
+    const onComplete = vi.fn()
+    const mixed: PopupQuestion[] = [
+      { prompt: "Who is this for?", options: [{ label: "Admins" }, { label: "End users" }] },
+      ...MULTI,
+    ]
+    render(<QuestionPopup questions={mixed} onComplete={onComplete} />)
+
+    // Q1 is single: one click settles and advances.
+    fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+
+    // Q2 is multi: two ticks + confirm complete the batch.
+    const options = screen.getAllByTestId("question-popup-option")
+    fireEvent.click(options[0])
+    fireEvent.click(options[1])
+    fireEvent.click(screen.getByTestId("question-popup-confirm-picks"))
+    const [answers] = onComplete.mock.calls[0]
+    expect(answers[0].answer).toBe("Admins")
+    expect(answers[0].picks).toBeUndefined()
+    expect(answers[1].picks).toHaveLength(2)
+  })
+
+  it("restored picks (a resumed draft) show as ticked and confirm intact", () => {
+    const onComplete = vi.fn()
+    render(
+      <QuestionPopup
+        questions={MULTI}
+        initialAnswers={{}}
+        onComplete={onComplete}
+      />,
+    )
+    // No restored answer → fresh. Now with a draft carrying picks: the boxes
+    // come back ticked, and one Confirm completes with them.
+    cleanup()
+    render(
+      <QuestionPopup
+        questions={[{ ...MULTI[0] }, { prompt: "And?", options: [{ label: "Done" }] }]}
+        initialAnswers={{
+          0: {
+            prompt: MULTI[0].prompt, answer: "Login flow, Settings page",
+            skipped: false,
+            picks: [
+              { label: "Login flow", value: "prd-7-s1" },
+              { label: "Settings page", value: "prd-7-s2" },
+            ],
+          },
+        }}
+        onComplete={onComplete}
+      />,
+    )
+    // Starts at the first OPEN question (Q2) — the multi answer was restored.
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("2/2")
+    fireEvent.click(screen.getAllByTestId("question-popup-option")[0])
+    const [answers] = onComplete.mock.calls[0]
+    expect(answers[0].picks).toHaveLength(2)
+    expect(answers[1].answer).toBe("Done")
+  })
+})
+
 describe("QuestionPopup — host-shaped questions (assignment)", () => {
   const ASSIGN: PopupQuestion[] = [
     {

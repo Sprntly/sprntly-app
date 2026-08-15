@@ -377,6 +377,19 @@ export function ProjectDetailView({
           </span>
         ) : null}
         <span className={styles.topSpacer} />
+        {/* Ambient task ledger — the only entry point back into the
+            TaskModal now that its rail card is un-mounted (task work moved
+            into chat via `get_task_ledger`). Entry point ONLY: no live
+            counts, no preview rows — see `TaskModal.tsx`. */}
+        <button
+          type="button"
+          className={styles.railToggle}
+          onClick={onOpenTasks}
+          data-testid="tasks-see-all"
+        >
+          <ChecklistIcon />
+          See all tasks
+        </button>
         <button
           type="button"
           className={styles.railToggle}

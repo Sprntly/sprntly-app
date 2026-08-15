@@ -532,11 +532,21 @@ def _run_call_index_sync(company_id: str) -> None:
 
     Every connected source, in one pass. Kicking per provider instead would
     race two threads of the same name onto the same company and duplicate the
-    work for a tenant that has both."""
+    work for a tenant that has both.
+
+    INCREMENTAL after the first success, exactly like `ensure_fresh`'s
+    read-path top-up. Passing no `since` made every 20-minute scheduler cycle
+    a full ten-page re-sync per company, which burned through a tenant's
+    Fireflies daily API quota on 2026-08-15 and 429-blocked every other
+    Fireflies read for that account until the next UTC midnight. The first
+    sync of a fresh connection still gets `since=None` — the full history
+    pull it needs."""
     from app import call_index
 
     try:
-        written = call_index.sync_all_sources(company_id)
+        written = call_index.sync_all_sources(
+            company_id, since=call_index.incremental_since(company_id)
+        )
         if written is None:
             logger.info("call-index: no transcript source for %s — nothing to do",
                         company_id)

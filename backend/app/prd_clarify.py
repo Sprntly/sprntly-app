@@ -28,7 +28,10 @@ _AGENT = "prd"
 # chat's question stepper (QuestionPopup) wears as its chip ("Target users",
 # "Success metric"). Optional end-to-end: a missing header renders a generic
 # chip, so older payloads and a model that omits it degrade cleanly.
-CLARIFY_PROMPT_VERSION = "prd-clarify-v3"
+# v4: the overflow clause stopped naming the "User input needed" section —
+# prd-author v4.8 retired it from the house format, so unasked questions now
+# land inline as [NEED]/[ESCALATE] markers rather than in an appendix list.
+CLARIFY_PROMPT_VERSION = "prd-clarify-v4"
 
 _SCHEMA: dict = {
     "type": "object",
@@ -90,8 +93,8 @@ requirements. If every plausible answer yields the same PRD, don't ask.
 Question rules:
 - sufficient=true whenever no question survives the tests. ZERO questions is \
 a valid and common outcome — never pad to reach a count. Five is a hard \
-ceiling: keep the most consequential five; the PRD's own "User input needed" \
-section catches the rest.
+ceiling: keep the most consequential five; anything else surfaces inline in \
+the PRD as its `[NEED]`/`[ESCALATE]` markers.
 - Never ask for: metric values or baselines (the PRD marks those [NEED]), \
 implementation or tech-stack choices, taste/wording preferences. Asking WHAT \
 to measure is fine; asking for the number is not.

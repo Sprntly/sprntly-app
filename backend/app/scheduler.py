@@ -654,6 +654,21 @@ async def _run_invite_reminder_cycle() -> None:
         logger.error("Scheduler: invite reminder cycle failed: %s", exc)
 
 
+async def _run_task_followup_cycle() -> None:
+    """Autonomous task follow-up sweep: ping/reschedule/escalate/finalize
+    every delegated task past its next_check_in. Mirrors the invite
+    reminder job — error-isolated inside run_task_followup_cycle, blocking
+    Supabase + LLM + Resend HTTP pushed off the event loop. Opt-in via
+    TASK_FOLLOWUP_ENABLED (on top of SCHEDULER_ENABLED)."""
+    from app.delegation_followup import run_task_followup_cycle
+
+    try:
+        summary = await asyncio.to_thread(run_task_followup_cycle)
+        logger.info("Scheduler: task followup cycle → %s", summary)
+    except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
+        logger.error("Scheduler: task followup cycle failed: %s", exc)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -945,6 +960,23 @@ def start_scheduler() -> None:
             trigger=IntervalTrigger(hours=invite_hours),
             id="invite_reminders",
             name=f"Invite reminders (every {invite_hours}h)",
+            replace_existing=True,
+        )
+
+    # Autonomous task follow-up sweep: ping/reschedule/escalate/finalize
+    # every delegated task past its next_check_in (Day-0 delivery fires
+    # inline at delegation time). Opt-in via TASK_FOLLOWUP_ENABLED — its
+    # own gate ON TOP of SCHEDULER_ENABLED, exactly the invite-reminder
+    # shape above, so staging stays dark even with SCHEDULER_ENABLED=true
+    # until this is explicitly flipped for prod. Idempotent send-ledger +
+    # SQL due-filter make extra ticks cheap no-ops.
+    if getattr(settings, "task_followup_enabled", False):
+        followup_hours = getattr(settings, "task_followup_interval_hours", 1) or 1
+        _scheduler.add_job(
+            _run_task_followup_cycle,
+            trigger=IntervalTrigger(hours=followup_hours),
+            id="task_followup",
+            name=f"Autonomous task follow-up sweep (every {followup_hours}h)",
             replace_existing=True,
         )
 

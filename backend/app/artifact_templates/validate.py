@@ -25,9 +25,12 @@ the two. That is why absence blocks activation rather than warning:
   - `ul.ev` — else `applyEvidenceTruncation`
     (`web/app/lib/prdEvidenceTruncate.ts:38`) returns false and "View more
     evidence" simply disappears.
-  - `ul.inputs` inside `.appendix` — else `extract_input_questions`
-    (`backend/app/prd_questions.py`) finds nothing and the PRD's chat loses
-    every answer button.
+  - `ul.inputs` inside `.appendix`, but ONLY when the section map claims an
+    open-questions home — else `extract_input_questions`
+    (`backend/app/prd_questions.py`) finds nothing there and the PRD's chat
+    loses its answer buttons. Conditional since prd-author v4.8 retired the
+    house appendix: the built-in PRD itself no longer collects open questions,
+    so a format without such a section is exactly as complete as ours.
   - `p.hyp`, but ONLY when the section map claims a hypothesis home — else
     `stripHypothesisSection` (`web/app/lib/htmlBrief.ts:67`) no-ops in the
     combined Evidence+PRD export and the hypothesis is duplicated.
@@ -277,6 +280,25 @@ def _claims_a_hypothesis(section_map: dict) -> bool:
     return False
 
 
+def _claims_input_questions(section_map: dict) -> bool:
+    """True when the compiled map says the customer's format has a home for
+    open questions. Only then is `ul.inputs` required.
+
+    This mirrors `_claims_a_hypothesis`, and became CONDITIONAL when
+    prd-author v4.8 retired the house "Still open" appendix: the built-in PRD
+    no longer collects open questions at all, so demanding the hook of every
+    uploaded format would block customers for lacking a section our own
+    skeleton does not have — the calibration test's exact definition of a
+    wrong validator. A format that DOES keep an open-items section still needs
+    the hook, or its answer buttons silently vanish."""
+    for entry in (section_map or {}).get("sections") or []:
+        if not isinstance(entry, dict):
+            continue
+        if "question" in str(entry.get("house") or "").lower():
+            return True
+    return False
+
+
 def _requirements_form(section_map: dict) -> str | None:
     """The declared `form` of the requirements section, or None if the map has
     no requirements entry."""
@@ -350,11 +372,15 @@ def validate_prd_skeleton(html: str, section_map: dict | None = None) -> Validat
             "bulleted evidence list so readers can open the sources behind each "
             "claim.",
         ))
-    if not scanner.has_inputs_list:
+    # Only required when the map says the format HAS an open-questions
+    # section — the same rule the hypothesis hook follows, and since v4.8 the
+    # house format itself has none.
+    if _claims_input_questions(section_map) and not scanner.has_inputs_list:
         notes.append(_note(
             "missing_input_questions",
-            "We couldn't find where your format collects open questions. "
-            "Without one, the PRD's chat can't offer answer buttons for the gaps.",
+            "Your format names an open-questions section, but we couldn't find "
+            "the list inside it — without one, the PRD's chat can't offer "
+            "answer buttons for the gaps.",
         ))
 
     form = _requirements_form(section_map)

@@ -818,6 +818,29 @@ def _oldest_success(
     return min(contributing) if contributing else None
 
 
+def incremental_since(company_id: str) -> Optional[datetime]:
+    """The `since` a scheduled refresh should pass to `sync_all_sources`.
+
+    The scheduler's 20-minute cycle passed nothing here, so every cycle was a
+    FULL re-sync — ten paginated transcript queries per company per cycle, 72
+    cycles a day. On 2026-08-15 that exhausted a tenant's Fireflies daily API
+    quota ("Too many requests. Please retry after Sun, 16 Aug 2026"), which
+    then broke every OTHER Fireflies read for that account — including the
+    on-demand call digest the user was actively asking questions through. A
+    top-up since the last success is one page and one HTTP call.
+
+    Exactly `ensure_fresh`'s anchor: the OLDEST contributing provider success,
+    minus the same late-arrival overlap, upsert semantics making the overlap
+    free. None — sync never succeeded, or state unreadable — means the caller
+    performs the full sync a first run genuinely needs.
+    """
+    state = _sync_state(company_id)
+    last_success = _oldest_success(company_id, _parse_ts(
+        (state or {}).get("last_success_at")
+    ))
+    return (last_success - _INCREMENTAL_OVERLAP) if last_success else None
+
+
 def ensure_fresh(
     company_id: str,
     *,

@@ -434,6 +434,53 @@ describe("ProjectDetailView — right rail structure", () => {
   })
 })
 
+describe("ProjectDetailView — see-all-tasks trigger (AC7, AC8, AC9)", () => {
+  it("test_see_all_tasks_trigger_in_header_not_rail — tasks-see-all renders, is a sibling of rail-toggle, and is not a descendant of project-rail", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const trigger = screen.getByTestId("tasks-see-all")
+    expect(trigger).toBeTruthy()
+    expect(screen.getByTestId("project-rail").contains(trigger)).toBe(false)
+    expect(trigger.parentElement).toBe(screen.getByTestId("rail-toggle").parentElement)
+    // Entry point only — no numeric task count rendered on the trigger.
+    expect(trigger.textContent).not.toMatch(/\d/)
+  })
+
+  it("test_see_all_tasks_opens_task_modal — clicking tasks-see-all opens TaskModal", () => {
+    const onOpenTasks = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenTasks })))
+    fireEvent.click(screen.getByTestId("tasks-see-all"))
+    expect(onOpenTasks).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_no_ledger_rail_card — no live-count/preview ledger element renders inside project-rail", () => {
+    render(
+      React.createElement(
+        ProjectDetailView,
+        viewProps({
+          ledgerCounts: { assigned_to_me_open: 3, waiting_on_open: 2 },
+          ledgerRows: [
+            {
+              delegation_id: 1,
+              task_summary: "A live row",
+              status: "assigned",
+              status_at: new Date().toISOString(),
+              bucket: "open",
+              other_party_user_id: "u-other",
+              other_party_name: "David",
+              delivered_conversation_id: null,
+              delivered_turn_id: null,
+            },
+          ],
+        }),
+      ),
+    )
+    const rail = screen.getByTestId("project-rail")
+    expect(within(rail).queryByTestId("tasks-see-all")).toBeNull()
+    expect(within(rail).queryByTestId("task-ledger-card")).toBeNull()
+    expect(within(rail).queryByText("A live row")).toBeNull()
+  })
+})
+
 describe("ProjectDetailScreen — task-ledger substrate intact after the rail un-mount (AC-12)", () => {
   it("projectsApi.ledger*/TaskModal/ledgerCounts/ledgerRows/onOpenTasks remain imported/defined/importable", () => {
     const src = readFileSync(

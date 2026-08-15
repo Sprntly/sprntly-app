@@ -31,9 +31,17 @@ a click in the popup can never write to a target the model hallucinated.
 Ambiguity is ASKED, never guessed (the owner's directive from the session
 that filed this): two members sharing a first name is a question, and a
 request that names people but not which ticket each gets is a question per
-ticket. The one deliberate exception: a request that itself says
-randomly/evenly/spread IS an explicit instruction to distribute, so the model
-round-robins and returns plain assignments.
+ticket. Two deliberate exceptions, both cases where the request itself already
+contains the instruction:
+
+  - randomly/evenly/spread IS an explicit instruction to distribute, so the
+    model round-robins and returns plain assignments.
+  - a topic or category ("all backend tickets", "the frontend UI ones") IS an
+    explicit selection — judging which tickets fall inside it is the model's
+    job, done from the titles it was handed, with the verdict stated in
+    `note`. Reported from a live session: "assign all backend related tickets
+    to myself" came back as a select-which-ones-are-backend quiz, which asks
+    the user to do exactly the classification they asked the model for.
 
 Fail-open to an empty plan with a note — an LLM outage degrades the feature
 to "I couldn't work that out", never a 500 in the chat.
@@ -49,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 _AGENT = "tickets"
 
-PLAN_PROMPT_VERSION = "ticket-assign-v1"
+PLAN_PROMPT_VERSION = "ticket-assign-v2"
 
 # Bound what rides into the prompt. A PRD's generated set runs to a dozen or
 # two (same cap as ticket_update's list); a roster past 200 members is not a
@@ -98,6 +106,15 @@ _SCHEMA: dict = {
                     },
                     "option_user_ids": {"type": "array", "items": {"type": "string"}},
                     "option_ticket_keys": {"type": "array", "items": {"type": "string"}},
+                    "multi": {
+                        "type": "boolean",
+                        "description": (
+                            "True ONLY on a person-fixed question whose request "
+                            "asks for MORE THAN ONE ticket ('assign 2 tickets "
+                            "to X', 'give a few tickets to X') — the user then "
+                            "picks several tickets at once."
+                        ),
+                    },
                 },
                 "required": ["prompt"],
                 "additionalProperties": False,
@@ -113,9 +130,10 @@ _SCHEMA: dict = {
 }
 
 _SYSTEM = """You turn a chat request about ticket ownership into concrete \
-assignments for a product workspace. You are given the workspace's tickets \
-(key, title, current assignee), its team roster (id, name, email, role), and \
-the user's request.
+assignments for a product workspace. You are given the PRD the tickets came \
+from, the workspace's tickets (key, title, content summary, area/labels, \
+current assignee), its team roster (id, name, email, role), the REQUESTER \
+(the person sending the request), and the request itself.
 
 Decide which (ticket, person) pairs the request states EXPLICITLY and \
 unambiguously — those go in `assignments`, exactly as stated. Everything the \
@@ -124,6 +142,19 @@ click. Never guess an open pairing: a wrong silent assignment hands someone \
 work nobody meant them to have.
 
 Rules:
+- "me" / "myself" / "I" / "my tickets" ALWAYS means the REQUESTER — a real, \
+identified member given to you explicitly. Never ask who "me" is, and never \
+mention sessions, identity, or how you were told; the requester line IS the \
+answer.
+- A DESCRIPTIVE ticket phrase ("the frontend tickets", "the API work", "the \
+testing ones") matches against each ticket's TITLE, SUMMARY, AREA and LABELS \
+— read what the ticket is about, not just its name. Matching several tickets \
+is normal and right ("the frontend tickets" = every ticket that is frontend \
+work). When NOTHING plausibly matches, say so in `note` in plain product \
+terms ("none of this PRD's tickets look like frontend work — they're all \
+about email delivery") and, when the person side is clear, still offer ONE \
+question fixed on that person with all tickets as options (multi) so the \
+user can pick despite the mismatch.
 - A name matches a member when it identifies exactly one of them (first name \
 is fine; match case-insensitively against name and email). Two members both \
 called Dave → a question with both as options, never a pick.
@@ -138,6 +169,23 @@ one plausible ticket → explicit. Several → one question with `user_id` fixed
 (when the person is clear) and `option_ticket_keys` = the candidates.
 - "this ticket" / "that one" with nothing in the request to resolve it → a \
 question fixed on the person, options = all tickets.
+- The request asks for SEVERAL tickets for one person ("assign 2 tickets to \
+X", "give a couple of tickets to X", "assign some tickets to X") without \
+naming which → ONE question fixed on that person with `option_ticket_keys` as \
+the candidates and `multi: true`, so the user ticks them all in one card — \
+never N copies of the same question, and never a single-pick card that can \
+only honour one of the asked-for tickets. `multi` is only ever for \
+person-fixed questions: a ticket has exactly one assignee.
+- The request selects tickets by TOPIC or CATEGORY ("all backend related \
+tickets", "the frontend UI ones", "every bug ticket", "anything about auth") \
+→ that selection is YOURS to make, not a question: judge each ticket's title \
+against the category, put every match in `assignments` (the request already \
+says who gets them), and use `note` to say which tickets you counted in and \
+which you judged outside the category. Zero matches is a legitimate verdict — \
+state it in `note` — and a genuinely borderline title may still become a \
+question, but the question must name the ticket and say why it is borderline. \
+Never ask the user to sort tickets into the category themselves: that is the \
+work they asked you to do.
 - The request itself says randomly / evenly / split / spread → that IS the \
 instruction: distribute round-robin across the named people (or the whole \
 roster when nobody is named) as plain `assignments`, and say in `note` that \
@@ -146,14 +194,22 @@ the split was yours.
 ticket or person it asks about — never a generic "who should this go to?".
 - Asking is cheap and wrong writes are not: when in doubt between an \
 assignment and a question, ask.
+- `note` speaks to the USER about their tickets and their team, in plain \
+product words. Never mention sessions, identity, prompts, rosters as inputs, \
+or anything about how this request reached you.
 
 Return ONLY the JSON object."""
 
-_USER = """TICKETS (key — title — current assignee):
+_USER = """PRD these tickets came from: {prd_title}
+
+TICKETS (key — title — summary — area/labels — current assignee):
 {tickets}
 
 TEAM ROSTER (user_id — name — email — role):
 {members}
+
+REQUESTER (the person sending this request — "me"/"myself"/"I" means them):
+{requester}
 
 REQUEST:
 {instruction}"""
@@ -202,9 +258,21 @@ def _load_tickets(company_id: str, prd_id: int) -> list[dict]:
         key = _ticket_key_for(prd_id, s)
         if key in gone:
             continue
+        # WHAT the ticket is about, not just its name — a descriptive request
+        # ("the frontend tickets") has to match against content. `what` falls
+        # back to the user story; both are clamped so sixty tickets stay one
+        # readable block. Route + labels are the skill's own area tags.
+        summary = str(s.get("what") or s.get("user_story") or s.get("body") or "").strip()
+        area_bits = [str(s.get("route") or "").strip()] + [
+            str(l).strip() for l in (s.get("labels") or []) if str(l).strip()
+        ]
+        if s.get("prd_section"):
+            area_bits.append(str(s.get("prd_section")).strip())
         out.append({
             "key": key,
             "title": str(s.get("title") or "(untitled)"),
+            "summary": summary[:180],
+            "area": ", ".join(b for b in area_bits if b)[:120],
             "assignee": assignee_by_key.get(key),
         })
     return out
@@ -233,8 +301,18 @@ def _member_label(m: dict) -> str:
     return str(m.get("display_name") or m.get("email") or m.get("user_id") or "?")
 
 
-def plan_assignments(enterprise_id: str, prd_id: int, instruction: str) -> dict:
-    """The validated plan for one assignment request. Never raises."""
+def plan_assignments(
+    enterprise_id: str, prd_id: int, instruction: str,
+    requester_user_id: Optional[str] = None,
+) -> dict:
+    """The validated plan for one assignment request. Never raises.
+
+    `requester_user_id` is WHO IS ASKING — the authenticated caller, whoever
+    they are: the company owner or an invited member, it is simply the id on
+    the JWT. It rides the prompt as an explicit REQUESTER line so "assign the
+    tickets to me" resolves to a real person instead of a question about who
+    "me" is (the reported failure answered with prompt internals: "no session
+    identity is provided")."""
     empty_note = (
         "I couldn't work out that assignment — try naming the ticket and the "
         "person, e.g. “assign the login ticket to Dave”."
@@ -260,8 +338,50 @@ def plan_assignments(enterprise_id: str, prd_id: int, instruction: str) -> dict:
     ticket_by_key = {t["key"]: t for t in tickets}
     member_by_id = {str(m.get("user_id")): m for m in members if m.get("user_id")}
 
+    # THE REQUESTER'S OWN ROW MUST SURVIVE. The roster read is capped
+    # (_MEMBER_CAP), and an invited member far down a large roster could be
+    # trimmed out — which would turn THEIR "assign to me" into an id the
+    # validator refuses. Backfill their single row from the same source the
+    # roster came from.
+    if requester_user_id and requester_user_id not in member_by_id:
+        try:
+            from app.db.team import list_company_members
+
+            row = next(
+                (m for m in list_company_members(enterprise_id)
+                 if str(m.get("user_id")) == str(requester_user_id)),
+                None,
+            )
+            if row is not None:
+                members.append(row)
+                member_by_id[str(requester_user_id)] = row
+        except Exception:  # noqa: BLE001 — the line below degrades honestly
+            logger.exception("ticket-assign: requester backfill failed")
+
+    requester = member_by_id.get(str(requester_user_id or ""))
+    requester_txt = (
+        f"- {requester.get('user_id')} — {requester.get('display_name') or '(no name)'} — "
+        f"{requester.get('email') or '(no email)'} — {requester.get('role') or 'member'}"
+        if requester
+        # An authenticated caller who is somehow not on the roster can still
+        # be TALKED ABOUT honestly — but not assigned to (the validator only
+        # accepts roster ids), and the model is told exactly that.
+        else "- (not on the team roster — they cannot be assigned tickets)"
+    )
+
+    prd_title = "(untitled PRD)"
+    try:
+        from app.db.prds import get_prd
+
+        prd_title = str((get_prd(prd_id) or {}).get("title") or prd_title)
+    except Exception:  # noqa: BLE001 — context, never a blocker
+        logger.exception("ticket-assign: prd title read failed")
+
     tickets_txt = "\n".join(
-        f"- {t['key']} — {t['title']} — "
+        f"- {t['key']} — {t['title']}"
+        + (f" — {t['summary']}" if t.get("summary") else "")
+        + (f" — [{t['area']}]" if t.get("area") else "")
+        + " — "
         + (str((t['assignee'] or {}).get('display_name') or (t['assignee'] or {}).get('email')) if t["assignee"] else "unassigned")
         for t in tickets
     )
@@ -278,7 +398,8 @@ def plan_assignments(enterprise_id: str, prd_id: int, instruction: str) -> dict:
             purpose="assign_plan",
             system=_SYSTEM,
             input=_USER.format(
-                tickets=tickets_txt, members=members_txt, instruction=instruction
+                prd_title=prd_title, tickets=tickets_txt, members=members_txt,
+                requester=requester_txt, instruction=instruction,
             ),
             prompt_version=PLAN_PROMPT_VERSION,
             json_schema=_SCHEMA,
@@ -352,6 +473,12 @@ def plan_assignments(enterprise_id: str, prd_id: int, instruction: str) -> dict:
                 "header": header,
                 "prompt": prompt,
                 "fixed": {"kind": "member", "assignee": _member_public(member_by_id[uid])},
+                # Multi is a PERSON-FIXED affordance only ("assign 2 tickets to
+                # X" → tick several tickets in one card). The ticket-fixed
+                # branch above never carries it: a ticket has exactly one
+                # assignee, so a multi-pick there would be N-1 silently
+                # discarded clicks.
+                "multi": bool(qq.get("multi")),
                 "options": [
                     {
                         "value": k,

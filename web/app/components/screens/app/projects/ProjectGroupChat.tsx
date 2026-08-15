@@ -28,6 +28,8 @@ import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
+import { ChatBubble } from "../../../shared/ChatBubble"
+import { ChatTranscript, type ChatTranscriptTurn } from "../../../shared/ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
@@ -204,6 +206,15 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const cursorRef = useRef<number | undefined>(undefined)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // The ONLY remaining job of an in-flight guard: block a double-submit of
+  // the EXACT same draft (a rapid double click/double-Enter before the
+  // composer clears). The backend already backgrounds the agent reply
+  // (`post_group_turn_route` returns once the human turn is persisted + the
+  // gate has decided, never after the reply generates) — so nothing here
+  // waits on it, and a DIFFERENT draft is never blocked by an earlier send
+  // still settling. Set the instant a send starts, cleared the instant the
+  // POST is acknowledged (not after the follow-up reconcile fetch).
+  const inFlightDraftRef = useRef<string | null>(null)
   // The scrollable message viewport — pinned to the newest turn on (re)load and
   // as new turns arrive, like a normal chat. See the scroll-to-bottom effect.
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -537,21 +548,24 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
 
   const handleSend = useCallback(() => {
     const content = draft.trim()
-    if (content.length < DRAFT_MIN_CHARS || posting) return
+    if (content.length < DRAFT_MIN_CHARS) return
+    // Double-submit guard for the SAME draft only (see the ref's doc above) —
+    // a ref, not the `posting` state, so it is synchronously visible even to
+    // a second dispatch that lands before this render's `posting` update has
+    // flushed. A DIFFERENT draft (content changed) is never blocked here.
+    if (inFlightDraftRef.current === content) return
+    inFlightDraftRef.current = content
     setPosting(true)
     setError(null)
     // Optimistic clear: empty the composer the INSTANT the send starts, not
-    // after the POST resolves — which only happens once a best-effort
-    // mention reply completes (backend/app/routes/projects.py's
-    // post_group_turn_route), so waiting that long left the box holding
-    // stale text through the whole round trip.
+    // after the POST resolves.
     setDraft("")
     // Optimistic turn: render the sender's OWN turn the INSTANT they hit
-    // send — the POST resolves only after a best-effort agent reply runs, so
-    // with a degraded transport the human turn was invisible for seconds. The
-    // negative id keeps it out of `knownTurnIdsRef`/`cursorRef`; `applyTurns`
-    // swaps it for the real turn when it lands (broadcast or reconcile), so
-    // there is no duplicate.
+    // send — the POST's own gate decision (mention/solo/should_respond) adds
+    // a beat before it resolves, so with a degraded transport the human turn
+    // was invisible for seconds. The negative id keeps it out of
+    // `knownTurnIdsRef`/`cursorRef`; `applyTurns` swaps it for the real turn
+    // when it lands (broadcast or reconcile), so there is no duplicate.
     const tempId = optimisticIdRef.current
     optimisticIdRef.current -= 1
     const optimisticTurn: GroupTurn = {
@@ -567,14 +581,20 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     projectsApi
       .postGroupTurn(projectId, content)
       .then(() => {
-        // The POST resolves only after a best-effort mention reply completes
-        // (backend/app/routes/projects.py's post_group_turn_route), so a poll
-        // right after it reliably picks up both the human turn and any agent
-        // reply in one round trip.
+        // The POST resolves once the human turn is persisted + broadcast +
+        // the gate has decided — NOT after the agent reply, which the
+        // backend backgrounds (`routes/projects.py`'s `post_group_turn_route`
+        // / `_schedule_group_reply`) and delivers via the `project:{id}`
+        // realtime broadcast + this reconcile poll (or the 4s interval poll
+        // above, whichever lands first). Clearing the double-submit guard
+        // here — not after this poll — is what lets the composer take the
+        // NEXT draft immediately; nothing about the reply gates it.
+        inFlightDraftRef.current = null
         return projectsApi.groupTurns(projectId, cursorRef.current)
       })
       .then(applyTurns)
       .catch(() => {
+        inFlightDraftRef.current = null
         setError("Couldn't send that. Try again.")
         // Roll back the optimistic turn so a failed POST leaves no ghost.
         setTurns((prev) => prev.filter((t) => t.id !== tempId))
@@ -585,7 +605,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .finally(() => {
         setPosting(false)
       })
-  }, [draft, posting, projectId, applyTurns, myUserId, myName])
+  }, [draft, projectId, applyTurns, myUserId, myName])
 
   // Idempotent per-turn save (UI-side guard — the backend does not dedupe
   // this endpoint). A turn already saved or already in flight is a no-op.
@@ -614,10 +634,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   // one still awaiting whatever comes next — v1 has no should-respond
   // classifier (AD-P10 is a later phase), so this is informational ("no
   // reply yet"), never a claim that the agent considered and declined.
-  // Suppressed while a send is in flight: during `posting` a reply may
-  // still be generating (the POST runs the best-effort reply before it
-  // resolves), so showing "stayed out" then is wrong — it's pending, not
-  // declined. The badge returns once posting settles and no reply arrived.
+  // Suppressed while this send's own POST + reconcile poll are in flight
+  // (`posting`): the backgrounded agent reply (see `handleSend`'s doc above)
+  // may still land any moment, so showing "stayed out" then is wrong — it's
+  // pending, not declined. The badge returns once posting settles and no
+  // reply arrived. Purely a display suppression window — it no longer has
+  // anything to do with whether the composer can take another message.
   const showStayedOut = !!lastTurn && lastTurn.role === "user" && !posting
 
   const rows = useMemo(
@@ -722,26 +744,32 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           <AssistantThinkingSkeleton phase="Loading the group chat…" />
         ) : (
           <>
-            {rows.map(({ turn, isMe, isAgent, invokedBy, invokedByMe }) => {
-              if (isAgent) {
-                return (
-                  <div key={turn.id} className={`gc-msg gc-msg--ai ${styles.msg} ${styles.msgAi}`} data-testid="gc-msg-agent">
-                    <span className={styles.aiMark} aria-hidden="true">
-                      s
-                    </span>
-                    <div className={styles.body}>
-                      <div className={styles.head}>
-                        <span className={styles.name}>{AGENT_NAME}</span>
-                        <span className={styles.agentTag}>AGENT</span>
-                        <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                        <span
-                          className={`${styles.stateBadge} ${invokedBy ? styles.stateInvoked : styles.stateDetected}`}
-                          data-testid="gc-state-badge"
-                        >
-                          {invokedBy ? (invokedByMe ? "invoked by you" : `invoked by ${firstName(invokedBy)}`) : "detected this was for it"}
-                        </span>
-                      </div>
-                      <div className={styles.bubbleAgent}>
+            {(() => {
+              // Three row shapes — agent / me / other — each maps onto ONE
+              // `<ChatBubble>` call: an agent row is agent-only, a human row
+              // is user-only (`showAgent: false`). The per-row markup below
+              // is the SAME content each branch already rendered inline;
+              // only the wrapping loop (this file's own hand-rolled `<div>`
+              // per row) is gone.
+              const rowTurns: ChatTranscriptTurn[] = rows.map(({ turn, isMe, isAgent, invokedBy, invokedByMe }) => {
+                if (isAgent) {
+                  return {
+                    turnId: `${turn.id}`,
+                    wrapperClassName: `bc-turn gc-msg gc-msg--ai ${styles.msg} ${styles.msgAi}`,
+                    dataTestId: "gc-msg-agent",
+                    agentName: AGENT_NAME,
+                    agentBadge: "AGENT",
+                    agentTimestamp: formatTime(turn.created_at),
+                    agentHeadExtra: (
+                      <span
+                        className={`${styles.stateBadge} ${invokedBy ? styles.stateInvoked : styles.stateDetected}`}
+                        data-testid="gc-state-badge"
+                      >
+                        {invokedBy ? (invokedByMe ? "invoked by you" : `invoked by ${firstName(invokedBy)}`) : "detected this was for it"}
+                      </span>
+                    ),
+                    agentBodyNode: (
+                      <>
                         <AskReplyBody reply={toAskResponse(turn.content)} />
                         <OpenArtifactChips
                           candidates={turn.open_candidates ?? []}
@@ -762,55 +790,55 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                             {savingTurnId === turn.id ? "Saving…" : "Save as artifact"}
                           </button>
                         )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              }
-              if (isMe) {
-                return (
-                  <div key={turn.id} className={`gc-msg gc-msg--me ${styles.msg} ${styles.msgMe}`} data-testid="gc-msg-me">
-                    <div className={styles.body}>
-                      <div className={styles.head}>
-                        <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                        <span className={styles.name}>You</span>
-                      </div>
-                      <div className={styles.bubbleMe}>
-                        <MentionBubble content={turn.content} />
-                      </div>
-                    </div>
-                    <span
-                      className={styles.av}
-                      aria-hidden="true"
-                      style={personAvatarStyle(turn.author_user_id, turn.author_name)}
-                    >
-                      {initials(turn.author_name)}
-                    </span>
-                  </div>
-                )
-              }
-              return (
-                <div key={turn.id} className={`gc-msg gc-msg--other ${styles.msg} ${styles.msgOther}`} data-testid="gc-msg-other">
-                  <span
-                    className={styles.av}
-                    aria-hidden="true"
-                    style={personAvatarStyle(turn.author_user_id, turn.author_name)}
-                  >
-                    {initials(turn.author_name)}
-                  </span>
-                  <div className={styles.body}>
-                    <div className={styles.head}>
-                      <span className={styles.name}>{turn.author_name ?? "Someone"}</span>
+                      </>
+                    ),
+                  }
+                }
+                if (isMe) {
+                  return {
+                    turnId: `${turn.id}`,
+                    wrapperClassName: `bc-turn gc-msg gc-msg--me ${styles.msg} ${styles.msgMe}`,
+                    dataTestId: "gc-msg-me",
+                    showAgent: false,
+                    agentName: AGENT_NAME,
+                    speaker: "You",
+                    userHeadExtra: <span className={styles.time}>{formatTime(turn.created_at)}</span>,
+                    user: {
+                      initials: initials(turn.author_name),
+                      avatarStyle: personAvatarStyle(turn.author_user_id, turn.author_name),
+                      bubbleClassName: styles.bubbleMe,
+                      bodyNode: <MentionBubble content={turn.content} />,
+                    },
+                  }
+                }
+                return {
+                  turnId: `${turn.id}`,
+                  wrapperClassName: `bc-turn gc-msg gc-msg--other ${styles.msg} ${styles.msgOther}`,
+                  dataTestId: "gc-msg-other",
+                  showAgent: false,
+                  agentName: AGENT_NAME,
+                  // A teammate's own turn, never the reader's — left-aligned,
+                  // avatar-flanked, so it reads as visually distinct from
+                  // the reader's own right-aligned turns below. Only a
+                  // group transcript's non-self human rows ever set this.
+                  humanAlign: "start",
+                  speaker: turn.author_name ?? "Someone",
+                  userHeadExtra: (
+                    <>
                       {turn.author_job_role ? <span className={styles.role}>{turn.author_job_role}</span> : null}
                       <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                    </div>
-                    <div className={styles.bubbleOther}>
-                      <MentionBubble content={turn.content} />
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+                    </>
+                  ),
+                  user: {
+                    initials: initials(turn.author_name),
+                    avatarStyle: personAvatarStyle(turn.author_user_id, turn.author_name),
+                    bubbleClassName: styles.bubbleOther,
+                    bodyNode: <MentionBubble content={turn.content} />,
+                  },
+                }
+              })
+              return <ChatTranscript turns={rowTurns} />
+            })()}
             {showStayedOut ? (
               <div className={styles.stayedOut} data-testid="gc-stayed-out">
                 <span className={styles.stayedOutDot} aria-hidden="true" />
@@ -857,7 +885,14 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
 
       <div className={styles.composerWrap}>
         <ChatComposer
-          busy={posting}
+          // NOT `posting`: there is no group Stop UI (spec §6.2 keeps group
+          // streaming/Stop out), so `busy` swapping Send for a no-op Stop
+          // button was the actual composer-blocking bug — a member could not
+          // send a second message while the first send's own reconcile poll
+          // was still in flight. Always `false` here; the double-submit guard
+          // above is the only remaining in-flight protection, and Send
+          // itself is only ever disabled by an empty/too-short draft.
+          busy={false}
           draft={draft}
           pinnedSkill={null}
           attachments={[]}
@@ -906,9 +941,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
           onFileSelect={() => {}}
-          voiceSupported={false}
-          voiceListening={false}
-          onToggleVoice={() => {}}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>

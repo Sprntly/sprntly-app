@@ -114,9 +114,9 @@ def test_emit_dual_publishes_to_both_parties(isolated_settings, monkeypatch):
     _install_fake_status(monkeypatch)
     calls = _spy_publish(monkeypatch)
 
-    # The assignee accepts — an assignee-owned, legal edge from `assigned`.
+    # The assignee starts work — an assignee-owned, legal edge from `assigned`.
     r = ctx.client.post(
-        _events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers
+        _events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers
     )
     assert r.status_code == 200
 
@@ -130,18 +130,18 @@ def test_emit_dual_publishes_to_both_parties(isolated_settings, monkeypatch):
 
 
 def test_emit_never_publishes_to_group_channel(isolated_settings, monkeypatch):
-    """Privacy gate (AD-P30): a decline is the private-est event — its status
-    must never leak to the group channel `project:{id}`."""
+    """Privacy gate (AD-P30): `cleared` (the assigner's kill switch) is the
+    private-est event — its status must never leak to the group channel
+    `project:{id}`, only to the two parties' own per-user channels."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
-    assignee_id, assignee_headers = _seed_member(ctx, project["id"])
+    assignee_id, _ = _seed_member(ctx, project["id"])
     deleg = _seed_delegation(project["id"], ctx.user_id, assignee_id)
     _install_fake_status(monkeypatch)
     calls = _spy_publish(monkeypatch)
 
-    r = ctx.client.post(
-        _events_url(project["id"], deleg["id"]), json={"event": "declined"}, headers=assignee_headers
-    )
+    # `cleared` is assigner-owned (EVENT_PARTY) — ctx (the assigner) emits it.
+    r = ctx.client.post(_events_url(project["id"], deleg["id"]), json={"event": "cleared"})
     assert r.status_code == 200
 
     group_topic = f"project:{project['id']}"
@@ -161,7 +161,7 @@ def test_publish_payload_is_shaped_dto(isolated_settings, monkeypatch):
     calls = _spy_publish(monkeypatch)
 
     r = ctx.client.post(
-        _events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers
+        _events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers
     )
     assert r.status_code == 200
 
@@ -173,7 +173,7 @@ def test_publish_payload_is_shaped_dto(isolated_settings, monkeypatch):
                        "delivered_conversation_id", "delivered_turn_id"):
             assert leaked not in c["payload"], leaked
         assert c["payload"]["delegation_id"] == deleg["id"]
-        assert c["payload"]["status"] == "accepted"
+        assert c["payload"]["status"] == "in_progress"
         assert c["payload"]["task_summary"] == "Draft the pricing page"
 
 
@@ -189,12 +189,12 @@ def test_publish_failure_does_not_fail_emit(isolated_settings, monkeypatch):
     _spy_publish(monkeypatch, raises=True)  # forced-raise publish
 
     r = ctx.client.post(
-        _events_url(project["id"], deleg["id"]), json={"event": "accepted"}, headers=assignee_headers
+        _events_url(project["id"], deleg["id"]), json={"event": "in_progress"}, headers=assignee_headers
     )
     # Identical response body whether the publish succeeds or fails.
     assert r.status_code == 200
-    assert r.json() == {"delegation_id": deleg["id"], "status": "accepted"}
+    assert r.json() == {"delegation_id": deleg["id"], "status": "in_progress"}
     # The event is still durably recorded.
     events = delegation_events_db.list_events(deleg["id"])
     assert len(events) == 1
-    assert events[0]["event"] == "accepted"
+    assert events[0]["event"] == "in_progress"

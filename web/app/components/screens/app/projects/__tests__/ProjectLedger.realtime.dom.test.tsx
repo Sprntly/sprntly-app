@@ -319,21 +319,24 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
 describe("brief-turn affordance — live update (AC-6)", () => {
   it("test_brief_turn_actions_update_on_delegation_event: the matched brief turn reflects the new status", async () => {
     individualTurnsMock.mockResolvedValue([iturn({ id: 7, content: "Ship onboarding by Friday." })])
-    // Completed → the assignee has no actions yet.
+    // Completed → the assignee has no actions yet (terminal, per LEGAL_ACTIONS).
     assignedRows = [row({ delegation_id: 5, delivered_turn_id: 7, status: "completed", bucket: "done" })]
 
     render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     await waitFor(() => expect(ledgerMock).toHaveBeenCalled())
-    expect(screen.queryByTestId("delegation-action-accepted")).toBeNull()
+    expect(screen.queryByTestId("delegation-action-in_progress")).toBeNull()
+    expect(screen.queryByTestId("delegation-action-completed")).toBeNull()
 
-    // The assigner reopens → the live event flips this turn's affordance open.
+    // The task moves back to `assigned` (e.g. a fresh hand-off) → the live
+    // event flips this turn's affordance open again.
     await act(async () => {
-      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "reopened" })
+      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
       await Promise.resolve()
     })
 
-    expect(await screen.findByTestId("delegation-action-accepted")).toBeTruthy()
+    expect(await screen.findByTestId("delegation-action-in_progress")).toBeTruthy()
+    expect(screen.getByTestId("delegation-action-completed")).toBeTruthy()
   })
 
   it("ignores a delegation.event for a turn not rendered in this thread", async () => {
@@ -342,7 +345,7 @@ describe("brief-turn affordance — live update (AC-6)", () => {
 
     render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
-    await waitFor(() => expect(screen.getByTestId("delegation-action-accepted")).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy())
 
     await act(async () => {
       // A different delegation, not on any rendered turn — must not throw or
@@ -350,8 +353,8 @@ describe("brief-turn affordance — live update (AC-6)", () => {
       lastHandlers().onEvent("delegation.event", { delegation_id: 999, status: "completed" })
       await Promise.resolve()
     })
-    // The rendered turn's Accept affordance is untouched.
-    expect(screen.getByTestId("delegation-action-accepted")).toBeTruthy()
+    // The rendered turn's affordance is untouched.
+    expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy()
   })
 })
 
