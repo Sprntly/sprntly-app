@@ -270,6 +270,38 @@ def remove_member(project_id: int, target_user_id: str) -> bool:
 
 
 @retry_on_disconnect
+def get_instructions(project_id: int) -> str | None:
+    """The project's saved free-text instructions for the Sprntly agent, or
+    None when nothing has been set. Single-column read — the hot-path caller
+    is scope assembly on every project-private/group agent turn."""
+    rows = (
+        require_client()
+        .table("projects")
+        .select("instructions")
+        .eq("id", project_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0].get("instructions") if rows else None
+
+
+@retry_on_disconnect
+def set_instructions(project_id: int, instructions: str | None) -> None:
+    """Persist the project's instructions and touch `updated_at` (mirrors
+    `add_member`'s update+touch pattern). Empty/whitespace-only normalizes
+    to `None` (clearing) rather than storing an empty string, so `get_
+    instructions` and the folded-block builder never have to distinguish
+    "" from unset."""
+    normalized = (instructions or "").strip() or None
+    client = require_client()
+    client.table("projects").update(
+        {"instructions": normalized, "updated_at": utc_now()}
+    ).eq("id", project_id).execute()
+
+
+@retry_on_disconnect
 def list_members(project_id: int) -> list[dict]:
     """Human members of this project, enriched with profile display data
     (mirrors `app.db.team.list_company_members`'s profile-join shape).

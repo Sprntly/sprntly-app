@@ -43,6 +43,12 @@ _MANIFEST_TITLES_PER_TYPE = 6
 # report body can't blow the tool-result back into the model unboundedly.
 _ARTIFACT_CONTENT_CHARS = 8000
 
+# Cap on the folded PROJECT INSTRUCTIONS block appended to BOTH project
+# surfaces' system prompts (private: `ask_job_runner._build_private_scope`;
+# group: `routes.projects._respond_as_group_agent`) — single-sourced here so
+# the format/cap can never drift between the two callers.
+_INSTRUCTIONS_CHARS = 2000
+
 _TYPE_LABELS = {
     "prd": "PRDs",
     "prototype": "Prototypes",
@@ -129,6 +135,23 @@ def _roster_block(project_id: int) -> str:
         role = (m.get("job_role") or "").strip()
         lines.append(f"- {name} — {role}" if role else f"- {name}")
     return "\n".join(lines)
+
+
+def _instructions_block(instructions: str | None) -> str:
+    """"PROJECT INSTRUCTIONS (set by the team — follow these):\n<text>", or
+    "" when nothing is set — the empty string is the caller's signal to omit
+    the block entirely rather than append a hollow header. Truncates at
+    `_INSTRUCTIONS_CHARS` with a trailing ellipsis so one team's saved
+    instructions can never blow either surface's system prompt unboundedly.
+    Single-sourced for both project surfaces (mirrors `_roster_block`) —
+    callers append this to `system_addendum`/`system_parts`, never to
+    `context_payload`."""
+    text = (instructions or "").strip()
+    if not text:
+        return ""
+    if len(text) > _INSTRUCTIONS_CHARS:
+        text = text[:_INSTRUCTIONS_CHARS].rstrip() + "…"
+    return "PROJECT INSTRUCTIONS (set by the team — follow these):\n" + text
 
 
 def assemble_private_project_context(

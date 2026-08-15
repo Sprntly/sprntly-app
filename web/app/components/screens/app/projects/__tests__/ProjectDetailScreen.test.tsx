@@ -31,6 +31,11 @@ const emitDelegationEventMock = vi.fn()
 // affected; the one test that opens it sets its own resolved value.
 const candidateSearchMock = vi.fn()
 const tagCandidateMock = vi.fn()
+// The settings-gear modal's Instructions tab GET-on-open effect fires
+// whenever `ProjectSettingsModal` mounts (any tab) — give it a safe default
+// up front, same reasoning as `individualUnreadMock` etc. above.
+const instructionsMock = vi.fn().mockResolvedValue({ instructions: null })
+const setInstructionsMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
 // listed human member — lets the container-level tests exercise the
 // "removable" branch (u2/Shristi) without also tripping the self-removal
@@ -71,6 +76,8 @@ vi.mock("../../../../../lib/api", () => {
       emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
       candidateSearch: (...a: unknown[]) => candidateSearchMock(...a),
       tagCandidate: (...a: unknown[]) => tagCandidateMock(...a),
+      instructions: (...a: unknown[]) => instructionsMock(...a),
+      setInstructions: (...a: unknown[]) => setInstructionsMock(...a),
     },
     // Real implementation (no API call, no side effect) — mirrors
     // lib/api.ts's own five-value check, kept here rather than importing the
@@ -277,6 +284,9 @@ afterEach(() => {
   candidateSearchMock.mockReset()
   candidateSearchMock.mockResolvedValue([])
   tagCandidateMock.mockReset()
+  instructionsMock.mockReset()
+  instructionsMock.mockResolvedValue({ instructions: null })
+  setInstructionsMock.mockReset()
   authMock.mockReset()
   authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })

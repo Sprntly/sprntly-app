@@ -12,17 +12,16 @@
 //   - Members → the SAME `ProjectDetailScreen.module.css` member-row classes
 //     the old rail (and `ProjectPanelSection`) already use — no second
 //     member-row palette.
-// Instructions is the one genuinely NEW surface — a non-persisting SHELL
-// only. Persisting it (GET/PUT + folding into agent context) is a follow-up
-// ticket; this tab is local-state-only, Save is deliberately disabled, and
-// no network call is ever made from it.
+// Instructions persists (GET on open, PUT on Save) and folds into both
+// project surfaces' agent context server-side — this tab is a thin
+// presentational wrapper over `projectsApi.instructions`/`setInstructions`.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { IconClose } from "../../../shared/app-icons"
 import { personAvatarStyle } from "./avatarColor"
 import { useEscapeToClose } from "./useEscapeToClose"
 import { MemorySummaryBody } from "./MemoryModal"
 import { ProjectInviteBody } from "./ProjectInviteModal"
-import type { ProjectDetail, ProjectMember, ProjectMemorySummary } from "../../../../lib/api"
+import { projectsApi, type ProjectDetail, type ProjectMember, type ProjectMemorySummary } from "../../../../lib/api"
 import detailStyles from "./ProjectDetailScreen.module.css"
 import styles from "./ProjectSettingsModal.module.css"
 
@@ -40,7 +39,10 @@ const TABS: { id: SettingsTab; label: string }[] = [
   { id: "invite", label: "Invite" },
 ]
 
-const INSTRUCTIONS_MAX = 4000
+// Matches the server's cap (`SetInstructionsRequest.instructions` `max_length`
+// + `project_group_context._INSTRUCTIONS_CHARS`) so the client-side count/
+// disable never disagrees with what the PUT would actually accept.
+const INSTRUCTIONS_MAX = 2000
 
 /** Same initials algorithm `ProjectDetailScreen.tsx`/`ProjectInviteModal.tsx`
  *  already duplicate locally — not a shared export in this codebase. */
@@ -103,9 +105,14 @@ export function ProjectSettingsModal({
 }: ProjectSettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>(initialTab ?? "instructions")
   const [membersQuery, setMembersQuery] = useState("")
-  // Instructions tab — SHELL only, local state, never persisted this ticket
-  // (see the scope-boundary note on the tab panel below).
+  // Instructions tab — `instructions` is the live textarea value;
+  // `savedInstructions` is the last value loaded/saved from the server,
+  // used purely for change-detection (Save disabled when they match).
   const [instructions, setInstructions] = useState("")
+  const [savedInstructions, setSavedInstructions] = useState("")
+  const [instructionsLoading, setInstructionsLoading] = useState(false)
+  const [instructionsSaving, setInstructionsSaving] = useState(false)
+  const [instructionsError, setInstructionsError] = useState<string | null>(null)
 
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
@@ -117,6 +124,57 @@ export function ProjectSettingsModal({
     setTab(initialTab ?? "instructions")
     setMembersQuery("")
   }, [open, initialTab])
+
+  // Load the saved instructions on open (or when the project id changes
+  // while open) — best-effort: a failed GET degrades to an in-tab error
+  // line, never a crash.
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setInstructionsError(null)
+    setInstructionsLoading(true)
+    projectsApi
+      .instructions(projectId)
+      .then((res) => {
+        if (cancelled) return
+        const value = res.instructions ?? ""
+        setInstructions(value)
+        setSavedInstructions(value)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setInstructionsError("Couldn't load saved instructions.")
+      })
+      .finally(() => {
+        if (!cancelled) setInstructionsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [open, projectId])
+
+  const instructionsOverCap = instructions.length > INSTRUCTIONS_MAX
+  const instructionsUnchanged = instructions === savedInstructions
+  const instructionsSaveDisabled =
+    instructionsUnchanged || instructionsOverCap || instructionsLoading || instructionsSaving
+
+  const saveInstructions = useCallback(() => {
+    setInstructionsError(null)
+    setInstructionsSaving(true)
+    projectsApi
+      .setInstructions(projectId, instructions)
+      .then((res) => {
+        const value = res.instructions ?? ""
+        setInstructions(value)
+        setSavedInstructions(value)
+      })
+      .catch(() => {
+        setInstructionsError("Couldn't save instructions — try again.")
+      })
+      .finally(() => {
+        setInstructionsSaving(false)
+      })
+  }, [projectId, instructions])
 
   useEffect(() => {
     if (!open) return
@@ -175,7 +233,7 @@ export function ProjectSettingsModal({
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div
         ref={dialogRef}
-        className={`modal modal-lg ${styles.panel}`}
+        className={`modal modal-md ${styles.panel}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="project-settings-modal-title"
@@ -229,7 +287,11 @@ export function ProjectSettingsModal({
                 id="settings-instructions-input"
                 className={styles.textarea}
                 value={instructions}
-                onChange={(e) => setInstructions(e.target.value.slice(0, INSTRUCTIONS_MAX))}
+                // Not hard-clamped at INSTRUCTIONS_MAX — the field lets the
+                // user type/paste past the cap so the count + Save-disabled
+                // state can actually mirror it (AC12); the server enforces
+                // the real cap on PUT regardless.
+                onChange={(e) => setInstructions(e.target.value)}
                 placeholder="e.g. Priced quotes must return in under 60s — treat that as the north-star constraint."
                 data-testid="settings-instructions-input"
               />
@@ -237,21 +299,21 @@ export function ProjectSettingsModal({
                 <span className={styles.charCount} data-testid="settings-instructions-count">
                   {instructions.length} / {INSTRUCTIONS_MAX} characters
                 </span>
-                {/* Scope boundary (this ticket): NO persistence — no GET/PUT,
-                    no reload, and folding this into the agent context is a
-                    follow-up ticket. Save stays disabled so nothing here can
-                    be mistaken for a saved value; no network call is ever
-                    issued from this panel. */}
                 <button
                   type="button"
                   className="btn btn-primary"
-                  disabled
-                  title="Saving instructions ships in the next update"
+                  disabled={instructionsSaveDisabled}
+                  onClick={saveInstructions}
                   data-testid="settings-instructions-save"
                 >
-                  Save
+                  {instructionsSaving ? "Saving…" : "Save"}
                 </button>
               </div>
+              {instructionsError ? (
+                <div className={styles.instructionsError} data-testid="settings-instructions-error">
+                  {instructionsError}
+                </div>
+              ) : null}
               <div className={styles.feedsNote}>
                 <InfoIcon />
                 <div>
