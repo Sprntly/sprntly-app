@@ -26,7 +26,13 @@
  * user may need to re-read to answer.
  */
 
-import { useState } from "react"
+import { useLayoutEffect, useRef, useState } from "react"
+
+/** How many option rows the list shows before it starts scrolling. Reported
+ *  from a live session: "assign some of the tickets to me" listed all ten of a
+ *  PRD's tickets, and the popup grew tall enough to bury the composer and the
+ *  thread it was asking about. */
+const MAX_VISIBLE_OPTIONS = 5
 
 export type PopupOption = {
   label: string
@@ -161,9 +167,61 @@ export function QuestionPopup({
   // `onComplete` must fire exactly once even though settling state and firing
   // it happen across renders.
   const [completed, setCompleted] = useState(false)
+  // The scrolling option list: the measured height of the first
+  // MAX_VISIBLE_OPTIONS rows, and whether the user has scrolled to the last one
+  // (the bottom fade lifts there).
+  const optionsRef = useRef<HTMLDivElement | null>(null)
+  const [optionsCap, setOptionsCap] = useState<number | null>(null)
+  const [atEnd, setAtEnd] = useState(false)
 
   const count = questions.length
   const q = questions[Math.min(index, count - 1)]
+
+  const optionCount = q?.options.length ?? 0
+  const scrolls = optionCount > MAX_VISIBLE_OPTIONS
+
+  // Measure rather than guess. Rows are a bare label for one host, a label
+  // plus a ticket id for another, and two wrapped lines for a long title, so
+  // any px constant shows four rows on one question and seven on the next.
+  // Reading where the fifth row ends is the only definition of "five rows"
+  // that survives all three.
+  useLayoutEffect(() => {
+    const el = optionsRef.current
+    if (!el || !scrolls) {
+      setOptionsCap(null)
+      return
+    }
+    const measure = () => {
+      const rows = Array.from(el.children) as HTMLElement[]
+      const first = rows[0]
+      const last = rows[MAX_VISIBLE_OPTIONS - 1]
+      if (!first || !last) return
+      // Both rows share an offsetParent, so the difference is the run of five
+      // rows plus the four gaps between them wherever the popup sits. Zero
+      // under jsdom, which lays nothing out — stay uncapped there.
+      const h = last.offsetTop + last.offsetHeight - first.offsetTop
+      setOptionsCap(h > 0 ? h : null)
+    }
+    measure()
+    // A narrower popup rewraps long labels; a late font swap changes line
+    // height. Neither moves the CAPPED container's own box, so watch the first
+    // row as well as the list.
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null
+    if (ro) {
+      ro.observe(el)
+      const first = el.children[0]
+      if (first) ro.observe(first)
+    }
+    return () => ro?.disconnect()
+  }, [scrolls, index, optionCount])
+
+  // A new question starts at the top of its own list, not wherever the last
+  // one was left scrolled to.
+  useLayoutEffect(() => {
+    if (optionsRef.current) optionsRef.current.scrollTop = 0
+    setAtEnd(false)
+  }, [index])
+
   if (!q || completed) return null
 
   const record = settled[index]
@@ -283,7 +341,21 @@ export function QuestionPopup({
 
       <div className="qpu-prompt" data-testid="question-popup-prompt">{q.prompt}</div>
 
-      <div className="qpu-options">
+      <div
+        ref={optionsRef}
+        className={`qpu-options${scrolls ? " qpu-options--scroll" : ""}`}
+        data-testid="question-popup-options"
+        data-scroll-end={scrolls && atEnd ? "1" : undefined}
+        style={optionsCap != null ? { maxHeight: optionsCap } : undefined}
+        onScroll={
+          scrolls
+            ? (e) => {
+                const el = e.currentTarget
+                setAtEnd(el.scrollTop + el.clientHeight >= el.scrollHeight - 2)
+              }
+            : undefined
+        }
+      >
         {q.options.map((opt, oi) => {
           // Single mode: active = the settled answer (Back shows the choice).
           // Multi mode: active = ticked-but-not-yet-confirmed; a click
