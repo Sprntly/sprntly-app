@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 
 from app.db.artifacts import list_artifacts_for_project
 from app.db.conversations import (
@@ -35,8 +36,10 @@ from app.db.conversations import (
     post_individual_turn,
 )
 from app.db.delegation_events import record_event, status_dto
+from app.db.delegation_followups import upsert_followup
 from app.db.project_delegations import record_delegation
 from app.db.projects import is_project_member, resolve_member
+from app.delegation_cadence import MIN_INTERVAL
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
@@ -436,6 +439,22 @@ def handle_delegate_task(
         except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a successful delivery
             logger.warning(
                 "delegation_genesis_event_failed delegation_id=%s error=%s",
+                deleg["id"], type(exc).__name__,
+            )
+        # Own try/except, same posture as the genesis-event block above:
+        # seed the cadence row the outbound follow-up sweep reads
+        # (`list_due_followups`) so this delegation enters the due-set. A
+        # lost seed must never roll back the already-committed
+        # delivery+fact write — it only means the task stays out of the
+        # sweep until a later status reply upserts a row.
+        try:
+            now = datetime.now(timezone.utc)
+            upsert_followup(
+                deleg["id"], next_check_in=now + MIN_INTERVAL, last_checked_in=now
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a successful delivery
+            logger.warning(
+                "delegation_followup_seed_failed delegation_id=%s error_class=%s",
                 deleg["id"], type(exc).__name__,
             )
         # Publish on the ASSIGNEE'S per-user channel, never the group
