@@ -1,9 +1,16 @@
 """Structured "User input needed" questions for a PRD — extraction + answer.
 
-The `prd-author` skill writes a "User input needed" section into the PRD as
-decorative HTML (`<ul class="inputs"><li>…[ESCALATE]/[NEED]…owner…</li></ul>`).
-Nothing structured reaches the product, so those decisions sat inert inside the
-document. This module gives them a life:
+The `prd-author` skill USED to write a "User input needed" section into the PRD
+as decorative HTML (`<ul class="inputs"><li>…[ESCALATE]/[NEED]…owner…</li></ul>`).
+Nothing structured reached the product, so those decisions sat inert inside the
+document. This module gave them a life.
+
+prd-author v4.8 retired that section from the house format (owner decision
+2026-08-14) — a fresh built-in-format PRD carries no open-items list, so
+extraction finds nothing and the popup stays quiet, by design. Everything here
+still runs for the documents that DO carry the section: every pre-v4.8 PRD, and
+any PRD generated against a company template that defines its own open-items
+section (Template adoption renders theirs). The mechanics:
 
   1. `extract_input_questions(prd_id)` — a LIGHTWEIGHT pass (run once after the PRD
      is generated) reads the finished PRD and lifts each "User input needed" item

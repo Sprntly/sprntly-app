@@ -16,6 +16,10 @@
  * reason documented on OpenArtifactChips: `role="listitem"` on a <button>
  * REPLACES its button role and screen readers stop announcing it pressable.
  *
+ * Long listings scroll inside the card: past VISIBLE_ROWS rows the group gets
+ * a max height with the sixth row half-visible as the scroll cue, so a
+ * 12-artifact answer no longer stretches the thread past the composer.
+ *
  * A reply-adjacent card leaf, props-driven with no coupling to any one
  * screen — `shared/ChatBubble` renders it via its `artifactList` prop, so
  * any surface that hands ChatBubble a turn's `ChatArtifactItem[]` gets the
@@ -56,6 +60,17 @@ function when(createdAt: string | null): string | null {
   return Number.isNaN(d.getTime()) ? null : d.toLocaleDateString()
 }
 
+// Past this many rows the list scrolls INSIDE the card instead of stretching
+// the thread — a 12-row listing was pushing the composer off-screen and
+// burying the reply's own lead line. The cap is visual only: every row still
+// renders, reachable by the card's own scrollbar.
+const VISIBLE_ROWS = 5
+// Five full rows plus HALF of the sixth — the cut-off row is the scroll
+// affordance, so a capped list can never be mistaken for a complete one.
+// Row ≈ 53px (9px padding ×2 + 18px title line + 15px context line + 1px
+// row gap between them) + the column's 6px gap.
+const MAX_LIST_HEIGHT = Math.round(VISIBLE_ROWS * (53 + 6) + 53 / 2)
+
 export function ArtifactListCards({
   items,
   onOpen,
@@ -75,7 +90,14 @@ export function ArtifactListCards({
       data-testid="artifact-list-cards"
       role="group"
       aria-label="Your artifacts — click one to open it"
-      style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10 }}
+      style={{
+        display: "flex", flexDirection: "column", gap: 6, marginTop: 10,
+        // overscrollBehavior keeps a wheel at the list's end from yanking the
+        // whole thread — the inner and outer scrollers stay independent.
+        ...(items.length > VISIBLE_ROWS
+          ? { maxHeight: MAX_LIST_HEIGHT, overflowY: "auto" as const, overscrollBehavior: "contain" as const }
+          : null),
+      }}
     >
       {items.map((a) => {
         const Icon = KIND_ICON[a.type]
@@ -95,7 +117,10 @@ export function ArtifactListCards({
             data-artifact-type={a.type}
             onClick={() => onOpen(a)}
             style={{
-              display: "flex", alignItems: "center", gap: 10, width: "100%",
+              // flexShrink 0: inside the capped scroll container the default
+              // shrink would compress rows to fit instead of overflowing —
+              // squished rows, no scrollbar.
+              display: "flex", alignItems: "center", gap: 10, width: "100%", flexShrink: 0,
               textAlign: "left", padding: "9px 12px", borderRadius: 10,
               border: "1px solid var(--line)", background: "var(--surface)",
               cursor: disabled ? "default" : "pointer",

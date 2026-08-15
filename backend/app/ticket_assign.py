@@ -31,9 +31,17 @@ a click in the popup can never write to a target the model hallucinated.
 Ambiguity is ASKED, never guessed (the owner's directive from the session
 that filed this): two members sharing a first name is a question, and a
 request that names people but not which ticket each gets is a question per
-ticket. The one deliberate exception: a request that itself says
-randomly/evenly/spread IS an explicit instruction to distribute, so the model
-round-robins and returns plain assignments.
+ticket. Two deliberate exceptions, both cases where the request itself already
+contains the instruction:
+
+  - randomly/evenly/spread IS an explicit instruction to distribute, so the
+    model round-robins and returns plain assignments.
+  - a topic or category ("all backend tickets", "the frontend UI ones") IS an
+    explicit selection — judging which tickets fall inside it is the model's
+    job, done from the titles it was handed, with the verdict stated in
+    `note`. Reported from a live session: "assign all backend related tickets
+    to myself" came back as a select-which-ones-are-backend quiz, which asks
+    the user to do exactly the classification they asked the model for.
 
 Fail-open to an empty plan with a note — an LLM outage degrades the feature
 to "I couldn't work that out", never a 500 in the chat.
@@ -168,6 +176,16 @@ the candidates and `multi: true`, so the user ticks them all in one card — \
 never N copies of the same question, and never a single-pick card that can \
 only honour one of the asked-for tickets. `multi` is only ever for \
 person-fixed questions: a ticket has exactly one assignee.
+- The request selects tickets by TOPIC or CATEGORY ("all backend related \
+tickets", "the frontend UI ones", "every bug ticket", "anything about auth") \
+→ that selection is YOURS to make, not a question: judge each ticket's title \
+against the category, put every match in `assignments` (the request already \
+says who gets them), and use `note` to say which tickets you counted in and \
+which you judged outside the category. Zero matches is a legitimate verdict — \
+state it in `note` — and a genuinely borderline title may still become a \
+question, but the question must name the ticket and say why it is borderline. \
+Never ask the user to sort tickets into the category themselves: that is the \
+work they asked you to do.
 - The request itself says randomly / evenly / split / spread → that IS the \
 instruction: distribute round-robin across the named people (or the whole \
 roster when nobody is named) as plain `assignments`, and say in `note` that \

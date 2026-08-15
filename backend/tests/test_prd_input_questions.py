@@ -593,10 +593,17 @@ def test_a_compiled_skeleton_keeps_the_hook_extraction_reads(isolated_settings):
     prompt must be talking about the same element."""
     from app.artifact_templates.validate import validate_prd_skeleton
 
+    # The map CLAIMS an open-questions home, which is what makes the hook
+    # required at all: prd-author v4.8 retired the house appendix, so the
+    # validator only demands `ul.inputs` of a format that says it collects
+    # open questions. That is exactly the format whose answer buttons would
+    # silently vanish if the two sides drifted apart.
     section_map = {
         "sections": [
             {"id": "s1", "house": "Requirements", "customer": "Scope",
              "order": 1, "form": "table"},
+            {"id": "s2", "house": "Open questions", "customer": "Still to decide",
+             "order": 2, "form": "bullets"},
         ],
         "unmapped_house": [], "extra_sections": [],
     }

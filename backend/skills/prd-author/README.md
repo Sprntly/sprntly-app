@@ -35,7 +35,7 @@ Run with no real inputs — a demo, a template fill, a worked example — the pa
 
 ## Structure (house format)
 
-`Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix (User input needed)`
+`Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → Risks` — the document ends at Risks.
 
 - **Title** — 4–8 words, reasoned rather than assembled. Names the change, not the essay about the change. Must fit a roadmap row and still mean something.
 - **Context** — *reason it out, then write the delta.* Answer two questions before writing: what must a VP already hold in their head for this document to land, and what do they already know that you must not spend a word on? Context is the gap between those and nothing else. The reader works at the company — no company or product explainer. ~70 words.
@@ -45,10 +45,9 @@ Run with no real inputs — a demo, a template fill, a worked example — the pa
 - **Goal** — one primary metric with formula and baseline. Projected impact is filled with an assumption chain and confidence tag, or renders as the **designed blank slot** — never faked. Guardrails separate.
 - **Hypothesis** — one plain-English sentence: *If we do X, then Y will happen, which moves Z.* No restatement of the problem.
 - **Requirements** — table with `Happy path / Edge case / Failure` types. These tags are load-bearing: `implementation-spec` inherits them to decide which EARS branches are mandatory.
-- **Risks** — in the body, not the appendix. Named risks, then exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem.
-- **Appendix** — holds **User input needed** only: ≤5 items, `[ESCALATE]`/`[NEED]`, each with an owner. Self-clearing; disappears when empty.
+- **Risks** — in the body, closing the document. Named risks, then exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem.
 
-Retired from the house format: Non-goals, Alignment, Rollout, Done-when. They return only if an adopted template asks for them.
+Retired from the house format: the Appendix and its User input needed list (v4.8 — unknowns render inline as `[NEED]`/`[ESCALATE]` where they occur), plus Non-goals, Alignment, Rollout, Done-when (v4.4). They return only if an adopted template asks for them.
 
 ---
 
@@ -105,6 +104,7 @@ When the caller supplies a template — a blank company form, a filled PRD to ma
 | **4.7** | **Pre-emit provenance check, per item** | A prohibition doesn't stop fabrication; naming the supplying artifact does |
 | 4.7 | Provenance sources widened | Now explicitly includes project knowledge bases, knowledge graphs, and attached documents |
 | 4.7 | Evidence cap added to template "not adopted" list | A template expecting eight entries still gets three |
+| **4.8** | **Appendix (User input needed) retired** | Owner decision 2026-08-14: the open-items list read as unfinished work shipped inside the document; unknowns stay inline as `[NEED]`/`[ESCALATE]`, and only a company template that defines an open-items section renders one |
 
 ### Known open items
 
