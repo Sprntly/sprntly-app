@@ -22,8 +22,9 @@ Covers:
     (AC8)
 
 `fake_group_llm` mirrors `test_group_chat_turns.py`'s fixture of the same
-name (not importable across test files) -- patches
-`app.routes.projects.run_tool_loop` so no test here ever hits Anthropic.
+name (not importable across test files) -- patches `app.llm.run_tool_loop`
+(the group-agent reply path's call, via the unified answer engine's sixth
+ladder branch) so no test here ever hits Anthropic.
 """
 from __future__ import annotations
 
@@ -78,8 +79,9 @@ def _stub_brief_llm(monkeypatch, *, reply: str = "Here is the brief. Please proc
 @pytest.fixture
 def fake_group_llm(isolated_settings, monkeypatch):
     """Patches the ONE call site the group-agent reply path uses
-    (`app.routes.projects.run_tool_loop`) so no test here ever hits
-    Anthropic. Mirrors `test_group_chat_turns.py::fake_group_llm`."""
+    (`app.llm.run_tool_loop`, via the unified answer engine's sixth ladder
+    branch) so no test here ever hits Anthropic. Mirrors
+    `test_group_chat_turns.py::fake_group_llm`."""
     state: dict = {
         "calls": [],
         "reply": "On it -- I'll take a look and report back.",
@@ -102,9 +104,7 @@ def fake_group_llm(isolated_settings, monkeypatch):
             )
         return state["reply"]
 
-    import app.routes.projects as projects_route
-
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_run_tool_loop)
     return state
 
 
@@ -496,7 +496,7 @@ def test_agent_reply_publishes_assistant_turn(isolated_settings, monkeypatch, fa
 
     r = ctx.client.post(
         f"/v1/projects/{project['id']}/group/turns",
-        json={"content": "@Sprntly can you summarize the last decision?"},
+        json={"content": "@Sprntly please delegate this to Fortune"},
     )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1

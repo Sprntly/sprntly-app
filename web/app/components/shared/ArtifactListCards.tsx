@@ -19,6 +19,11 @@
  * Long listings scroll inside the card: past VISIBLE_ROWS rows the group gets
  * a max height with the sixth row half-visible as the scroll cue, so a
  * 12-artifact answer no longer stretches the thread past the composer.
+ *
+ * A reply-adjacent card leaf, props-driven with no coupling to any one
+ * screen — `shared/ChatBubble` renders it via its `artifactList` prop, so
+ * any surface that hands ChatBubble a turn's `ChatArtifactItem[]` gets the
+ * same clickable listing, not a second implementation.
  */
 import type { ChatArtifactItem } from "../../lib/api"
 import {

@@ -12,8 +12,9 @@ only at its edges (AC1). Once `_respond_as_group_agent` runs,
 the SAME `apply_chat_edit_scoped` the private surface calls — the ★ gate
 (`assert_prd_on_project` then `require_owned_prd`) fires identically. Every
 other envelope (`answer`, and any generate/open phrasing — group
-generate/open is DEFERRED, spec ⭐) falls through to the EXISTING
-`run_tool_loop` unchanged.
+generate/open is DEFERRED, spec ⭐) falls through to the unified answer
+engine (`qa_agent.answer`, scoped to this project) unchanged in shape from
+the pre-collapse `run_tool_loop` call it replaces.
 
 The classifier and (for the two IDOR proofs) the target resolver are
 monkeypatched for determinism — `resolve_chat_intent`'s own thresholds are
@@ -150,7 +151,8 @@ def test_group_classifies_only_after_should_respond(tenant_client, isolated_sett
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
+        projects_route.qa_agent, "answer",
+        lambda **kw: loop_calls.append(1) or {"answer": "unused", "citations": []},
     )
 
     resp = t.client.post(
@@ -183,7 +185,8 @@ def test_group_casual_scope_question_routes_answer(tenant_client, isolated_setti
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "let's discuss"
+        projects_route.qa_agent, "answer",
+        lambda **kw: loop_calls.append(1) or {"answer": "let's discuss", "citations": []},
     )
 
     resp = t.client.post(
@@ -222,7 +225,8 @@ def test_group_edit_prd_persists_and_broadcasts(tenant_client, isolated_settings
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
+        projects_route.qa_agent, "answer",
+        lambda **kw: loop_calls.append(1) or {"answer": "unused", "citations": []},
     )
 
     resp = t.client.post(
@@ -262,18 +266,11 @@ def test_group_non_edit_runs_existing_loop(tenant_client, isolated_settings, mon
     )
     loop_calls = []
 
-    def _fake_loop(*, system, user, tools, dispatch, model, meta_out=None, **kw):
-        loop_calls.append([tl["name"] for tl in tools])
-        if meta_out is not None:
-            meta_out.update(
-                {
-                    "model": model, "input_tokens": 1, "output_tokens": 1,
-                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-                }
-            )
-        return "an ordinary answer"
+    def _fake_answer(*, enterprise_id, question, dataset, scope=None, **kw):
+        loop_calls.append([tl["name"] for tl in (scope.extra_tools if scope else [])])
+        return {"answer": "an ordinary answer", "citations": []}
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer)
 
     # `answer`, and any generate/open PHRASING — the envelope is mocked to
     # `answer` regardless of wording (group generate/open has no executor to
@@ -308,18 +305,11 @@ def test_group_no_propose_tool_wired(tenant_client, isolated_settings, monkeypat
     )
     tools_seen = []
 
-    def _fake_loop(*, system, user, tools, dispatch, model, meta_out=None, **kw):
-        tools_seen.append(tools)
-        if meta_out is not None:
-            meta_out.update(
-                {
-                    "model": model, "input_tokens": 1, "output_tokens": 1,
-                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-                }
-            )
-        return "ok"
+    def _fake_answer(*, enterprise_id, question, dataset, scope=None, **kw):
+        tools_seen.append(list(scope.extra_tools) if scope else [])
+        return {"answer": "ok", "citations": []}
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer)
 
     resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})
     assert resp.status_code == 200, resp.text
@@ -422,7 +412,8 @@ def test_group_edit_own_project_in_place_versioned_broadcast(
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
+        projects_route.qa_agent, "answer",
+        lambda **kw: loop_calls.append(1) or {"answer": "unused", "citations": []},
     )
 
     resp = t.client.post(
@@ -458,18 +449,11 @@ def test_group_edit_target_resolved_not_client_supplied(tenant_client, isolated_
     )
     loop_calls = []
 
-    def _fake_loop(*, system, user, tools, dispatch, model, meta_out=None, **kw):
-        loop_calls.append([tl["name"] for tl in tools])
-        if meta_out is not None:
-            meta_out.update(
-                {
-                    "model": model, "input_tokens": 1, "output_tokens": 1,
-                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-                }
-            )
-        return "falling through"
+    def _fake_answer(*, enterprise_id, question, dataset, scope=None, **kw):
+        loop_calls.append([tl["name"] for tl in (scope.extra_tools if scope else [])])
+        return {"answer": "falling through", "citations": []}
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_loop)
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer)
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/group/turns",
@@ -494,7 +478,8 @@ def test_group_edit_disabled_flag_no_write(tenant_client, isolated_settings, mon
     )
     loop_calls = []
     monkeypatch.setattr(
-        projects_route, "run_tool_loop", lambda **kw: loop_calls.append(1) or "fell through"
+        projects_route.qa_agent, "answer",
+        lambda **kw: loop_calls.append(1) or {"answer": "fell through", "citations": []},
     )
     before = _payload(prd_id)
     before_versions = len(_versions(prd_id))
