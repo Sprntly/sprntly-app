@@ -63,9 +63,22 @@ def _spec(runner, skill="competitive-intelligence-review",
 
 def _payload(answer="## Competitive review\n\nAcme shipped X.",
              skill="competitive-intelligence-review") -> dict:
-    """An Ask-shaped success payload, as the engines return it."""
+    """An Ask-shaped success payload, as the engines return it — `_report`
+    included, which is what marks it a finished document rather than one of
+    the same engine's apologies."""
     return {"answer": answer, "key_points": [], "citations": [],
-            "confidence": 0.6, "_skill": skill}
+            "confidence": 0.6, "_skill": skill, "_report": True}
+
+
+def _due_skills(now, tz=None, schedule=None) -> list[str]:
+    """The skills due right now. Asserted per-skill rather than as "the list
+    is empty": the roster holds several INDEPENDENT specs, so suppressing one
+    (a saved row, a spent attempt) must leave the others due — an emptiness
+    check would pass today only because the roster happened to be short."""
+    return [s.skill for s in mr.due_specs(
+        COMPANY["id"], now, tz or ZoneInfo("UTC"),
+        schedule or DEFAULT_SCHEDULE,
+    )]
 
 
 # ─── due_specs: the pure monthly decision ────────────────────────────────────
@@ -116,8 +129,10 @@ def test_saved_scheduled_report_suppresses_the_cycle():
     spec = mr.MONTHLY_REPORT_SPECS[0]
     db.save_report(COMPANY["id"], skill=spec.skill, title="t",
                    html="## body", question=spec.question)
-    assert mr.due_specs(COMPANY["id"], FIRE + timedelta(hours=2),
-                        ZoneInfo("UTC"), DEFAULT_SCHEDULE) == []
+    due = _due_skills(FIRE + timedelta(hours=2))
+    assert spec.skill not in due
+    # ...and only that spec: each report keeps its own ledger.
+    assert [s.skill for s in mr.MONTHLY_REPORT_SPECS[1:]] == due
 
 
 def test_a_human_chat_report_does_not_suppress_the_scheduled_cycle():
@@ -128,8 +143,10 @@ def test_a_human_chat_report_does_not_suppress_the_scheduled_cycle():
     spec = mr.MONTHLY_REPORT_SPECS[0]
     db.save_report(COMPANY["id"], skill=spec.skill, title="t",
                    html="## body", question="where do we stand vs Acme?")
-    assert mr.due_specs(COMPANY["id"], FIRE + timedelta(hours=2),
-                        ZoneInfo("UTC"), DEFAULT_SCHEDULE) != []
+    # Named explicitly, not `!= []`: with several specs on the roster an
+    # emptiness check would pass on a sibling still being due, proving nothing
+    # about the one whose human-authored row is under test.
+    assert spec.skill in _due_skills(FIRE + timedelta(hours=2))
 
 
 def test_attempt_ledger_suppresses_within_the_cycle():
@@ -137,8 +154,10 @@ def test_attempt_ledger_suppresses_within_the_cycle():
     the paid sweep is bought at most once per cycle per process."""
     spec = mr.MONTHLY_REPORT_SPECS[0]
     mr._last_attempt[(COMPANY["id"], spec.skill)] = FIRE + timedelta(hours=1)
-    assert mr.due_specs(COMPANY["id"], FIRE + timedelta(hours=3),
-                        ZoneInfo("UTC"), DEFAULT_SCHEDULE) == []
+    due = _due_skills(FIRE + timedelta(hours=3))
+    assert spec.skill not in due
+    # A spent attempt on one report never stands in for another's.
+    assert [s.skill for s in mr.MONTHLY_REPORT_SPECS[1:]] == due
 
 
 # ─── run_and_deliver: generate → save → announce ─────────────────────────────
@@ -162,27 +181,68 @@ def test_run_saves_the_report_and_announces(monkeypatch):
     assert row["html"] == "## Competitive review\n\nAcme shipped X."
     assert row["title"] == "Competitive Intelligence report · June 2026"
     assert announced == [(COMPANY["id"], spec.skill)]
-    # ...and the run is what makes the next due-check a no-op.
-    assert mr.due_specs(COMPANY["id"], now + timedelta(hours=2),
-                        ZoneInfo("UTC"), DEFAULT_SCHEDULE) == []
+    # ...and the saved row is what makes this spec's next due-check a no-op.
+    assert spec.skill not in _due_skills(now + timedelta(hours=2))
 
 
 def test_degraded_payload_saves_and_announces_nothing(monkeypatch):
-    """The engine's plain-message cases carry no `_skill` marker — an apology
-    is not a monthly report. Nothing is saved, nothing announced, and the
-    attempt is still recorded so the sweep isn't re-bought this cycle."""
+    """An apology is not a monthly report. Nothing is saved, nothing
+    announced, and the attempt is still recorded so the sweep isn't re-bought
+    this cycle.
+
+    The payload here is the engines' REAL degraded shape: `_plain_payload`
+    stamps `_skill` on its apologies exactly as the success return does, so
+    this is precisely the case a `_skill`-only check would wave through —
+    filing "finish onboarding and I'll…" as the month's report AND stamping
+    the durable ledger, suppressing the real one until next month.
+    """
     announced: list = []
     monkeypatch.setattr(mr, "_announce",
                         lambda cid, spec: announced.append(cid))
-    spec = _spec(lambda company: {"answer": "I need your company profile…",
-                                  "confidence": 0.0})
+    spec = _spec(lambda company: {
+        "answer": "I can review your competitors, but I don't have your "
+                  "company profile yet — finish onboarding…",
+        "key_points": [], "citations": [], "confidence": 0.0,
+        "_skill": "competitive-intelligence-review",
+        "_skill_action": "Competitive intelligence",
+        "_skill_source": "competitive-intel",
+    })
 
     now = FIRE + timedelta(minutes=30)
     assert mr.run_and_deliver(COMPANY, spec, now=now) is None
     assert announced == []
     assert (COMPANY["id"], spec.skill) in mr._last_attempt
-    assert mr.due_specs(COMPANY["id"], now + timedelta(hours=2),
-                        ZoneInfo("UTC"), DEFAULT_SCHEDULE) == []
+    assert spec.skill not in _due_skills(now + timedelta(hours=2))
+
+
+def test_query_mode_followup_is_not_a_report(monkeypatch):
+    """Query mode answers a follow-up off a STORED run and stamps `_skill`
+    too. It is an answer about a past report, not this month's — saving it
+    would file a one-line reply as the monthly artifact."""
+    announced: list = []
+    monkeypatch.setattr(mr, "_announce",
+                        lambda cid, spec: announced.append(cid))
+    spec = _spec(lambda company: {
+        "answer": "Two competitors shipped pricing changes.",
+        "key_points": [], "citations": [], "confidence": 0.5,
+        "_skill": "competitive-intelligence-review",
+        "_skill_action": "Competitive intelligence · from the 2026-05-04 review",
+        "_skill_source": "competitive-intel-query",
+    })
+
+    assert mr.run_and_deliver(COMPANY, spec,
+                              now=FIRE + timedelta(minutes=30)) is None
+    assert announced == []
+
+
+def test_a_payload_from_the_wrong_engine_is_rejected(monkeypatch):
+    """`_report` alone is not enough: a runner wired to the wrong engine
+    returns a real document under another skill's name, and filing it under
+    this spec would mislabel the artifact and stamp the wrong ledger."""
+    monkeypatch.setattr(mr, "_announce", lambda cid, spec: None)
+    spec = _spec(lambda company: _payload(skill="public-feedback-report"))
+    assert mr.run_and_deliver(COMPANY, spec,
+                              now=FIRE + timedelta(minutes=30)) is None
 
 
 def test_announcement_failure_never_loses_the_saved_report(monkeypatch):
@@ -265,3 +325,36 @@ def test_monthly_reports_on_defaults_and_toggle():
     assert mr.monthly_reports_on({}) is True
     assert mr.monthly_reports_on({"monthly_reports_enabled": "no"}) is True
     assert mr.monthly_reports_on({"monthly_reports_enabled": False}) is False
+
+
+# ─── the roster's contract with the engines ──────────────────────────────────
+
+
+def test_every_spec_skill_matches_its_engine_constant():
+    """The spec skills are not free text — they must equal the constants the
+    engines stamp on their payloads, or `_is_report` rejects every real run
+    and the company silently gets no reports at all."""
+    from app.competitive_intel import CIR_SKILL
+    from app.public_feedback import PF_SKILL
+
+    assert mr.CIR_SPEC.skill == CIR_SKILL
+    assert mr.PF_SPEC.skill == PF_SKILL
+    assert [s.skill for s in mr.MONTHLY_REPORT_SPECS] == [CIR_SKILL, PF_SKILL]
+
+
+def test_spec_questions_are_unique_per_skill():
+    """The question doubles as the durable ledger marker, so two specs sharing
+    one would have their cycles suppress each other."""
+    markers = [(s.skill, s.question) for s in mr.MONTHLY_REPORT_SPECS]
+    assert len(set(markers)) == len(markers)
+    assert all(q.strip() for _, q in markers)
+
+
+def test_the_feedback_question_asks_for_a_fresh_report_not_a_followup():
+    """`public_feedback.answer` routes to query mode — a cheap answer off the
+    LAST stored run — unless the question is report-shaped. If this marker
+    ever stopped matching, the monthly job would quietly re-serve last
+    month's captured records as this month's report."""
+    from app.public_feedback import is_followup_query
+
+    assert is_followup_query(mr.PF_SPEC.question) is False

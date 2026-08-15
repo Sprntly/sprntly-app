@@ -42,9 +42,16 @@ wide window safe — it can catch up, never double-fire.
 
 Delivery is best-effort by contract (the report is already saved; a delivery
 failure costs the announcement, not the artifact). A company with no
-competitor set / profile degrades inside the engine to a plain chat message,
-which carries no `_skill` marker — those runs save nothing and announce
-nothing, by design: an apology is not a monthly report.
+competitor set / profile degrades inside the engine to a plain chat message
+("finish onboarding and I'll…"), and those runs must save nothing and announce
+nothing: an apology is not a monthly report, and saving one would ALSO stamp
+the durable ledger and so suppress the real report for the rest of the month.
+
+What separates the two is the engines' explicit `_report: True`, set only on
+the one return in each that is a finished document. `_skill` cannot carry that
+meaning — the engines stamp it on their degraded `_plain_payload` apologies
+and on query-mode follow-ups too — so a `_skill`-only test accepts exactly the
+runs this module must reject.
 """
 from __future__ import annotations
 
@@ -76,9 +83,10 @@ class ReportSpec:
     orphans the ledger for one cycle — treat it as an identifier, not copy.
 
     `runner` takes the company row and returns the engine's Ask-shaped
-    payload (or None). A payload is accepted as a real report only when its
-    `_skill` equals `skill` — the engines mark success that way and their
-    degraded plain-text apologies don't.
+    payload (or None). A payload is accepted as a real report only when it
+    carries `_report: True` AND its `_skill` equals `skill` — see
+    `_is_report`; the `_skill` half alone would also accept the engines'
+    degraded apologies and their query-mode follow-ups.
     """
     skill: str
     question: str
@@ -112,9 +120,37 @@ CIR_SPEC = ReportSpec(
     runner=_run_cir,
 )
 
-# The monthly roster. Market-intelligence and 3P-feedback reports join here
-# as their engines land — the tick, ledgers, and delivery already handle N.
-MONTHLY_REPORT_SPECS: tuple[ReportSpec, ...] = (CIR_SPEC,)
+def _run_pf(company: dict) -> dict | None:
+    """Run the public-feedback (3P feedback) engine headlessly for one company.
+
+    Lazy import for the same reason as `_run_cir`.
+    """
+    from app import public_feedback
+
+    return public_feedback.answer(
+        enterprise_id=company["id"],
+        question=PF_SPEC.question,
+    )
+
+
+# The wording is load-bearing twice over. As with CIR it is the durable ledger
+# marker, so it must stay stable. It must ALSO stay report-shaped:
+# `public_feedback.answer` routes a question to query mode — a cheap follow-up
+# answered off the LAST stored run — unless `_REPORT_SHAPED` matches first.
+# "public feedback" satisfies that pattern, so this asks for a fresh capture.
+# A phrasing that missed it would re-serve last month's records as this
+# month's report, and only when a stored run happened to exist.
+PF_SPEC = ReportSpec(
+    skill="public-feedback-report",
+    question="Scheduled monthly public feedback report",
+    label="3P Feedback report",
+    runner=_run_pf,
+)
+
+# The monthly roster. A market-intelligence report joins here when its engine
+# lands — the tick, both ledgers, and delivery already handle N, and each
+# entry is independent: one spec degrading or raising never touches another.
+MONTHLY_REPORT_SPECS: tuple[ReportSpec, ...] = (CIR_SPEC, PF_SPEC)
 
 
 # In-memory once-per-cycle ATTEMPT ledger, (company_id, skill) → aware UTC
@@ -199,6 +235,25 @@ def due_specs(
     return due
 
 
+def _is_report(payload: object, spec: ReportSpec) -> bool:
+    """True only for a payload that is a finished report document.
+
+    Both halves are required and neither is redundant. `_report` is the
+    engines' explicit "this is a document" flag, set on the single success
+    return in each — without it, the degraded `_plain_payload` apologies and
+    the query-mode follow-ups (which carry `_skill` too) would be saved as
+    that month's report and stamp the ledger, suppressing the real one.
+    `_skill` then confirms the payload came from the engine this spec asked
+    for, so a runner wired to the wrong engine fails loudly rather than
+    filing its output under the wrong report's name.
+    """
+    return (
+        isinstance(payload, dict)
+        and payload.get("_report") is True
+        and payload.get("_skill") == spec.skill
+    )
+
+
 def run_and_deliver(company: dict, spec: ReportSpec,
                     now: datetime | None = None) -> int | None:
     """Run one scheduled report for one company: generate → save → announce.
@@ -214,7 +269,7 @@ def run_and_deliver(company: dict, spec: ReportSpec,
     _last_attempt[(company_id, spec.skill)] = now
 
     payload = spec.runner(company)
-    if not isinstance(payload, dict) or payload.get("_skill") != spec.skill:
+    if not _is_report(payload, spec):
         logger.info(
             "monthly-reports: %s for company %s degraded — nothing saved",
             spec.skill, company_id,
