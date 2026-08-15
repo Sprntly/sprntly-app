@@ -206,9 +206,20 @@ def scene_two_prds(sb):
         return row["id"]
 
     def _prd(brief_id, title):
+        # `source="upload"` — NOT the default/insight branch. Two rows
+        # sharing one `brief_id` + `insight_index=0` with no `source` set
+        # collapse into ONE regeneration family under `_prd_family_key`
+        # (`db/artifacts.py`) — `(brief_id, "insight", 0)` for BOTH rows —
+        # so `list_artifacts_for_project` returns only the newest and the
+        # genuine 2-PRD ambiguity this fixture exists to prove never
+        # materializes (`_resolve_prd_id` auto-resolves instead of
+        # refusing). An "upload" row's family key is `(brief_id, "upload",
+        # row["id"])` — unique per row by construction — so both PRDs stay
+        # two distinct artifacts, matching the fixture's own name.
         row = c.table("prds").insert({
             "brief_id": brief_id, "insight_index": 0, "title": title,
             "payload_md": f"# {title}\n\nOriginal problem statement.", "status": "ready",
+            "source": "upload",
         }).execute().data[0]
         created["prds"].append(row["id"])
         return row["id"]
@@ -294,15 +305,23 @@ def test_two_prd_edit_returns_clarify_with_both_options_live(scene_two_prds, mon
     edit_resp = client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
         json={
-            "instruction": "Please tighten the problem statement in the PRD.",
+            "instruction": "Sharpen the problem statement to mention onboarding drop-off.",
             "prd_id": chosen_id,
         },
     )
     assert edit_resp.status_code == 200, edit_resp.text
     edit_body = edit_resp.json()
+    # The route call itself either applied the edit or the live model judged
+    # the instruction a no-op (`edited=True` either way — see
+    # `apply_chat_edit_scoped`'s docstring); `sections_changed` is what tells
+    # the two cases apart, same convention
+    # `test_projects_prd_chat_edit_route_live.py` already establishes for a
+    # real-model edit call on thin seed content.
     assert edit_body["edited"] is True, edit_body
-
-    assert len(_versions(chosen_id)) == before_chosen_versions + 1
-    # The sibling PRD on the SAME project is completely untouched.
+    if edit_body["sections_changed"]:
+        assert len(_versions(chosen_id)) == before_chosen_versions + 1
+    else:
+        assert len(_versions(chosen_id)) == before_chosen_versions
+    # The sibling PRD on the SAME project is completely untouched either way.
     assert len(_versions(other_id)) == before_other_versions
     assert _payload(other_id) == before_other_payload
