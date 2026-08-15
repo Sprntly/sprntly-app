@@ -496,7 +496,7 @@ def test_agent_reply_publishes_assistant_turn(isolated_settings, monkeypatch, fa
 
     r = ctx.client.post(
         f"/v1/projects/{project['id']}/group/turns",
-        json={"content": "@Sprntly can you summarize the last decision?"},
+        json={"content": "@Sprntly please delegate this to Fortune"},
     )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1

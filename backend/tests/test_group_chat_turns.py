@@ -233,7 +233,7 @@ def test_mention_triggers_single_assistant_turn(
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "@Sprntly can you summarize the last decision?"},
+            json={"content": "@Sprntly please delegate this to Fortune"},
         )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1
@@ -264,7 +264,8 @@ def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_gr
     fake_group_llm["raise_error"] = True
 
     r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns", json={"content": "@Sprntly help"}
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "@Sprntly please delegate this to Fortune"},
     )
     assert r.status_code == 200  # never raises to the caller (AD-P7)
 
@@ -273,7 +274,7 @@ def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_gr
     conv = conversations_db.get_group_chat(project["id"])
     turns = conversations_db.list_group_turns(conv["id"])
     assert [t["role"] for t in turns] == ["user"]
-    assert turns[0]["content"] == "@Sprntly help"
+    assert turns[0]["content"] == "@Sprntly please delegate this to Fortune"
 
 
 @pytest.mark.parametrize("mention", ["@Sprntly", "@sprntly", "@SPRNTLY"])
@@ -282,7 +283,8 @@ def test_mention_case_insensitive(isolated_settings, monkeypatch, fake_group_llm
     project = _create_project(ctx)
 
     r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns", json={"content": f"{mention} status?"}
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": f"{mention} assign this to Fortune"},
     )
     assert r.status_code == 200
     assert len(fake_group_llm["calls"]) == 1

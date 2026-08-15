@@ -133,7 +133,7 @@ def test_mention_bypasses_gate(isolated_settings, monkeypatch, caplog):
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "@Sprntly can you summarize where we left off?"},
+            json={"content": "@Sprntly please delegate the export review to Fortune"},
         )
     assert r.status_code == 200
     assert gate_calls == [], "an @Sprntly mention must never consult the classifier"
@@ -172,7 +172,7 @@ def test_solo_project_bypasses_gate_with_unaddressed_turn(isolated_settings, mon
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "kicking this off — anyone around?"},
+            json={"content": "quick one — can we assign the export review to Fortune?"},
         )
     assert r.status_code == 200
     assert gate_calls == [], "a solo project must never consult the classifier"
@@ -254,7 +254,7 @@ def test_gate_respond_true_triggers_single_reply(isolated_settings, monkeypatch,
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         r = ctx.client.post(
             f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "is anyone able to help debug the deploy pipeline today?"},
+            json={"content": "is anyone able to help — can you assign the export review to Fortune?"},
         )
     assert r.status_code == 200
     assert len(reply_calls) == 1

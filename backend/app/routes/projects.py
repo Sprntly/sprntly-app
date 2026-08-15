@@ -62,7 +62,7 @@ from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
-from app.surface_scope import Surface, SurfaceScope
+from app.surface_scope import PROJECT_TOOL_NUDGE, Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,9 @@ list_project_artifacts, get_artifact_content (to read a specific PRD/
 report/evidence body), and get_task_ledger. Every one of these is scoped
 to THIS project only. When someone asks what a document says, call
 get_artifact_content and answer from the real content.
-"""
+
+{nudge}
+""".format(nudge=PROJECT_TOOL_NUDGE)
 
 
 def _group_system_with_roster(roster: list[dict]) -> str:

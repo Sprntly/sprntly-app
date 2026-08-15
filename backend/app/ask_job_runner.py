@@ -29,15 +29,18 @@ from app.db.conversations import post_individual_turn
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
 from app.report_capture import capture_report
-from app.surface_scope import Surface, SurfaceScope
+from app.surface_scope import PROJECT_TOOL_NUDGE, Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
 
 # The private ("My chat with Sprntly") individual thread's system-prompt
 # addendum — RELOCATED verbatim from the deleted `project_individual_agent.
 # _SYSTEM` (the standalone bounded-loop responder this collapse replaces).
-# Carried on `SurfaceScope.system_addendum` for the sixth ladder branch
-# (`qa_agent._try_scoped_tool_answer`), never read by the composer path.
+# Carried on `SurfaceScope.system_addendum` — read by BOTH the sixth ladder
+# branch (`qa_agent._try_scoped_tool_answer`, as the tool loop's system
+# prompt) AND, on the gate's decline path, folded into `history` ahead of
+# the composer (`qa_agent.answer`'s fall-through seam) — which is how
+# `PROJECT_TOOL_NUDGE` (appended below) reaches a plain-Q&A turn.
 _PRIVATE_SCOPE_SYSTEM = (
     "You are Sprntly, the user's private project assistant in their one-on-one "
     "chat. Answer the user's question about THIS project directly and concisely. "
@@ -55,7 +58,7 @@ _PRIVATE_SCOPE_SYSTEM = (
     "describe your role as merely advisory, or claim you cannot edit the PRD, or "
     "say edits must be accepted before they apply. Everything you can read is "
     "scoped to this one project; never assume data from another project or "
-    "company."
+    "company.\n\n" + PROJECT_TOOL_NUDGE
 )
 
 

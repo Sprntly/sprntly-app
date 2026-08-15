@@ -24,6 +24,28 @@ class Surface(str, Enum):
     project_group = "project_group"
 
 
+#: Accept-with-nudge (Babajide decision — the fix for `is_project_tool_
+#: request`'s false-negative risk). `is_project_tool_request` is a cheap,
+#: deliberately narrow gate — an IMPLIED delegation/execution request it
+#: misses falls through to the composer, which has no `delegate_task`/
+#: `execute_task` tool at all. Unlike the connector-family gates (a miss
+#: there still degrades to a correct, just thinner, KG-grounded answer),
+#: silently answering an unrouted delegation in prose is a FUNCTIONAL
+#: failure — the task never gets created. Both project surfaces append this
+#: sentence to their `SurfaceScope.system_addendum`, so it reaches the model
+#: on the composer fall-through path (folded into `history`, `qa_agent.
+#: answer`'s decline seam) as well as the sixth branch itself (harmless
+#: there — the tools ARE available on that path).
+PROJECT_TOOL_NUDGE = (
+    "If this message is asking you to hand off, assign, or delegate a task "
+    "to a teammate, or to draft/execute something on the team's behalf, but "
+    "you do not have a delegate/execute tool available in THIS reply, do "
+    "NOT silently answer as if nothing was asked and do NOT pretend to have "
+    "done it. Tell the user plainly to phrase it explicitly — for example "
+    "'delegate the onboarding doc to Ada' — so it gets routed correctly."
+)
+
+
 @dataclass(frozen=True)
 class SurfaceScope:
     """One turn's surface-specific context, built once by the caller

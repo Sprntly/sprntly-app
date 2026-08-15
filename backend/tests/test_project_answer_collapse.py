@@ -64,10 +64,21 @@ def test_respond_individual_removed():
     assert "respond_individual" not in dir(ajr)
 
 
-# ── True parity: plain-Q&A streams/cancels, tool turns don't (AC5) ────────
+# ── True parity via GATED ROUTING: plain-Q&A streams/cancels, tool-intent
+# turns don't (AC5/AC5a). Every test below drives the REAL `_build_private_
+# scope()` (extra_tools always the full six — declarative, unchanged) so the
+# routing decision is made by the actual `is_project_tool_request` gate, not
+# by hand-constructing an empty `extra_tools=()` scope — that bypass is
+# exactly what the ship-gate's live run caught as masking the un-gated bug
+# (a hand-built empty-tools scope "proved" streaming worked while the real
+# `_build_private_scope` path, always 6 tools, never reached the composer at
+# all). ─────────────────────────────────────────────────────────────────
 
 
-def test_private_plainqa_streaming_delta_fires(monkeypatch):
+def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
+    """AC5: the REAL private scope (all 6 tools) + a plain-context question
+    the gate DECLINES routes to the untouched composer path and streams —
+    exactly like main chat."""
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     deltas = []
 
@@ -77,40 +88,100 @@ def test_private_plainqa_streaming_delta_fires(monkeypatch):
         return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
-    # extra_tools=() -> the sixth branch never claims this turn; the
-    # composer path (untouched) runs and honours on_delta exactly as it
-    # does for main chat.
-    scope = SurfaceScope(surface=Surface.project_private, project_id=9)
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("the tool loop must never run for a declined turn")),
+    )
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    assert len(scope.extra_tools) == 6  # real, declarative, unconditional — not hand-emptied
     out = qa.answer(
-        enterprise_id="c1", question="what happened last week", dataset="d",
+        enterprise_id="c1", question="what's blocking the launch?", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
     assert deltas == ["partial-text"]
     assert out["answer"] == "ok"
 
 
-def test_private_plainqa_is_cancelled_aborts(monkeypatch):
-    scope = SurfaceScope(surface=Surface.project_private, project_id=9)
+def test_private_realscope_plainqa_is_cancelled_aborts(monkeypatch):
+    """AC5: same real-scope decline path — `is_cancelled` aborts generation
+    before the composer's expensive call, exactly like main chat."""
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
     with pytest.raises(qa.AskCancelled):
         qa.answer(
-            enterprise_id="c1", question="anything", dataset="d",
+            enterprise_id="c1", question="what's blocking the launch?", dataset="d",
             scope=scope, is_cancelled=lambda: True,
         )
 
 
-def test_private_tool_turn_does_not_stream(monkeypatch):
-    monkeypatch.setattr("app.llm.run_tool_loop", lambda **kw: "answered without streaming")
-    deltas = []
-    scope = SurfaceScope(
-        surface=Surface.project_private, project_id=9,
-        extra_tools=(project_task_execution.EXECUTE_TASK_TOOL,),
+def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
+    """AC5/AC5a/AC7: the REAL private scope + a DELEGATION-phrased question
+    the gate FIRES on runs the sixth branch (no `on_delta`) and
+    `delegate_task` is dispatchable — proving the gate routes by INTENT, not
+    by the mere presence of tools."""
+    dispatched = []
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatched.append(dispatch("delegate_task", {"assignee": "Fortune", "task_summary": "Draft it"}))
+        return "sent"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task", lambda **kw: "Sent the brief to Fortune's chat.",
     )
+    deltas = []
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
-        enterprise_id="c1", question="status?", dataset="d",
+        enterprise_id="c1", question="please delegate the export review to Fortune", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
     assert deltas == []
-    assert out["answer"] == "answered without streaming"
+    assert dispatched == ["Sent the brief to Fortune's chat."]
+    assert out["answer"] == "sent"
+
+
+def test_gate_removed_plainqa_routes_to_loop_is_red(monkeypatch):
+    """AC5a MUTATION: reverting the sixth-branch guard to the un-gated build
+    (`scope.extra_tools` alone, `is_project_tool_request` short-circuited to
+    always-True — the exact shape of the bug the ship-gate's live run
+    caught) makes a PLAIN-Q&A private turn route to the tool loop and never
+    stream — the composer-streams assertion goes RED. Restoring the real
+    gate on the identical question makes it GREEN again."""
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    plain_question = "what's blocking the launch?"
+    deltas = []
+
+    # RED: simulate the un-gated build by forcing the gate to always fire —
+    # same effect as deleting `and is_project_tool_request(...)` from the
+    # guard. The real `qa.answer()` call path is exercised, unmodified.
+    monkeypatch.setattr(qa, "is_project_tool_request", lambda *a, **kw: True)
+    monkeypatch.setattr("app.llm.run_tool_loop", lambda **kw: "looped, never streamed")
+    out_red = qa.answer(
+        enterprise_id="c1", question=plain_question, dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert out_red["answer"] == "looped, never streamed"  # the mutated (un-gated) behaviour
+    with pytest.raises(AssertionError):
+        assert deltas, "un-gated build never streams a plain-Q&A turn — RED proof"
+
+    # GREEN: restore the real gate; same question now declines and streams.
+    monkeypatch.undo()  # drops BOTH mutations above, restoring the real gate + real run_tool_loop
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("streamed")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("the real gate must decline this plain question")),
+    )
+    qa.answer(
+        enterprise_id="c1", question=plain_question, dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == ["streamed"]  # GREEN
 
 
 def test_private_read_tools_registered_and_dispatched(monkeypatch):
@@ -126,7 +197,9 @@ def test_private_read_tools_registered_and_dispatched(monkeypatch):
         lambda name, ti, **kw: "ledger text" if name == "get_task_ledger" else None,
     )
     scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
-    out = qa.answer(enterprise_id="c1", question="ledger?", dataset="d", scope=scope)
+    out = qa.answer(
+        enterprise_id="c1", question="please draft a PRD for the ledger work", dataset="d", scope=scope,
+    )
     assert "get_task_ledger" in captured["tools"]
     assert out["answer"] == "ledger text"
 
@@ -187,7 +260,10 @@ def test_delegate_execute_callable_both_surfaces(monkeypatch):
         assigner_identity={"assigner_user_id": "u2", "source_turn_id": 4},
     )
     for scope in (private_scope, group_scope):
-        qa.answer(enterprise_id="c1", question="q", dataset="d", scope=scope)
+        qa.answer(
+            enterprise_id="c1", question="please delegate the export review to Fortune",
+            dataset="d", scope=scope,
+        )
 
     assert len(delegate_calls) == 2
     assert len(execute_calls) == 2
@@ -204,7 +280,10 @@ def test_private_delegate_identity_threaded(monkeypatch):
         lambda **kw: captured.update(kw) or "sent",
     )
     scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=scope)
+    qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Fortune",
+        dataset="d", scope=scope,
+    )
     assert captured["assigner_user_id"] == "u-assigner"
     assert captured["source_conversation_id"] == 5
 
@@ -224,7 +303,10 @@ def test_group_delegate_identity_threaded(monkeypatch):
         extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
         assigner_identity={"assigner_user_id": "u-asker", "source_turn_id": 42},
     )
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=scope)
+    qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Fortune",
+        dataset="d", scope=scope,
+    )
     assert captured["assigner_user_id"] == "u-asker"
     assert captured["source_turn_id"] == 42
 
@@ -247,13 +329,19 @@ def test_delegate_identity_blanked_is_red(monkeypatch):
         extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
         assigner_identity={"assigner_user_id": None, "source_conversation_id": None},
     )
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=blanked_scope)
+    qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Fortune",
+        dataset="d", scope=blanked_scope,
+    )
     with pytest.raises(AssertionError):
         assert captured["assigner_user_id"] == "u-assigner"  # RED
 
     captured.clear()
     restored_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=restored_scope)
+    qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Fortune",
+        dataset="d", scope=restored_scope,
+    )
     assert captured["assigner_user_id"] == "u-assigner"  # GREEN
 
 
@@ -277,7 +365,10 @@ def test_execute_task_post_turn_fires(monkeypatch):
         lambda conv_id, role, content: private_posts.append((conv_id, role, content)),
     )
     private_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u1")
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=private_scope)
+    qa.answer(
+        enterprise_id="c1", question="please draft a PRD for the onboarding flow",
+        dataset="d", scope=private_scope,
+    )
     assert private_posts == [(5, "assistant", "progress update")]
 
     group_posts = []
@@ -286,7 +377,10 @@ def test_execute_task_post_turn_fires(monkeypatch):
         extra_tools=(project_task_execution.EXECUTE_TASK_TOOL,),
         post_turn=lambda content: group_posts.append(content),
     )
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=group_scope)
+    qa.answer(
+        enterprise_id="c1", question="please draft a PRD for the onboarding flow",
+        dataset="d", scope=group_scope,
+    )
     assert group_posts == ["progress update"]
 
 
@@ -309,7 +403,10 @@ def test_delegate_writes_delegations_row(monkeypatch):
     )
 
     scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=scope)
+    qa.answer(
+        enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=scope,
+    )
     assert len(recorded) == 1  # a real delegate_task call seeds a project_delegations row
 
 
@@ -338,7 +435,10 @@ def test_delegate_unregistered_is_red(monkeypatch):
     unregistered = dataclasses.replace(
         base, extra_tools=tuple(t for t in base.extra_tools if t["name"] != "delegate_task"),
     )
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=unregistered)
+    qa.answer(
+        enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=unregistered,
+    )
     assert recorded == []
 
     # GREEN: delegate_task restored + actually called.
@@ -346,7 +446,10 @@ def test_delegate_unregistered_is_red(monkeypatch):
         "app.llm.run_tool_loop",
         lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "Assignee", "task_summary": "Draft it"}),
     )
-    qa.answer(enterprise_id="c1", question="q", dataset="d", scope=base)
+    qa.answer(
+        enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=base,
+    )
     assert len(recorded) == 1
 
 
@@ -512,6 +615,99 @@ def test_lt8_input_shape_switch(tenant_client, isolated_settings, monkeypatch):
     monkeypatch.setattr(projects_route, "_GROUP_TRANSCRIPT_AS_QUESTION", True)
     projects_route._respond_as_group_agent(project_id, conv["id"], ctx, trigger_kind="mention")
     assert captured["question"] == captured["scope"].prerendered_transcript
+
+
+# ── Gated routing — group context-fold + accept-with-nudge (AC5b/AC5c) ─────
+
+
+def test_group_plainqa_context_fold_reaches_composer(monkeypatch):
+    """AC5b: a GROUP plain-Q&A turn (the gate declines) still reaches the
+    composer WITH `scope.system_addendum` + `scope.context_payload` folded
+    into `history` as a synthetic context row — it does NOT answer "as a
+    stranger" with no roster/ledger/memory."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    captured = {}
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        captured["history"] = history
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_task_execution.EXECUTE_TASK_TOOL),
+        system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
+        context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
+    )
+    qa.answer(enterprise_id="c1", question="what's blocking the launch?", dataset="d", scope=scope)
+
+    history = captured["history"]
+    assert history and history[0]["role"] == "context"
+    assert "PROJECT ROSTER" in history[0]["content"]
+    assert "Fortune — Draft the export review" in history[0]["content"]
+
+
+def test_group_context_fold_dropped_is_red(monkeypatch):
+    """AC5b MUTATION: dropping the fold seam (`_fold_project_context`
+    forced to a no-op — the exact effect of deleting the seam) makes the
+    roster-present assertion RED; restoring it makes it GREEN."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    captured = {}
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        captured["history"] = history
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+        system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
+        context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
+    )
+
+    # RED: the fold seam is a no-op (deleted).
+    monkeypatch.setattr(qa, "_fold_project_context", lambda scope, history: history)
+    qa.answer(enterprise_id="c1", question="what's blocking the launch?", dataset="d", scope=scope)
+    history_red = captured.get("history")
+    with pytest.raises(AssertionError):
+        assert history_red and "PROJECT ROSTER" in history_red[0]["content"]  # RED
+
+    # GREEN: restore the real seam.
+    monkeypatch.undo()
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    captured.clear()
+    qa.answer(enterprise_id="c1", question="what's blocking the launch?", dataset="d", scope=scope)
+    history_green = captured["history"]
+    assert "PROJECT ROSTER" in history_green[0]["content"]  # GREEN
+
+
+def test_nudge_on_missed_delegation(monkeypatch):
+    """AC5c: a delegation-phrased turn the gate MISSES (false negative —
+    e.g. an implied hand-off with no matching verb) still reaches the
+    composer with the accept-with-nudge instruction present in the folded
+    system addendum, so the model is told to ask the user to phrase it
+    explicitly rather than silently doing nothing."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    captured = {}
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        captured["history"] = history
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    # A phrasing implying a hand-off with none of the gate's matched verbs —
+    # a genuine false negative, not a veto hit.
+    missed = "it'd be great if Fortune could take point on the export section"
+    from app.skill_router import is_project_tool_request
+
+    assert is_project_tool_request(missed) is False  # confirms this IS a miss
+
+    qa.answer(enterprise_id="c1", question=missed, dataset="d", scope=scope)
+    history = captured["history"]
+    assert history and "phrase it explicitly" in history[0]["content"]
 
 
 # ── Backgrounded group reply ─────────────────────────────────────────────

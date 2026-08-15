@@ -86,6 +86,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_project_tool_request,
     is_ticket_update,
     is_voc_report_request,
 )
@@ -1813,6 +1814,36 @@ def _try_scoped_tool_answer(
     return {"answer": text, "citations": []}
 
 
+def _fold_project_context(
+    scope: Optional[SurfaceScope], history: Optional[list[dict]],
+) -> Optional[list[dict]]:
+    """DECLINE/fall-through seam (AC5b/AC5c): when `scope` is a project
+    surface, fold its `system_addendum` + `context_payload` into `history`
+    as one synthetic context row, reusing the exact technique `routes/
+    ask.py:347` already uses for the private surface's own breadth block.
+
+    BREADTH-IDEMPOTENT for private — `scope.context_payload` is "" there
+    (that breadth already reached `history` independently, upstream, via
+    `routes/ask.py`, before `answer()` ever ran, so this adds no NEW
+    project information) — but LOAD-BEARING for group, which has no other
+    path for its roster/ledger/memory block to reach the composer at all.
+
+    Also where the accept-with-nudge instruction reaches a plain-Q&A turn
+    on BOTH surfaces: `scope.system_addendum` carries the nudge sentence
+    (see `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_AGENT_SYSTEM_PROMPT`), so a
+    delegation-phrased ask the sixth-branch gate MISSED still tells the
+    user to phrase it explicitly rather than silently doing nothing.
+
+    A no-op (returns `history` unchanged) for `scope is None`/main, or a
+    project scope whose `system_addendum`/`context_payload` are both empty."""
+    if scope is None or scope.surface == Surface.main:
+        return history
+    fold_block = "\n\n".join(p for p in (scope.system_addendum, scope.context_payload) if p)
+    if not fold_block:
+        return history
+    return [{"role": "context", "content": fold_block}] + list(history or [])
+
+
 @timed_def("qa:answer")
 def answer(
     *,
@@ -1893,14 +1924,28 @@ def answer(
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
 
+    # Computed FIRST (moved ahead of its historical position below) so the
+    # sixth branch's intent gate can consult it — `_routing_text` is a pure
+    # function of `question` alone, so moving it earlier changes nothing
+    # about what any interceptor below sees.
+    routing_text = _routing_text(question)
+
     # SIXTH LADDER BRANCH (project surfaces) — checked FIRST, before any
-    # routing/interceptor/composer machinery below, exactly the way
+    # other routing/interceptor/composer machinery, exactly the way
     # `respond_individual`/`_respond_as_group_agent` already fully owned a
     # project turn pre-collapse (RELOCATED here, not reimplemented — see
-    # `_try_scoped_tool_answer`). A no-op whenever `scope` is None/main or
-    # carries no project tools — every line below this block then runs
-    # completely unchanged (AC1/AC2 byte-identity).
-    if scope is not None and scope.surface != Surface.main and scope.extra_tools:
+    # `_try_scoped_tool_answer`). GATED on `is_project_tool_request` — the
+    # ship-gate proved that gating on `scope.extra_tools` alone (always
+    # populated) routed EVERY project ask here and never streamed/composed,
+    # which is not parity with how main chat's own tracker/Jira/connector
+    # branches decide whether to claim a turn (`is_jira_lookup(routing_text,
+    # history)` etc., `:2326` below). A no-op whenever `scope` is None/main,
+    # carries no project tools, or the gate declines — every line below then
+    # runs unchanged (AC1/AC2 byte-identity for `scope is None`).
+    if (
+        scope is not None and scope.surface != Surface.main and scope.extra_tools
+        and is_project_tool_request(routing_text, history)
+    ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
             enterprise_id=enterprise_id, dataset=dataset,
@@ -1912,12 +1957,17 @@ def answer(
         # as `respond_individual`'s own single-shot degrade. GROUP re-raises
         # out of `_try_scoped_tool_answer` instead of reaching here.
 
+    # DECLINE / FALL-THROUGH path (the gate above never fired, or fired and
+    # the private surface degraded) — fold the project surface's system
+    # addendum + breadth block into `history`, see `_fold_project_context`'s
+    # docstring for the full rationale (AC5b/AC5c).
+    history = _fold_project_context(scope, history)
+
     # Everything below that decides WHERE this turn goes — every interceptor
     # predicate and route() itself — judges the user's own words, never an
     # attached document's. See `_routing_text`'s docstring for why: the full
     # `question` (with the [Attached files] block, when present) still reaches
     # grounding/answering/persistence/caching unchanged everywhere below.
-    routing_text = _routing_text(question)
 
     # SHADOW MODE, PLANNER-FIRST — observes, logs, decides nothing (slice 1 of
     # backend/docs/ASK_PLANNER.md, placement reversed by owner decision
