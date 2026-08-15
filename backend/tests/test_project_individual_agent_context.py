@@ -1,7 +1,9 @@
-"""Property/content test for `app/project_individual_agent.py::_SYSTEM` —
-the private-chat prompt extension that makes the project's shared memory
-QUERYABLE on an "entire context" ask and clarifies the PRD-edit path is
-applied-in-place, not queued for approval.
+"""Property/content test for `app/ask_job_runner.py::_PRIVATE_SCOPE_SYSTEM`
+— the private-chat prompt extension (relocated verbatim onto the unified
+answer engine's `SurfaceScope.system_addendum` seam, no longer a standalone
+responder module) that makes the project's shared memory QUERYABLE on an
+"entire context" ask and clarifies the PRD-edit path is applied-in-place,
+not queued for approval.
 
 A prompt-property test, not a live-model test: proves the INSTRUCTION is
 present (positive markers) and the prompt explicitly PROHIBITS the
@@ -12,11 +14,11 @@ tests for the sibling `_PROMOTE_SYSTEM` constant
 """
 from __future__ import annotations
 
-from app import project_individual_agent
+from app import ask_job_runner
 
 
 def test_individual_system_carries_context_and_edit_clarity():
-    system = project_individual_agent._SYSTEM
+    system = ask_job_runner._PRIVATE_SCOPE_SYSTEM
     lowered = system.lower()
 
     # Positive: the "entire context / catch me up / why & goal" synthesis

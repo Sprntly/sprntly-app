@@ -65,12 +65,18 @@ def _create_project(ctx, *, name: str = "Interjection gate project") -> dict:
 
 def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") -> list[dict]:
     """Stub BOTH downstream calls a successful `_respond_as_group_agent`
-    makes (the reply itself, `app.routes.projects.run_tool_loop`, and the
-    memory-promotion classifier it fires afterwards,
-    `app.project_memory.call_json`) so a test that lets the gate say
-    `respond=true` doesn't also reach Anthropic for those two unrelated
-    surfaces. The fake reply does NOT invoke `dispatch(...)` — none of
-    these tests exercise delegation. Returns the list of reply calls made."""
+    makes (the reply itself — patched ONE LEVEL BELOW the unified answer
+    engine, at `app.llm.run_tool_loop`, RELOCATED from the pre-collapse
+    call this stub used to patch — so the REAL `qa_agent.answer` /
+    `qa_agent._try_scoped_tool_answer` wrapper still runs, including its
+    cost-log line, exactly as it did pre-collapse; and the memory-promotion
+    classifier fired afterwards, `app.project_memory.call_json`) so a test
+    that lets the gate say `respond=true` doesn't also reach Anthropic for
+    those two unrelated surfaces. The fake reply does NOT invoke
+    `dispatch(...)` — none of these tests exercise delegation. Returns the
+    list of reply calls made, each carrying the SAME `system`/`user` kwargs
+    `run_tool_loop` always received, so every downstream
+    `reply_calls[0]["system"]` assertion keeps working unchanged."""
     calls: list[dict] = []
 
     def _fake_run_tool_loop(  # noqa: ARG001
@@ -80,16 +86,13 @@ def _stub_reply_path(monkeypatch, *, reply: str = "On it — taking a look.") ->
         if meta_out is not None:
             meta_out.update(
                 {
-                    "model": model,
-                    "input_tokens": 40,
-                    "output_tokens": 10,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
+                    "model": model, "input_tokens": 40, "output_tokens": 10,
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
                 }
             )
         return reply
 
-    monkeypatch.setattr(projects_route, "run_tool_loop", _fake_run_tool_loop)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_run_tool_loop)
     monkeypatch.setattr(
         project_memory, "call_json",
         lambda **kw: {"should_promote": False, "insight": ""},  # noqa: ARG005

@@ -25,11 +25,93 @@ from app.db.asks import (
     set_ask_job_route,
     touch_ask_job,
 )
+from app.db.conversations import post_individual_turn
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
 from app.report_capture import capture_report
+from app.surface_scope import Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
+
+# The private ("My chat with Sprntly") individual thread's system-prompt
+# addendum — RELOCATED verbatim from the deleted `project_individual_agent.
+# _SYSTEM` (the standalone bounded-loop responder this collapse replaces).
+# Carried on `SurfaceScope.system_addendum` for the sixth ladder branch
+# (`qa_agent._try_scoped_tool_answer`), never read by the composer path.
+_PRIVATE_SCOPE_SYSTEM = (
+    "You are Sprntly, the user's private project assistant in their one-on-one "
+    "chat. Answer the user's question about THIS project directly and concisely. "
+    "You have tools to read the project's shared memory, its artifact list, a "
+    "specific artifact's content, and its task ledger — call them when the answer "
+    "depends on project data rather than guessing. When the user asks for the "
+    "whole picture — e.g. 'give me the entire context on this project', 'catch me "
+    "up', or 'what's the why and goal here' — first read the project's shared "
+    "memory (and its artifacts/ledger as needed), then synthesize the why, the "
+    "goal, the current state, who's assigned to what, and prior work — grounded in "
+    "what you read, never generic. When the user asks you to change the PRD, the "
+    "edit is applied to the document in place and a new version is saved "
+    "automatically so the change is undoable — it is NOT queued for approval and "
+    "does not need a teammate to manually accept it before it takes effect. Never "
+    "describe your role as merely advisory, or claim you cannot edit the PRD, or "
+    "say edits must be accepted before they apply. Everything you can read is "
+    "scoped to this one project; never assume data from another project or "
+    "company."
+)
+
+
+def _private_roster_block(roster: list[dict]) -> str:
+    """"PROJECT ROSTER:\n- {first} — {job_role}" — RELOCATED verbatim from
+    the deleted `project_individual_agent._roster_prompt_block`, so the
+    private surface resolves a free-text assignee ("the designer") to the
+    same names/roles the group agent's roster block uses."""
+    lines = []
+    for m in roster:
+        name = m.get("name") or "(unnamed)"
+        first = name.split()[0] if name != "(unnamed)" else name
+        role = m.get("job_role") or "no role set"
+        lines.append(f"- {first} — {role}")
+    return "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
+
+
+def _build_private_scope(
+    *, project_id: int, conversation_id: int | None, user_id: str | None,
+) -> SurfaceScope:
+    """Construct the `SurfaceScope` for a project-private ask — the six
+    project tools (4 read tools + delegate_task + execute_task), the
+    relocated system text + roster, and the assigner identity
+    (`user_id`/`conversation_id`) delegation attribution depends on
+    (#1174). Best-effort roster fetch (AD-P7): a read failure degrades to an
+    empty roster rather than breaking the ask."""
+    from app import project_delegation, project_task_execution
+    from app.db import projects as projects_db
+    from app.project_group_context import read_tools
+
+    try:
+        roster = projects_db.list_members(project_id)
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        roster = []
+    system_addendum = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
+    post_turn = (
+        (lambda content: post_individual_turn(conversation_id, "assistant", content))
+        if conversation_id is not None else None
+    )
+    return SurfaceScope(
+        surface=Surface.project_private,
+        project_id=project_id,
+        system_addendum=system_addendum,
+        extra_tools=(
+            project_delegation.DELEGATE_TASK_TOOL,
+            project_task_execution.EXECUTE_TASK_TOOL,
+            *read_tools(),
+        ),
+        roster=tuple(roster),
+        assigner_identity={
+            "assigner_user_id": user_id,
+            "source_conversation_id": conversation_id,
+        },
+        post_turn=post_turn,
+        capabilities={"streaming": True, "cancel": True},
+    )
 
 
 async def _heartbeat(ask_id: int) -> None:
@@ -195,6 +277,24 @@ def _run_sync(
     # deflection. None for every non-project ask (interceptors unchanged there).
     project_id_token = ask_runner.set_active_project_id(project_id)
 
+    # Project-scoped individual chat (`project_id is not None`): the sixth
+    # ladder branch inside `qa_agent.answer()` owns the turn via the SAME
+    # `_single_shot` call below — no fork, no second call site. Constructing
+    # `SurfaceScope(project_private, ...)` here (once) is the collapse's
+    # entire private-surface change: `_single_shot` already wires
+    # `on_delta`/`is_cancelled`/`on_route`/`on_phase` into `answer()`, and
+    # `answer()` honours them on the composer path exactly as it does for
+    # main chat — a scoped ask that engages `scope.extra_tools` takes the
+    # sixth branch instead and does not stream (AC5; matches how main
+    # chat's own tracker/ticket/connector-lookup turns behave today). `None`
+    # for every non-project ask — byte-identical to before this change.
+    scope = (
+        _build_private_scope(
+            project_id=project_id, conversation_id=conversation_id, user_id=user_id,
+        )
+        if project_id is not None else None
+    )
+
     def _single_shot() -> dict:
         return qa_agent.answer(
             plan=ask_plan,
@@ -220,32 +320,11 @@ def _run_sync(
             # attached to the stream.
             on_route=lambda skill_id, action: set_ask_job_route(ask_id, skill_id, action),
             on_phase=token_stream.phase_sink(loop, ask_channel(ask_id)),
+            scope=scope,
         )
 
     try:
-        if project_id is not None:
-            # Project-scoped individual chat: a bounded tool-loop responder with
-            # the project read tools (depth), answer-executor only — PRD edits
-            # are classified client-side and never reach this loop (see
-            # project_individual_agent.py's module docstring). It returns the
-            # same payload shape as the single-shot path, so the strip/complete/
-            # capture/log calls below run UNCHANGED, and degrades to `_single_shot`
-            # on any failure. Non-project asks (`project_id is None`) skip this
-            # branch entirely — byte-identical to before this change.
-            from app.project_individual_agent import respond_individual
-
-            payload = respond_individual(
-                project_id=project_id,
-                dataset=dataset,
-                company_id=enterprise_id,
-                question=question,
-                history=history,
-                single_shot=_single_shot,
-                assigner_user_id=user_id,
-                source_conversation_id=conversation_id,
-            )
-        else:
-            payload = _single_shot()
+        payload = _single_shot()
     finally:
         ask_runner.reset_active_conversation(context_token)
         ask_runner.reset_active_question_embedding(embedding_token)

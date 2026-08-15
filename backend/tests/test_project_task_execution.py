@@ -1,7 +1,10 @@
 """Tests for `app/project_task_execution.py` — the `execute_task` tool,
-its inline best-effort handler, and its wiring into BOTH the group agent
-(`routes/projects.py::_respond_as_group_agent`) and the private-chat agent
-(`project_individual_agent.py::respond_individual`).
+its inline best-effort handler, and its wiring into BOTH project surfaces
+via the unified answer engine's sixth ladder branch: registered on
+`SurfaceScope.extra_tools` by the group agent (`routes/projects.py::
+_respond_as_group_agent`) and the private surface (`ask_job_runner.py::
+_build_private_scope`), dispatched by the shared branch
+(`qa_agent.py::_try_scoped_tool_answer`).
 
 Covers:
   - tool-description property tests (length, doable-type, negative-space
@@ -117,18 +120,22 @@ def test_execute_tool_description_length_and_negative_space():
 
 
 def test_execute_tool_registered_in_both_agents():
-    from app import project_individual_agent
+    # Post-collapse: registration lives at each surface's SurfaceScope
+    # construction; dispatch is single-sourced on the unified engine's
+    # sixth ladder branch (`qa_agent._try_scoped_tool_answer`) — checked
+    # ONCE rather than duplicated per surface, since both surfaces share it.
+    from app import ask_job_runner, qa_agent
     from app.routes import projects as routes_projects
 
     group_src = inspect.getsource(routes_projects._respond_as_group_agent)
     assert "project_task_execution.EXECUTE_TASK_TOOL" in group_src
-    assert 'name == "execute_task"' in group_src
-    assert "handle_execute_task" in group_src
 
-    individual_src = inspect.getsource(project_individual_agent.respond_individual)
+    individual_src = inspect.getsource(ask_job_runner._build_private_scope)
     assert "project_task_execution.EXECUTE_TASK_TOOL" in individual_src
-    assert 'name == "execute_task"' in individual_src
-    assert "handle_execute_task" in individual_src
+
+    dispatch_src = inspect.getsource(qa_agent._try_scoped_tool_answer)
+    assert 'name == "execute_task"' in dispatch_src
+    assert "handle_execute_task" in dispatch_src
 
 
 # ── Doable-set gating (AC3/AC5) ────────────────────────────────────────────

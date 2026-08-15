@@ -41,6 +41,7 @@ from __future__ import annotations
 from app.timing import timed_def
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 
@@ -89,6 +90,7 @@ from app.skill_router import (
     is_voc_report_request,
 )
 from app.skills.loader import list_skills
+from app.surface_scope import Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
 
@@ -1662,6 +1664,149 @@ def _project_scoped_ask() -> bool:
         return False
 
 
+def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
+    """Render prior turns + the new question into the sixth branch's tool-loop
+    user message — relocated VERBATIM from
+    `project_individual_agent._render_transcript`. Each history turn is
+    `{role, content}`-shaped (assistant turns are the agent's own); an
+    unknown/absent role renders as the user."""
+    lines: list[str] = []
+    for turn in history or []:
+        role = (turn.get("role") or "user").strip().lower()
+        content = (turn.get("content") or "").strip()
+        if not content:
+            continue
+        speaker = "Sprntly" if role == "assistant" else "User"
+        lines.append(f"{speaker}: {content}")
+    lines.append(f"User: {question}")
+    return "\n".join(lines)
+
+
+def _try_scoped_tool_answer(
+    *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
+    enterprise_id: str, dataset: str,
+) -> Optional[dict]:
+    """The SIXTH ladder branch (project surfaces) — RELOCATED, not
+    reimplemented, from `project_individual_agent.respond_individual` /
+    `routes.projects._respond_as_group_agent`'s inline bodies, structurally
+    matching the five existing tool-loop interceptor branches above
+    (`_m_ticket_update`, `_m_tracker_lookup`, the Jira/connector-lookup/
+    document-lookup interceptors): runs a bounded `run_tool_loop` over
+    `scope.extra_tools`, dispatching through `dispatch_read_tool` /
+    `handle_delegate_task` / `handle_execute_task` — consumed VERBATIM, never
+    reimplemented — and returns an Ask-shaped payload (`{"answer",
+    "citations"}`).
+
+    Does NOT stream and does NOT honour `is_cancelled` — identical parity
+    with every existing tool-loop branch on the main-chat ladder, none of
+    which stream either (AC5). Plain-context Q&A turns get streaming/cancel
+    from the UNTOUCHED composer path below this function's caller — this
+    function is only reached when `scope.extra_tools` is non-empty.
+
+    Returns `None` on ANY failure for the PRIVATE surface — the caller falls
+    through to the rest of the ladder (degrading to the ordinary composer
+    path), mirroring `respond_individual`'s own AD-P7 single-shot degrade.
+    RE-RAISES on ANY failure for the GROUP surface — group has no single-shot
+    fallback (a generic, non-group-aware reply would be worse than none);
+    the caller (`_respond_as_group_agent`) already wraps its own call in a
+    best-effort try/except, exactly as it does today."""
+    start = time.monotonic()
+    identity = scope.assigner_identity or {}
+    assigner_user_id = identity.get("assigner_user_id")
+    roster = list(scope.roster)
+
+    def _dispatch(name: str, tool_input: dict) -> str:
+        from app.project_group_context import dispatch_read_tool
+
+        read = dispatch_read_tool(
+            name, tool_input,
+            project_id=scope.project_id, dataset=dataset, company_id=enterprise_id,
+        )
+        if read is not None:
+            return read
+        if name == "delegate_task":
+            from app import project_delegation
+
+            return project_delegation.handle_delegate_task(
+                project_id=scope.project_id,
+                assigner_user_id=assigner_user_id,
+                source_conversation_id=identity.get("source_conversation_id"),
+                source_turn_id=identity.get("source_turn_id"),
+                roster=roster,
+                dataset=dataset,
+                company_id=enterprise_id,
+                tool_input=tool_input,
+            )
+        if name == "execute_task":
+            from app import project_task_execution
+
+            return project_task_execution.handle_execute_task(
+                project_id=scope.project_id,
+                requester_user_id=assigner_user_id,
+                dataset=dataset,
+                company_id=enterprise_id,
+                tool_input=tool_input,
+                roster=roster,
+                post_turn=scope.post_turn,
+            )
+        return f"(unknown tool: {name})"
+
+    system = "\n\n".join(p for p in (scope.system_addendum, scope.context_payload) if p)
+    user = (
+        scope.prerendered_transcript
+        if scope.prerendered_transcript is not None
+        else _render_scoped_transcript(history, question)
+    )
+    meta: dict = {}
+    try:
+        from app.llm import DEFAULT_MODEL, run_tool_loop
+
+        text = run_tool_loop(
+            system=system,
+            user=user,
+            tools=list(scope.extra_tools),
+            dispatch=_dispatch,
+            model=DEFAULT_MODEL,
+            max_iters=5,
+            meta_out=meta,
+        )
+    except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
+        logger.warning(
+            "scoped_tool_reply_failed project_id=%s surface=%s",
+            scope.project_id, scope.surface.value,
+        )
+        if scope.surface == Surface.project_private:
+            return None
+        raise
+
+    # Exactly one structured cost line per scoped reply — identifiers only,
+    # never the body/question (Rule #24). Relocated from the two duplicate
+    # call sites (`respond_individual`, `_respond_as_group_agent`) into this
+    # one shared branch.
+    from app.llm_telemetry import RunUsage, log_llm_run
+
+    operation = (
+        "projects.individual_chat.reply" if scope.surface == Surface.project_private
+        else "projects.group_chat.mention_reply"
+    )
+    usage = RunUsage(
+        cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
+        cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
+        input_tokens=meta.get("input_tokens", 0),
+        output_tokens=meta.get("output_tokens", 0),
+    )
+    log_llm_run(
+        operation=operation,
+        identifier={"project_id": scope.project_id},
+        usage=usage,
+        duration_ms=int((time.monotonic() - start) * 1000),
+        status="complete",
+        model=meta.get("model") or DEFAULT_MODEL,
+        mode="individual" if scope.surface == Surface.project_private else "group",
+    )
+    return {"answer": text, "citations": []}
+
+
 @timed_def("qa:answer")
 def answer(
     *,
@@ -1678,6 +1823,7 @@ def answer(
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
     plan: Optional["AskPlan"] = None,
+    scope: Optional["SurfaceScope"] = None,
 ) -> dict:
     """Answer a question — directly by default, or via a dedicated pipeline or
     one of the company's own uploaded skills. `pinned_skill` skips routing (used
@@ -1728,9 +1874,37 @@ def answer(
     It must arrive GATED. This function does not re-check sources against the
     company's connections or re-check a skill id against the tenant boundary;
     `ask_planner.apply_gates` owns that, and taking an ungated plan here would
-    move the tenant boundary to whoever called us."""
+    move the tenant boundary to whoever called us.
+
+    `scope` — a `SurfaceScope` (see `app.surface_scope`) naming which of the
+    three answer surfaces (main / project_private / project_group) this turn
+    is for. `None` (every caller that predates this parameter) and
+    `SurfaceScope(surface=Surface.main)` are BOTH no-ops — nothing below this
+    docstring changes when `scope` carries no project tools. A project scope
+    whose `extra_tools` is non-empty is claimed by the SIXTH ladder branch,
+    checked first, before routing/interceptors/composers ever run — see
+    `_try_scoped_tool_answer`."""
     # Cancelled before we've spent anything → bail immediately.
     _check_cancelled(is_cancelled)
+
+    # SIXTH LADDER BRANCH (project surfaces) — checked FIRST, before any
+    # routing/interceptor/composer machinery below, exactly the way
+    # `respond_individual`/`_respond_as_group_agent` already fully owned a
+    # project turn pre-collapse (RELOCATED here, not reimplemented — see
+    # `_try_scoped_tool_answer`). A no-op whenever `scope` is None/main or
+    # carries no project tools — every line below this block then runs
+    # completely unchanged (AC1/AC2 byte-identity).
+    if scope is not None and scope.surface != Surface.main and scope.extra_tools:
+        scoped_result = _try_scoped_tool_answer(
+            scope=scope, question=question, history=history,
+            enterprise_id=enterprise_id, dataset=dataset,
+        )
+        if scoped_result is not None:
+            return scoped_result
+        # PRIVATE-only fall-through (see `_try_scoped_tool_answer`'s
+        # docstring): degrades to the ordinary ladder/composer below, same
+        # as `respond_individual`'s own single-shot degrade. GROUP re-raises
+        # out of `_try_scoped_tool_answer` instead of reaching here.
 
     # Everything below that decides WHERE this turn goes — every interceptor
     # predicate and route() itself — judges the user's own words, never an

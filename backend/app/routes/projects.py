@@ -23,15 +23,17 @@ this — the agent decides (v3.4 retired the Auto/mention-only setting).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
-import time
+import sys
 from typing import Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app import qa_agent
 from app.auth import WorkspaceContext, require_workspace
 from app.chat_intent import resolve_chat_intent
 from app.db import conversation_read_cursors as read_cursors_db
@@ -46,8 +48,6 @@ from app.db.companies import get_seat_limit
 from app.db.prds import save_prd_version, update_prd_content
 from app.team_email import send_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
-from app.llm import DEFAULT_MODEL, run_tool_loop
-from app.llm_telemetry import RunUsage, log_llm_run
 from app import project_delegation
 from app import project_group_context
 from app import project_join_greeting
@@ -62,6 +62,7 @@ from app.project_group_gate import render_group_transcript, should_respond
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
+from app.surface_scope import Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,51 @@ _GROUP_TURN_DTO_KEYS = (
     "id", "role", "content", "author_user_id", "author_name",
     "author_job_role", "created_at",
 )
+
+# Strong refs to in-flight background group-reply tasks — mirrors
+# `routes.ask._inflight_tasks` (`ask.py:43`). asyncio holds only a WEAK
+# reference to a bare `create_task` result, so without this the task can be
+# garbage-collected mid-run. The done-callback discards each task on
+# completion.
+_group_reply_tasks: set[asyncio.Task] = set()
+
+# LT-8 (genuinely open, spec §10.2/build-spec §Group): which shape the
+# group agent's reply call sees as `question` — the attributed transcript
+# itself, or just the latest triggering message (with the full transcript
+# still riding on `SurfaceScope.prerendered_transcript` either way, so the
+# model always sees the whole thread; see `_respond_as_group_agent`).
+# Defaulted to the conservative option so a missing live test never
+# silently changes router/interceptor behaviour (build-spec §Group);
+# pinned by the ship-gate LT-8 live test before merge.
+_GROUP_TRANSCRIPT_AS_QUESTION = False
+
+
+def _schedule_group_reply(
+    project_id: int, conversation_id: int, ctx: WorkspaceContext, trigger_kind: str,
+) -> None:
+    """Fire-and-forget the group agent's reply, backgrounded off the
+    request path (spec §5.5; Gate-1 BLOCKER-1 fix). `post_group_turn_route`
+    is `async def` so a loop is running here, letting `asyncio.create_task`
+    schedule `asyncio.to_thread(_respond_as_group_agent, ...)` — `to_thread`
+    because `_respond_as_group_agent` stays a SYNC function (its LLM/DB
+    calls are blocking and belong on the threadpool, not the event loop). A
+    bare `create_task(_respond_as_group_agent(...))` would raise twice over
+    (no running loop outside a request, and the target isn't a coroutine).
+
+    Under `"pytest" in sys.modules` runs the reply INLINE instead (mirrors
+    `routes.ask.py`'s own `:457` guard) — the TestClient does not keep the
+    app's event loop alive between requests, so a fire-and-forget task would
+    never run and a test asserting on the posted reply would hang/miss it."""
+    if "pytest" in sys.modules:
+        _respond_as_group_agent(project_id, conversation_id, ctx, trigger_kind=trigger_kind)
+        return
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            _respond_as_group_agent, project_id, conversation_id, ctx, trigger_kind,
+        )
+    )
+    _group_reply_tasks.add(task)
+    task.add_done_callback(_group_reply_tasks.discard)
 
 
 def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dict | None) -> None:
@@ -1065,7 +1111,7 @@ def _is_solo_project(project_id: int) -> bool:
 
 
 @router.post("/{project_id}/group/turns")
-def post_group_turn_route(
+async def post_group_turn_route(
     project_id: int,
     payload: PostGroupTurnRequest,
     ctx: WorkspaceContext = Depends(require_workspace),
@@ -1087,7 +1133,12 @@ def post_group_turn_route(
          (the UI's existing "stayed out" affordance shows). The gate's
          conservative AD-P10 posture is unchanged for these projects.
 
-    Every path triggers AT MOST one best-effort agent reply."""
+    Every path triggers AT MOST one best-effort agent reply, and the reply
+    is BACKGROUNDED (spec §5.5): the gate decision above still runs
+    synchronously, right here, before the route returns — only the reply
+    ITSELF (`_respond_as_group_agent`, scheduled via `_schedule_group_reply`)
+    is fire-and-forget. This route returns as soon as the human turn is
+    persisted + broadcast + the gate has decided, never after the reply."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
     turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
@@ -1097,7 +1148,7 @@ def post_group_turn_route(
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
-        _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind="mention")
+        _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="mention")
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
         # Sprntly responds to EVERY message, no @mention needed and never
@@ -1107,7 +1158,7 @@ def post_group_turn_route(
         # This short-circuits the gate exactly like `mention`/`continuation`.
         # Multi-human projects fall through to the unchanged gate below, so the
         # AD-P10 conservative posture is preserved wherever it still applies.
-        _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind="solo")
+        _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="solo")
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
         # The turn just posted is `recent[-1]`; `recent[-2]` (if any) is the
@@ -1125,7 +1176,7 @@ def post_group_turn_route(
             agent_spoke_last=agent_spoke_last,
         ):
             trigger_kind = "continuation" if agent_spoke_last else "gate"
-            _respond_as_group_agent(project_id, conversation["id"], ctx, trigger_kind=trigger_kind)
+            _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind=trigger_kind)
     return turn
 
 
@@ -1225,15 +1276,15 @@ class _GroupEditOutcome(NamedTuple):
     - `applied_turn` not None → a real edit was written in place
       (`apply_chat_edit_scoped` + `prd_versions` snapshot) and the
       completed-past-tense assistant turn is already posted/broadcast; the
-      caller returns immediately and never reaches `run_tool_loop`.
+      caller returns immediately and never reaches the unified-engine reply.
     - `applied_turn` None AND `was_edit_request` True → the latest turn WAS
       an edit request but nothing was written (flag off, or the target
       would not resolve — zero/ambiguous PRD, `refusal` says which when
-      set). The caller falls through to `run_tool_loop` and MUST NOT let
+      set). The caller falls through to the unified-engine reply and MUST NOT let
       the reply claim an edit happened; `refusal`, when set, lets it ask
       which PRD instead.
     - `applied_turn` None AND `was_edit_request` False → not an edit at all
-      (answer/discussion); ordinary `run_tool_loop` reply."""
+      (answer/discussion); ordinary unified-engine reply."""
     applied_turn: dict | None
     was_edit_request: bool
     refusal: str | None
@@ -1258,7 +1309,7 @@ def _classify_and_maybe_edit_group_prd(
     `applied_turn` set.
 
     Returns a `_GroupEditOutcome` with `applied_turn=None` for every
-    outcome that should fall through to the existing `run_tool_loop`
+    outcome that should fall through to the existing unified-engine reply
     instead — a non-`edit_prd` envelope, the flag off, or an
     unresolved/ambiguous target (`_resolve_prd_id` — NEVER a client/model-
     supplied id — over THIS project's own artifacts) — but ALWAYS reports
@@ -1281,7 +1332,7 @@ def _classify_and_maybe_edit_group_prd(
     if not was_edit_request or not allow_prd_edit or prd_id is None:
         # Nothing is written on this pass. Report WHETHER the latest turn
         # WAS an edit request (regardless of WHY it didn't apply) so the
-        # caller's `run_tool_loop` fallback can ask/answer honestly rather
+        # caller's unified-engine fallback can ask/answer honestly rather
         # than fabricate a "done" (B2 no-fabrication).
         return _GroupEditOutcome(applied_turn=None, was_edit_request=was_edit_request, refusal=refusal)
 
@@ -1349,30 +1400,33 @@ def _respond_as_group_agent(
     trigger_kind: str = "mention",
 ) -> None:
     """Called on an `@Sprntly` mention OR a `should_respond=True`
-    smart-interjection decision (`post_group_turn_route` decides which,
-    and derives `trigger_kind` — "mention" / "continuation" / "gate" — for
-    THIS call; this function's own body runs the SAME single classify-and-
-    edit path first regardless of `trigger_kind`): classify the triggering
-    turn via `_classify_and_maybe_edit_group_prd` — a real edit applies in
-    place and returns; a requested-but-unwritten edit steers the fallback
-    reply with an `edit_note` so it never fabricates a completed change
-    (B2 no-fabrication); everything else (including `answer` and any
+    smart-interjection decision (`post_group_turn_route` decides which, and
+    derives `trigger_kind` — "mention" / "continuation" / "gate" / "solo" —
+    for THIS call, then BACKGROUNDS this whole call via
+    `_schedule_group_reply` — spec §5.5; this function itself stays SYNC and
+    runs on the threadpool, never on the event loop). This function's own
+    body runs the SAME single classify-and-edit path first regardless of
+    `trigger_kind`: classify the triggering turn via
+    `_classify_and_maybe_edit_group_prd` — a real edit applies in place and
+    returns; a requested-but-unwritten edit steers the fallback reply with
+    an `edit_note` so it never fabricates a completed change (B2
+    no-fabrication); everything else (including `answer` and any
     generate/open phrasing — group generate/open is DEFERRED, spec ⭐)
     falls through to assemble recent group-turn context (each speaker
     tagged with their `author_name`/`author_job_role`) and produce ONE
     assistant turn (`role='assistant', author_user_id=NULL`) via the
-    EXISTING `run_tool_loop`. Never raises (AD-P7 best-effort contract) —
-    a failure (including a refused edit) yields no assistant turn and the
+    unified answer engine (`qa_agent.answer`, scoped to this project —
+    RELOCATED from this function's own former inline `run_tool_loop` body,
+    not reimplemented). Never raises (AD-P7 best-effort contract) — a
+    failure (including a refused edit) yields no assistant turn and the
     human turn that triggered this already persisted, so the chat is never
-    blocked. Meters ONLY the `run_tool_loop` path (the structured
-    cost-summary log line — never emitted for a human-to-human turn or a
-    structured edit_prd dispatch, because neither makes that call).
+    blocked.
 
-    The reply call is a `run_tool_loop` (AD-P15) carrying the
-    `delegate_task` tool — zero new LLM calls: delegation piggybacks on
-    this same reply. `ctx` is threaded in only to derive
-    `dataset`/`company_id` for `project_delegation.handle_delegate_task`'s
-    artifact fold-in; reply/promotion behavior is otherwise unchanged.
+    The reply carries the `delegate_task`/`execute_task`/read tools —
+    zero new LLM calls: delegation and task execution piggyback on this
+    same reply. `ctx` is threaded in only to derive `dataset`/`company_id`
+    for the project tool handlers' artifact fold-in; reply/promotion
+    behavior is otherwise unchanged.
 
     After a reply is actually produced, runs the best-effort memory-
     promotion classifier (`maybe_promote_turn`) over the same clamped
@@ -1380,7 +1434,6 @@ def _respond_as_group_agent(
     is itself never-raising, so this call cannot turn a successful reply
     into a failure; it only ever runs on the agent-reply path, never on a
     human-to-human turn or a structured edit_prd dispatch."""
-    start = time.monotonic()
     try:
         recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
         transcript = render_group_transcript(recent)
@@ -1393,13 +1446,13 @@ def _respond_as_group_agent(
         source_turn_id = trigger["id"] if trigger else None
         dataset = _dataset_for(ctx)
 
-        # Every trigger kind (mention, continuation, gate) runs the ONE
-        # classify-then-edit path first — an applicable edit is applied in
-        # place here and we return; anything else falls through to the SAME
-        # `run_tool_loop` reply below. `edit_note` carries forward whether
-        # this turn was an un-applied edit request so the fallback reply can
-        # ask/answer honestly instead of fabricating a completed edit (B2
-        # no-fabrication).
+        # Every trigger kind (mention, continuation, gate, solo) runs the
+        # ONE classify-then-edit path first — an applicable edit is applied
+        # in place here and we return; anything else falls through to the
+        # SAME unified-engine reply below. `edit_note` carries forward
+        # whether this turn was an un-applied edit request so the fallback
+        # reply can ask/answer honestly instead of fabricating a completed
+        # edit (B2 no-fabrication).
         edit_note = ""
         if trigger is not None:
             history = [
@@ -1426,87 +1479,62 @@ def _respond_as_group_agent(
                 )
 
         roster = projects_db.list_members(project_id)
-        meta: dict = {}
 
-        def _dispatch(name: str, tool_input: dict) -> str:
-            # Project-scoped read tools first (breadth+depth project awareness);
-            # returns None when `name` isn't one of them, so delegate_task and
-            # the unknown-tool fallback still apply.
-            read = project_group_context.dispatch_read_tool(
-                name, tool_input,
-                project_id=project_id, dataset=dataset, company_id=ctx.company_id,
-            )
-            if read is not None:
-                return read
-            if name == "delegate_task":
-                return project_delegation.handle_delegate_task(
-                    project_id=project_id,
-                    assigner_user_id=assigner_user_id,
-                    source_conversation_id=conversation_id,
-                    source_turn_id=source_turn_id,
-                    roster=roster,
-                    dataset=dataset,
-                    company_id=ctx.company_id,
-                    tool_input=tool_input,
-                )
-            if name == "execute_task":
-                return project_task_execution.handle_execute_task(
-                    project_id=project_id,
-                    requester_user_id=assigner_user_id,
-                    dataset=dataset,
-                    company_id=ctx.company_id,
-                    tool_input=tool_input,
-                    roster=roster,
-                    post_turn=lambda content: conversations_db.post_group_turn(
-                        conversation_id, None, content, role="assistant"
-                    ),
-                )
-            return f"(unknown tool: {name})"
-
-        # Inject the bounded project-context block (best-effort, never raises)
-        # onto the roster system prompt, and hand the agent the read tools
-        # alongside delegate_task so it can answer AND retrieve on demand.
+        # Inject the bounded project-context block (best-effort, never
+        # raises) onto the roster system prompt, and hand the agent the
+        # read tools alongside delegate_task/execute_task so it can answer
+        # AND act on demand — exactly the six tools the private surface
+        # carries, so both project surfaces stay single-sourced on the
+        # unified engine's tool set.
         context_block = project_group_context.assemble_group_agent_context(
             project_id, dataset, ctx.company_id
         )
         addressing = _ADDRESSING_NOTES.get(trigger_kind, _ADDRESSING_NOTES["mention"])
-        parts = [_group_system_with_roster(roster), addressing]
+        system_parts = [_group_system_with_roster(roster), addressing]
         if edit_note:
-            parts.append(edit_note)
-        parts.append(context_block)
-        system = "\n\n".join(parts)
-        tools = [
-            project_delegation.DELEGATE_TASK_TOOL,
-            project_task_execution.EXECUTE_TASK_TOOL,
-            *project_group_context.read_tools(),
-        ]
-        reply = run_tool_loop(
-            system=system,
-            user=transcript,
-            tools=tools,
-            dispatch=_dispatch,
-            model=DEFAULT_MODEL,
-            meta_out=meta,
+            system_parts.append(edit_note)
+
+        # LT-8 input-shape switch (build-spec §Group) — `question` is either
+        # the full attributed transcript or just the latest triggering
+        # message; `prerendered_transcript` ALWAYS carries the full
+        # attributed transcript either way, so the model never loses the
+        # thread — it is never re-flattened into `answer()`'s single-user
+        # history model (Invariant 4).
+        question = (
+            transcript if _GROUP_TRANSCRIPT_AS_QUESTION
+            else (trigger["content"] if trigger else transcript)
         )
+        scope = SurfaceScope(
+            surface=Surface.project_group,
+            project_id=project_id,
+            context_payload=context_block,
+            system_addendum="\n\n".join(system_parts),
+            extra_tools=(
+                project_delegation.DELEGATE_TASK_TOOL,
+                project_task_execution.EXECUTE_TASK_TOOL,
+                *project_group_context.read_tools(),
+            ),
+            roster=tuple(roster),
+            assigner_identity={
+                "assigner_user_id": assigner_user_id,
+                "source_turn_id": source_turn_id,
+            },
+            post_turn=lambda content: conversations_db.post_group_turn(
+                conversation_id, None, content, role="assistant"
+            ),
+            prerendered_transcript=transcript,
+            capabilities={"streaming": False, "cancel": False},
+            multi_party=True,
+        )
+        result = qa_agent.answer(
+            enterprise_id=ctx.company_id, question=question, dataset=dataset,
+            scope=scope,
+        )
+        reply = (result or {}).get("answer", "")
         assistant_turn = conversations_db.post_group_turn(
             conversation_id, None, reply, role="assistant"
         )
         _publish_group_turn_created(project_id, conversation_id, assistant_turn)
-        usage = RunUsage(
-            cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
-            cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
-            input_tokens=meta.get("input_tokens", 0),
-            output_tokens=meta.get("output_tokens", 0),
-        )
-        log_llm_run(
-            operation="projects.group_chat.mention_reply",
-            identifier={"project_id": project_id, "conversation_id": conversation_id},
-            usage=usage,
-            duration_ms=int((time.monotonic() - start) * 1000),
-            status="complete",
-            model=meta.get("model") or DEFAULT_MODEL,
-            mode="group",
-        )
         maybe_promote_turn(project_id, conversation_id, transcript)
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the chat
         logger.warning(
