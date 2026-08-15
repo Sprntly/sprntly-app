@@ -88,16 +88,25 @@ def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
         return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda **kw: (_ for _ in ()).throw(AssertionError("the tool loop must never run for a declined turn")),
-    )
+    # A COUNTER tripwire, not an exception-throwing one: `_try_scoped_tool_
+    # answer` catches ANY exception from `run_tool_loop` and, on the PRIVATE
+    # surface, degrades to a silent fall-through (AD-P7) — so a tripwire
+    # that raises would be swallowed and prove nothing about whether the
+    # loop actually ran. Counting calls is immune to that swallow.
+    loop_calls = {"n": 0}
+
+    def _tripwire(**kw):
+        loop_calls["n"] += 1
+        return "loop ran — must not happen for a declined turn"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
     scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
     assert len(scope.extra_tools) == 6  # real, declarative, unconditional — not hand-emptied
     out = qa.answer(
         enterprise_id="c1", question="what's blocking the launch?", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
+    assert loop_calls["n"] == 0  # the loop was never entered
     assert deltas == ["partial-text"]
     assert out["answer"] == "ok"
 
@@ -173,14 +182,22 @@ def test_gate_removed_plainqa_routes_to_loop_is_red(monkeypatch):
         return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda **kw: (_ for _ in ()).throw(AssertionError("the real gate must decline this plain question")),
-    )
+    # Counter tripwire again (see the sibling test's comment): an exception
+    # here would be swallowed by `_try_scoped_tool_answer`'s private-surface
+    # AD-P7 degrade and prove nothing about whether the gate actually
+    # declined.
+    loop_calls = {"n": 0}
+
+    def _tripwire(**kw):
+        loop_calls["n"] += 1
+        return "loop ran — the real gate must decline this plain question"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
     qa.answer(
         enterprise_id="c1", question=plain_question, dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
+    assert loop_calls["n"] == 0  # the real gate declined — the loop was never entered
     assert deltas == ["streamed"]  # GREEN
 
 
