@@ -246,7 +246,12 @@ def assign_plan(
     from app.ticket_assign import plan_assignments
 
     return plan_assignments(
-        company.company_id, body.prd_id, body.instruction.strip()
+        company.company_id, body.prd_id, body.instruction.strip(),
+        # WHO is asking, so "assign the tickets to me" resolves to the caller
+        # instead of a question about who "me" is (reported with a screenshot:
+        # the model answered "no session identity is provided" — prompt
+        # internals leaked into the chat).
+        requester_user_id=company.user_id,
     )
 
 

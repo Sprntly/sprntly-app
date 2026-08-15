@@ -3879,6 +3879,11 @@ export type TicketAssignQuestion = {
   fixed:
     | { kind: "ticket"; ticket_key: string; ticket_title: string }
     | { kind: "member"; assignee: TicketAssignee }
+  /** Person-fixed questions only: the request asked for SEVERAL tickets
+   *  ("assign 2 tickets to X"), so the popup renders this question as a
+   *  multi-pick — tick several, confirm once, every pick becomes a write.
+   *  Never set on ticket-fixed questions (a ticket has one assignee). */
+  multi?: boolean
   options: {
     value: string
     label: string
