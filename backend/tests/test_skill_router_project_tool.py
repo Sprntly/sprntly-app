@@ -1,5 +1,5 @@
 """Unit tests for `skill_router.is_project_tool_request` — the sixth
-ladder branch's intent gate (CP-01, AC5a). No `test_skill_router.py` exists
+ladder branch's intent gate. No `test_skill_router.py` exists
 in this repo, so this is a new, self-contained collected test home for the
 new gate function (sibling of `is_jira_lookup`/`is_connector_lookup`/
 `document_lookup_candidates`, none of which have their own dedicated file
