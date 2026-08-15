@@ -67,6 +67,7 @@ import {
 import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
+  askApi,
   projectsApi,
   storiesApi,
   type AskResponse,
@@ -611,9 +612,20 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
       .catch(() => void runAsk())
   }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled])
 
+  // Stopping is deliberate (unlike a background unmount): it reclaims the
+  // composer's local poll AT ONCE (`stoppedRef`, checked on the poll's next
+  // tick) AND asks the backend to cancel so the worker aborts before its next
+  // LLM step and any late answer is discarded server-side — the local flag
+  // alone only silences the UI while the backend call keeps running and
+  // billing to completion. Mirrors the main chat surface's own Stop handler.
   const handleStop = useCallback(() => {
     stoppedRef.current = true
-  }, [])
+    const pending = getPendingAsk(activeCompany, tabId)
+    if (pending) {
+      const askId = Number(pending.id)
+      if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
+    }
+  }, [activeCompany, tabId])
 
   return (
     <div className={styles.thread} data-testid="project-individual-chat">

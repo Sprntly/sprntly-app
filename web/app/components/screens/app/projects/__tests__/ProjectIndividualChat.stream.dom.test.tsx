@@ -5,11 +5,13 @@
 // `runAskGeneration` on this surface is now called with an `onPartial`
 // handler (mirroring the main chat's own ask-path streaming block): a delta
 // arriving mid-generation renders into the in-flight turn instead of sitting
-// behind a bare wait state until the poll resolves. Stop is unchanged client-
-// side (it already existed) — this file proves the signal it sends
-// (`isStopped`) reaches `runAskGeneration`, which is what lets it reach the
-// backend's cancellation round-trip; that round-trip itself is a live-backend
-// proof, out of reach of a mocked unit test.
+// behind a bare wait state until the poll resolves.
+//
+// Stop does two things, both proven here: it flips the LOCAL `isStopped`
+// signal `runAskGeneration` polls, AND it actively resolves the pending ask
+// id and calls the cancel endpoint so the backend worker aborts and any late
+// answer is discarded server-side — a local-only stop would leave the
+// backend call running (and billing) to completion after the UI goes quiet.
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -43,6 +45,7 @@ const resumeAskGenerationMock = vi.fn()
 const getPendingAskMock = vi.fn(() => null as { id: string } | null)
 const individualChatMock = vi.fn()
 const individualTurnsMock = vi.fn()
+const askCancelMock = vi.fn()
 
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
@@ -60,6 +63,10 @@ vi.mock("../../../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/api")>("../../../../../lib/api")
   return {
     ...actual,
+    askApi: {
+      ...actual.askApi,
+      cancel: (...a: unknown[]) => askCancelMock(...a),
+    },
     projectsApi: {
       ...actual.projectsApi,
       individualChat: (...a: unknown[]) => individualChatMock(...a),
@@ -102,6 +109,8 @@ beforeEach(() => {
   individualChatMock.mockImplementation((id: number) => Promise.resolve(individualChatRecord(9001, id)))
   individualTurnsMock.mockReset()
   individualTurnsMock.mockResolvedValue([])
+  askCancelMock.mockReset()
+  askCancelMock.mockResolvedValue({ ask_id: 0, status: "cancelled" })
 })
 afterEach(() => cleanup())
 
@@ -152,26 +161,57 @@ describe("ProjectIndividualChat — private streaming", () => {
   })
 })
 
-describe("ProjectIndividualChat — Stop wiring reaches runAskGeneration", () => {
-  it("passes isStopped through to runAskGeneration and it flips true after Stop is clicked", async () => {
+describe("ProjectIndividualChat — Stop actively cancels the backend job", () => {
+  it("flips the local isStopped signal AND calls the cancel endpoint with the resolved ask id", async () => {
     let capturedOpts: AskOpts = {}
     runAskGenerationMock.mockImplementation((_q, _company, _tabId, opts: AskOpts) => {
       capturedOpts = opts
       return new Promise(() => {})
     })
+    // No pending job at MOUNT (nothing to resume) — `getPendingAsk` only
+    // starts resolving the ask this send kicks off once it's set below,
+    // right before Stop, mirroring the REAL `runAskGeneration` persisting
+    // the job id only after the send starts (mocked wholesale here, so its
+    // side effect doesn't happen — this is the equivalent client-visible
+    // state at the moment the user hits Stop).
     render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
     await send("stop me mid-answer")
 
     expect(typeof capturedOpts.isStopped).toBe("function")
     expect(capturedOpts.isStopped!()).toBe(false)
+    expect(askCancelMock).not.toHaveBeenCalled()
+
+    // The job the backend is now running for this thread's tab — Stop must
+    // resolve THIS id and cancel it, not just flip a local flag.
+    getPendingAskMock.mockReturnValue({ id: "777" })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Stop generating"))
+    })
+
+    // 1) The local signal `runAskGeneration` polls to stop rendering/polling.
+    expect(capturedOpts.isStopped!()).toBe(true)
+    // 2) The ACTIVE backend cancel — without this, the local flag alone
+    // silences the UI while the backend LLM call keeps running (and billing)
+    // to completion. Must be the actual pending job's id, not a guess.
+    expect(askCancelMock).toHaveBeenCalledWith(777)
+  })
+
+  it("does nothing to the backend if there is no pending job for this tab (nothing to cancel)", async () => {
+    let capturedOpts: AskOpts = {}
+    runAskGenerationMock.mockImplementation((_q, _company, _tabId, opts: AskOpts) => {
+      capturedOpts = opts
+      return new Promise(() => {})
+    })
+    getPendingAskMock.mockReturnValue(null)
+
+    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    await send("stop me mid-answer")
 
     await act(async () => {
       fireEvent.click(screen.getByLabelText("Stop generating"))
     })
-    // The client-side signal `runAskGeneration` polls to decide whether to
-    // keep polling / to request server-side cancellation — this is the half
-    // of the round-trip a mocked unit test can prove; the backend actually
-    // honouring it (`is_cancelled`) is the ship-gate's live-backend proof.
+
     expect(capturedOpts.isStopped!()).toBe(true)
+    expect(askCancelMock).not.toHaveBeenCalled()
   })
 })
