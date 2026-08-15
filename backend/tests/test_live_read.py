@@ -320,6 +320,119 @@ def test_an_empty_call_index_states_what_it_holds(stub_registry, monkeypatch):
     assert "not transcripts" in result.read[0].text
 
 
+def _indexed_call(external_id, call_date, title, account=None):
+    from app.call_index import IndexedCall
+
+    return IndexedCall(
+        external_id=external_id, title=title, call_date=call_date,
+        duration_min=None, participants=[], account=account, summary="",
+    )
+
+
+def test_a_windowed_plan_renders_the_whole_window_not_a_keyword_probe(
+    stub_registry, monkeypatch
+):
+    """The 2026-08-15 failure: "a table of how many customer calls I had each
+    week" matched no call title, so the keyword probe answered "none match"
+    and the model built its weekly table from KG signals — which only hold the
+    ~25 newest meetings, so every older week rendered as zero while the index
+    held the whole history. A plan carrying `since`/`until` must render the
+    WINDOW: true counts per week, zero weeks included, without ever needing a
+    title to match."""
+    import app.call_index as call_index
+
+    calls = [
+        _indexed_call("1", "2026-07-13T15:00:00+00:00",
+                      "TransUnion + Demo", "TransUnion"),
+        _indexed_call("2", "2026-07-28T15:00:00+00:00",
+                      "Woodward + Demo", "Woodward"),
+    ]
+    seen = {}
+
+    def _list(eid, *, since=None, until=None, limit=50):
+        seen["since"], seen["until"], seen["limit"] = since, until, limit
+        return calls
+
+    def _probe_must_not_decide(eid, q):
+        raise AssertionError("a windowed plan fell back to the keyword probe")
+
+    monkeypatch.setattr(call_index, "list_calls", _list)
+    monkeypatch.setattr(
+        call_index, "count_calls", lambda eid, since=None, until=None: 2
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", _probe_must_not_decide)
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="how many customer calls each week",
+        constraints={"since": "2026-07-11", "until": "2026-08-01"},
+    )
+
+    text = result.read[0].text
+    assert seen["since"] is not None and seen["until"] is not None
+    assert "2 recorded calls in the index between 2026-07-11 and 2026-08-01" in text
+    assert "week of 2026-07-13: 1 call(s) — TransUnion" in text
+    # The zero week is rendered EXPLICITLY: a missing line and a zero are
+    # different claims, and only the zero stops "no data" readings.
+    assert "week of 2026-07-20: 0 call(s)" in text
+    # The newest individual calls ride along so a "group last week's calls"
+    # follow-up has titles, not just counts.
+    assert "Woodward + Demo" in text
+
+
+def test_an_empty_window_is_a_fact_not_a_missing_sync(stub_registry, monkeypatch):
+    """Zero calls IN THE WINDOW on an index holding hundreds outside it must
+    say exactly that — "nothing recorded for this workspace" would be false."""
+    import app.call_index as call_index
+
+    monkeypatch.setattr(
+        call_index, "list_calls",
+        lambda eid, *, since=None, until=None, limit=50: [],
+    )
+    monkeypatch.setattr(
+        call_index, "count_calls",
+        lambda eid, since=None, until=None: 0 if (since or until) else 522,
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="calls in june",
+        constraints={"since": "2026-06-01", "until": "2026-06-30"},
+    )
+
+    text = result.read[0].text
+    assert "0 recorded calls in the index between 2026-06-01 and 2026-06-30" in text
+    assert "522 indexed calls outside this window" in text
+
+
+def test_a_long_window_rolls_up_by_month(stub_registry, monkeypatch):
+    """A multi-year window at one line per week would overflow the per-source
+    budget and be truncated from the tail — deleting the newest periods, the
+    ones the question is about. Past `_MAX_WEEK_LINES` weeks the digest groups
+    by month instead."""
+    import app.call_index as call_index
+
+    calls = [
+        _indexed_call("1", "2024-01-15T15:00:00+00:00", "Kickoff", "Acme"),
+        _indexed_call("2", "2026-07-15T15:00:00+00:00", "Renewal", "Acme"),
+    ]
+    monkeypatch.setattr(
+        call_index, "list_calls",
+        lambda eid, *, since=None, until=None, limit=50: calls,
+    )
+    monkeypatch.setattr(
+        call_index, "count_calls", lambda eid, since=None, until=None: 2
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="all our calls ever",
+        constraints={"since": "2024-01-01", "until": "2026-08-01"},
+    )
+
+    text = result.read[0].text
+    assert "January 2024: 1 call(s) — Acme" in text
+    assert "July 2026: 1 call(s) — Acme" in text
+    assert "week of" not in text
+
+
 def test_github_reads_synced_prs_because_live_search_needs_a_repo(
     stub_registry, monkeypatch
 ):

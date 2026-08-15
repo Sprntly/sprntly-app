@@ -834,6 +834,25 @@ def test_ensure_fresh_tops_up_incrementally_from_the_last_success(monkeypatch):
     assert seen["since"] == last - ci._INCREMENTAL_OVERLAP
 
 
+def test_incremental_since_mirrors_the_read_path_anchor(monkeypatch):
+    """The scheduler's cycle must top up, not re-read history: passing no
+    `since` made every 20-minute refresh a full ten-page re-sync, which
+    exhausted a tenant's Fireflies daily quota (2026-08-15) and 429-blocked
+    every other Fireflies read for that account. Same anchor as
+    `ensure_fresh`: last success minus the late-arrival overlap."""
+    last = datetime.now(timezone.utc) - timedelta(hours=6)
+    monkeypatch.setattr(
+        ci, "_sync_state", lambda cid: {"last_success_at": last.isoformat()}
+    )
+    assert ci.incremental_since("ent-A") == last - ci._INCREMENTAL_OVERLAP
+
+
+def test_incremental_since_is_none_before_the_first_success(monkeypatch):
+    """A fresh connection still needs its one full history pull."""
+    monkeypatch.setattr(ci, "_sync_state", lambda cid: None)
+    assert ci.incremental_since("ent-A") is None
+
+
 def test_ensure_fresh_degrades_to_stale_when_the_source_fails(monkeypatch):
     """A failed refresh must NOT look fresh. We keep the old `as_of` and mark
     it stale, so the answer discloses its age instead of asserting a count."""
