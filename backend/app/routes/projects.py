@@ -54,7 +54,11 @@ from app import project_join_greeting
 from app import project_task_execution
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
-from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
+from app.project_prd_patch_tool import (
+    _project_prd_ids,
+    _resolve_prd_id,
+    project_prd_edit_enabled,
+)
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -750,6 +754,20 @@ def add_project_artifact(
 
 class ProjectChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
+    # OPTIONAL — the id the caller picked off a prior `clarify` envelope's
+    # `prd_options` (2+-PRD disambiguation). Omitted (the default, and the
+    # ONLY value pre-fix callers ever sent), target resolution is unchanged:
+    # server-side auto-select on exactly one project PRD, refuse on 0/2+.
+    # A client-SUPPLIED id is NOT trusted on its own — `_resolve_prd_id`
+    # returns it verbatim (`tool_input.get("prd_id")` → `(int(raw), None)`,
+    # no signature change), but `apply_chat_edit_scoped` below runs the ★
+    # cross-project (`assert_prd_on_project`) + cross-tenant
+    # (`require_owned_prd`) gate on WHATEVER `prd_id` reaches it,
+    # unconditionally and BEFORE any read/write — identically whether that
+    # id was server-auto-selected or client-supplied. See
+    # `test_project_chat_edit_explicit_id_cross_project_denied` for the
+    # mutation-proofed IDOR guard.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 @router.post("/{project_id}/prd/chat-edit")
@@ -766,18 +784,22 @@ def project_chat_edit(
     Membership-gated (`_require_project_member`), THEN the request-time
     `PROJECT_PRD_EDIT_ENABLED` rollout flag (503 semantics degrade to a
     no-op — off means no write and a no-edit reply, never an error), THEN
-    target resolution: the edit target is resolved SERVER-side over THIS
-    project's own artifacts via `_resolve_prd_id` (single-PRD auto-select /
-    ambiguous-disambiguate) — never a client-supplied `prd_id`, so there is
-    nothing here for a caller to spoof. 0/ambiguous PRDs make no write and
+    target resolution: `_resolve_prd_id` auto-selects on exactly one project
+    PRD, or — on 2+ PRDs — accepts the id the caller picked off a prior
+    `clarify` envelope's `prd_options` (`body.prd_id`, OPTIONAL, `None` on
+    every pre-fix call). 0/ambiguous-and-unpicked PRDs make no write and
     return a no-edit, answer-shaped payload (`{"edited": false, "answer"}`)
     instead of an error, so the private chat can degrade to a grounded ask.
 
-    `apply_chat_edit_scoped` then runs the ★ cross-project IDOR gate
-    (`assert_prd_on_project`) before any read/write — defense in depth here
-    (the resolved id is already this project's own), and the SAME single-
-    sourced gate a future group-chat write path will call with a
-    less-trusted target. A `ProjectPrdWriteDenied` from that gate is caught
+    ★ `body.prd_id` is CLIENT-SUPPLIED and UNTRUSTED on its own — a member of
+    project A could name a PRD on project B, or (probed) another tenant's.
+    `apply_chat_edit_scoped` runs the ★ cross-project IDOR gate
+    (`assert_prd_on_project`) — fail-closed, before any read/write — on
+    WHATEVER `prd_id` reaches it, identically whether server-auto-selected
+    or client-supplied, THEN the cross-tenant gate (`require_owned_prd`).
+    This is the PRIMARY defense for the client-supplied case, not defense in
+    depth — `_resolve_prd_id` performs no project/tenant check of its own on
+    an explicit id. A `ProjectPrdWriteDenied` from that gate is caught
     and degrades to the same no-edit shape rather than a raw 403/404, since
     the resolved-target contract promises callers a soft refusal, not an
     error, on this route.
@@ -791,7 +813,13 @@ def project_chat_edit(
         }
 
     dataset = _dataset_for(ctx)
-    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    # `body.prd_id` present (the caller picked a PRD off a prior `clarify`
+    # envelope's `prd_options`) -> thread it through explicitly, same shape
+    # `_resolve_prd_id` already honors (`tool_input.get("prd_id")`) for the
+    # write-tool caller. Absent -> `{}`, preserving today's server-side
+    # auto-select/refuse behavior byte-for-byte.
+    tool_input = {"prd_id": body.prd_id} if body.prd_id is not None else {}
+    prd_id, refusal = _resolve_prd_id(tool_input, project_id, dataset, ctx.company_id)
     if prd_id is None:
         return {"edited": False, "answer": refusal or "I couldn't work out which PRD to edit."}
 
@@ -1260,9 +1288,23 @@ def project_chat_intent(
     _require_project_member(project_id, ctx)
     dataset = _dataset_for(ctx)
     history = _load_history(body.conversation_id, ctx.company_id, ctx.user_id)
-    envelope, prd_id, _refusal = resolve_project_chat_intent(
+    envelope, prd_id, refusal = resolve_project_chat_intent(
         project_id, body.message, history, dataset, ctx
     )
+    # The `_NEEDS_PRD` downgrade (chat_intent.py) fires whenever a PRD-target
+    # intent's target didn't resolve, rewriting the envelope to a plain
+    # `answer` with `source="no_target_prd"` — that alone doesn't distinguish
+    # "no PRD to edit" (nothing to disambiguate, the honest `answer` stands)
+    # from "more than one PRD, which one?" (a genuine choice the caller was
+    # never asked to make). Surface the latter as a first-class `clarify`
+    # envelope instead of a silent no-op; single-sourced off `_project_prd_
+    # ids` + the `_resolve_prd_id` refusal string, same as the group side.
+    if envelope.get("source") == "no_target_prd":
+        prd_options = _project_prd_ids(project_id, dataset, ctx.company_id)
+        if len(prd_options) >= 2:
+            envelope["intent"] = "clarify"
+            envelope["clarification"] = refusal
+            envelope["prd_options"] = prd_options
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = None
     return envelope
@@ -1317,10 +1359,21 @@ class _GroupEditOutcome(NamedTuple):
       the reply claim an edit happened; `refusal`, when set, lets it ask
       which PRD instead.
     - `applied_turn` None AND `was_edit_request` False → not an edit at all
-      (answer/discussion); ordinary unified-engine reply."""
+      (answer/discussion); ordinary unified-engine reply.
+
+    `needs_prd_clarify` — a SEPARATE, content-derived signal, NOT a
+    restatement of `refusal` truthiness: True only when THIS turn's own
+    classify came back downgraded-for-no-target (`envelope.get("source") ==
+    "no_target_prd"` — the model classified a PRD-target intent) AND the
+    project genuinely has 2+ PRDs to choose from. `refusal` alone depends
+    only on the project's PRD COUNT, not on what the message said, so keying
+    the "which PRD?" question off `refusal` truthiness would ask it on every
+    ordinary message in any 2+-PRD project — this field exists precisely to
+    avoid that over-fire while still surfacing the genuine ambiguity."""
     applied_turn: dict | None
     was_edit_request: bool
     refusal: str | None
+    needs_prd_clarify: bool = False
 
 
 def _classify_and_maybe_edit_group_prd(
@@ -1361,13 +1414,25 @@ def _classify_and_maybe_edit_group_prd(
     envelope, prd_id, refusal = resolve_project_chat_intent(
         project_id, message, history, dataset, ctx
     )
+    # Content-derived clarify signal — computed from THIS turn's own classify
+    # outcome, never from `refusal` truthiness (which depends only on the
+    # project's PRD count, not on what was asked — see `_GroupEditOutcome`'s
+    # docstring). `_project_prd_ids` is only read on the branch where the
+    # downgrade actually fired, so a plain non-edit message never pays for
+    # a manifest read it doesn't need.
+    needs_prd_clarify = False
+    if envelope.get("source") == "no_target_prd":
+        needs_prd_clarify = len(_project_prd_ids(project_id, dataset, ctx.company_id)) >= 2
     was_edit_request = envelope["intent"] == "edit_prd"
     if not was_edit_request or not allow_prd_edit or prd_id is None:
         # Nothing is written on this pass. Report WHETHER the latest turn
         # WAS an edit request (regardless of WHY it didn't apply) so the
         # caller's unified-engine fallback can ask/answer honestly rather
         # than fabricate a "done" (B2 no-fabrication).
-        return _GroupEditOutcome(applied_turn=None, was_edit_request=was_edit_request, refusal=refusal)
+        return _GroupEditOutcome(
+            applied_turn=None, was_edit_request=was_edit_request, refusal=refusal,
+            needs_prd_clarify=needs_prd_clarify,
+        )
 
     result = apply_chat_edit_scoped(
         prd_id, envelope["instruction"], ctx, project_id=project_id, dataset=dataset,
@@ -1498,17 +1563,32 @@ def _respond_as_group_agent(
             )
             if edit.applied_turn is not None:
                 return
-            if edit.was_edit_request:
-                # An edit was asked for but NOT written (flag off, or the
-                # target didn't resolve). The reply has no edit tool, so it
-                # must not claim a change was made; steer it to ask/explain.
+            if edit.needs_prd_clarify:
+                # Content-derived signal (NOT `edit.refusal` truthiness — see
+                # `_GroupEditOutcome`'s docstring): this turn asked to edit
+                # the PRD and the project genuinely has 2+ PRDs to choose
+                # from. Ask which one via the single-sourced listing
+                # (`_project_prd_ids` + the `_resolve_prd_id` refusal
+                # string) instead of silently answering.
+                listing = (edit.refusal or "more than one PRD exists on this project").rstrip(".")
+                edit_note = (
+                    "EDIT STATUS: The latest turn asked to change the PRD, but "
+                    f"{listing}. You cannot edit the PRD in this reply. Do NOT "
+                    "say you added, updated, or changed anything. Ask which "
+                    "PRD is meant before doing anything else."
+                )
+            elif edit.was_edit_request:
+                # An edit was asked for but NOT written for some OTHER reason
+                # (flag off, or a target that failed to resolve without a
+                # genuine 2+-PRD choice — e.g. zero PRDs). The reply has no
+                # edit tool, so it must not claim a change was made; steer it
+                # to explain.
                 reason = (edit.refusal or "the edit could not be applied").rstrip(".")
                 edit_note = (
                     "EDIT STATUS: The latest turn asked to change the PRD, but "
                     f"NO edit was made on this turn ({reason}). You cannot edit "
                     "the PRD in this reply. Do NOT say you added, updated, or "
-                    "changed anything. If more than one PRD could be meant, ask "
-                    "which PRD to edit; otherwise explain briefly what's needed."
+                    "changed anything. Explain briefly what's needed."
                 )
 
         roster = projects_db.list_members(project_id)

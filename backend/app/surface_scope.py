@@ -46,6 +46,28 @@ PROJECT_TOOL_NUDGE = (
 )
 
 
+#: The single-sourced "answer from THIS block, don't deflect" header both
+#: project surfaces frame their real facts with — moved here, byte-for-byte,
+#: from its original private-only home (`routes/ask.py`'s inline
+#: `project_preamble` literal) so the group composer fall-through
+#: (`qa_agent._fold_project_context`) can prepend the SAME framing to its
+#: own non-empty `context_payload` instead of folding the roster/ledger/
+#: memory block as a passive, unframed "Context:" row the model is free to
+#: deflect on. Private usage is unchanged byte-for-byte (`routes/ask.py`).
+PROJECT_FACTS_AUTHORITATIVE_PREAMBLE = (
+    "[Project workspace facts — AUTHORITATIVE for THIS project, and "
+    "the source of truth for anything about the project itself. The "
+    "lines below are the real members (and their roles), the real "
+    "task/delegation ledger, and the real artifacts (PRDs, "
+    "prototypes, evidence, reports, ticket sets) of the project this "
+    "chat belongs to. When asked who is on this project, what tasks "
+    "are open / who is doing what, or how many / which PRDs or "
+    "artifacts exist, answer directly and specifically from these "
+    "facts. Do NOT say you cannot see them and do NOT tell the user "
+    "to connect a data source for them — this block IS that source.]"
+)
+
+
 @dataclass(frozen=True)
 class SurfaceScope:
     """One turn's surface-specific context, built once by the caller

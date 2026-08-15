@@ -11,6 +11,17 @@
   flex-direction: column;
 }
 
+/* Keeps the relocated "Add existing artifact" trigger seated next to the
+ * close button as one group, so the header's existing space-between still
+ * reads as two clusters (title block / actions) instead of three items
+ * spread evenly across the row. Layout-only — no new color/token. */
+.headActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .panel :global(.modal-body) {
   overflow-y: auto;
 }

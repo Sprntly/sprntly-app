@@ -309,3 +309,149 @@ def test_group_and_private_share_the_resolve_helper(
     )
     assert resp2.status_code == 200, resp2.text
     assert len(calls) == 2  # the group classifier ALSO went through it
+
+
+# ── AC1 — the private route surfaces the >1-PRD disambiguation as a real ────
+# clarify instead of silently discarding it (`refusal`) and returning
+# `intent:"answer", prd_id:null`.
+def test_private_intent_two_prds_returns_clarify_not_silent_answer(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
+    from app.db import projects as projects_db
+
+    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
+    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+
+    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
+        # Mirrors the REAL `_NEEDS_PRD` downgrade (chat_intent.py): an
+        # edit-phrased message whose target failed to resolve comes back
+        # rewritten to `answer`, `source="no_target_prd"` — exactly what
+        # `resolve_chat_intent` itself would produce for `prd_id=None`.
+        return _fake_envelope(intent="answer", source="no_target_prd")
+
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "tighten the scope"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # NOT the silent no-op the unfixed route returns.
+    assert body["intent"] == "clarify"
+    assert body["prd_id"] is None
+    assert "more than one PRD" in body["clarification"]
+    assert {o["id"] for o in body["prd_options"]} == {prd_a, prd_b}
+
+
+# ── AC5 — the clarify's `prd_options` is exactly `_project_prd_ids(...)` ────
+# for the project — tenant-scoped, never a client-supplied listing.
+def test_private_intent_clarify_options_are_project_prds(
+    tenant_client, isolated_settings, monkeypatch
+):
+    from app.project_prd_patch_tool import _project_prd_ids
+
+    t = tenant_client.make(slug="acme")
+    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
+    from app.db import projects as projects_db
+
+    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
+    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent",
+        lambda *a, **kw: _fake_envelope(intent="answer", source="no_target_prd"),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "tighten the scope"},
+    )
+    assert resp.status_code == 200, resp.text
+    expected = _project_prd_ids(project_id, "acme", t.company_id)
+    assert resp.json()["prd_options"] == expected
+
+
+# ── AC3 — exactly ONE PRD: unchanged edit_prd verdict, no clarify ───────────
+def test_private_intent_one_prd_unchanged_edit_prd(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
+
+    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
+        # A single project PRD resolves — the target survives, no downgrade.
+        return _fake_envelope(intent="edit_prd", instruction="tighten it", source="llm")
+
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "tighten the scope"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "edit_prd"
+    assert body["prd_id"] == prd_id
+    assert "clarification" not in body
+    assert "prd_options" not in body
+
+
+# ── AC4 — zero PRDs: unchanged honest answer, no clarify ────────────────────
+def test_private_intent_zero_prd_unchanged_answer(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent",
+        lambda *a, **kw: _fake_envelope(intent="answer", source="no_target_prd"),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "tighten the scope"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "answer"
+    assert body["prd_id"] is None
+    assert "clarification" not in body
+    assert "prd_options" not in body
+
+
+# ── AC6 — a plain non-edit question on a 2-PRD project does NOT over-fire ───
+# a clarify: `source != "no_target_prd"` skips the branch entirely.
+def test_private_intent_plain_question_two_prds_no_clarify(
+    tenant_client, isolated_settings, monkeypatch
+):
+    t = tenant_client.make(slug="acme")
+    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
+    from app.db import projects as projects_db
+
+    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
+    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent",
+        lambda *a, **kw: _fake_envelope(intent="answer", source="llm"),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "what's the weather like?"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "answer"
+    assert "clarification" not in body
+    assert "prd_options" not in body

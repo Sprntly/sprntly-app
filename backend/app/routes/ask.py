@@ -33,6 +33,7 @@ from app.deps.ownership import (
 )
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
+from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE
 
 logger = logging.getLogger(__name__)
 
@@ -367,20 +368,11 @@ async def ask(
             # those sources. This block IS the source of truth for those, so the
             # header explicitly tells the model to answer them from it and NOT
             # to deflect. Breadth only; stays a single injected row (no tools).
-            project_preamble = (
-                "[Project workspace facts — AUTHORITATIVE for THIS project, and "
-                "the source of truth for anything about the project itself. The "
-                "lines below are the real members (and their roles), the real "
-                "task/delegation ledger, and the real artifacts (PRDs, "
-                "prototypes, evidence, reports, ticket sets) of the project this "
-                "chat belongs to. When asked who is on this project, what tasks "
-                "are open / who is doing what, or how many / which PRDs or "
-                "artifacts exist, answer directly and specifically from these "
-                "facts. Do NOT say you cannot see them and do NOT tell the user "
-                "to connect a data source for them — this block IS that source.]"
-            )
             history = [
-                {"role": "context", "content": f"{project_preamble}\n{project_block}"}
+                {
+                    "role": "context",
+                    "content": f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{project_block}",
+                }
             ] + history
         # Best-effort bind (first-write-wins, mirrors bind_conversation_to_prd):
         # navigating away mid-generation must not orphan the conversation ↔

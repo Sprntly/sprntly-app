@@ -31,6 +31,8 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import app.routes.projects as projects_route
 from app.db.workspaces import ensure_default_workspace
 
@@ -52,6 +54,45 @@ def _ctx(t) -> SimpleNamespace:
         company_id=t.company_id, workspace_id=ensure_default_workspace(t.company_id)["id"],
         user_id=t.user_id, user_email=None,
     )
+
+
+# `_project_prd_ids` walks `list_artifacts_for_project` -> `list_artifacts_
+# for_company`, which queries `prototypes` unconditionally — not in
+# conftest's shared fake schema (same convention `test_project_intent_
+# route.py`/`test_group_chat_prd_edit.py` already use). Only the two new
+# clarify tests below need real PRDs, so this fixture is opt-in, not
+# autouse.
+_PROTOTYPE_DDL = """
+CREATE TABLE IF NOT EXISTS prototypes (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id                 INTEGER,
+    workspace_id           TEXT NOT NULL,
+    status                 TEXT NOT NULL DEFAULT 'generating',
+    created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+@pytest.fixture
+def _prototypes_table(isolated_settings):
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().executescript(_PROTOTYPE_DDL)
+    yield
+
+
+def _seed_prd(db_mod, dataset="acme", html="<html><body><h1>Doc</h1></body></html>"):
+    brief_id = db_mod.save_brief(
+        dataset=dataset, week_label="Week of stub",
+        payload={"summary_headline": "s", "insights": [{"title": "I0"}], "_schema_version": 1},
+        schema_version=1,
+    )
+    prd_id = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="Doc",
+        template_version=1, variant="v3", source="chat", theme_id="chat:seed",
+    )
+    db_mod.complete_prd(prd_id, title="Doc", md=html)
+    return prd_id
 
 
 def _fake_loop_capturing(systems: list[str], *, reply: str = "unused"):
@@ -194,10 +235,14 @@ def test_resolve_project_chat_intent_returns_triple(tenant_client, isolated_sett
 
 def test_both_resolver_callers_unpack_triple():
     """Both callers of `resolve_project_chat_intent` unpack all three
-    values; a source-scan proves NO 2-tuple unpack remains anywhere."""
+    values; a source-scan proves NO 2-tuple unpack remains anywhere.
+
+    UPDATED for the clarify fix: the private route no longer discards
+    `refusal` (`_refusal`) — it now surfaces the >1-PRD disambiguation as a
+    real `clarify` envelope, so BOTH callers bind the same `refusal` name."""
     src = PROJECTS_ROUTE_SRC
-    assert "envelope, prd_id, _refusal = resolve_project_chat_intent(" in src
-    assert "envelope, prd_id, refusal = resolve_project_chat_intent(" in src
+    assert src.count("envelope, prd_id, refusal = resolve_project_chat_intent(") == 2
+    assert "envelope, prd_id, _refusal = resolve_project_chat_intent(" not in src
     assert "envelope, prd_id = resolve_project_chat_intent(" not in src
     assert src.count("resolve_project_chat_intent(") == 3  # def + 2 call sites
 
@@ -552,3 +597,100 @@ def test_gate_logs_decision_and_reason_no_content(tenant_client, isolated_settin
     assert r.status_code == 200
     joined = "\n".join(rec.getMessage() for rec in caplog.records)
     assert secret not in joined
+
+
+# ── Group PRD-edit clarify — the SAME content-derived signal the private ────
+# route uses, driven through the REAL classify path (not a fabricated
+# tuple): `resolve_project_chat_intent`/`_resolve_prd_id` run for real over
+# actually-seeded project PRDs; only `resolve_chat_intent` (the LLM
+# classify call) is mocked, mirroring the REAL `_NEEDS_PRD` downgrade
+# (chat_intent.py) for `prd_id=None`.
+
+
+def test_group_asks_which_prd_on_two_prds_via_real_classify(
+    tenant_client, isolated_settings, monkeypatch, _prototypes_table,
+):
+    """An edit-phrased group turn on a genuinely 2-PRD project sets
+    `_GroupEditOutcome.needs_prd_clarify=True` and steers the fallback
+    reply's EDIT STATUS note to ask which PRD, via the single-sourced
+    `_project_prd_ids`/refusal listing — end to end through the real HTTP
+    route + the real `_resolve_prd_id`. On the UNFIXED route `was_edit_
+    request` is False (the downgrade rewrote `edit_prd` -> `answer`) so no
+    `edit_note` is produced at all (the red)."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+    from app.db import projects as projects_db
+
+    prd_a = _seed_prd(isolated_settings["db"], dataset=t.slug)
+    prd_b = _seed_prd(isolated_settings["db"], dataset=t.slug)
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+
+    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
+
+    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
+        # The REAL `_NEEDS_PRD` downgrade's shape: an edit-phrased turn
+        # whose target failed to resolve (prd_id=None, from the REAL
+        # `_resolve_prd_id` over the 2 seeded PRDs) comes back rewritten to
+        # `answer`, `source="no_target_prd"`; a resolved target keeps
+        # `edit_prd`.
+        if prd_id is None:
+            return {"intent": "answer", "source": "no_target_prd", "instruction": None}
+        return {"intent": "edit_prd", "instruction": "do it", "source": "llm"}
+
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
+    systems: list[str] = []
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_loop_capturing(systems))
+
+    r = t.client.post(
+        f"/v1/projects/{project_id}/group/turns",
+        json={"content": "@Sprntly please update the PRD"},
+    )
+    assert r.status_code == 200, r.text
+    assert len(systems) == 1
+    system = systems[0]
+    assert "EDIT STATUS" in system
+    assert "more than one PRD" in system
+    assert "Do NOT say you added, updated, or changed anything" in system
+
+
+def test_group_plain_message_two_prds_no_clarify(
+    tenant_client, isolated_settings, monkeypatch, _prototypes_table,
+):
+    """NEGATIVE regression (group equivalent of AC6, the over-fire guard):
+    a PLAIN non-edit group message on a genuinely 2-PRD project has
+    `source != "no_target_prd"` (the real classifier never downgrades a
+    non-edit turn) -> `needs_prd_clarify=False` -> no "which PRD" edit_note.
+    Keying the signal off `edit.refusal` truthiness instead (which is
+    non-None on THIS project for EVERY message, since `_resolve_prd_id`
+    depends only on PRD count) would make this test RED — that is exactly
+    the over-fire regression this ticket must not reintroduce."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+    from app.db import conversations as conversations_db
+    from app.db import projects as projects_db
+
+    prd_a = _seed_prd(isolated_settings["db"], dataset=t.slug)
+    prd_b = _seed_prd(isolated_settings["db"], dataset=t.slug)
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+    conv = conversations_db.create_group_chat(project_id, t.user_id)
+
+    # A plain question — the real classifier's own `intent`/`source` never
+    # downgrade a non-edit turn, regardless of the project's PRD count.
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent",
+        lambda company_id, message, history, *, prd_id=None, **kw: {
+            "intent": "answer", "source": "llm", "instruction": None,
+        },
+    )
+
+    outcome = projects_route._classify_and_maybe_edit_group_prd(
+        project_id, conv["id"], _ctx(t), "what's the status?", [], t.slug,
+    )
+    # Proves the over-fire trap is real: `refusal` IS set on this 2-PRD
+    # project (PRD-count-derived, content-independent) — but the content-
+    # derived signal correctly stays False.
+    assert outcome.refusal is not None
+    assert outcome.needs_prd_clarify is False
+    assert outcome.was_edit_request is False
