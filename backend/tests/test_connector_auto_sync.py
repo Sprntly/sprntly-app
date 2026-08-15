@@ -802,6 +802,33 @@ def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):
     assert index_calls == ["co-X"]
 
 
+def test_scheduled_call_index_refresh_is_incremental(monkeypatch):
+    """Every 20-minute cycle was a FULL ten-page re-sync per company — which
+    exhausted a tenant's Fireflies daily API quota on 2026-08-15 and
+    429-blocked every other Fireflies read for that account until UTC
+    midnight. The refresh must pass the same incremental anchor the read
+    path's `ensure_fresh` uses; a company that never synced still gets
+    `since=None`, the full pull a first sync needs."""
+    from datetime import datetime, timezone
+
+    import app.call_index as ci
+    from app.kg_ingest import auto_sync
+
+    anchor = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(ci, "incremental_since", lambda cid: anchor)
+    seen = {}
+
+    def _sync(company_id, *, since=None, **_kw):
+        seen["company"], seen["since"] = company_id, since
+        return 3
+
+    monkeypatch.setattr(ci, "sync_all_sources", _sync)
+
+    auto_sync._run_call_index_sync("co-X")
+
+    assert seen == {"company": "co-X", "since": anchor}
+
+
 def test_fireflies_disconnect_clears_the_call_index(isolated_settings, monkeypatch):
     """Leaving the index behind is not harmless.
 

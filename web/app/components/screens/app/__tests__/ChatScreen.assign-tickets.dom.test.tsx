@@ -261,6 +261,45 @@ describe("ChatScreen — assign_tickets dispatch", () => {
     await waitFor(() => expect(saveFields).toHaveBeenCalledWith("prd-501-s2", { assignee: DAVE }))
   })
 
+  it("a multi question ('assign 2 tickets to Dave') applies EVERY tick", async () => {
+    // The reported bug, end to end: the plan asks which tickets Dave gets,
+    // marked multi — the card renders as checkboxes, both ticks confirm as
+    // ONE answer, and BOTH tickets get written to Dave.
+    assignPlan.mockResolvedValue({
+      assignments: [],
+      questions: [{
+        header: "Which tickets", prompt: "Which 2 tickets should Dave get?",
+        fixed: { kind: "member", assignee: DAVE },
+        multi: true,
+        options: [
+          { value: "prd-501-s1", label: "Login flow", description: "prd-501-s1" },
+          { value: "prd-501-s2", label: "Settings page", description: "prd-501-s2" },
+          { value: "prd-501-s3", label: "Billing export", description: "prd-501-s3" },
+        ],
+      }],
+      note: "",
+    })
+    await openThreadThenArmAssign("assign 2 tickets to Dave")
+    await typeAndSend("assign 2 tickets to Dave")
+    await waitFor(() => expect(screen.getByTestId("question-popup")).toBeTruthy())
+
+    // Ticks are local — nothing writes, the stepper stays put.
+    const options = screen.getAllByTestId("question-popup-option")
+    await act(async () => { fireEvent.click(options[0]) })
+    await act(async () => { fireEvent.click(options[2]) })
+    expect(saveFields).not.toHaveBeenCalled()
+
+    // Confirm settles the question → the batch completes → one write PER TICK.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("question-popup-confirm-picks"))
+    })
+    await waitFor(() => expect(saveFields).toHaveBeenCalledWith("prd-501-s1", { assignee: DAVE }))
+    await waitFor(() => expect(saveFields).toHaveBeenCalledWith("prd-501-s3", { assignee: DAVE }))
+    expect(saveFields).not.toHaveBeenCalledWith("prd-501-s2", expect.anything())
+    await waitFor(() => expect(document.body.textContent).toContain("“Login flow” → Dave Okafor"))
+    await waitFor(() => expect(document.body.textContent).toContain("“Billing export” → Dave Okafor"))
+  })
+
   it("a plan failure lands as an honest reply, never a dead turn", async () => {
     assignPlan.mockRejectedValue(new Error("backend down"))
     await openThreadThenArmAssign("assign the login ticket to Dave")

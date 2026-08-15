@@ -182,6 +182,50 @@ def test_member_fixed_question_offers_tickets(tenant_client, monkeypatch):
     assert q["options"][0]["label"] == "Settings page"
 
 
+def test_a_several_tickets_ask_rides_out_as_one_multi_question(
+    tenant_client, monkeypatch
+):
+    """"Assign 2 tickets to fortune" — reported with a screenshot: the popup
+    listed the tickets but only one could be clicked. A person-fixed question
+    the model marks `multi` keeps the flag, so the card renders as
+    tick-several-confirm-once; a ticket-fixed question NEVER carries it (a
+    ticket has exactly one assignee), whatever the model says."""
+    t = tenant_client.make(slug="acme")
+    _seed_tickets(t.company_id, 7, [
+        {"id": "s1", "title": "Login flow"},
+        {"id": "s2", "title": "Settings page"},
+    ])
+    _seed_member(t.company_id, "u-dave", "Dave Okafor", "dave@acme.com")
+    monkeypatch.setattr(ticket_assign, "llm_call", lambda **kw: _llm_result({
+        "assignments": [],
+        "questions": [
+            {
+                "header": "Which tickets", "prompt": "Which 2 tickets should Dave get?",
+                "user_id": "u-dave",
+                "option_ticket_keys": ["prd-7-s1", "prd-7-s2"],
+                "multi": True,
+            },
+            {
+                "header": "Assignee", "prompt": "Who should “Login flow” go to?",
+                "ticket_key": "prd-7-s1",
+                "option_user_ids": ["u-dave"],
+                "multi": True,  # the model drifted — must not survive
+            },
+        ],
+        "note": "",
+    }))
+    body = t.client.post(
+        "/v1/tickets/assign-plan",
+        json={"prd_id": 7, "instruction": "assign 2 tickets to Dave"},
+    ).json()
+    member_q, ticket_q = body["questions"]
+    assert member_q["fixed"]["kind"] == "member"
+    assert member_q["multi"] is True
+    assert [o["value"] for o in member_q["options"]] == ["prd-7-s1", "prd-7-s2"]
+    assert ticket_q["fixed"]["kind"] == "ticket"
+    assert "multi" not in ticket_q
+
+
 def test_deleted_tickets_are_not_offered(tenant_client, monkeypatch):
     t = tenant_client.make(slug="acme")
     _seed_tickets(t.company_id, 7, [
@@ -240,6 +284,47 @@ def test_category_rule_rides_in_the_prompt(tenant_client, monkeypatch):
     assert [a["ticket_key"] for a in body["assignments"]] == ["prd-7-s1"]
     assert body["questions"] == []
     assert "only backend-ish" in body["note"]
+
+
+def test_the_requester_rides_the_prompt_so_me_resolves(tenant_client, monkeypatch):
+    """"Assign the frontend tickets to me" answered "no session identity is
+    provided" (screenshot-reported) — the plan call never knew who was asking.
+    The authenticated caller — company owner or INVITED member alike, it is
+    whoever's JWT made the request — now rides the input as an explicit
+    REQUESTER line, and the ticket lines carry content (summary + area), not
+    bare titles, so descriptive phrases have something to match against."""
+    t = tenant_client.make(slug="acme", user_id="u-invited")
+    _seed_tickets(t.company_id, 7, [
+        {"id": "s1", "title": "Login flow", "what": "Retry the SPF check",
+         "route": "backend", "labels": ["email"], "prd_section": "Delivery"},
+    ])
+    # The caller's PROFILE details (the tenant fixture already seeded their
+    # membership + a bare profile — whoever's JWT it is, owner or invitee,
+    # the roster read finds them; this just gives the row a name to assert).
+    from app.db.client import require_client
+
+    require_client().table("profiles").update({
+        "email": "fortune@acme.com", "full_name": "Fortune Tede",
+    }).eq("id", "u-invited").execute()
+    seen = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"assignments": [], "questions": [], "note": ""})
+
+    monkeypatch.setattr(ticket_assign, "llm_call", _capture)
+    t.client.post(
+        "/v1/tickets/assign-plan",
+        json={"prd_id": 7, "instruction": "assign the frontend tickets to me"},
+    )
+    # The requester block names the caller — id, name, email.
+    assert "REQUESTER" in seen["input"]
+    assert "u-invited — Fortune Tede — fortune@acme.com" in seen["input"]
+    # The ticket line carries what the ticket IS, not just its title.
+    assert "Retry the SPF check" in seen["input"]
+    assert "backend, email, Delivery" in seen["input"]
+    # And the rule the model follows lives in the system prompt.
+    assert '"me" / "myself"' in seen["system"]
 
 
 def test_no_tickets_short_circuits_without_an_llm_call(tenant_client, monkeypatch):
