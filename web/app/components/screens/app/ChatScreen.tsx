@@ -3674,20 +3674,37 @@ export function ChatScreen() {
       for (let i = 0; i < pa.questions.length; i++) {
         const q = pa.questions[i]
         const a = answers[i]
-        const opt = a && !a.skipped && a.answer
-          ? ((a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
-             q.options.find((o) => o.label === a.answer))
-          : undefined
-        if (!opt) { skipped += 1; continue }
-        const pair = q.fixed.kind === "ticket"
-          ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
-          : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
-        if (!pair.assignee) { skipped += 1; continue }
-        try {
-          await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
-          applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
-        } catch {
-          failed.push(pair.title)
+        // A multi-pick answer carries EVERY tick on `picks` — one option (and
+        // one write) per pick. A single-pick answer resolves to exactly one
+        // option, same lookup as always: by stable value first, label second.
+        const chosen: TicketAssignQuestion["options"] = []
+        if (a && !a.skipped && a.answer) {
+          if (q.multi && a.picks?.length) {
+            for (const p of a.picks) {
+              const opt =
+                (p.value != null ? q.options.find((o) => o.value === p.value) : undefined) ??
+                q.options.find((o) => o.label === p.label)
+              if (opt) chosen.push(opt)
+            }
+          } else {
+            const opt =
+              (a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
+              q.options.find((o) => o.label === a.answer)
+            if (opt) chosen.push(opt)
+          }
+        }
+        if (!chosen.length) { skipped += 1; continue }
+        for (const opt of chosen) {
+          const pair = q.fixed.kind === "ticket"
+            ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
+            : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
+          if (!pair.assignee) { skipped += 1; continue }
+          try {
+            await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
+            applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
+          } catch {
+            failed.push(pair.title)
+          }
         }
       }
       const lines: string[] = []
@@ -7364,6 +7381,11 @@ export function ChatScreen() {
                       // Free text can't be validated against the roster — the
                       // options ARE the answer space here.
                       allowOther: false,
+                      // "Assign 2 tickets to X" → the backend marks the
+                      // person-fixed question multi, and the card renders as
+                      // tick-several-confirm-once instead of a single pick
+                      // that could only honour one of the asked-for tickets.
+                      multiSelect: !!q.multi,
                     }))}
                     fallbackHeader="Assign"
                     onComplete={(answers) => void completeAssign(activeTabId, answers)}
