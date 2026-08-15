@@ -511,6 +511,110 @@ def test_genesis_failure_does_not_rollback_delegation(isolated_settings, monkeyp
     assert events == [], "the forced-failing genesis event must never have been written"
 
 
+# ── Follow-up cadence seed (unblocks the outbound follow-up sweep) ───────
+# A freshly delegated task never entered `list_due_followups`'s due-set
+# because `handle_delegate_task` wrote the `project_delegations` fact but
+# never seeded a `delegation_followups` row. These tests prove the seed
+# fires (own try/except, same best-effort posture as the genesis event
+# above) and never blocks a successful hand-off.
+
+
+def test_handle_delegate_task_seeds_followup_row(isolated_settings, monkeypatch):
+    """A successful delegation writes a `delegation_followups` row for the
+    new delegation with `next_check_in` ~= now + 24h, `last_checked_in` ~=
+    now, `muted is False`, and `expected_completion is None`."""
+    from datetime import datetime, timedelta, timezone
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    before = datetime.now(timezone.utc)
+    result = _delegate(project, ctx.user_id)
+    after = datetime.now(timezone.utc)
+    assert "Sent the brief" in result
+
+    from app.db.client import require_client
+
+    deleg = (
+        require_client()
+        .table("project_delegations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data[0]
+    )
+    followup = (
+        require_client()
+        .table("delegation_followups")
+        .select("*")
+        .eq("delegation_id", deleg["id"])
+        .execute()
+        .data[0]
+    )
+    next_check_in = datetime.fromisoformat(followup["next_check_in"])
+    last_checked_in = datetime.fromisoformat(followup["last_checked_in"])
+    assert before + timedelta(hours=24) <= next_check_in <= after + timedelta(hours=24)
+    assert before <= last_checked_in <= after
+    assert followup["muted"] is False
+    assert followup["expected_completion"] is None
+
+
+def test_handle_delegate_task_seed_failure_is_best_effort(isolated_settings, monkeypatch, caplog):
+    """When `upsert_followup` raises, `handle_delegate_task` still returns
+    its success string and the delivery/fact writes stand; a
+    `delegation_followup_seed_failed` warning is logged."""
+    import logging
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    def _boom(*args, **kwargs):  # noqa: ARG001
+        raise RuntimeError("simulated followup-seed failure")
+
+    monkeypatch.setattr(project_delegation, "upsert_followup", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
+        result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+
+    from app.db.client import require_client
+
+    delegations = (
+        require_client()
+        .table("project_delegations")
+        .select("*")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert len(delegations) == 1
+
+    turns = (
+        require_client()
+        .table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", delegations[0]["delivered_conversation_id"])
+        .execute()
+        .data
+    )
+    assert len(turns) == 1
+    assert turns[0]["role"] == "assistant"
+
+    followups = (
+        require_client()
+        .table("delegation_followups")
+        .select("delegation_id")
+        .eq("delegation_id", delegations[0]["id"])
+        .execute()
+        .data
+    )
+    assert followups == [], "the forced-failing seed must never have been written"
+
+    assert any("delegation_followup_seed_failed" in r.message for r in caplog.records)
+
+
 # ── Ledger-create liveness (publish delegation.event on genesis) ──────────
 # The emit route publishes a `delegation.event` on every later status change so
 # the Task ledger updates live. Creation is the one transition that route never

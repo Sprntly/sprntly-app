@@ -196,6 +196,7 @@ def assemble_group_agent_context(project_id: int, dataset: str, company_id: str)
     if insight_text and len(insight_text) > _INSIGHT_CHARS:
         insight_text = insight_text[:_INSIGHT_CHARS].rstrip() + "…"
 
+    roster = _roster_block(project_id)
     ledger = _ledger_digest(project_id, members)
     manifest = _artifact_manifest(project_id, dataset, company_id)
 
@@ -203,6 +204,7 @@ def assemble_group_agent_context(project_id: int, dataset: str, company_id: str)
         "PROJECT CONTEXT (this project only — never another company's data):",
         f"Project memory summary: {summary_md or '(none yet)'}",
         f"Latest shared insight: {insight_text or '(none yet)'}",
+        f"Project roster (who is on this project):\n{roster}",
         f"Task ledger:\n{ledger}",
         f"Artifacts: {manifest}",
     ]

@@ -1910,6 +1910,57 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
     return bool(_PROJECT_TOOL_DELEGATE_VERB.search(q) or _PROJECT_TOOL_EXECUTE_VERB.search(q))
 
 
+#: Read/recall/summary INTENT — an interrogative lead or a summary/read
+#: verb. Deliberately reuses the same shape as `_PROJECT_TOOL_MENTION_VETO`
+#: (the phrasings that gate vetoes are exactly the ones this gate wants),
+#: but this is a POSITIVE match, not a veto.
+_PROJECT_CONTENT_INTENT = re.compile(
+    r"^\s*(?:what|who|how|when|where|which)\b"
+    r"|\b(?:summarize|summarise|catch\s+me\s+up|tell\s+me\s+about|status\s+of|"
+    r"read\s+(?:me\s+)?the|what'?s?\s+(?:in|on)|list|show\s+me)\b",
+    re.I,
+)
+
+#: PROJECT-CONTENT noun anchor — the message must also name project
+#: content, or a bare interrogative ("what's the capital of France") would
+#: match on intent alone and pull generic chit-chat into the tool loop.
+_PROJECT_CONTENT_NOUN = re.compile(
+    r"\bprds?\b|\breports?\b|\bevidence\b|\bprototypes?\b|\bartifacts?\b|"
+    r"\bmemory\b|\btasks?\b|\bledger\b|\bdelegations?\b|\bmembers?\b|"
+    r"\broster\b|\bteam\b|"
+    r"\bwho(?:'?s|\s+is)\s+(?:on|working)\b|"
+    r"\bthis\s+project\b|"
+    r"\bwe\s+decided\b|\bdecisions?\b",
+    re.I,
+)
+
+
+def is_project_content_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message expresses a read/recall/summary intent AND
+    names project content — the parallel POSITIVE gate that unlocks the
+    sixth-branch read-tool loop (`get_project_memory` /
+    `list_project_artifacts` / `get_artifact_content` / `get_task_ledger`)
+    for natural questions that `is_project_tool_request` deliberately vetoes
+    (that gate is delegate/execute-only; its veto exists precisely to send
+    these phrasings elsewhere — this gate is that elsewhere).
+
+    Noun-anchored, veto-set discipline over completeness, sibling to
+    `is_project_tool_request`: a bare interrogative with no project noun
+    ("what's the capital of France") or plain chit-chat ("hey", "thanks")
+    must NOT match — a false negative here only costs falling through to
+    the composer's breadth block (still answerable), while a false
+    positive would pull generic chit-chat into the non-streaming tool loop.
+
+    Does NOT touch `is_project_tool_request` or `_PROJECT_TOOL_MENTION_VETO`
+    — delegate/execute phrasings are owned by that gate; the caller ORs the
+    two together. `history` is accepted for signature parity with every
+    other ladder predicate but not consulted in v1."""
+    q = question or ""
+    if not q.strip():
+        return False
+    return bool(_PROJECT_CONTENT_INTENT.search(q) and _PROJECT_CONTENT_NOUN.search(q))
+
+
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
     """True when the message only means something as a continuation of the
     thread — its subject lives in an earlier turn, not in its own words ("can you

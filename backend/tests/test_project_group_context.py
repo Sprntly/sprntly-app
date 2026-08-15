@@ -226,3 +226,106 @@ def test_private_project_context_degrades_and_never_raises(monkeypatch):
     # Never raises; still returns the scoped roster/ledger/artifacts section.
     block = pgc.assemble_private_project_context(1, "user-1", "acme", "c1")
     assert "never another company's data" in block
+
+
+# ── Group breadth self-carries the roster (memory + members context) ──────
+
+
+def test_group_agent_context_includes_roster(monkeypatch):
+    """`assemble_group_agent_context`'s breadth block now carries its own
+    roster line (DRY reuse of `_roster_block`), rather than relying solely
+    on the group system-prompt addendum to deliver it — the breadth block
+    becomes independently verifiable."""
+    monkeypatch.setattr(
+        pgc.projects_db, "list_members",
+        lambda pid: [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}],
+    )
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "summary text"})
+    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)
+    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
+
+    block = pgc.assemble_group_agent_context(1, "acme", "c1")
+    assert "Project roster (who is on this project):" in block
+    assert "Ada Lovelace" in block
+    assert "summary text" in block  # memory summary still present alongside the roster
+
+
+def test_private_context_still_has_summary_and_roster(monkeypatch):
+    """Regression guard: the private surface's breadth block continues to
+    carry BOTH the memory summary and the roster (it already did before
+    this ticket) — the group-only roster addition must not have touched
+    this function."""
+    import app.project_context as project_context_mod
+
+    monkeypatch.setattr(
+        project_context_mod, "assemble_project_context",
+        lambda project_id, user_id: "Project memory summary: private summary text",
+    )
+    monkeypatch.setattr(
+        pgc.projects_db, "list_members",
+        lambda pid: [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}],
+    )
+    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
+
+    block = pgc.assemble_private_project_context(1, "user-1", "acme", "c1")
+    assert "private summary text" in block
+    assert "Project roster (who is on this project):" in block
+    assert "Ada Lovelace" in block
+
+
+# ── IDOR — cross-tenant artifact refusal (named per the ticket's own AC) ──
+
+
+def test_get_artifact_content_refuses_cross_tenant_artifact(monkeypatch):
+    """`get_artifact_content` (via `dispatch_read_tool`) for an `artifact_id`
+    that belongs to a DIFFERENT project/company is refused and no content
+    is read — the routing-breadth expansion in this ticket does not widen
+    the read tools' tenancy scoping."""
+    import app.db.prds as prds_db
+
+    monkeypatch.setattr(
+        prds_db, "get_prd_rendered",
+        lambda pid: {"payload_md": "CROSS-TENANT PRD body"} if pid == 4242 else None,
+    )
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
+    )
+    refused = _read_artifact("prd", 4242)
+    assert "CROSS-TENANT PRD body" not in refused
+    assert "can't find that artifact" in refused.lower()
+
+
+def test_artifact_manifest_gate_is_load_bearing(monkeypatch):
+    """RED->GREEN: bypassing the manifest membership check (the gate
+    proving the cross-tenant refusal above is load-bearing, not
+    incidental) lets the cross-tenant read succeed; restoring it refuses
+    again."""
+    import app.db.prds as prds_db
+
+    monkeypatch.setattr(
+        prds_db, "get_prd_rendered",
+        lambda pid: {"payload_md": "CROSS-TENANT PRD body"} if pid == 4242 else None,
+    )
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
+    )
+    assert "can't find that artifact" in _read_artifact("prd", 4242).lower()
+
+    # RED: bypass the gate — simulate the manifest check accepting anything.
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 4242, "title": "Bypassed"}],
+    )
+    bypassed = _read_artifact("prd", 4242)
+    assert "CROSS-TENANT PRD body" in bypassed  # the gate was load-bearing — RED without it
+
+    # GREEN: restore the real (tenant-scoped) manifest.
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
+    )
+    assert "can't find that artifact" in _read_artifact("prd", 4242).lower()

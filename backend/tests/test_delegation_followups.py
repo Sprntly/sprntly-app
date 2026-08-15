@@ -408,3 +408,28 @@ def test_followup_cascades_on_delegation_delete(sb, fixture_ids, project):
     assert rows_after == []
 
     sb.table("conversations").delete().eq("id", conv["id"]).execute()
+
+
+# ── Due-set entry (the delegation-seed ticket's AC2) ─────────────────────
+
+
+def test_seeded_delegation_is_due_after_min_interval(sb, delegation):
+    """Seeding the cadence row with the SAME values `handle_delegate_task`
+    now writes at delegation time (`next_check_in = now + MIN_INTERVAL`,
+    `last_checked_in = now`) puts the delegation in `list_due_followups`'s
+    due-set once `MIN_INTERVAL` has elapsed, and NOT before — proving the
+    seed actually unblocks the outbound follow-up sweep (a delegation with
+    no followups row is invisible to `list_due_followups`)."""
+    from app.db.delegation_followups import upsert_followup, list_due_followups
+    from app.delegation_cadence import MIN_INTERVAL
+
+    now = datetime.now(timezone.utc)
+    upsert_followup(delegation["id"], next_check_in=now + MIN_INTERVAL, last_checked_in=now)
+
+    not_yet_due = list_due_followups(now)
+    assert delegation["id"] not in {r["delegation_id"] for r in not_yet_due}
+
+    due = list_due_followups(now + MIN_INTERVAL)
+    due_ids = {r["delegation_id"]: r for r in due}
+    assert delegation["id"] in due_ids
+    assert due_ids[delegation["id"]]["status"] == "assigned"

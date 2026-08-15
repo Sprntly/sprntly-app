@@ -86,6 +86,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_project_content_request,
     is_project_tool_request,
     is_ticket_update,
     is_voc_report_request,
@@ -1944,7 +1945,10 @@ def answer(
     # runs unchanged (AC1/AC2 byte-identity for `scope is None`).
     if (
         scope is not None and scope.surface != Surface.main and scope.extra_tools
-        and is_project_tool_request(routing_text, history)
+        and (
+            is_project_tool_request(routing_text, history)
+            or is_project_content_request(routing_text, history)
+        )
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
