@@ -611,6 +611,12 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // has no ticket-assignment surface — fall back to the grounded
             // ask rather than silently dropping the message.
             onAssignTickets: () => void runAsk(),
+            // clarify: the project-scoped classify route asks which PRD is
+            // meant (2+ PRDs, an unresolved edit target) instead of silently
+            // answering. Render the disambiguation directly as the assistant
+            // turn — no `/v1/ask` round-trip — same as every other
+            // structured executor here.
+            onClarify: (clarification) => settleReply(reply(clarification)),
             onAnswer: () => void runAsk(),
           },
         )

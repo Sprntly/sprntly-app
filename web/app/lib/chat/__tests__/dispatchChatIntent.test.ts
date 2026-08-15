@@ -48,6 +48,9 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onAssignTickets: vi.fn(),
     onListArtifacts: vi.fn(),
     onAnswer: vi.fn(),
+    // Deliberately omitted from the default fixture — `onClarify` is
+    // OPTIONAL (main-chat callers never supply it) — see the two `clarify`
+    // describe blocks below, which add it explicitly where needed.
   }
 }
 
@@ -259,6 +262,47 @@ describe("dispatchChatIntent — open_artifact falls through without a lookup (A
     const env = envelope({ intent: "open_artifact" })
     const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onOpenArtifact).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+})
+
+describe("dispatchChatIntent — clarify (AC7, AC11 main-chat safety)", () => {
+  it("with an onClarify executor + clarification text, calls onClarify with both", () => {
+    const ex = executors()
+    const onClarify = vi.fn()
+    const options = [{ id: 501, title: "Onboarding" }, { id: 502, title: "Billing" }]
+    const env = envelope({
+      intent: "clarify",
+      clarification: "This project has more than one PRD — tell me which to edit by id: …",
+      prd_options: options,
+    })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onClarify })
+    expect(onClarify).toHaveBeenCalledWith(env.clarification, options)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("no onClarify executor supplied (main chat) falls through to onAnswer", () => {
+    // No `onClarify` in the executors object at all — the exact shape a
+    // caller that never wires the clarify render (main chat, today) uses.
+    const ex = executors()
+    const env = envelope({
+      intent: "clarify",
+      clarification: "This project has more than one PRD — tell me which to edit by id: …",
+      prd_options: [{ id: 501, title: "Onboarding" }],
+    })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("onClarify present but no clarification text still falls through to onAnswer", () => {
+    const ex = executors()
+    const onClarify = vi.fn()
+    const env = envelope({ intent: "clarify", clarification: undefined, prd_options: undefined })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onClarify })
+    expect(onClarify).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
   })

@@ -975,6 +975,15 @@ export type ChatIntentEnvelope = {
      *  conversation history, exactly like clicking it on the Artifacts
      *  screen. */
     | "list_artifacts"
+    /** The private project chat's classify route ONLY (`POST /{project_id}/
+     *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
+     *  main chat runs, so a `switch (envelope.intent)` consumer that never
+     *  sees this surface is unaffected as long as it falls through on an
+     *  unmatched case (every existing consumer does). A PRD-target intent
+     *  (`edit_prd`) that couldn't resolve its target because the project has
+     *  2+ PRDs — `clarification` names the choice, `prd_options` lists them,
+     *  so the surface can ask instead of silently answering. */
+    | "clarify"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
@@ -1044,6 +1053,15 @@ export type ChatIntentEnvelope = {
    *  first, capped). The client renders these as clickable items; a click
    *  opens the artifact in its own thread with its conversation history. */
   artifact_list?: ChatArtifactItem[]
+  /** `clarify` ONLY (private project chat) — the `_resolve_prd_id`
+   *  disambiguation string ("This project has more than one PRD — tell me
+   *  which to edit by id: …"). Absent on every other intent. */
+  clarification?: string
+  /** `clarify` ONLY (private project chat) — every PRD on the project,
+   *  tenant-scoped, so the surface can render the choice as clickable
+   *  options rather than parsing the id list out of `clarification`.
+   *  Absent on every other intent. */
+  prd_options?: { id: number; title: string }[]
 }
 
 /** One row of the chat's artifact listing — a clickable stand-in for the same

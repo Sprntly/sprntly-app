@@ -92,7 +92,7 @@ from app.skill_router import (
     is_voc_report_request,
 )
 from app.skills.loader import list_skills
-from app.surface_scope import Surface, SurfaceScope
+from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE, Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
 
@@ -1836,10 +1836,25 @@ def _fold_project_context(
     user to phrase it explicitly rather than silently doing nothing.
 
     A no-op (returns `history` unchanged) for `scope is None`/main, or a
-    project scope whose `system_addendum`/`context_payload` are both empty."""
+    project scope whose `system_addendum`/`context_payload` are both empty.
+
+    `context_payload`, when non-empty (group only — private already leaves
+    it "", its own breadth having reached `history` upstream via `routes/
+    ask.py` WITH the same framing), is prepended with `PROJECT_FACTS_
+    AUTHORITATIVE_PREAMBLE` — the exact "answer from THIS block, don't
+    deflect" header the private surface already uses — so the group
+    composer fall-through frames its ledger/roster/memory facts the same
+    authoritative way instead of folding them as a passive, deflectable
+    "Context:" row. Join order is UNCHANGED: `system_addendum` first,
+    `context_payload` second."""
     if scope is None or scope.surface == Surface.main:
         return history
-    fold_block = "\n\n".join(p for p in (scope.system_addendum, scope.context_payload) if p)
+    parts = []
+    if scope.system_addendum:
+        parts.append(scope.system_addendum)
+    if scope.context_payload:
+        parts.append(f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{scope.context_payload}")
+    fold_block = "\n\n".join(parts)
     if not fold_block:
         return history
     return [{"role": "context", "content": fold_block}] + list(history or [])

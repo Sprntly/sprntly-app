@@ -171,3 +171,107 @@ def test_project_edit_message_classifies_edit_prd_with_target_live(scene):
     # route (unlike the pre-fix client call) never sends an empty target.
     assert body["intent"] == "edit_prd", body
     assert body["prd_id"] == scene["prd_id"]
+
+
+@pytest.fixture
+def scene_two_prds(sb):
+    """A real (company, workspace, user) with one project carrying TWO
+    PRDs — the genuine-ambiguity case the private route must now surface
+    as a `clarify` instead of the silent no-op it returned pre-fix."""
+    from app.db import projects as projects_db
+    from app.db.client import require_client
+
+    c = require_client()
+
+    members = sb.table("company_members").select("company_id, user_id").limit(50).execute().data
+    company_id = workspace_id = user_id = slug = None
+    for m in members:
+        comp = sb.table("companies").select("slug").eq("id", m["company_id"]).limit(1).execute().data
+        ws = sb.table("workspaces").select("id").eq("company_id", m["company_id"]).limit(1).execute().data
+        if comp and comp[0].get("slug") and ws:
+            company_id, workspace_id, user_id, slug = (
+                m["company_id"], ws[0]["id"], m["user_id"], comp[0]["slug"]
+            )
+            break
+    assert company_id, "no (company w/ slug, workspace, member) in the local rig"
+
+    created = {"projects": [], "briefs": [], "prds": []}
+
+    def _brief(label):
+        row = c.table("briefs").insert({
+            "dataset": slug, "week_label": label, "is_current": False,
+            "payload": {"insights": []},
+        }).execute().data[0]
+        created["briefs"].append(row["id"])
+        return row["id"]
+
+    def _prd(brief_id, title):
+        row = c.table("prds").insert({
+            "brief_id": brief_id, "insight_index": 0, "title": title,
+            "payload_md": f"# {title}\n\nOriginal problem statement.", "status": "ready",
+        }).execute().data[0]
+        created["prds"].append(row["id"])
+        return row["id"]
+
+    def _project(name):
+        p = projects_db.create_project(
+            company_id=company_id, workspace_id=workspace_id, name=name, created_by=user_id
+        )
+        created["projects"].append(p["id"])
+        return p["id"]
+
+    project_id = _project("intent route two-prd live")
+    brief_id = _brief("intent route two-prd live")
+    prd_a = _prd(brief_id, "Onboarding PRD")
+    prd_b = _prd(brief_id, "Billing PRD")
+    projects_db.add_artifact(project_id, "prd", prd_a)
+    projects_db.add_artifact(project_id, "prd", prd_b)
+
+    yield {
+        "company_id": company_id, "workspace_id": workspace_id, "user_id": user_id,
+        "project_id": project_id, "prd_ids": {prd_a, prd_b},
+    }
+
+    for pid in created["projects"]:
+        sb.table("project_artifacts").delete().eq("project_id", pid).execute()
+        sb.table("project_members").delete().eq("project_id", pid).execute()
+        sb.table("projects").delete().eq("id", pid).execute()
+    for prd_id in created["prds"]:
+        sb.table("prd_versions").delete().eq("prd_id", prd_id).execute()
+        sb.table("prds").delete().eq("id", prd_id).execute()
+    for bid in created["briefs"]:
+        sb.table("briefs").delete().eq("id", bid).execute()
+
+
+def test_two_prd_edit_returns_clarify_with_both_options_live(scene_two_prds):
+    """AC1/AC2 (real model): a 2-PRD project's edit-phrased message → the
+    private route returns a real `clarify` listing BOTH PRDs — the "which
+    PRD?" disambiguation `_resolve_prd_id` already computes, surfaced
+    instead of discarded.
+
+    KNOWN GAP, flagged for ship-gate/planner — NOT fixed by this ticket:
+    AC2's second half ("supplying an id applies the edit in place") is
+    UNVERIFIABLE against the current write path. `POST /{project_id}/prd/
+    chat-edit` (`routes/projects.py::project_chat_edit`) resolves its edit
+    target via `_resolve_prd_id({}, project_id, dataset, company_id)` with
+    a HARD-CODED empty `tool_input` — there is no `prd_id` field on
+    `ProjectChatEditIn` for a client to supply an id through, and this
+    ticket's Deliverables do not touch that route (only `_resolve_prd_id`'s
+    CALLERS may not change its signature; the write route itself is out of
+    scope here). On a 2+-PRD project the write route will keep refusing
+    EVERY follow-up message, disambiguated or not, until a follow-up
+    ticket threads a client-resolved id through it. This test proves the
+    achievable half (the clarify itself, real-LLM) and stops there."""
+    client = _make_client(scene_two_prds["user_id"], scene_two_prds["workspace_id"])
+
+    resp = client.post(
+        f"/v1/projects/{scene_two_prds['project_id']}/chat/intent",
+        json={"message": "Please tighten the problem statement in the PRD."},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["intent"] == "clarify", body
+    assert body["prd_id"] is None
+    assert isinstance(body.get("clarification"), str) and body["clarification"]
+    listed_ids = {o["id"] for o in body.get("prd_options", [])}
+    assert listed_ids == scene_two_prds["prd_ids"]

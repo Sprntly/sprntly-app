@@ -152,6 +152,51 @@ def test_ask_with_project_folds_memory_and_role(tenant_client, isolated_settings
     assert "Product Manager" in prompt
 
 
+# ---- AC10 — single-sourced preamble, byte-identical for the private surface -
+
+
+def test_shared_preamble_equals_prior_ask_literal(tenant_client, isolated_settings, fake_llm):
+    """`PROJECT_FACTS_AUTHORITATIVE_PREAMBLE` (`app.surface_scope`) is the
+    EXACT string that used to be inlined at `routes/ask.py`, and the folded
+    `{"role":"context", ...}` row `routes/ask.py` builds is byte-identical
+    to before (`PREAMBLE\\nblock`, single newline) — the extraction changes
+    where the string lives, never what reaches the model."""
+    from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE
+
+    assert PROJECT_FACTS_AUTHORITATIVE_PREAMBLE == (
+        "[Project workspace facts — AUTHORITATIVE for THIS project, and "
+        "the source of truth for anything about the project itself. The "
+        "lines below are the real members (and their roles), the real "
+        "task/delegation ledger, and the real artifacts (PRDs, "
+        "prototypes, evidence, reports, ticket sets) of the project this "
+        "chat belongs to. When asked who is on this project, what tasks "
+        "are open / who is doing what, or how many / which PRDs or "
+        "artifacts exist, answer directly and specifically from these "
+        "facts. Do NOT say you cannot see them and do NOT tell the user "
+        "to connect a data source for them — this block IS that source.]"
+    )
+
+    t = tenant_client.make(slug="acme-preamble-literal")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme-preamble-literal")
+    project = _create_project(t)
+
+    fake_llm["payload"] = _STANDARD_PAYLOAD
+    start = t.client.post(
+        "/v1/ask",
+        json={
+            "question": "What should I know about this project?",
+            "dataset": "acme-preamble-literal",
+            "project_id": project["id"],
+        },
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    prompt = fake_llm["calls"][0]["user"]
+    # The preamble is bound to the project block with a SINGLE newline, not
+    # a blank line — exactly `routes/ask.py`'s pre-extraction literal join.
+    assert f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n" in prompt
+
+
 def test_assemble_context_no_kg_tables(tenant_client, isolated_settings):
     """AC3 — `assemble_project_context` issues no query against
     kg_entity/kg_signal/kg_relationship (query spy on the real fake-DB

@@ -96,6 +96,24 @@ def test_project_content_gate_empty_and_none_decline():
     assert is_project_content_request(None) is False
 
 
+def test_content_gate_matches_owe_phrasings():
+    for q in (
+        "who owes what",
+        "who owes me anything",
+        "what's outstanding on this project",
+        "who's still outstanding on this",
+    ):
+        assert is_project_content_request(q) is True, q
+
+
+def test_content_gate_still_rejects_non_project_interrogative():
+    for q in (
+        "what's the capital of France",
+        "how do I center a div",
+    ):
+        assert is_project_content_request(q) is False, q
+
+
 def test_is_project_tool_request_unchanged():
     # Regression guard: the parallel positive gate must not perturb the
     # existing delegate/execute gate's match/veto outcomes.

@@ -93,6 +93,14 @@ export interface ChatIntentExecutors {
    *  listing's own honest answer, not a fall-through. Only an ABSENT array
    *  (an older backend that doesn't attach rows) falls back to `onAnswer`. */
   onListArtifacts: (envelope: ChatIntentEnvelope) => void
+  /** `clarify` — the private project chat's classify route asks which PRD
+   *  is meant (2+ PRDs, an unresolved edit target) instead of silently
+   *  answering. OPTIONAL: `clarify` is only ever emitted by the project-
+   *  scoped classify route (never the shared `/v1/chat/intent` route main
+   *  chat runs), so a caller that omits this executor — main chat, today —
+   *  falls through to `onAnswer` rather than being required to implement a
+   *  render path it can never reach. */
+  onClarify?: (clarification: string, prdOptions: { id: number; title: string }[]) => void
   /** The grounded-ask fall-through — called whenever no structured intent's
    *  guard held (an unresolvable edit_prd/change_prd_template/assign_tickets
    *  target, a lookup-less open_artifact, or `answer`/low-confidence/unknown/
@@ -203,6 +211,17 @@ export function dispatchChatIntent(
         executors.onListArtifacts(envelope)
         return { handled: true }
       }
+      executors.onAnswer()
+      return { handled: false }
+
+    case "clarify":
+      if (executors.onClarify && envelope.clarification) {
+        executors.onClarify(envelope.clarification, envelope.prd_options ?? [])
+        return { handled: true }
+      }
+      // No onClarify executor supplied (main chat never receives this
+      // intent in the first place) or no clarification text — fall through
+      // to the grounded ask, same as any other unhandled envelope.
       executors.onAnswer()
       return { handled: false }
 

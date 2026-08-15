@@ -252,6 +252,64 @@ def test_lt8_multiparty_router_behaviour_live(scene):
         assert result.get("answer"), f"as_question={as_question} must still answer"
 
 
+def test_group_who_owes_answers_from_real_ledger_live(scene):
+    """AC9 — the group ledger-framing fix: a group "who owes what / what's
+    the status" question, on a project with a REAL, existing delegation,
+    answers from the REAL ledger (names the delegation/task) and matches
+    the fact the private surface returns for the same question. The model
+    must NOT report an empty ledger and must NOT tell the user to connect
+    a data source — the group composer fall-through now frames the same
+    facts the private surface already answers from, with the SAME
+    authoritative preamble (`PROJECT_FACTS_AUTHORITATIVE_PREAMBLE`)."""
+    from app.qa_agent import answer
+    from app.surface_scope import Surface, SurfaceScope
+
+    task_summary = "draft the onboarding PRD"
+    private_scope = _private_scope(scene)
+    delegate_result = answer(
+        enterprise_id=scene["company_id"],
+        question=f"Please delegate '{task_summary}' to {scene['second_user_id']}.",
+        dataset=scene["dataset"], scope=private_scope,
+    )
+    assert delegate_result.get("answer")
+    rows = (
+        _sb().table("project_delegations")
+        .select("id").eq("project_id", scene["project_id"]).execute().data
+    )
+    assert len(rows) >= 1, "the ledger question needs a REAL delegation fact to answer from"
+
+    deflection_phrases = ("connect a data source", "connect a connector", "i don't have visibility")
+    question = "Who owes what on this project right now?"
+
+    private_result = answer(
+        enterprise_id=scene["company_id"], question=question,
+        dataset=scene["dataset"], scope=private_scope,
+    )
+    private_text = (private_result.get("answer") or "").lower()
+    assert private_text
+    assert not any(p in private_text for p in deflection_phrases)
+
+    group_scope = SurfaceScope(
+        surface=Surface.project_group, project_id=scene["project_id"],
+        extra_tools=(), multi_party=True,
+    )
+    group_result = answer(
+        enterprise_id=scene["company_id"], question=question,
+        dataset=scene["dataset"], scope=group_scope,
+    )
+    group_text = (group_result.get("answer") or "").lower()
+    assert group_text
+    assert not any(p in group_text for p in deflection_phrases), (
+        f"group ledger question deflected instead of answering from the real "
+        f"delegation: {group_text!r}"
+    )
+    # Parity with the private surface on the same fact: the task the model
+    # names must be recognizable in both answers (not necessarily identical
+    # prose, but the same underlying fact — the delegated task itself).
+    assert "onboarding" in private_text or "prd" in private_text
+    assert "onboarding" in group_text or "prd" in group_text
+
+
 def test_lt9_list_artifacts_post_ff_live(scene):
     """LT-9 — `list_artifacts` on project surfaces post-ff: the prose
     fallback still fires on the private surface; nothing 500s on group."""

@@ -1930,7 +1930,8 @@ _PROJECT_CONTENT_NOUN = re.compile(
     r"\broster\b|\bteam\b|"
     r"\bwho(?:'?s|\s+is)\s+(?:on|working)\b|"
     r"\bthis\s+project\b|"
-    r"\bwe\s+decided\b|\bdecisions?\b",
+    r"\bwe\s+decided\b|\bdecisions?\b|"
+    r"\bowe[sd]?\b|\bowed\b|\boutstanding\b|\bwho\s+owes\b",
     re.I,
 )
 

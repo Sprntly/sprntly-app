@@ -229,6 +229,31 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     expect(addArtifactMock).not.toHaveBeenCalled()
   })
 
+  it("a clarify envelope renders the clarification + PRD options, no /v1/ask", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "clarify", confidence: 0.9, task: null, instruction: null,
+      reason: "ambiguous target", source: "no_target_prd", prd_id: null, prd_title: null,
+      clarification:
+        "This project has more than one PRD — tell me which to edit by id: " +
+        "Onboarding [id 501], Billing [id 502].",
+      prd_options: [
+        { id: 501, title: "Onboarding" },
+        { id: 502, title: "Billing" },
+      ],
+    })
+
+    await sendMessage("tighten the problem statement")
+
+    await waitFor(() =>
+      expect(screen.getByTestId("ic-msg-agent").textContent).toContain(
+        "tell me which to edit by id",
+      ),
+    )
+    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Onboarding [id 501]")
+    expect(runAskGenerationMock).not.toHaveBeenCalled()
+    expect(prdChatEditMock).not.toHaveBeenCalled()
+  })
+
   it("send classifies via the project-scoped resolver, not chatIntentApi.resolve(_, {})", async () => {
     resolveIntentMock.mockResolvedValue({
       intent: "answer", confidence: 0.9, task: null, instruction: null,

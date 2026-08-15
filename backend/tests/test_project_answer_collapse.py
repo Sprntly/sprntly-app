@@ -18,7 +18,7 @@ import app.qa_agent as qa
 import app.routes.projects as projects_route
 from app import project_delegation, project_task_execution
 from app.db.workspaces import ensure_default_workspace
-from app.surface_scope import Surface, SurfaceScope
+from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE, Surface, SurfaceScope
 
 
 def _route_out():
@@ -853,6 +853,87 @@ def test_group_context_fold_dropped_is_red(monkeypatch):
     qa.answer(enterprise_id="c1", question="what's blocking the launch?", dataset="d", scope=scope)
     history_green = captured["history"]
     assert "PROJECT ROSTER" in history_green[0]["content"]  # GREEN
+
+
+# ── Authoritative preamble single-source (AC9 mechanism, AC10, AC11) ───────
+
+
+def test_group_fold_prepends_authoritative_preamble():
+    """A group scope with a non-empty `context_payload` folds it with the
+    SAME "answer from THIS block, don't deflect" header the private surface
+    already uses — the group composer fall-through no longer frames its
+    ledger/roster/memory facts as a passive, deflectable row. On the
+    UNFIXED code the fold has no preamble (the red)."""
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
+        context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
+    )
+    folded = qa._fold_project_context(scope, [])
+    assert folded and folded[0]["role"] == "context"
+    content = folded[0]["content"]
+    assert content.startswith("PROJECT ROSTER")  # system_addendum FIRST, order preserved
+    assert PROJECT_FACTS_AUTHORITATIVE_PREAMBLE in content
+    # The preamble is bound directly to the facts payload (single newline),
+    # not the addendum.
+    assert f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\nTask ledger:" in content
+
+
+def test_private_fold_adds_no_preamble():
+    """Private scope leaves `context_payload == ""` — its own breadth
+    already reached history upstream (`routes/ask.py`) WITH the preamble —
+    so the fold must add NO preamble here (no double-framing)."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        system_addendum="You are Sprntly's private assistant for this project.",
+        context_payload="",
+    )
+    folded = qa._fold_project_context(scope, [])
+    assert folded and folded[0]["role"] == "context"
+    content = folded[0]["content"]
+    assert content == "You are Sprntly's private assistant for this project."
+    assert PROJECT_FACTS_AUTHORITATIVE_PREAMBLE not in content
+
+
+def test_main_scope_fold_is_noop_mutation_proofed():
+    """AC11, mutation-proofed: `scope=None`/main is a pure no-op — `history`
+    comes back byte-identical, no preamble, no fold row. A variant that
+    FORCES the preamble/fold onto the main path (the mutation) is RED;
+    restoring the `scope is None or scope.surface == Surface.main` guard
+    makes it GREEN."""
+    history = [{"role": "user", "content": "hello"}]
+
+    # GREEN — the real, guarded function.
+    assert qa._fold_project_context(None, history) is history
+    main_scope = SurfaceScope(surface=Surface.main)
+    assert qa._fold_project_context(main_scope, history) is history
+
+    # RED — a mutated variant with the main-guard removed, exactly the
+    # effect of deleting `if scope is None or scope.surface == Surface.main:
+    # return history`. Constructed as a throwaway local function, never
+    # monkeypatched onto `qa` or any shared module.
+    def _mutated_fold_no_main_guard(scope, history):
+        parts = []
+        if scope is not None and scope.system_addendum:
+            parts.append(scope.system_addendum)
+        if scope is not None and scope.context_payload:
+            parts.append(f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{scope.context_payload}")
+        fold_block = "\n\n".join(parts)
+        if not fold_block:
+            return history
+        return [{"role": "context", "content": fold_block}] + list(history or [])
+
+    # A main scope carrying leaked project text (the shape the guard exists
+    # to prevent from ever reaching main chat) — the mutated variant folds
+    # it in; the real, guarded function must not.
+    leaked_scope = SurfaceScope(
+        surface=Surface.main,
+        system_addendum="PROJECT ROSTER: this must never reach main chat",
+    )
+    mutated_result = _mutated_fold_no_main_guard(leaked_scope, history)
+    with pytest.raises(AssertionError):
+        assert mutated_result is history  # RED: the mutation leaks project text into main
+    assert qa._fold_project_context(leaked_scope, history) is history  # GREEN: real guard holds
 
 
 def test_nudge_on_missed_delegation(monkeypatch):
