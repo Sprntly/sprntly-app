@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import re
 
-from app.db.artifact_shares import owning_company_domain
 from app.db.client import require_client, retry_on_disconnect, utc_now
 from app.db.team import email_belongs_to_other_company, get_member, list_company_members
 from app.db.workspaces import get_workspace_member, list_workspace_members
@@ -574,7 +573,9 @@ def resolve_candidate(project_id: int, needle: str) -> dict:
       {"tier": "t_workspace", "user_id": str, "email": str|None, "name": str|None}
       {"tier": "t_company",   "user_id": str, "email": str|None, "name": str|None}
       {"tier": "t_newuser",   "email": str}                       # lower-cased
-      {"tier": "t_refuse",    "reason": str}  # cross_company|other_company|no_match|ambiguous|no_project
+      {"tier": "t_refuse",    "reason": str}  # other_company|no_match|ambiguous|no_project
+      # (policy match: the project-only same-domain "cross_company" refuse is
+      # gone — matches the admin-invite policy, no email-domain gate)
 
     This is classification only — it performs no write. The action layer
     that consumes this tier re-runs the live membership assertion
@@ -659,11 +660,11 @@ def resolve_candidate(project_id: int, needle: str) -> dict:
         # directory read happens for a NAME needle.
         return {"tier": TIER_REFUSE, "reason": "no_match"}
 
-    # EMAIL needle, no existing account anywhere — the invite/domain gate.
+    # EMAIL needle, no existing account. Match the admin-invite policy exactly:
+    # no domain gate — any domain is invitable. The one cross-company refuse the
+    # admin flow keeps (an email already a member of ANOTHER company) is retained
+    # just above via email_belongs_to_other_company. This drops the project-only
+    # same-domain restriction (the locked "cross-company hard refuse" domain gate).
     if email_belongs_to_other_company(company_id=company_id, email=raw):
         return {"tier": TIER_REFUSE, "reason": "other_company"}
-    domain = raw.rsplit("@", 1)[-1].strip().lower() if "@" in raw else None
-    owning_domain = owning_company_domain(company_id)
-    if owning_domain and domain == owning_domain:
-        return {"tier": TIER_NEWUSER, "email": raw.strip().lower()}
-    return {"tier": TIER_REFUSE, "reason": "cross_company"}
+    return {"tier": TIER_NEWUSER, "email": raw.strip().lower()}
