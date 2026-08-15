@@ -28,6 +28,8 @@ import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
+import { ChatBubble } from "../../../shared/ChatBubble"
+import { ChatTranscript, type ChatTranscriptTurn } from "../../../shared/ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
@@ -742,26 +744,32 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           <AssistantThinkingSkeleton phase="Loading the group chat…" />
         ) : (
           <>
-            {rows.map(({ turn, isMe, isAgent, invokedBy, invokedByMe }) => {
-              if (isAgent) {
-                return (
-                  <div key={turn.id} className={`gc-msg gc-msg--ai ${styles.msg} ${styles.msgAi}`} data-testid="gc-msg-agent">
-                    <span className={styles.aiMark} aria-hidden="true">
-                      s
-                    </span>
-                    <div className={styles.body}>
-                      <div className={styles.head}>
-                        <span className={styles.name}>{AGENT_NAME}</span>
-                        <span className={styles.agentTag}>AGENT</span>
-                        <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                        <span
-                          className={`${styles.stateBadge} ${invokedBy ? styles.stateInvoked : styles.stateDetected}`}
-                          data-testid="gc-state-badge"
-                        >
-                          {invokedBy ? (invokedByMe ? "invoked by you" : `invoked by ${firstName(invokedBy)}`) : "detected this was for it"}
-                        </span>
-                      </div>
-                      <div className={styles.bubbleAgent}>
+            {(() => {
+              // Three row shapes — agent / me / other — each maps onto ONE
+              // `<ChatBubble>` call: an agent row is agent-only, a human row
+              // is user-only (`showAgent: false`). The per-row markup below
+              // is the SAME content each branch already rendered inline;
+              // only the wrapping loop (this file's own hand-rolled `<div>`
+              // per row) is gone.
+              const rowTurns: ChatTranscriptTurn[] = rows.map(({ turn, isMe, isAgent, invokedBy, invokedByMe }) => {
+                if (isAgent) {
+                  return {
+                    turnId: `${turn.id}`,
+                    wrapperClassName: `bc-turn gc-msg gc-msg--ai ${styles.msg} ${styles.msgAi}`,
+                    dataTestId: "gc-msg-agent",
+                    agentName: AGENT_NAME,
+                    agentBadge: "AGENT",
+                    agentTimestamp: formatTime(turn.created_at),
+                    agentHeadExtra: (
+                      <span
+                        className={`${styles.stateBadge} ${invokedBy ? styles.stateInvoked : styles.stateDetected}`}
+                        data-testid="gc-state-badge"
+                      >
+                        {invokedBy ? (invokedByMe ? "invoked by you" : `invoked by ${firstName(invokedBy)}`) : "detected this was for it"}
+                      </span>
+                    ),
+                    agentBodyNode: (
+                      <>
                         <AskReplyBody reply={toAskResponse(turn.content)} />
                         <OpenArtifactChips
                           candidates={turn.open_candidates ?? []}
@@ -782,55 +790,50 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
                             {savingTurnId === turn.id ? "Saving…" : "Save as artifact"}
                           </button>
                         )}
-                      </div>
-                    </div>
-                  </div>
-                )
-              }
-              if (isMe) {
-                return (
-                  <div key={turn.id} className={`gc-msg gc-msg--me ${styles.msg} ${styles.msgMe}`} data-testid="gc-msg-me">
-                    <div className={styles.body}>
-                      <div className={styles.head}>
-                        <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                        <span className={styles.name}>You</span>
-                      </div>
-                      <div className={styles.bubbleMe}>
-                        <MentionBubble content={turn.content} />
-                      </div>
-                    </div>
-                    <span
-                      className={styles.av}
-                      aria-hidden="true"
-                      style={personAvatarStyle(turn.author_user_id, turn.author_name)}
-                    >
-                      {initials(turn.author_name)}
-                    </span>
-                  </div>
-                )
-              }
-              return (
-                <div key={turn.id} className={`gc-msg gc-msg--other ${styles.msg} ${styles.msgOther}`} data-testid="gc-msg-other">
-                  <span
-                    className={styles.av}
-                    aria-hidden="true"
-                    style={personAvatarStyle(turn.author_user_id, turn.author_name)}
-                  >
-                    {initials(turn.author_name)}
-                  </span>
-                  <div className={styles.body}>
-                    <div className={styles.head}>
-                      <span className={styles.name}>{turn.author_name ?? "Someone"}</span>
+                      </>
+                    ),
+                  }
+                }
+                if (isMe) {
+                  return {
+                    turnId: `${turn.id}`,
+                    wrapperClassName: `bc-turn gc-msg gc-msg--me ${styles.msg} ${styles.msgMe}`,
+                    dataTestId: "gc-msg-me",
+                    showAgent: false,
+                    agentName: AGENT_NAME,
+                    speaker: "You",
+                    userHeadExtra: <span className={styles.time}>{formatTime(turn.created_at)}</span>,
+                    user: {
+                      initials: initials(turn.author_name),
+                      avatarStyle: personAvatarStyle(turn.author_user_id, turn.author_name),
+                      bubbleClassName: styles.bubbleMe,
+                      bodyNode: <MentionBubble content={turn.content} />,
+                    },
+                  }
+                }
+                return {
+                  turnId: `${turn.id}`,
+                  wrapperClassName: `bc-turn gc-msg gc-msg--other ${styles.msg} ${styles.msgOther}`,
+                  dataTestId: "gc-msg-other",
+                  showAgent: false,
+                  agentName: AGENT_NAME,
+                  speaker: turn.author_name ?? "Someone",
+                  userHeadExtra: (
+                    <>
                       {turn.author_job_role ? <span className={styles.role}>{turn.author_job_role}</span> : null}
                       <span className={styles.time}>{formatTime(turn.created_at)}</span>
-                    </div>
-                    <div className={styles.bubbleOther}>
-                      <MentionBubble content={turn.content} />
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+                    </>
+                  ),
+                  user: {
+                    initials: initials(turn.author_name),
+                    avatarStyle: personAvatarStyle(turn.author_user_id, turn.author_name),
+                    bubbleClassName: styles.bubbleOther,
+                    bodyNode: <MentionBubble content={turn.content} />,
+                  },
+                }
+              })
+              return <ChatTranscript turns={rowTurns} />
+            })()}
             {showStayedOut ? (
               <div className={styles.stayedOut} data-testid="gc-stayed-out">
                 <span className={styles.stayedOutDot} aria-hidden="true" />

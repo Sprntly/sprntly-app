@@ -1,0 +1,11 @@
+/* Additive rules only — every class here is NEW markup that only renders
+   when a caller opts in (e.g. `agentTimestamp`). The main chat never passes
+   these props, so its DOM and styling stay untouched (byte-identity). This
+   is the ONE shared module the reconciled-CSS turn-render leaves carry
+   alongside the pre-existing global `bc-*` rules — no globals.css edit. */
+
+.agentTime {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted, #8a8a94);
+}
