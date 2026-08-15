@@ -754,6 +754,20 @@ def add_project_artifact(
 
 class ProjectChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
+    # OPTIONAL — the id the caller picked off a prior `clarify` envelope's
+    # `prd_options` (2+-PRD disambiguation). Omitted (the default, and the
+    # ONLY value pre-fix callers ever sent), target resolution is unchanged:
+    # server-side auto-select on exactly one project PRD, refuse on 0/2+.
+    # A client-SUPPLIED id is NOT trusted on its own — `_resolve_prd_id`
+    # returns it verbatim (`tool_input.get("prd_id")` → `(int(raw), None)`,
+    # no signature change), but `apply_chat_edit_scoped` below runs the ★
+    # cross-project (`assert_prd_on_project`) + cross-tenant
+    # (`require_owned_prd`) gate on WHATEVER `prd_id` reaches it,
+    # unconditionally and BEFORE any read/write — identically whether that
+    # id was server-auto-selected or client-supplied. See
+    # `test_project_chat_edit_explicit_id_cross_project_denied` for the
+    # mutation-proofed IDOR guard.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 @router.post("/{project_id}/prd/chat-edit")
@@ -770,18 +784,22 @@ def project_chat_edit(
     Membership-gated (`_require_project_member`), THEN the request-time
     `PROJECT_PRD_EDIT_ENABLED` rollout flag (503 semantics degrade to a
     no-op — off means no write and a no-edit reply, never an error), THEN
-    target resolution: the edit target is resolved SERVER-side over THIS
-    project's own artifacts via `_resolve_prd_id` (single-PRD auto-select /
-    ambiguous-disambiguate) — never a client-supplied `prd_id`, so there is
-    nothing here for a caller to spoof. 0/ambiguous PRDs make no write and
+    target resolution: `_resolve_prd_id` auto-selects on exactly one project
+    PRD, or — on 2+ PRDs — accepts the id the caller picked off a prior
+    `clarify` envelope's `prd_options` (`body.prd_id`, OPTIONAL, `None` on
+    every pre-fix call). 0/ambiguous-and-unpicked PRDs make no write and
     return a no-edit, answer-shaped payload (`{"edited": false, "answer"}`)
     instead of an error, so the private chat can degrade to a grounded ask.
 
-    `apply_chat_edit_scoped` then runs the ★ cross-project IDOR gate
-    (`assert_prd_on_project`) before any read/write — defense in depth here
-    (the resolved id is already this project's own), and the SAME single-
-    sourced gate a future group-chat write path will call with a
-    less-trusted target. A `ProjectPrdWriteDenied` from that gate is caught
+    ★ `body.prd_id` is CLIENT-SUPPLIED and UNTRUSTED on its own — a member of
+    project A could name a PRD on project B, or (probed) another tenant's.
+    `apply_chat_edit_scoped` runs the ★ cross-project IDOR gate
+    (`assert_prd_on_project`) — fail-closed, before any read/write — on
+    WHATEVER `prd_id` reaches it, identically whether server-auto-selected
+    or client-supplied, THEN the cross-tenant gate (`require_owned_prd`).
+    This is the PRIMARY defense for the client-supplied case, not defense in
+    depth — `_resolve_prd_id` performs no project/tenant check of its own on
+    an explicit id. A `ProjectPrdWriteDenied` from that gate is caught
     and degrades to the same no-edit shape rather than a raw 403/404, since
     the resolved-target contract promises callers a soft refusal, not an
     error, on this route.
@@ -795,7 +813,13 @@ def project_chat_edit(
         }
 
     dataset = _dataset_for(ctx)
-    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    # `body.prd_id` present (the caller picked a PRD off a prior `clarify`
+    # envelope's `prd_options`) -> thread it through explicitly, same shape
+    # `_resolve_prd_id` already honors (`tool_input.get("prd_id")`) for the
+    # write-tool caller. Absent -> `{}`, preserving today's server-side
+    # auto-select/refuse behavior byte-for-byte.
+    tool_input = {"prd_id": body.prd_id} if body.prd_id is not None else {}
+    prd_id, refusal = _resolve_prd_id(tool_input, project_id, dataset, ctx.company_id)
     if prd_id is None:
         return {"edited": False, "answer": refusal or "I couldn't work out which PRD to edit."}
 

@@ -243,29 +243,39 @@ def scene_two_prds(sb):
         sb.table("briefs").delete().eq("id", bid).execute()
 
 
-def test_two_prd_edit_returns_clarify_with_both_options_live(scene_two_prds):
-    """AC1/AC2 (real model): a 2-PRD project's edit-phrased message → the
-    private route returns a real `clarify` listing BOTH PRDs — the "which
-    PRD?" disambiguation `_resolve_prd_id` already computes, surfaced
-    instead of discarded.
+def _versions(prd_id):
+    from app.db.client import require_client
 
-    KNOWN GAP, flagged for ship-gate/planner — NOT fixed by this ticket:
-    AC2's second half ("supplying an id applies the edit in place") is
-    UNVERIFIABLE against the current write path. `POST /{project_id}/prd/
-    chat-edit` (`routes/projects.py::project_chat_edit`) resolves its edit
-    target via `_resolve_prd_id({}, project_id, dataset, company_id)` with
-    a HARD-CODED empty `tool_input` — there is no `prd_id` field on
-    `ProjectChatEditIn` for a client to supply an id through, and this
-    ticket's Deliverables do not touch that route (only `_resolve_prd_id`'s
-    CALLERS may not change its signature; the write route itself is out of
-    scope here). On a 2+-PRD project the write route will keep refusing
-    EVERY follow-up message, disambiguated or not, until a follow-up
-    ticket threads a client-resolved id through it. This test proves the
-    achievable half (the clarify itself, real-LLM) and stops there."""
+    return (
+        require_client().table("prd_versions").select("*")
+        .eq("prd_id", prd_id).execute().data or []
+    )
+
+
+def _payload(prd_id):
+    from app.db.client import require_client
+
+    return require_client().table("prds").select("payload_md").eq(
+        "id", prd_id
+    ).execute().data[0]["payload_md"]
+
+
+def test_two_prd_edit_returns_clarify_with_both_options_live(scene_two_prds, monkeypatch):
+    """AC1/AC2, full loop, real model + real DB: a 2-PRD project's
+    edit-phrased message -> a real `clarify` listing BOTH PRDs (the "which
+    PRD?" disambiguation `_resolve_prd_id` already computes, surfaced
+    instead of discarded) -> supplying ONE of the listed ids
+    (`ProjectChatEditIn.prd_id`) applies the edit IN PLACE on that PRD only:
+    `prds.payload_md` changes + exactly one `prd_versions` snapshot on the
+    CHOSEN PRD, and the SIBLING PRD on the same project is untouched. The
+    ask→pick→apply loop this ticket closes end to end."""
+    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
+    project_id = scene_two_prds["project_id"]
+    prd_ids = scene_two_prds["prd_ids"]
     client = _make_client(scene_two_prds["user_id"], scene_two_prds["workspace_id"])
 
     resp = client.post(
-        f"/v1/projects/{scene_two_prds['project_id']}/chat/intent",
+        f"/v1/projects/{project_id}/chat/intent",
         json={"message": "Please tighten the problem statement in the PRD."},
     )
     assert resp.status_code == 200, resp.text
@@ -274,4 +284,25 @@ def test_two_prd_edit_returns_clarify_with_both_options_live(scene_two_prds):
     assert body["prd_id"] is None
     assert isinstance(body.get("clarification"), str) and body["clarification"]
     listed_ids = {o["id"] for o in body.get("prd_options", [])}
-    assert listed_ids == scene_two_prds["prd_ids"]
+    assert listed_ids == prd_ids
+
+    chosen_id, other_id = sorted(prd_ids)  # deterministic pick, order doesn't matter
+    before_chosen_versions = len(_versions(chosen_id))
+    before_other_versions = len(_versions(other_id))
+    before_other_payload = _payload(other_id)
+
+    edit_resp = client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit",
+        json={
+            "instruction": "Please tighten the problem statement in the PRD.",
+            "prd_id": chosen_id,
+        },
+    )
+    assert edit_resp.status_code == 200, edit_resp.text
+    edit_body = edit_resp.json()
+    assert edit_body["edited"] is True, edit_body
+
+    assert len(_versions(chosen_id)) == before_chosen_versions + 1
+    # The sibling PRD on the SAME project is completely untouched.
+    assert len(_versions(other_id)) == before_other_versions
+    assert _payload(other_id) == before_other_payload

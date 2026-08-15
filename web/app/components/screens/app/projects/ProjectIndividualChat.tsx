@@ -135,6 +135,14 @@ type LocalTurn = {
   /** The live preview channel dropped mid-answer while the poll carries on —
    *  a display downgrade, never an error (the poll is still authoritative). */
   streamDropped?: boolean
+  /** Set ONLY on a `clarify` reply (2+-PRD disambiguation) — the PRD choices
+   *  the user can pick to resolve the edit target. `clarifyInstruction` is
+   *  the original edit request that produced the clarify, carried forward so
+   *  picking an option can re-issue it with a target attached. Cleared the
+   *  moment a pick is made (fires once; a picked/resolved turn never re-
+   *  renders the options). */
+  clarifyOptions?: { id: number; title: string }[]
+  clarifyInstruction?: string
 }
 
 export type ProjectIndividualChatProps = {
@@ -615,14 +623,65 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             // meant (2+ PRDs, an unresolved edit target) instead of silently
             // answering. Render the disambiguation directly as the assistant
             // turn — no `/v1/ask` round-trip — same as every other
-            // structured executor here.
-            onClarify: (clarification) => settleReply(reply(clarification)),
+            // structured executor here. Carries `prdOptions` + the ORIGINAL
+            // edit request (`question`) forward onto the turn so picking an
+            // option (`pickClarifyPrd`, below) can re-issue the SAME
+            // instruction with a resolved target attached, closing the
+            // ask→pick→apply loop.
+            onClarify: (clarification, prdOptions) => {
+              setTurns((prev) => prev.map((t) => (
+                t.id === id
+                  ? {
+                      ...t, reply: reply(clarification), pending: false,
+                      clarifyOptions: prdOptions, clarifyInstruction: question,
+                    }
+                  : t
+              )))
+              setBusy(false)
+            },
             onAnswer: () => void runAsk(),
           },
         )
       })
       .catch(() => void runAsk())
   }, [draft, busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled])
+
+  // Closes the ask→pick→apply loop (a `clarify` turn's PRD options, above):
+  // re-issues the ORIGINAL edit instruction with the CHOSEN `prdId` attached
+  // (`projectsApi.prdChatEdit`'s optional third argument) — the write route
+  // threads it to `_resolve_prd_id` explicitly and the ★ cross-project/
+  // cross-tenant gate inside `apply_chat_edit_scoped` still runs on it,
+  // unconditionally, before any write. A standalone top-level callback (not
+  // nested in `handleSend`) because a pick happens on a LATER render, after
+  // `handleSend`'s own closures for that turn are long gone. Clears the
+  // source turn's `clarifyOptions` immediately so a double-click can't fire
+  // two applies, and appends a NEW turn for the pick + its result rather
+  // than mutating the clarify turn in place.
+  const pickClarifyPrd = useCallback((sourceTurnId: string, instruction: string, prdId: number, title: string) => {
+    setTurns((prev) => prev.map((t) => (t.id === sourceTurnId ? { ...t, clarifyOptions: undefined } : t)))
+    const pickId = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+    setTurns((prev) => [
+      ...prev,
+      { id: pickId, question: `(applying to "${title}") ${instruction}`, reply: null, pending: true, stopped: false, error: null },
+    ])
+    setBusy(true)
+    projectsApi
+      .prdChatEdit(projectId, instruction, prdId)
+      .then((res) => {
+        const answer = res.edited ? (res.summary || "Updated the PRD.") : res.answer
+        setTurns((prev) => prev.map((t) => (
+          t.id === pickId
+            ? { ...t, reply: { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }, pending: false }
+            : t
+        )))
+      })
+      .catch(() => {
+        setTurns((prev) => prev.map((t) => (
+          t.id === pickId ? { ...t, pending: false, error: "That edit didn't come through. Try again." } : t
+        )))
+      })
+      .finally(() => setBusy(false))
+  }, [projectId])
 
   // Stopping is deliberate (unlike a background unmount): it reclaims the
   // composer's local poll AT ONCE (`stoppedRef`, checked on the poll's next
@@ -726,6 +785,23 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
               <div data-testid="ic-msg-agent">
                 <AskReplyBody reply={turn.reply} />
                 <OpenArtifactChips candidates={[]} onOpen={(c) => onOpenArtifact?.(c)} />
+                {turn.clarifyOptions?.length ? (
+                  <div className={styles.clarifyOptions} data-testid="ic-clarify-options">
+                    {turn.clarifyOptions.map((option) => (
+                      <button
+                        key={option.id}
+                        type="button"
+                        className={styles.clarifyOption}
+                        data-testid={`ic-clarify-option-${option.id}`}
+                        onClick={() =>
+                          pickClarifyPrd(turn.id, turn.clarifyInstruction ?? "", option.id, option.title)
+                        }
+                      >
+                        {option.title}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             ) : null
             return {

@@ -5908,14 +5908,18 @@ export const projectsApi = {
    *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private (and, later,
    *  group) project chat's in-place, versioned edit path, reusing the same
    *  scoped editor + ★ cross-project IDOR gate the main chat's
-   *  `prdApi.chatEdit` calls guard-off. The route resolves its OWN edit
-   *  target server-side (never a client-supplied `prd_id`); membership-gated
-   *  and `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
-   *  rather than an error. */
-  prdChatEdit: (id: number | string, instruction: string) =>
+   *  `prdApi.chatEdit` calls guard-off. Omitted (the default), the route
+   *  resolves its OWN edit target server-side: auto-select on exactly one
+   *  project PRD, refuse on 0/2+. OPTIONAL `prdId` is the id the caller
+   *  picked off a prior `clarify` envelope's `prd_options` (2+-PRD
+   *  disambiguation) — untrusted on its own; the route's ★ cross-project +
+   *  cross-tenant gate still runs on it before any write, unconditionally.
+   *  Membership-gated and `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading
+   *  to `edited: false` rather than an error. */
+  prdChatEdit: (id: number | string, instruction: string, prdId?: number | null) =>
     api.post<ProjectChatEditResult>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
-      { instruction },
+      prdId != null ? { instruction, prd_id: prdId } : { instruction },
     ),
   /** Classify one private-chat message via the project-scoped counterpart
    *  of `chatIntentApi.resolve` (`POST /v1/projects/{id}/chat/intent`).
