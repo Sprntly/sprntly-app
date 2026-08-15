@@ -46,6 +46,63 @@ function RefreshIcon() {
   )
 }
 
+// ── Read-only summary body — extracted so the layout redesign's Settings ›
+// Memory tab can render the SAME markup (DRY — do not re-implement) without
+// pulling in the modal chrome or fetch/state-machine below. `MemoryModalView`
+// keeps rendering it for its own (unchanged) ready branch. ──
+
+export function MemorySummaryBody({ summary }: { summary: ProjectMemorySummary }) {
+  return (
+    <>
+      {/* ── Read-only synthesized summary — NO edit/remove controls,
+          ever. */}
+      <div className={styles.synth} data-testid="memory-synth-block">
+        <div className={styles.synthHead}>
+          <span className={styles.synthTitle}>
+            <SparkleIcon />
+            What this project knows
+          </span>
+          <span className={styles.synthTagGroup}>
+            <span className={styles.synthTag} data-testid="memory-synth-readonly-tag">
+              <LockIcon />
+              Read-only · synthesized
+            </span>
+            {summary.stale ? (
+              <span className={styles.synthRefreshing} data-testid="memory-synth-refreshing">
+                <RefreshIcon />
+                Updating…
+              </span>
+            ) : null}
+          </span>
+        </div>
+        {summary.summary_md ? (
+          <p className={styles.synthBody} data-testid="memory-synth-body">
+            {summary.summary_md}
+          </p>
+        ) : (
+          <p className={styles.synthPending} data-testid="memory-synth-pending">
+            Synthesis pending — insights will appear here as the team collaborates.
+          </p>
+        )}
+        <div className={styles.synthFoot}>
+          <RefreshIcon />
+          Synthesized from {summary.entry_count} memor{summary.entry_count === 1 ? "y" : "ies"} · updates as
+          memory changes · not directly edited
+        </div>
+      </div>
+
+      {/* ── Privacy boundary ── */}
+      <div className={styles.privacy} data-testid="memory-privacy-strip">
+        <LockIcon />
+        <div>
+          <b>Personal chats outside this project never feed project memory.</b> Only what happens inside the
+          project is shared — your private context stays walled off.
+        </div>
+      </div>
+    </>
+  )
+}
+
 // ── View ──
 
 type LoadState =
@@ -150,53 +207,7 @@ export function MemoryModalView({ open, state, onClose }: MemoryModalViewProps) 
               Couldn&apos;t load project memory. Try again.
             </div>
           ) : (
-            <>
-              {/* ── Read-only synthesized summary — NO edit/remove controls,
-                  ever. */}
-              <div className={styles.synth} data-testid="memory-synth-block">
-                <div className={styles.synthHead}>
-                  <span className={styles.synthTitle}>
-                    <SparkleIcon />
-                    What this project knows
-                  </span>
-                  <span className={styles.synthTagGroup}>
-                    <span className={styles.synthTag} data-testid="memory-synth-readonly-tag">
-                      <LockIcon />
-                      Read-only · synthesized
-                    </span>
-                    {state.summary.stale ? (
-                      <span className={styles.synthRefreshing} data-testid="memory-synth-refreshing">
-                        <RefreshIcon />
-                        Updating…
-                      </span>
-                    ) : null}
-                  </span>
-                </div>
-                {state.summary.summary_md ? (
-                  <p className={styles.synthBody} data-testid="memory-synth-body">
-                    {state.summary.summary_md}
-                  </p>
-                ) : (
-                  <p className={styles.synthPending} data-testid="memory-synth-pending">
-                    Synthesis pending — insights will appear here as the team collaborates.
-                  </p>
-                )}
-                <div className={styles.synthFoot}>
-                  <RefreshIcon />
-                  Synthesized from {state.summary.entry_count} memor{state.summary.entry_count === 1 ? "y" : "ies"} ·
-                  updates as memory changes · not directly edited
-                </div>
-              </div>
-
-              {/* ── Privacy boundary ── */}
-              <div className={styles.privacy} data-testid="memory-privacy-strip">
-                <LockIcon />
-                <div>
-                  <b>Personal chats outside this project never feed project memory.</b> Only what happens inside
-                  the project is shared — your private context stays walled off.
-                </div>
-              </div>
-            </>
+            <MemorySummaryBody summary={state.summary} />
           )}
         </div>
       </div>

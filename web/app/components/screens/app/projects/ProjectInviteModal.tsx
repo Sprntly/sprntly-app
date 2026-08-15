@@ -43,16 +43,21 @@ function emailFailed(status: string | undefined): boolean {
   return (status ?? "").toLowerCase() === "failed"
 }
 
-export type ProjectInviteModalProps = {
+export type ProjectInviteBodyProps = {
   projectId: number | string
-  open: boolean
-  onClose: () => void
   /** Fired after a successful add/invite so the caller re-fetches the roster
    *  (`refetchProject`) and the new member shows in the members list. */
   onInvited: () => void
 }
 
-export function ProjectInviteModal({ projectId, open, onClose, onInvited }: ProjectInviteModalProps) {
+/** The candidate-picker body — extracted so the layout redesign's Settings ›
+ *  Invite tab can render the SAME search/typeahead/add-by-email surface
+ *  (DRY — do not re-implement). Mount-lifetime IS open-lifetime: both callers
+ *  (the standalone `ProjectInviteModal` below and the settings tab) only
+ *  mount this component while visible, so a fresh instance — and fresh local
+ *  state — appears on every open; no separate `open` prop or reset effect
+ *  needed here. */
+export function ProjectInviteBody({ projectId, onInvited }: ProjectInviteBodyProps) {
   const [query, setQuery] = useState("")
   const [candidates, setCandidates] = useState<CandidateRow[]>([])
   const [candLoading, setCandLoading] = useState(false)
@@ -60,50 +65,12 @@ export function ProjectInviteModal({ projectId, open, onClose, onInvited }: Proj
   const [addingNeedle, setAddingNeedle] = useState<string | null>(null)
   const [affordance, setAffordance] = useState<Affordance | null>(null)
 
-  const dialogRef = useRef<HTMLDivElement>(null)
-  const openerRef = useRef<Element | null>(null)
-
-  // Reset transient state each time the modal (re)opens. Candidates are NOT
-  // cleared here — the fetch effect below immediately re-populates them
-  // (empty-query fetch, on open).
-  useEffect(() => {
-    if (!open) return
-    setQuery("")
-    setCandLoading(false)
-    setCandError(false)
-    setAddingNeedle(null)
-    setAffordance(null)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    openerRef.current = document.activeElement
-    const first = dialogRef.current?.querySelector<HTMLElement>(
-      "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
-    )
-    first?.focus()
-    const opener = openerRef.current
-    return () => {
-      if (opener instanceof HTMLElement) opener.focus()
-    }
-  }, [open])
-
-  useEscapeToClose(open, onClose)
-
   // Candidate fetch — the SAME tenant-scoped read the group chat's mention
   // picker uses (`candidateSearch`), degraded to an in-body error rather
-  // than a throw. On OPEN with an EMPTY query this fetches the workspace
-  // non-member list (the primary "add someone" picker) rather than
-  // clearing/bailing — an empty query on an open modal MUST populate the
-  // list. A non-empty query (the user typing) debounces as before; the
-  // empty-on-open fetch fires immediately (no debounce needed).
+  // than a throw. On mount (empty query) this fetches the workspace
+  // non-member list (the primary "add someone" picker) immediately (no
+  // debounce); a non-empty query (the user typing) debounces as before.
   useEffect(() => {
-    if (!open) {
-      setCandidates([])
-      setCandLoading(false)
-      setCandError(false)
-      return
-    }
     const q = query.trim()
     setCandLoading(true)
     setCandError(false)
@@ -130,13 +97,16 @@ export function ProjectInviteModal({ projectId, open, onClose, onInvited }: Proj
       cancelled = true
       clearTimeout(timer)
     }
-  }, [query, projectId, open])
+  }, [query, projectId])
 
   // The primary "add someone" list on open (empty query): workspace
   // non-members only — a member already on the project never appears here
   // (that is how "already-in-project members drop off"). Same-company/
   // other-workspace (`kind:"company"`) rows stay reachable via the
-  // typeahead below, not this primary list.
+  // typeahead below, not this primary list. Also drives the "N not yet in
+  // this project" count above the list (layout redesign — same count in
+  // both the standalone modal and the Settings › Invite tab, since both
+  // render this same body).
   const workspaceCandidates = useMemo(
     () => candidates.filter((c) => c.kind === "workspace"),
     [candidates],
@@ -182,11 +152,151 @@ export function ProjectInviteModal({ projectId, open, onClose, onInvited }: Proj
     [addingNeedle, projectId, onInvited],
   )
 
-  if (!open) return null
-
   const q = query.trim()
   const emailLike = isEmailNeedle(q)
   const showInviteByEmail = q.length > 0 && (emailLike || (!candLoading && !candError && candidates.length === 0))
+
+  return (
+    <>
+      <div className={detailStyles.railSectionLabel} data-testid="settings-invite-count">
+        Add someone
+        <span className={detailStyles.railSectionCount}>{workspaceCandidates.length} not yet in this project</span>
+      </div>
+      <input
+        className="input"
+        style={{ width: "100%" }}
+        placeholder="Search by name or email…"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        aria-label="Search people to add"
+        data-testid="project-invite-search"
+      />
+
+      {candLoading ? (
+        <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-loading">
+          Searching…
+        </p>
+      ) : candError ? (
+        <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-search-error">
+          Couldn&rsquo;t search right now — keep typing to retry.
+        </p>
+      ) : (
+        // Fixed-height, independently-scrolling list region — same pattern
+        // the Settings › Members tab uses (search-first + fixed-height
+        // scroll for a long candidate list).
+        <div style={{ marginTop: 10, maxHeight: 296, overflowY: "auto" }} data-testid="project-invite-results">
+          {/* Empty query (on open): the primary "add someone" picker —
+              workspace non-members only, a member already on the project
+              never appears. Non-empty query: the typeahead over the full
+              candidate set (member/workspace/company), unchanged. */}
+          {(q.length === 0 ? workspaceCandidates : candidates).map((c) => {
+            const label = c.name ?? c.email ?? "Unknown"
+            const needle = c.email ?? c.name ?? ""
+            const isMember = c.kind === "member"
+            return (
+              <div className={detailStyles.memberRow} key={`${c.kind}:${c.user_id}`} data-testid="project-invite-candidate">
+                <span className={detailStyles.memberAv} aria-hidden="true" style={personAvatarStyle(c.user_id, c.name)}>
+                  {initials(c.name)}
+                </span>
+                <div className={detailStyles.memberMain}>
+                  <div className={detailStyles.memberName}>{label}</div>
+                  <div className={detailStyles.memberRole}>{c.email || (isMember ? "Member" : "Not on project")}</div>
+                </div>
+                {isMember ? (
+                  <span className="modal-sub" data-testid="project-invite-already">
+                    On this project
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    onClick={() => addByNeedle(needle, label)}
+                    disabled={addingNeedle === needle}
+                    data-testid="project-invite-add"
+                  >
+                    {addingNeedle === needle ? "Adding…" : "Add"}
+                  </button>
+                )}
+              </div>
+            )
+          })}
+          {q.length === 0 && workspaceCandidates.length === 0 ? (
+            <p className="modal-sub" data-testid="project-invite-empty-workspace">
+              Everyone in this workspace is already on the project — invite someone new by email below.
+            </p>
+          ) : null}
+          {showInviteByEmail ? (
+            <div className={detailStyles.memberRow} data-testid="project-invite-by-email-row">
+              <div className={detailStyles.memberMain}>
+                <div className={detailStyles.memberName}>
+                  {emailLike ? `Invite ${q} by email` : "No matches — invite by email"}
+                </div>
+                <div className={detailStyles.memberRole}>They get an invite and land in this project.</div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => addByNeedle(q, q)}
+                disabled={!emailLike || addingNeedle === q}
+                title={emailLike ? undefined : "Enter a full email address to invite someone new"}
+                data-testid="project-invite-by-email"
+              >
+                {addingNeedle === q ? "Inviting…" : "Invite"}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      )}
+
+      {affordance ? (
+        <div
+          role="status"
+          data-testid="project-invite-affordance"
+          style={{
+            marginTop: 14,
+            padding: "10px 12px",
+            borderRadius: 8,
+            fontSize: 13,
+            background: affordance.tone === "error" ? "var(--danger-soft, #FEE)" : "var(--info-soft)",
+            color: affordance.tone === "error" ? "var(--danger, #B4232A)" : "var(--ink-2)",
+          }}
+        >
+          {affordance.text}
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+export type ProjectInviteModalProps = {
+  projectId: number | string
+  open: boolean
+  onClose: () => void
+  /** Fired after a successful add/invite so the caller re-fetches the roster
+   *  (`refetchProject`) and the new member shows in the members list. */
+  onInvited: () => void
+}
+
+export function ProjectInviteModal({ projectId, open, onClose, onInvited }: ProjectInviteModalProps) {
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const openerRef = useRef<Element | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    openerRef.current = document.activeElement
+    const first = dialogRef.current?.querySelector<HTMLElement>(
+      "button, [href], input, select, textarea, [tabindex]:not([tabindex='-1'])",
+    )
+    first?.focus()
+    const opener = openerRef.current
+    return () => {
+      if (opener instanceof HTMLElement) opener.focus()
+    }
+  }, [open])
+
+  useEscapeToClose(open, onClose)
+
+  if (!open) return null
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -217,108 +327,7 @@ export function ProjectInviteModal({ projectId, open, onClose, onInvited }: Proj
         </div>
 
         <div className="modal-body" data-testid="project-invite-modal-body">
-          <div className={detailStyles.railSectionLabel}>
-            Add someone
-          </div>
-          <input
-            className="input"
-            style={{ width: "100%" }}
-            placeholder="Search by name or email…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            aria-label="Search people to add"
-            data-testid="project-invite-search"
-          />
-
-          {candLoading ? (
-            <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-loading">
-              Searching…
-            </p>
-          ) : candError ? (
-            <p className="modal-sub" style={{ marginTop: 10 }} data-testid="project-invite-search-error">
-              Couldn&rsquo;t search right now — keep typing to retry.
-            </p>
-          ) : (
-            <div style={{ marginTop: 10 }} data-testid="project-invite-results">
-              {/* Empty query (on open): the primary "add someone" picker —
-                  workspace non-members only, a member already on the project
-                  never appears. Non-empty query: the typeahead over the full
-                  candidate set (member/workspace/company), unchanged. */}
-              {(q.length === 0 ? workspaceCandidates : candidates).map((c) => {
-                const label = c.name ?? c.email ?? "Unknown"
-                const needle = c.email ?? c.name ?? ""
-                const isMember = c.kind === "member"
-                return (
-                  <div className={detailStyles.memberRow} key={`${c.kind}:${c.user_id}`} data-testid="project-invite-candidate">
-                    <span className={detailStyles.memberAv} aria-hidden="true" style={personAvatarStyle(c.user_id, c.name)}>
-                      {initials(c.name)}
-                    </span>
-                    <div className={detailStyles.memberMain}>
-                      <div className={detailStyles.memberName}>{label}</div>
-                      <div className={detailStyles.memberRole}>{c.email || (isMember ? "Member" : "Not on project")}</div>
-                    </div>
-                    {isMember ? (
-                      <span className="modal-sub" data-testid="project-invite-already">
-                        On this project
-                      </span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="btn btn-primary"
-                        onClick={() => addByNeedle(needle, label)}
-                        disabled={addingNeedle === needle}
-                        data-testid="project-invite-add"
-                      >
-                        {addingNeedle === needle ? "Adding…" : "Add"}
-                      </button>
-                    )}
-                  </div>
-                )
-              })}
-              {q.length === 0 && workspaceCandidates.length === 0 ? (
-                <p className="modal-sub" data-testid="project-invite-empty-workspace">
-                  Everyone in this workspace is already on the project — invite someone new by email below.
-                </p>
-              ) : null}
-              {showInviteByEmail ? (
-                <div className={detailStyles.memberRow} data-testid="project-invite-by-email-row">
-                  <div className={detailStyles.memberMain}>
-                    <div className={detailStyles.memberName}>
-                      {emailLike ? `Invite ${q} by email` : "No matches — invite by email"}
-                    </div>
-                    <div className={detailStyles.memberRole}>They get an invite and land in this project.</div>
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-primary"
-                    onClick={() => addByNeedle(q, q)}
-                    disabled={!emailLike || addingNeedle === q}
-                    title={emailLike ? undefined : "Enter a full email address to invite someone new"}
-                    data-testid="project-invite-by-email"
-                  >
-                    {addingNeedle === q ? "Inviting…" : "Invite"}
-                  </button>
-                </div>
-              ) : null}
-            </div>
-          )}
-
-          {affordance ? (
-            <div
-              role="status"
-              data-testid="project-invite-affordance"
-              style={{
-                marginTop: 14,
-                padding: "10px 12px",
-                borderRadius: 8,
-                fontSize: 13,
-                background: affordance.tone === "error" ? "var(--danger-soft, #FEE)" : "var(--info-soft)",
-                color: affordance.tone === "error" ? "var(--danger, #B4232A)" : "var(--ink-2)",
-              }}
-            >
-              {affordance.text}
-            </div>
-          ) : null}
+          <ProjectInviteBody projectId={projectId} onInvited={onInvited} />
         </div>
 
         <div className="modal-foot">

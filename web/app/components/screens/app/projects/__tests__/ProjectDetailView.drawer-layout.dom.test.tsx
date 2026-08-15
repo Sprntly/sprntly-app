@@ -73,8 +73,6 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     project: PROJECT,
     artifacts: ARTIFACTS,
     memory: MEMORY,
-    railCollapsed: false,
-    onToggleRail: noop,
     activeChat: "group",
     onSelectChat: noop,
     individualUnread: false,
@@ -85,9 +83,8 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     openArtifact: null,
     onCloseArtifactDrawer: noop,
     onAddExistingArtifact: noop,
-    onOpenMemory: noop,
     onOpenTasks: noop,
-    onInvite: noop,
+    onOpenSettings: noop,
     currentUserId: "current-viewer",
     onRemoveMember: noop,
     ...overrides,
@@ -97,9 +94,10 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
 afterEach(cleanup)
 
 describe("ProjectDetailView — in-place drawer layout", () => {
-  it("with no artifact open, the rail is shown and no drawer is mounted", () => {
+  it("with no artifact open, the chat is full-bleed and no rail or drawer is mounted", () => {
     render(React.createElement(ProjectDetailView, viewProps({ openArtifact: null })))
-    expect(screen.getByTestId("project-rail")).toBeTruthy()
+    expect(screen.queryByTestId("project-rail")).toBeNull()
+    expect(screen.getByTestId("thread-interactive")).toBeTruthy()
     expect(screen.queryByTestId("drawer-stub")).toBeNull()
   })
 

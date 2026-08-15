@@ -132,6 +132,14 @@ vi.mock("../ProjectMainThread", () => ({
       "data-insight-text": props.insightNote?.text ?? "",
     }),
 }))
+// The in-place artifact drawer's own fetch/render semantics are covered by
+// `ProjectArtifactDrawer.dom.test.tsx` and (for its LAYOUT placement beside
+// the chat) `ProjectDetailView.drawer-layout.dom.test.tsx` — stubbed here,
+// same isolation reason as `ProjectMainThread` above, so this file only
+// proves the shell still mounts the chat host while an artifact is open.
+vi.mock("../ProjectArtifactDrawer", () => ({
+  ProjectArtifactDrawer: () => React.createElement("aside", { "data-testid": "drawer-stub" }),
+}))
 
 import { ProjectDetailView, ProjectDetailScreen, type ProjectDetailViewProps } from "../ProjectDetailScreen"
 // Regular (non-type-only) import: resolves to the mocked `ApiError` above,
@@ -230,8 +238,6 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     project: PROJECT,
     artifacts: ARTIFACTS,
     memory: MEMORY,
-    railCollapsed: false,
-    onToggleRail: noop,
     activeChat: "group",
     onSelectChat: noop,
     individualUnread: false,
@@ -242,9 +248,8 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     openArtifact: null,
     onCloseArtifactDrawer: noop,
     onAddExistingArtifact: noop,
-    onOpenMemory: noop,
     onOpenTasks: noop,
-    onInvite: noop,
+    onOpenSettings: noop,
     currentUserId: "current-viewer",
     onRemoveMember: noop,
     ...overrides,
@@ -288,175 +293,72 @@ describe("ProjectDetailView — top bar", () => {
   })
 })
 
-describe("ProjectDetailView — right rail structure", () => {
-  it("renders the chat switcher, then ARTIFACTS / PROJECT / MEMBERS sections in order, with no Overview card", () => {
+// The former "right rail structure" describe — the redesign removes the
+// standing rail entirely (AC2). Every assertion that targeted rail-only DOM
+// either moved verbatim to `ProjectSettingsModal.dom.test.tsx` (the Members
+// tab now owns the member/agent-row assertions) or is superseded by the
+// new top-bar layout tests below — nothing here is lost, see the ticket's
+// disposition table.
+describe("ProjectDetailView — top-bar layout (redesign)", () => {
+  it("test_detail_no_standing_rail — project-rail and rail-toggle are absent in the ready state", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
-    // Redesign: the mockup leads the rail with Artifacts, so the group⇆private
-    // Chat switch is now a compact segmented control at the top of the rail
-    // (`rail-chat-toggle`, a role="tablist") rather than its own "Chats"
-    // rail-section-label. The remaining labelled sections keep their order.
-    expect(screen.getByTestId("rail-chat-toggle")).toBeTruthy()
-    const labels = screen
-      .getAllByTestId("rail-section-label")
-      .map((el) => (el.textContent?.trim().match(/^[A-Za-z]+/) ?? [""])[0])
-    expect(labels).toEqual(["Artifacts", "Project", "Members"])
-    expect(screen.queryByText("Overview")).toBeNull()
+    expect(screen.queryByTestId("project-rail")).toBeNull()
+    expect(screen.queryByTestId("rail-toggle")).toBeNull()
   })
 
-  it("test_detail_rail_section_reads_project_settings — the memory-card rail section is labelled Project Settings", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const labels = screen.getAllByTestId("rail-section-label").map((el) => el.textContent?.trim())
-    expect(labels).toContain("Project Settings")
-    expect(labels).not.toContain("Project")
+  it("test_detail_topbar_has_settings_gear_opens_modal — the gear renders and calls onOpenSettings", () => {
+    const onOpenSettings = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenSettings })))
+    const gear = screen.getByTestId("project-settings-gear")
+    expect(gear.getAttribute("aria-label")).toBe("Project settings")
+    fireEvent.click(gear)
+    expect(onOpenSettings).toHaveBeenCalledTimes(1)
   })
 
-  it("renders the Sprntly AGENT member row with the green working status, from the virtual member", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const agentRow = screen.getByTestId("member-row-agent")
-    expect(agentRow.textContent).toContain("Sprntly")
-    expect(within(agentRow).getByText("Agent")).toBeTruthy()
-    expect(within(agentRow).getByText("Agent coworker · dispatches tasks")).toBeTruthy()
-    expect(within(agentRow).getByText("working")).toBeTruthy()
+  it("test_detail_topbar_artifacts_button_shows_count_and_opens_modal — topbar-artifacts shows artifacts.length and calls onOpenArtifacts", () => {
+    const onOpenArtifacts = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts })))
+    const btn = screen.getByTestId("topbar-artifacts")
+    expect(btn.textContent).toContain(String(ARTIFACTS.length))
+    fireEvent.click(btn)
+    expect(onOpenArtifacts).toHaveBeenCalledTimes(1)
   })
 
-  it("test_agent_pill_has_status_role — the agent pill is exposed to assistive tech as a live status with an accessible name referencing the status string", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const pill = screen.getByTestId("agent-working-status")
-    expect(pill.getAttribute("role")).toBe("status")
-    const accessibleName = pill.getAttribute("aria-label") ?? pill.textContent ?? ""
-    expect(accessibleName).toContain("Sprntly")
-    expect(accessibleName).toContain(PROJECT.members[0].kind === "agent" ? PROJECT.members[0].status : "")
-  })
-
-  it("test_agent_pill_shows_backend_status_string — the pill text equals the virtual member's status constant, no derived/overridden value", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const pill = screen.getByTestId("agent-working-status")
-    expect(pill.textContent).toBe("working")
-  })
-
-  it("test_working_pill_only_for_agent — no human member row renders the agent-working-status pill", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const humanRows = screen.getAllByTestId("member-row-human")
-    for (const row of humanRows) {
-      expect(within(row).queryByTestId("agent-working-status")).toBeNull()
-    }
-    expect(screen.getAllByTestId("agent-working-status")).toHaveLength(1)
-  })
-
-  it("human member rows carry their job_role label", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const rows = screen.getAllByTestId("member-row-human")
-    expect(rows).toHaveLength(2)
-    expect(within(rows[0]).getByText("David M.")).toBeTruthy()
-    expect(within(rows[0]).getByText("PM")).toBeTruthy()
-    expect(within(rows[1]).getByText("Shristi")).toBeTruthy()
-    expect(within(rows[1]).getByText("Design")).toBeTruthy()
-  })
-
-  it("renders the Remove control only on the removable row — not the creator, not the caller, not the agent", () => {
-    // PROJECT: created_by="u1" (David M.), members u1/u2. currentUserId
-    // defaults ("current-viewer") to neither, so only u2 (Shristi) is
-    // removable — proves the creator suppression independently of self.
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const rows = screen.getAllByTestId("member-row-human")
-    expect(within(rows[0]).queryByTestId("member-remove")).toBeNull() // David M. — creator
-    expect(within(rows[1]).getByTestId("member-remove")).toBeTruthy() // Shristi — removable
-    expect(within(screen.getByTestId("member-row-agent")).queryByTestId("member-remove")).toBeNull()
-  })
-
-  it("withholds the Remove control on the caller's OWN row, even when not the creator", () => {
-    render(React.createElement(ProjectDetailView, viewProps({ currentUserId: "u2" })))
-    expect(screen.queryAllByTestId("member-remove")).toHaveLength(0)
-  })
-
-  it("clicking Remove invokes onRemoveMember with that human member", () => {
-    const onRemoveMember = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onRemoveMember })))
-    const rows = screen.getAllByTestId("member-row-human")
-    fireEvent.click(within(rows[1]).getByTestId("member-remove"))
-    expect(onRemoveMember).toHaveBeenCalledTimes(1)
-    expect(onRemoveMember.mock.calls[0][0]).toMatchObject({ user_id: "u2", name: "Shristi" })
-  })
-
-  it("renders one compact card per artifact type present, sourced from the artifacts list, plus an Add-existing card", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    expect(screen.getByTestId("artifact-card-prd-sub").textContent).toContain("1 item")
-    expect(screen.getByTestId("artifact-card-evidence-sub").textContent).toContain("2 items")
-    expect(screen.queryByTestId("artifact-card-prototype")).toBeNull()
-    expect(screen.queryByTestId("artifact-card-report")).toBeNull()
-    const addExisting = screen.getByTestId("artifact-add-existing")
-    expect(addExisting).toBeTruthy()
-    expect(addExisting.textContent).toContain("Add existing artifact")
-  })
-
-  it("clicking Add existing artifact invokes onAddExistingArtifact (opens the company-library picker)", () => {
+  it("test_detail_add_existing_invokes_handler — clicking artifact-add-existing (now in the top bar) invokes onAddExistingArtifact", () => {
     const onAddExistingArtifact = vi.fn()
     render(React.createElement(ProjectDetailView, viewProps({ onAddExistingArtifact })))
     fireEvent.click(screen.getByTestId("artifact-add-existing"))
     expect(onAddExistingArtifact).toHaveBeenCalledTimes(1)
   })
 
-  it("clicking a MULTI-item artifact card's ↗ opens the browse modal for that type", () => {
-    // Evidence has 2 items in the fixture → no single artifact to open in
-    // place → the card still routes to the browse modal (onOpenArtifacts).
-    const onOpenArtifacts = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts })))
-    fireEvent.click(screen.getByTestId("artifact-card-evidence"))
-    expect(onOpenArtifacts).toHaveBeenCalledWith("evidence")
+  it("test_detail_topbar_chat_toggle_selects_private — topbar-chat-toggle wraps chat-row-group/chat-row-individual as a tablist", () => {
+    const onSelectChat = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
+    const toggle = screen.getByTestId("topbar-chat-toggle")
+    expect(toggle.getAttribute("role")).toBe("tablist")
+    expect(within(toggle).getByTestId("chat-row-group")).toBeTruthy()
+    const indiv = within(toggle).getByTestId("chat-row-individual")
+    fireEvent.click(indiv)
+    expect(onSelectChat).toHaveBeenCalledWith("individual")
   })
 
-  it("clicking a SINGLE in-place-type artifact card opens that artifact in the side drawer, not the modal", () => {
-    // Redesign: a rail card for an in-place type (prd/evidence/prototype) that
-    // maps to exactly ONE artifact opens it IN-PLACE beside the chat
-    // (onOpenArtifactInPlace) rather than the browse modal. The PRD fixture is
-    // a single item, so its card takes that path.
-    const onOpenArtifacts = vi.fn()
-    const onOpenArtifactInPlace = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onOpenArtifacts, onOpenArtifactInPlace })))
-    fireEvent.click(screen.getByTestId("artifact-card-prd"))
-    expect(onOpenArtifactInPlace).toHaveBeenCalledTimes(1)
-    expect(onOpenArtifactInPlace.mock.calls[0][0]).toMatchObject({ type: "prd", id: 1 })
-    expect(onOpenArtifacts).not.toHaveBeenCalled()
+  it("test_detail_chat_full_bleed_without_artifact — with openArtifact null, project-main-thread-host renders and no rail column exists", () => {
+    render(React.createElement(ProjectDetailView, viewProps({ openArtifact: null })))
+    expect(screen.getByTestId("project-main-thread-host")).toBeTruthy()
+    expect(screen.queryByTestId("project-rail")).toBeNull()
   })
 
-  it("test_detail_memory_card_heading_reads_memory — memory-card <h4> reads Memory, not Project memory", () => {
-    render(React.createElement(ProjectDetailView, viewProps()))
-    const card = screen.getByTestId("memory-card")
-    expect(card.querySelector("h4")?.textContent?.trim()).toBe("Memory")
-  })
-
-  it("test_detail_memory_card_summary_only — no Add button; teaser present; View memory (no 'insight' copy) opens the modal", () => {
-    const onOpenMemory = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onOpenMemory })))
-    const card = screen.getByTestId("memory-card")
-    expect(within(card).getByText(/A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds\./)).toBeTruthy()
-    expect(within(card).getByText("24")).toBeTruthy()
-    expect(screen.queryByTestId("memory-add")).toBeNull()
-    const viewAll = screen.getByTestId("memory-view-all")
-    expect(viewAll.textContent?.toLowerCase()).not.toContain("insight")
-    fireEvent.click(viewAll)
-    expect(onOpenMemory).toHaveBeenCalledTimes(1)
-  })
-
-  it("the task-ledger rail card is un-mounted from the rail (non-destructive — see the source-scan test below)", () => {
-    render(
-      React.createElement(
-        ProjectDetailView,
-        viewProps({ ledgerCounts: { assigned_to_me_open: 3, waiting_on_open: 2 } }),
-      ),
-    )
-    expect(screen.queryByTestId("task-ledger-card")).toBeNull()
-    expect(screen.queryByTestId("task-ledger-view-all")).toBeNull()
+  it("test_detail_artifact_open_keeps_chat_mounted — with an artifact open, the chat host stays rendered", () => {
+    render(React.createElement(ProjectDetailView, viewProps({ openArtifact: ARTIFACTS[0] })))
+    expect(screen.getByTestId("project-main-thread-host")).toBeTruthy()
   })
 })
 
 describe("ProjectDetailView — see-all-tasks trigger (AC7, AC8, AC9)", () => {
-  it("test_see_all_tasks_trigger_in_header_not_rail — tasks-see-all renders, is a sibling of rail-toggle, and is not a descendant of project-rail", () => {
+  it("test_see_all_tasks_trigger_in_topbar — tasks-see-all renders in the top bar, no numeric count", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
     const trigger = screen.getByTestId("tasks-see-all")
     expect(trigger).toBeTruthy()
-    expect(screen.getByTestId("project-rail").contains(trigger)).toBe(false)
-    expect(trigger.parentElement).toBe(screen.getByTestId("rail-toggle").parentElement)
     // Entry point only — no numeric task count rendered on the trigger.
     expect(trigger.textContent).not.toMatch(/\d/)
   })
@@ -466,34 +368,6 @@ describe("ProjectDetailView — see-all-tasks trigger (AC7, AC8, AC9)", () => {
     render(React.createElement(ProjectDetailView, viewProps({ onOpenTasks })))
     fireEvent.click(screen.getByTestId("tasks-see-all"))
     expect(onOpenTasks).toHaveBeenCalledTimes(1)
-  })
-
-  it("test_no_ledger_rail_card — no live-count/preview ledger element renders inside project-rail", () => {
-    render(
-      React.createElement(
-        ProjectDetailView,
-        viewProps({
-          ledgerCounts: { assigned_to_me_open: 3, waiting_on_open: 2 },
-          ledgerRows: [
-            {
-              delegation_id: 1,
-              task_summary: "A live row",
-              status: "assigned",
-              status_at: new Date().toISOString(),
-              bucket: "open",
-              other_party_user_id: "u-other",
-              other_party_name: "David",
-              delivered_conversation_id: null,
-              delivered_turn_id: null,
-            },
-          ],
-        }),
-      ),
-    )
-    const rail = screen.getByTestId("project-rail")
-    expect(within(rail).queryByTestId("tasks-see-all")).toBeNull()
-    expect(within(rail).queryByTestId("task-ledger-card")).toBeNull()
-    expect(within(rail).queryByText("A live row")).toBeNull()
   })
 })
 
@@ -524,18 +398,6 @@ describe("ProjectDetailScreen — task-ledger substrate intact after the rail un
 })
 
 describe("ProjectDetailView — state", () => {
-  it("Hide panel / Show panel toggles the rail via railCollapsed", () => {
-    const onToggleRail = vi.fn()
-    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ onToggleRail })))
-    expect(screen.getByTestId("project-rail")).toBeTruthy()
-    fireEvent.click(screen.getByTestId("rail-toggle"))
-    expect(onToggleRail).toHaveBeenCalledTimes(1)
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ railCollapsed: true })))
-    expect(screen.queryByTestId("project-rail")).toBeNull()
-    expect(screen.getByTestId("rail-toggle").textContent).toContain("Show panel")
-  })
-
   it("selecting the individual CHATS row sets activeChat and marks it active", () => {
     const onSelectChat = vi.fn()
     render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
@@ -590,17 +452,14 @@ describe("ProjectDetailView — state", () => {
 })
 
 describe("ProjectDetailView — accessibility", () => {
-  it("every rail control is a real interactive element with an aria-label on icon-only affordances", () => {
+  it("test_topbar_controls_interactive_with_labels — project-settings-gear/topbar-artifacts/tasks-see-all/chat-row-* are BUTTONs with accessible names", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
-    expect(screen.getByTestId("rail-toggle").tagName).toBe("BUTTON")
+    expect(screen.getByTestId("project-settings-gear").tagName).toBe("BUTTON")
+    expect(screen.getByLabelText("Project settings")).toBeTruthy()
+    expect(screen.getByTestId("topbar-artifacts").tagName).toBe("BUTTON")
+    expect(screen.getByTestId("tasks-see-all").tagName).toBe("BUTTON")
     expect(screen.getByTestId("chat-row-group").tagName).toBe("BUTTON")
     expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
-    expect(screen.getByTestId("artifact-card-prd").tagName).toBe("BUTTON")
-    // The single-item PRD card opens in place → its accessible name is "Open
-    // PRD"; a multi-item type keeps the "Browse … artifacts" browse label.
-    expect(screen.getByLabelText("Open PRD")).toBeTruthy()
-    expect(screen.getByLabelText("Browse Evidence artifacts")).toBeTruthy()
-    expect(screen.getByLabelText("Invite by email")).toBeTruthy()
   })
 
   it("static markup renders (SSR-safe) with no interactive element disabled by default", () => {
@@ -621,8 +480,11 @@ describe("ProjectDetailScreen module CSS — tokens only", () => {
     expect(disallowed).toEqual([])
   })
 
-  it("the artifact-type badge palette in the .tsx matches ArtifactsScreen's real hexes, never the design mockup's purple", () => {
-    const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
+  it("the artifact-type badge palette (now in ArtifactsModal.tsx — the rail's own badge/TYPE_BADGE is gone with the rail) matches ArtifactsScreen's real hexes, never the design mockup's purple", () => {
+    // Redesign: `TYPE_BADGE`/`ArtifactTypeIcon` left `ProjectDetailScreen.tsx`
+    // with the removed rail — the surviving per-type badge palette lives in
+    // `ArtifactsModal.tsx` (already mounted, unmodified by this ticket).
+    const src = readFileSync(join(__dirname, "../ArtifactsModal.tsx"), "utf8")
     expect(src).toContain("#DBEAFE")
     expect(src).toContain("#1E40AF")
     expect(src).not.toContain("634AB0")
@@ -654,12 +516,19 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
     // The project invite modal adds ONE more (13): `inviteOpen`, the same shape
     // of pure local open/close toggle as `openArtifact` — it replaces the rail
     // Invite button's call into the shared `useNavigation().openModal("invite")`
-    // mechanics with mounting `<ProjectInviteModal>` directly. The guard this
-    // test protects — no NEW state for the AGENT STATUS pulse specifically —
-    // still holds: `posting` (the ask-composer wiring this guard was written
-    // against) is still absent.
+    // mechanics with mounting `<ProjectInviteModal>` directly.
+    // The layout redesign (Projects panel demotion) then removes TWO states —
+    // `railCollapsed` (the standing rail + its collapse toggle are gone) and
+    // `inviteOpen` (the standalone `<ProjectInviteModal>` mount is gone;
+    // Invite is now a tab inside `<ProjectSettingsModal>` reached via the
+    // top-bar gear) — and adds exactly ONE: `settingsTab` (`SettingsTab |
+    // null`; `null` = the settings modal is closed, a tab value = open on
+    // that tab — open-ness is derived, no separate `settingsOpen` boolean).
+    // Net 13 − 2 + 1 = 12. The guard this test protects — no NEW state for
+    // the AGENT STATUS pulse specifically — still holds: `posting` (the
+    // ask-composer wiring this guard was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(13)
+    expect(useStateDeclarations).toHaveLength(12)
     expect(src).not.toContain("posting")
   })
 })
@@ -755,26 +624,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(screen.getByText("Project not found")).toBeTruthy()
   })
 
-  it("invite button opens the project-scoped invite modal, NOT the global mock InviteModal", async () => {
-    getMock.mockResolvedValue(PROJECT)
-    artifactsMock.mockResolvedValue(ARTIFACTS)
-    memorySummaryMock.mockResolvedValue(MEMORY)
-    memoryInsightMock.mockResolvedValue(null)
-    await act(async () => {
-      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
-    })
-    await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
-    expect(screen.queryByTestId("project-invite-modal")).toBeNull()
-
-    fireEvent.click(screen.getByTestId("invite-button"))
-
-    // The project-scoped surface opens...
-    expect(screen.getByTestId("project-invite-modal")).toBeTruthy()
-    // ...and the global mock modal mechanics are never touched.
-    expect(openModalMock).not.toHaveBeenCalled()
-  })
-
-  it("the project invite modal no longer renders the 'On this project' current-members block", async () => {
+  it("the settings gear's Invite tab opens the project-scoped picker, NOT the global mock InviteModal", async () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
@@ -783,8 +633,32 @@ describe("ProjectDetailScreen — data fetch", () => {
     await act(async () => {
       render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
-    await waitFor(() => expect(screen.getByTestId("invite-button")).toBeTruthy())
-    fireEvent.click(screen.getByTestId("invite-button"))
+    await waitFor(() => expect(screen.getByTestId("project-settings-gear")).toBeTruthy())
+    expect(screen.queryByTestId("project-settings-modal")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("project-settings-gear"))
+    expect(screen.getByTestId("project-settings-modal")).toBeTruthy()
+    fireEvent.click(screen.getByTestId("settings-tab-invite"))
+
+    // The project-scoped picker body renders inside the settings modal...
+    await waitFor(() => expect(screen.getByTestId("project-invite-search")).toBeTruthy())
+    // ...and the global mock modal mechanics are never touched.
+    expect(openModalMock).not.toHaveBeenCalled()
+  })
+
+  it("the Invite tab renders no 'On this project' current-members block", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    candidateSearchMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("project-settings-gear")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("project-settings-gear"))
+    fireEvent.click(screen.getByTestId("settings-tab-invite"))
+    await waitFor(() => expect(screen.getByTestId("project-invite-search")).toBeTruthy())
 
     expect(screen.queryByTestId("project-invite-members-label")).toBeNull()
     expect(screen.queryByTestId("project-invite-members")).toBeNull()
@@ -805,6 +679,9 @@ describe("ProjectDetailScreen — data fetch", () => {
       await act(async () => {
         render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
       })
+      await waitFor(() => expect(screen.getByTestId("project-settings-gear")).toBeTruthy())
+      fireEvent.click(screen.getByTestId("project-settings-gear"))
+      fireEvent.click(screen.getByTestId("settings-tab-members"))
       await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
 
       const rows = screen.getAllByTestId("member-row-human")
@@ -835,6 +712,9 @@ describe("ProjectDetailScreen — data fetch", () => {
       await act(async () => {
         render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
       })
+      await waitFor(() => expect(screen.getByTestId("project-settings-gear")).toBeTruthy())
+      fireEvent.click(screen.getByTestId("project-settings-gear"))
+      fireEvent.click(screen.getByTestId("settings-tab-members"))
       await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
       const rows = screen.getAllByTestId("member-row-human")
       fireEvent.click(within(rows[1]).getByTestId("member-remove"))
@@ -856,6 +736,9 @@ describe("ProjectDetailScreen — data fetch", () => {
       await act(async () => {
         render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
       })
+      await waitFor(() => expect(screen.getByTestId("project-settings-gear")).toBeTruthy())
+      fireEvent.click(screen.getByTestId("project-settings-gear"))
+      fireEvent.click(screen.getByTestId("settings-tab-members"))
       await waitFor(() => expect(screen.getAllByTestId("member-row-human")).toHaveLength(2))
       const rows = screen.getAllByTestId("member-row-human")
       fireEvent.click(within(rows[1]).getByTestId("member-remove"))

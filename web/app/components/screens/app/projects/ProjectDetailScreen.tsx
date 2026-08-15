@@ -1,6 +1,6 @@
 "use client"
 
-// ── ProjectDetailScreen — the group-chat-centric detail shell (v3.6) ──
+// ── ProjectDetailScreen — the group-chat-centric detail shell (v4.0) ──
 //
 // Flat route (AD-P14): mounts from `web/app/(app)/projects/ProjectsRoute.tsx`
 // when `?id=<id>` is present on the one `/projects` route — NO `[id]`
@@ -8,9 +8,12 @@
 // own `useSearchParams().get("id")` read, so this component stays
 // testable in isolation without mocking `next/navigation`.
 //
-// Scope boundary (this ticket): the SHELL — top bar, a group⇆individual
-// chat HOST slot + composer shell, and the collapsible right rail
-// (CHATS / ARTIFACTS / PROJECT / MEMBERS), wired to the real
+// Layout (redesign): full-bleed chat is first-class — there is no standing
+// right rail. Settings/artifacts/members/memory/invite are demoted behind a
+// top-bar gear (`ProjectSettingsModal`, a 4-tab modal) and an "Artifacts (N)"
+// button (`ArtifactsModal`); selecting an artifact opens it in-place beside
+// the still-interactive chat (`ProjectArtifactDrawer`), the ONLY thing that
+// ever occupies a second body-grid column. Wired to the real
 // `GET /v1/projects/{id}`, `/artifacts`, `/memory/summary` endpoints.
 //
 // AD-P13 (one chat presentation layer): this file renders NO bespoke chat
@@ -37,7 +40,6 @@ import { PROJECTS_PATH } from "../../../../lib/routes"
 import {
   ApiError,
   projectsApi,
-  isProjectArtifactType,
   type ArtifactItem,
   type DelegationCounts,
   type DelegationLedgerRow,
@@ -48,10 +50,9 @@ import {
   type ProjectMemorySummary,
 } from "../../../../lib/api"
 import { ProjectMainThread } from "./ProjectMainThread"
-import { MemoryModal } from "./MemoryModal"
 import { ArtifactsModal } from "./ArtifactsModal"
 import { AddArtifactModal } from "./AddArtifactModal"
-import { ProjectInviteModal } from "./ProjectInviteModal"
+import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
@@ -60,43 +61,12 @@ import styles from "./ProjectDetailScreen.module.css"
 
 // Focus-gated FALLBACK poll interval for the unread badge (AD-P22) — same
 // cadence `ProjectGroupChat.tsx`'s own `POLL_MS` uses (AD-P4), duplicated
-// locally per this file's existing precedent (TYPE_BADGE, relativeTime,
-// etc.). Demoted below: the live per-user channel + its reconnect reconcile
-// carry the badge while connected; this interval only arms when degraded.
+// locally per this file's existing precedent (`initials`, etc.). Demoted
+// below: the live per-user channel + its reconnect reconcile carry the
+// badge while connected; this interval only arms when degraded.
 const UNREAD_POLL_MS = 4000
 
 type HumanMember = Extract<ProjectMember, { kind: "human" }>
-
-/** Copied verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same
- *  exception `ProjectsScreen.module.css` already takes) — the app's real
- *  per-type semantic palette, not a new one. Duplicated locally rather than
- *  imported: `ArtifactsScreen` is not a declared Deliverable for this
- *  ticket. */
-const TYPE_BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: string }> = {
-  prd: { label: "PRD", bg: "var(--accent-soft)", color: "var(--accent-ink)" },
-  evidence: { label: "Evidence", bg: "#FEF0E6", color: "#B45309" },
-  prototype: { label: "Prototype", bg: "#DBEAFE", color: "#1E40AF" },
-  report: { label: "Report", bg: "#EDE9FE", color: "#6D28D9" },
-  ticket_set: { label: "Tickets", bg: "var(--info-soft)", color: "var(--info)" },
-}
-
-const TYPE_ORDER: ProjectArtifactType[] = ["prd", "prototype", "evidence", "report", "ticket_set"]
-
-/** Same compact relative-time bucketing `ProjectsScreen.tsx`/
- *  `ArtifactsScreen.tsx` use, duplicated locally per the same precedent. */
-function relativeTime(iso: string): string {
-  const then = new Date(iso).getTime()
-  if (Number.isNaN(then)) return ""
-  const diffMs = Date.now() - then
-  const mins = Math.floor(diffMs / 60000)
-  if (mins < 1) return "just now"
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  if (days < 7) return `${days}d ago`
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" })
-}
 
 /** Same initials algorithm `TicketsScreen.tsx`/`TicketDetail.tsx` already
  *  duplicate locally — not a shared export in this codebase. */
@@ -104,45 +74,6 @@ function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
 }
-
-/** The teaser text on the Project-memory rail card: the summary's first
- *  sentence (AC7), stripped of any markdown emphasis. Falls back to a
- *  plain "nothing yet" line when no summary has been generated. */
-function firstSentence(summaryMd: string | null): string {
-  if (!summaryMd) return "Nothing synthesized yet — insights will appear as the team collaborates."
-  const stripped = summaryMd.replace(/[#*_`]/g, "").trim()
-  const match = stripped.match(/^[^.!?]*[.!?]/)
-  return (match ? match[0] : stripped).trim()
-}
-
-function groupArtifactsByType(
-  artifacts: ArtifactItem[],
-): Partial<Record<ProjectArtifactType, ArtifactItem[]>> {
-  const out: Partial<Record<ProjectArtifactType, ArtifactItem[]>> = {}
-  for (const a of artifacts) {
-    // A custom_artifact row can't reach a project's own artifact list today
-    // (project_artifacts' DB CHECK constraint), so it has no bucket here —
-    // skipped rather than assumed away, since `ArtifactItem["type"]` is
-    // statically wider than `ProjectArtifactType`.
-    if (!isProjectArtifactType(a.type)) continue
-    const bucket = (out[a.type] ??= [])
-    bucket.push(a)
-  }
-  return out
-}
-
-function mostRecent(items: ArtifactItem[]): string {
-  let latest = items[0]?.created_at ?? ""
-  for (const it of items) {
-    if (it.created_at > latest) latest = it.created_at
-  }
-  return latest
-}
-
-/** Types the in-place `ProjectArtifactDrawer` can render/route (prd/evidence
- *  markdown-or-HTML, prototype → canvas link). `report`/`ticket_set` have no
- *  in-place viewer, so their rail cards keep opening the browse modal. */
-const IN_PLACE_TYPES: ProjectArtifactType[] = ["prd", "evidence", "prototype"]
 
 // ── Small icons ──
 
@@ -162,11 +93,20 @@ function FolderIcon() {
   )
 }
 
-function PanelIcon() {
+function GearIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function ArtifactsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true">
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <line x1="15" y1="4" x2="15" y2="20" />
+      <path d="M12 3l8.5 4.7L12 12.4 3.5 7.7 12 3z" />
+      <path d="M3.5 12L12 16.7 20.5 12" />
     </svg>
   )
 }
@@ -218,32 +158,6 @@ function ChecklistIcon() {
   )
 }
 
-function RemoveIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-      <line x1="6" y1="6" x2="18" y2="18" />
-      <line x1="18" y1="6" x2="6" y2="18" />
-    </svg>
-  )
-}
-
-function WarnIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
-      <path d="M13 2 3 14h7l-1 8 10-12h-7z" />
-    </svg>
-  )
-}
-
-function ArtifactTypeIcon({ type }: { type: ProjectArtifactType }) {
-  const cfg = TYPE_BADGE[type]
-  return (
-    <span className={styles.artifactIcon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true">
-      <FolderIcon />
-    </span>
-  )
-}
-
 // ── Presentational pieces ──
 
 type ActiveChat = "group" | "individual"
@@ -252,15 +166,13 @@ export type ProjectDetailViewProps = {
   project: ProjectDetail
   artifacts: ArtifactItem[]
   memory: ProjectMemorySummary
-  railCollapsed: boolean
-  onToggleRail: () => void
   activeChat: ActiveChat
   onSelectChat: (chat: ActiveChat) => void
   /** Derived (AD-P3/AD-P20 — never a stored boolean upstream, this is the
    *  server's `unread` field passed straight through): true when the
    *  caller's individual chat has a turn beyond their read cursor. Renders
-   *  a dot on the "My chat with Sprntly" rail row; clears when the row is
-   *  selected (the container POSTs `/individual/read` on that transition). */
+   *  a dot on the top-bar Private tab; clears when the tab is selected
+   *  (the container POSTs `/individual/read` on that transition). */
   individualUnread: boolean
   /** Open-only delegation counts for the Task-ledger rail card, mirrored
    *  from `GET /v1/projects/{id}/delegations/counts` on fetch/poll the same
@@ -290,9 +202,12 @@ export type ProjectDetailViewProps = {
    *  (`AddArtifactModal`) — the rail's create button now attaches an
    *  existing artifact rather than generating a new one (Deliverables). */
   onAddExistingArtifact: () => void
-  onOpenMemory: () => void
   onOpenTasks: () => void
-  onInvite: () => void
+  /** Opens the top-bar "Project settings" gear (`ProjectSettingsModal`),
+   *  landing on its default Instructions tab — the container owns the
+   *  `settingsTab` state and mounts the modal; navigating to a specific tab
+   *  from there happens inside the modal itself (its own tab buttons). */
+  onOpenSettings: () => void
   /** The cross-chat INSIGHT turn (design-spec AC7), fed from
    *  `GET /v1/projects/{id}/memory/insight` — `null` when the project has
    *  no agent-promoted memory entry yet, or the fetch failed (best-effort,
@@ -318,34 +233,28 @@ export type ProjectDetailViewProps = {
 export function ProjectDetailView({
   project,
   artifacts,
-  memory,
-  railCollapsed,
-  onToggleRail,
+  memory: _memory,
   activeChat,
   onSelectChat,
   individualUnread,
-  ledgerCounts,
-  ledgerRows,
+  ledgerCounts: _ledgerCounts,
+  ledgerRows: _ledgerRows,
   onOpenArtifacts,
-  onOpenArtifactInPlace,
+  onOpenArtifactInPlace: _onOpenArtifactInPlace,
   openArtifact,
   onCloseArtifactDrawer,
   onAddExistingArtifact,
-  onOpenMemory,
   onOpenTasks,
-  onInvite,
+  onOpenSettings,
   insightNote,
-  currentUserId,
-  onRemoveMember,
+  currentUserId: _currentUserId,
+  onRemoveMember: _onRemoveMember,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
-  const agent = useMemo(() => project.members.find((m): m is Extract<ProjectMember, { kind: "agent" }> => m.kind === "agent"), [project.members])
-  const byType = useMemo(() => groupArtifactsByType(artifacts), [artifacts])
-  const presentTypes = TYPE_ORDER.filter((t) => (byType[t]?.length ?? 0) > 0)
   // AD-HOC (live-rig): the in-place artifact drawer is a LAYOUT COLUMN, not
-  // an overlay. When one is open it takes the right region (where the rail
-  // sits), the body grid reflows to [ chat | drawer ], the rail hides, and
-  // the chat column to the left stays fully interactive.
+  // an overlay. When one is open it takes the right region (where the
+  // former rail sat), the body grid reflows to [ chat | drawer ], and the
+  // chat column to the left stays fully interactive.
   const drawerOpen = openArtifact != null
 
   return (
@@ -375,7 +284,45 @@ export function ProjectDetailView({
             ))}
           </span>
         ) : null}
+
+        {/* Group ⇆ Private chat switch (redesign: relocated from the
+            standing rail into the top bar — same testids/behaviour). */}
+        <div className={styles.topChatToggle} role="tablist" aria-label="Chat" data-testid="topbar-chat-toggle">
+          <button
+            type="button"
+            role="tab"
+            className={`${styles.chatToggleBtn} ${activeChat === "group" ? styles.chatToggleBtnActive : ""}`}
+            onClick={() => onSelectChat("group")}
+            aria-selected={activeChat === "group"}
+            data-testid="chat-row-group"
+          >
+            <GroupChatIcon />
+            Group
+            <span className={styles.chatToggleDot} title="active now" aria-label="active now" />
+          </button>
+          <button
+            type="button"
+            role="tab"
+            className={`${styles.chatToggleBtn} ${activeChat === "individual" ? styles.chatToggleBtnActive : ""}`}
+            onClick={() => onSelectChat("individual")}
+            aria-selected={activeChat === "individual"}
+            data-testid="chat-row-individual"
+          >
+            <LockIcon />
+            Private
+            {individualUnread ? (
+              <span
+                className={styles.chatRowUnreadDot}
+                title="unread"
+                aria-label="unread"
+                data-testid="individual-chat-unread-dot"
+              />
+            ) : null}
+          </button>
+        </div>
+
         <span className={styles.topSpacer} />
+
         {/* Ambient task ledger — the only entry point back into the
             TaskModal now that its rail card is un-mounted (task work moved
             into chat via `get_task_ledger`). Entry point ONLY: no live
@@ -392,20 +339,34 @@ export function ProjectDetailView({
         <button
           type="button"
           className={styles.railToggle}
-          onClick={onToggleRail}
-          aria-pressed={railCollapsed}
-          data-testid="rail-toggle"
+          onClick={() => onOpenArtifacts()}
+          data-testid="topbar-artifacts"
         >
-          <PanelIcon />
-          {railCollapsed ? "Show panel" : "Hide panel"}
+          <ArtifactsIcon />
+          Artifacts
+          <span className={styles.topbarCount}>{artifacts.length}</span>
+        </button>
+        <button
+          type="button"
+          className={styles.railToggle}
+          onClick={onAddExistingArtifact}
+          data-testid="artifact-add-existing"
+        >
+          <PlusIcon />
+          Add existing artifact
+        </button>
+        <button
+          type="button"
+          className={styles.gearBtn}
+          onClick={onOpenSettings}
+          aria-label="Project settings"
+          data-testid="project-settings-gear"
+        >
+          <GearIcon />
         </button>
       </header>
 
-      <div
-        className={`${styles.body} ${
-          drawerOpen ? styles.bodyDrawerOpen : railCollapsed ? styles.bodyRailCollapsed : ""
-        }`}
-      >
+      <div className={`${styles.body} ${drawerOpen ? styles.bodyDrawerOpen : ""}`}>
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
@@ -440,194 +401,10 @@ export function ProjectDetailView({
 
         {drawerOpen ? (
           // Right region: the in-place artifact drawer, side-by-side with the
-          // still-interactive chat column. Replaces the rail while open;
-          // closing it (its own close control / Escape) restores the rail.
+          // still-interactive chat column (redesign: this is now the ONLY
+          // right-hand column the body grid ever renders — the standing rail
+          // is gone; the chat is full-bleed whenever no artifact is open).
           <ProjectArtifactDrawer artifact={openArtifact} projectId={project.id} onClose={onCloseArtifactDrawer} />
-        ) : !railCollapsed ? (
-          <aside className={styles.rail} aria-label="Project panel" data-testid="project-rail">
-            {/* Compact chat switcher (redesign): the mockup leads the rail with
-                Artifacts, so the group⇆private toggle rides a small segmented
-                control at the top rather than two full rows. Same behavior +
-                test hooks as before. */}
-            <div className={styles.chatToggle} role="tablist" aria-label="Chat" data-testid="rail-chat-toggle">
-              <button
-                type="button"
-                role="tab"
-                className={`${styles.chatToggleBtn} ${activeChat === "group" ? styles.chatToggleBtnActive : ""}`}
-                onClick={() => onSelectChat("group")}
-                aria-selected={activeChat === "group"}
-                data-testid="chat-row-group"
-              >
-                <GroupChatIcon />
-                Group
-                <span className={styles.chatToggleDot} title="active now" aria-label="active now" />
-              </button>
-              <button
-                type="button"
-                role="tab"
-                className={`${styles.chatToggleBtn} ${activeChat === "individual" ? styles.chatToggleBtnActive : ""}`}
-                onClick={() => onSelectChat("individual")}
-                aria-selected={activeChat === "individual"}
-                data-testid="chat-row-individual"
-              >
-                <LockIcon />
-                Private
-                {individualUnread ? (
-                  <span
-                    className={styles.chatRowUnreadDot}
-                    title="unread"
-                    aria-label="unread"
-                    data-testid="individual-chat-unread-dot"
-                  />
-                ) : null}
-              </button>
-            </div>
-
-            <div className={styles.railSectionLabel} data-testid="rail-section-label">
-              Artifacts
-              {artifacts.length > 0 ? <span className={styles.railSectionCount}>{artifacts.length}</span> : null}
-            </div>
-            {presentTypes.map((t) => {
-              const items = byType[t] ?? []
-              const cfg = TYPE_BADGE[t]
-              // Single openable artifact → open it directly in the in-place
-              // drawer (no modal). Multiple of an openable type → the browse
-              // modal (pick which). Non-in-place types (report/ticket_set) →
-              // always the modal, unchanged.
-              const openInPlace = IN_PLACE_TYPES.includes(t) && items.length === 1
-              return (
-                <button
-                  type="button"
-                  key={t}
-                  className={styles.artifactCard}
-                  onClick={() => (openInPlace ? onOpenArtifactInPlace(items[0]) : onOpenArtifacts(t))}
-                  aria-label={openInPlace ? `Open ${cfg.label}` : `Browse ${cfg.label} artifacts`}
-                  data-testid={`artifact-card-${t}`}
-                >
-                  <ArtifactTypeIcon type={t} />
-                  <div className={styles.artifactMain}>
-                    <div className={styles.artifactTitle}>{cfg.label}</div>
-                    <div className={styles.artifactSub} data-testid={`artifact-card-${t}-sub`}>
-                      {items.length} item{items.length === 1 ? "" : "s"} · updated {relativeTime(mostRecent(items))}
-                    </div>
-                  </div>
-                  <span className={styles.artifactOpen} aria-hidden="true">
-                    &#8599;
-                  </span>
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              className={`${styles.artifactCard} ${styles.artifactCreate}`}
-              onClick={onAddExistingArtifact}
-              data-testid="artifact-add-existing"
-            >
-              <span className={styles.artifactPlus} aria-hidden="true">
-                <PlusIcon />
-              </span>
-              Add existing artifact — from your company's library
-            </button>
-
-            <div className={styles.railSectionLabel} data-testid="rail-section-label">
-              Project Settings
-            </div>
-            <div className={styles.card} data-testid="memory-card">
-              <div className={styles.cardHead}>
-                <h4>
-                  <ClockIcon />
-                  Memory
-                </h4>
-                <span className={styles.cardCount}>{memory.entry_count}</span>
-              </div>
-              <div className={styles.teaser} data-testid="memory-teaser">
-                <div className={styles.teaserSrc}>What this project knows · read-only</div>
-                {firstSentence(memory.summary_md)}
-              </div>
-              <div className={styles.cardActions}>
-                <button type="button" className={styles.viewAllBtn} onClick={onOpenMemory} data-testid="memory-view-all">
-                  View memory
-                </button>
-              </div>
-            </div>
-
-            {/* Task-ledger rail card UN-MOUNTED from this location (non-
-                destructive — task work returns later). `ledgerCounts`/
-                `ledgerRows`/`onOpenTasks`/`ledgerVersion`/`projectsApi.ledger*`/
-                `TaskModal` (still mounted below for `railModal?.kind ===
-                "tasks"`) all remain imported/defined/importable. */}
-
-            <div className={styles.railSectionLabel} data-testid="rail-section-label">
-              Members
-              <span className={styles.railSectionCount}>{project.members.length}</span>
-            </div>
-            {humans.map((m) => {
-              // Removable-row rule (AC3): never the project creator, never
-              // the caller themselves. The agent member never reaches this
-              // loop at all (it's rendered separately below).
-              const removable = m.user_id !== project.created_by && m.user_id !== currentUserId
-              return (
-                <div className={styles.memberRow} key={m.user_id} data-testid="member-row-human">
-                  <span className={styles.memberAv} aria-hidden="true" style={personAvatarStyle(m.user_id, m.name)}>
-                    {initials(m.name)}
-                  </span>
-                  <div className={styles.memberMain}>
-                    <div className={styles.memberName}>{m.name ?? "Unnamed member"}</div>
-                    <div className={styles.memberRole}>{m.job_role || "Member"}</div>
-                  </div>
-                  {removable ? (
-                    <button
-                      type="button"
-                      className={styles.memberRemoveBtn}
-                      onClick={() => onRemoveMember(m)}
-                      aria-label={`Remove ${m.name ?? "member"} from project`}
-                      title="Remove from project"
-                      data-testid="member-remove"
-                    >
-                      <RemoveIcon />
-                    </button>
-                  ) : null}
-                </div>
-              )
-            })}
-            {agent ? (
-              <div className={`${styles.memberRow} ${styles.memberRowAgent}`} data-testid="member-row-agent">
-                <span className={styles.agentAv} aria-hidden="true">
-                  s
-                </span>
-                <div className={styles.memberMain}>
-                  <div className={styles.memberName}>
-                    {agent.name} <span className={styles.agentTag}>Agent</span>
-                  </div>
-                  <div className={styles.memberRole}>{agent.role_label}</div>
-                </div>
-                <span
-                  className={styles.workingPill}
-                  role="status"
-                  aria-label={`Sprntly — ${agent.status}`}
-                  data-testid="agent-working-status"
-                >
-                  {agent.status}
-                </span>
-              </div>
-            ) : null}
-            <div className={styles.inviteRow}>
-              <input className={styles.inviteInput} placeholder="Invite by email…" aria-label="Invite by email" />
-              <button type="button" className={styles.inviteBtn} onClick={onInvite} data-testid="invite-button">
-                Invite
-              </button>
-            </div>
-            <div className={styles.tagNote}>
-              <WarnIcon />
-              <div>
-                <b>Tag anyone by email — even non-members.</b> They get an invite, create an account, and land
-                straight in this project.{" "}
-                <span className={styles.fastFollowBadge} style={{ marginLeft: 2 }}>
-                  Fast-follow
-                </span>
-              </div>
-            </div>
-          </aside>
         ) : null}
       </div>
     </div>
@@ -651,12 +428,13 @@ type LoadState =
       insight: ProjectMemoryInsight | null
     }
 
-/** Which of this ticket's rail-triggered modals is open, if any. `artifacts`
- *  carries the type the rail card/inline chip was opened FOR (or `undefined`
- *  for the generic "View all"/chip-less opens) — the modal itself owns the
- *  filter-chip state from there. */
+/** Which of this ticket's top-bar-triggered modals is open, if any.
+ *  `artifacts` carries the type the top-bar chip was opened FOR (or
+ *  `undefined` for the generic "View all"/chip-less opens) — the modal
+ *  itself owns the filter-chip state from there. Memory no longer has its
+ *  own variant here — it's a tab inside `ProjectSettingsModal` now (a
+ *  separate `settingsTab` state below), reached via the top-bar gear. */
 type OpenModal =
-  | { kind: "memory" }
   | { kind: "artifacts"; type?: ProjectArtifactType }
   | { kind: "tasks" }
   | { kind: "add-artifact" }
@@ -675,10 +453,14 @@ export function ProjectDetailScreen({
   const auth = useAuth()
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
-  const [railCollapsed, setRailCollapsed] = useState(false)
   const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
   const [railModal, setRailModal] = useState<OpenModal>(null)
-  const [inviteOpen, setInviteOpen] = useState(false)
+  // The top-bar gear's "Project settings" modal — `null` = closed, a tab
+  // value = open on that tab. Replaces the standalone `MemoryModal`/
+  // `ProjectInviteModal` mounts (folded into this modal's Memory/Invite
+  // tabs) AND the old rail's collapse toggle (there is no rail to collapse
+  // any more — the chat is full-bleed whenever this is closed).
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null)
   const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
@@ -911,16 +693,17 @@ export function ProjectDetailScreen({
       })
   }, [projectId])
 
-  const onToggleRail = useCallback(() => setRailCollapsed((v) => !v), [])
-  // The project rail's Invite opens the PROJECT-scoped surface — the
-  // current-members list + real `/tag` add — NOT the global mock InviteModal
-  // (empty email rows + toast stub), which stays for its other call sites.
-  const onInvite = useCallback(() => setInviteOpen(true), [])
-  // The memory/artifacts/task/add-artifact modals below are this ticket's
-  // bodies for these rail-card triggers.
+  // The top-bar gear opens the settings modal on its default (Instructions)
+  // tab — navigating to a specific tab from there happens inside the modal
+  // itself, via its own tab buttons. Replaces the old rail's separate
+  // Invite/Memory triggers (`onInvite`/`onOpenMemory`), both folded into
+  // this one modal's tabs.
+  const onOpenSettings = useCallback(() => setSettingsTab("instructions"), [])
+  const onCloseSettings = useCallback(() => setSettingsTab(null), [])
+  // The artifacts/task/add-artifact modals below are this ticket's bodies
+  // for these top-bar triggers.
   const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
   const onAddExistingArtifact = useCallback(() => setRailModal({ kind: "add-artifact" }), [])
-  const onOpenMemory = useCallback(() => setRailModal({ kind: "memory" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
   // Re-fetches ONLY the project's artifact list — the AddArtifactModal's
   // `onAdded` callback (a pick just wrote `project_artifacts` rows
@@ -1037,8 +820,6 @@ export function ProjectDetailScreen({
         artifacts={state.artifacts}
         memory={state.memory}
         insightNote={state.insight}
-        railCollapsed={railCollapsed}
-        onToggleRail={onToggleRail}
         activeChat={activeChat}
         onSelectChat={onSelectChat}
         individualUnread={individualUnread}
@@ -1049,9 +830,8 @@ export function ProjectDetailScreen({
         openArtifact={openArtifact}
         onCloseArtifactDrawer={onCloseArtifactDrawer}
         onAddExistingArtifact={onAddExistingArtifact}
-        onOpenMemory={onOpenMemory}
         onOpenTasks={onOpenTasks}
-        onInvite={onInvite}
+        onOpenSettings={onOpenSettings}
         currentUserId={currentUserId}
         onRemoveMember={onRemoveMember}
       />
@@ -1066,11 +846,16 @@ export function ProjectDetailScreen({
         onConfirm={onConfirmRemove}
         onCancel={onCancelRemove}
       />
-      <MemoryModal
+      <ProjectSettingsModal
+        open={settingsTab !== null}
+        onClose={onCloseSettings}
         projectId={projectId}
-        members={state.project.members}
-        open={railModal?.kind === "memory"}
-        onClose={onCloseRailModal}
+        project={state.project}
+        memory={state.memory}
+        currentUserId={currentUserId}
+        onRemoveMember={onRemoveMember}
+        onInvited={refetchProject}
+        initialTab={settingsTab ?? "instructions"}
       />
       <ArtifactsModal
         projectId={projectId}
@@ -1091,12 +876,6 @@ export function ProjectDetailScreen({
         existingKeys={new Set(state.artifacts.map((a) => `${a.type}-${a.id}`))}
         onClose={onCloseRailModal}
         onAdded={refetchArtifacts}
-      />
-      <ProjectInviteModal
-        projectId={projectId}
-        open={inviteOpen}
-        onClose={() => setInviteOpen(false)}
-        onInvited={refetchProject}
       />
     </AppLayout>
   )
