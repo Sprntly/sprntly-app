@@ -125,11 +125,73 @@ _CIR_VETO = re.compile(
     re.I,
 )
 
+# ── Market-intelligence report intent ────────────────────────────────────────
+# The sibling of CIR, and the reason it needs its own shape: CIR answers "how do
+# we stand against these rivals", this answers "what happened to the CATEGORY" —
+# funding, M&A, entrants, category movement, regulation, analyst coverage.
+#
+# `_CIR_SUBJECT` admits "market", so before this rule existed EVERY market-plus-
+# report-noun phrasing fast-pathed into CIR, including "market intelligence
+# report" — the new report's own name. Reassigning those is the point, not a
+# side effect. What deliberately STAYS with CIR is the us-versus-them family
+# ("how do we compare to the market", "benchmark us against the market", "where
+# do we stand vs the market"): those are comparisons against our position, which
+# is CIR's question whatever noun they use. That separation is why the noun list
+# below is narrower than `_CIR_REPORT_NOUN` — it omits `benchmark`, and it omits
+# `study`/`deep dive`, whose bare-market phrasings are pinned as haiku-router
+# deferrals in tests/test_cir_routing_phrases.py and are left exactly there.
+_MI_SUBJECT = r"(?:market|categor(?:y|ies)|industry|sector)"
+# `landscape` is deliberately ABSENT and stays CIR's. "market landscape" is
+# PM usage for the competitive landscape — who is in the category and where we
+# sit in it — not for a news sweep of the category, and it is pinned to CIR in
+# tests/test_cir_routing_phrases.py. `benchmark` and `study`/`deep dive` are out
+# for the same kind of reason: comparison shapes and general-study phrasings
+# already have owners.
+_MI_REPORT_NOUN = (
+    r"(?:intelligence|intel|report|briefing|brief|round-?up|digest|"
+    r"update|overview|scan)"
+)
+_MI_SUBJECT_B = rf"\b{_MI_SUBJECT}\b"
+
+_MI_REPORT_RULE_SRC = (
+    # "market intelligence", "market report", "industry landscape",
+    # "monthly category scan", "quarterly market briefing".
+    rf"\b{_MI_SUBJECT}\s+(?:\w+\s+){{0,2}}{_MI_REPORT_NOUN}\b"
+    # "report on the market", "briefing on our category", "roundup of the
+    # industry".
+    rf"|\b{_MI_REPORT_NOUN}\s+(?:of|on|for|across)\s+"
+    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_MI_SUBJECT_B}"
+)
+
+# Market SIZING is not market intelligence: "what's the TAM", "market sizing
+# report", "market structure", "five forces" are analytical frameworks over a
+# category, not a news sweep of it. `_CIR_VETO` already defers them to the haiku
+# router and tests pin that; this veto keeps the new rule from quietly claiming
+# them on its way past. The own-data half is the same guard for the same reason:
+# "the market data I uploaded" is a DS question about a spreadsheet.
+#
+# The COMPETITOR half is the load-bearing one. This rule sits above CIR, and a
+# market-shaped noun phrase can carry a competitor subject — "competitive
+# landscape report for our category" is a CIR ask that happens to say
+# "category", and is pinned to CIR. Naming competitors, the competition or
+# rivals means the question is about our position against them, which is CIR's
+# whatever else the sentence contains; so MI defers the moment one appears.
+_MI_VETO = re.compile(
+    r"\b(?:competitors?|competition|competitive|rivals?)\b"
+    r"|\bmarket\s+structure\b|\bfive\s+forces\b|\bporter'?s\b"
+    r"|\bmarket\s+siz\w+\b|(?-i:\b(?:TAM|SAM|SOM)\b)"
+    r"|\buploaded?\b|\b(?:my|our)\s+data\b|\bthe\s+data\b"
+    r"|\b(?:csvs?|spreadsheets?|excel|xlsx?)\b",
+    re.I,
+)
+
+
 # skill_id → veto pattern. When a rule matches but its veto also matches, the
 # fast-path DEFERS (falls through to the remaining rules, then the haiku router)
 # rather than claiming a question that belongs to a sibling skill.
 _RULE_VETOES: dict[str, re.Pattern] = {
     "competitive-intelligence-review": _CIR_VETO,
+    "market-intelligence-report": _MI_VETO,
 }
 
 
@@ -213,6 +275,17 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
                 r"\b(offer|sell|charge)\b", re.I),
      "company-research", "Deep company research", 0.85),
 
+    # Market intelligence — what happened to the CATEGORY (funding, M&A,
+    # entrants, category movement, regulation, analyst coverage).
+    #
+    # ABOVE the CIR rule and below company-research, which is the only ordering
+    # that works. Above CIR because `_CIR_SUBJECT` admits "market", so CIR would
+    # otherwise claim "market intelligence report" — this report's own name.
+    # Below company-research because "research our market" is an inward ask
+    # about our own positioning, and first-match-wins keeps it there.
+    (re.compile(_MI_REPORT_RULE_SRC, re.I),
+     "market-intelligence-report", "Market intelligence report", 0.85),
+
     # Competitive intelligence — REPORT-INTENT shapes only.
     #
     # This rule used to be `\b(competit|competitor|competitive analysis|market
@@ -239,7 +312,7 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
 # un-ships a capability rather than degrading it. `test_skill_router.py` pins
 # the set against the rules and against qa_agent's dispatch.
 #
-# All four have rules above; the set is stated separately because `pinned_skill`
+# All five have rules above; the set is stated separately because `pinned_skill`
 # (Slack's `/competitive` command) and the classifier can also name one without
 # a rule firing.
 PIPELINE_SKILLS: frozenset[str] = frozenset({
@@ -247,6 +320,7 @@ PIPELINE_SKILLS: frozenset[str] = frozenset({
     "public-feedback-report",
     "company-research",
     "competitive-intelligence-review",
+    "market-intelligence-report",
 })
 
 

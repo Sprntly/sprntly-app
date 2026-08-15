@@ -335,11 +335,15 @@ def test_every_spec_skill_matches_its_engine_constant():
     engines stamp on their payloads, or `_is_report` rejects every real run
     and the company silently gets no reports at all."""
     from app.competitive_intel import CIR_SKILL
+    from app.market_intel import MI_SKILL
     from app.public_feedback import PF_SKILL
 
     assert mr.CIR_SPEC.skill == CIR_SKILL
     assert mr.PF_SPEC.skill == PF_SKILL
-    assert [s.skill for s in mr.MONTHLY_REPORT_SPECS] == [CIR_SKILL, PF_SKILL]
+    assert mr.MI_SPEC.skill == MI_SKILL
+    assert [s.skill for s in mr.MONTHLY_REPORT_SPECS] == [
+        CIR_SKILL, PF_SKILL, MI_SKILL,
+    ]
 
 
 def test_spec_questions_are_unique_per_skill():

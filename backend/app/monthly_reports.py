@@ -1,7 +1,7 @@
 """Monthly scheduled intelligence reports — run, save into the library, announce.
 
-The intelligence reports (competitive-intelligence-review today; market
-intelligence and 3P feedback follow) have always been PULL: someone remembers
+The intelligence reports (competitive intelligence, 3P feedback and market
+intelligence) have always been PULL: someone remembers
 to ask, a multi-minute web sweep runs, the answer lands in that chat and
 nowhere else. This module makes them PUSH on a monthly cadence: once a month,
 per company, each registered report runs headlessly, the finished document is
@@ -147,10 +147,33 @@ PF_SPEC = ReportSpec(
     runner=_run_pf,
 )
 
-# The monthly roster. A market-intelligence report joins here when its engine
-# lands — the tick, both ledgers, and delivery already handle N, and each
-# entry is independent: one spec degrading or raising never touches another.
-MONTHLY_REPORT_SPECS: tuple[ReportSpec, ...] = (CIR_SPEC, PF_SPEC)
+def _run_mi(company: dict) -> dict | None:
+    """Run the market-intelligence engine headlessly for one company.
+
+    Lazy import for the same reason as `_run_cir`.
+    """
+    from app import market_intel
+
+    return market_intel.answer(
+        enterprise_id=company["id"],
+        question=MI_SPEC.question,
+    )
+
+
+# Unlike the other two this question has no routing contract to satisfy — the
+# module has no query mode to be diverted into — but it is still the durable
+# ledger marker, so it is an identifier and must stay stable.
+MI_SPEC = ReportSpec(
+    skill="market-intelligence-report",
+    question="Scheduled monthly market intelligence report",
+    label="Market Intelligence report",
+    runner=_run_mi,
+)
+
+# The monthly roster. Each entry is independent: one spec degrading, raising,
+# or being suppressed never touches another, and the tick, both ledgers and
+# delivery are all written for N.
+MONTHLY_REPORT_SPECS: tuple[ReportSpec, ...] = (CIR_SPEC, PF_SPEC, MI_SPEC)
 
 
 # In-memory once-per-cycle ATTEMPT ledger, (company_id, skill) → aware UTC

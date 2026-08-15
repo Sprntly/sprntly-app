@@ -2743,6 +2743,25 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
+    # Market-intelligence routed: the report is public-web news about the
+    # CATEGORY (funding, M&A, entrants, category movement, regulation, analyst
+    # coverage), which the generic skill answer can't reach — the KG holds
+    # first-party signal, not the trade press. Run the dedicated web-search
+    # pipeline instead; it returns None only when the company profile can't be
+    # read, falling through to the generic answer.
+    if decision.skill_id == "market-intelligence-report":
+        from app import market_intel
+
+        mi = market_intel.answer(
+            enterprise_id=enterprise_id, question=question, history=history,
+            # The capture is paid web search and the synthesis is a
+            # document-scale call; the boundary between them is a cancellation
+            # checkpoint, so a Stop actually stops the second spend.
+            is_cancelled=is_cancelled,
+        )
+        if mi is not None:
+            return _maybe_verify(mi, enterprise_id)
+
     # VoC routed by ANY stage — including the haiku intent router. One path
     # answers it, and that path reads BOTH halves of the evidence: the live call
     # sources and the knowledge graph. A phrasing only the LLM router
