@@ -124,6 +124,14 @@ type LocalTurn = {
   pending: boolean
   stopped: boolean
   error: string | null
+  /** Live token stream, display-only — mirrors the main chat surface's own
+   *  `onPartial` shape (its thread turn's `partial`/`streamDropped` fields).
+   *  The poll's authoritative `reply` above always replaces it once the ask
+   *  settles. */
+  partial?: string
+  /** The live preview channel dropped mid-answer while the poll carries on —
+   *  a display downgrade, never an error (the poll is still authoritative). */
+  streamDropped?: boolean
 }
 
 export type ProjectIndividualChatProps = {
@@ -438,10 +446,27 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
             project_id: Number(projectId),
             conversation_id: conversationId,
             isStopped: () => stoppedRef.current,
+            // Live token stream, mirroring the main chat surface's own
+            // ask-path `onPartial` block: the accumulating answer markdown
+            // renders in place of the wait state as the model writes it.
+            // Display only — the poll's authoritative `reply` below still
+            // replaces it.
+            onPartial: (text) => {
+              setTurns((prev) => prev.map((t) =>
+                t.id === id && !t.reply && !t.stopped ? { ...t, partial: text, streamDropped: false } : t,
+              ))
+            },
+            onStreamDrop: () => {
+              setTurns((prev) => prev.map((t) =>
+                t.id === id && !t.reply && !t.stopped ? { ...t, streamDropped: true } : t,
+              ))
+            },
           }),
         )
         .then((reply) => {
-          setTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false } : t)))
+          setTurns((prev) => prev.map((t) =>
+            t.id === id ? { ...t, reply, pending: false, partial: undefined, streamDropped: undefined } : t,
+          ))
         })
         .catch((err: unknown) => {
           if (err instanceof AskStoppedError) {
@@ -651,9 +676,25 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.question}</ReactMarkdown>
             </div>
             {turn.pending ? (
-              <div className={styles.agentTurn} data-testid="ic-msg-pending">
-                <AssistantWaitState compact />
-              </div>
+              turn.partial ? (
+                // Rung 4/5: live token stream — the accumulating answer
+                // markdown renders as the model writes it, no simulated
+                // typing. Mirrors the main chat's own streaming wait state.
+                <div className={styles.agentTurn} data-testid="ic-msg-streaming">
+                  <AssistantWaitState compact streaming streamDropped={turn.streamDropped}>
+                    <AskReplyBody
+                      reply={{
+                        answer: turn.partial, key_points: [], citations: [],
+                        confidence: 0, unanswered: "",
+                      } as unknown as AskResponse}
+                    />
+                  </AssistantWaitState>
+                </div>
+              ) : (
+                <div className={styles.agentTurn} data-testid="ic-msg-pending">
+                  <AssistantWaitState compact />
+                </div>
+              )
             ) : turn.stopped ? (
               <div className={styles.agentTurn} data-testid="ic-msg-stopped">
                 You stopped this response.
@@ -704,9 +745,6 @@ export function ProjectIndividualChat({ projectId, onOpenArtifact, insightNote }
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
           onFileSelect={() => {}}
-          voiceSupported={false}
-          voiceListening={false}
-          onToggleVoice={() => {}}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>

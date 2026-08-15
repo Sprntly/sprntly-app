@@ -657,3 +657,26 @@ describe("ProjectGroupChat — save as artifact (agent turns only, v1)", () => {
     expect(retryBtn.textContent).toBe("Save as artifact")
   })
 })
+
+// Was `voiceSupported={false}` — the composer's shared default-on wiring now
+// offers the mic here like every other composer consumer.
+describe("ProjectGroupChat — voice (shared composer default)", () => {
+  beforeEach(() => {
+    ;(window as unknown as Record<string, unknown>).webkitSpeechRecognition = class {
+      start() {}
+      stop() {}
+      abort() {}
+    }
+  })
+  afterEach(() => {
+    delete (window as unknown as Record<string, unknown>).webkitSpeechRecognition
+  })
+
+  it("renders a live mic — no more voiceSupported={false} hard-disable", async () => {
+    const src = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
+    expect(src).not.toContain("voiceSupported={false}")
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await waitFor(() => expect(screen.getByLabelText("Dictate your question")).toBeTruthy())
+  })
+})

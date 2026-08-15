@@ -204,6 +204,15 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const cursorRef = useRef<number | undefined>(undefined)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // The ONLY remaining job of an in-flight guard: block a double-submit of
+  // the EXACT same draft (a rapid double click/double-Enter before the
+  // composer clears). The backend already backgrounds the agent reply
+  // (`post_group_turn_route` returns once the human turn is persisted + the
+  // gate has decided, never after the reply generates) — so nothing here
+  // waits on it, and a DIFFERENT draft is never blocked by an earlier send
+  // still settling. Set the instant a send starts, cleared the instant the
+  // POST is acknowledged (not after the follow-up reconcile fetch).
+  const inFlightDraftRef = useRef<string | null>(null)
   // The scrollable message viewport — pinned to the newest turn on (re)load and
   // as new turns arrive, like a normal chat. See the scroll-to-bottom effect.
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -537,21 +546,24 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
 
   const handleSend = useCallback(() => {
     const content = draft.trim()
-    if (content.length < DRAFT_MIN_CHARS || posting) return
+    if (content.length < DRAFT_MIN_CHARS) return
+    // Double-submit guard for the SAME draft only (see the ref's doc above) —
+    // a ref, not the `posting` state, so it is synchronously visible even to
+    // a second dispatch that lands before this render's `posting` update has
+    // flushed. A DIFFERENT draft (content changed) is never blocked here.
+    if (inFlightDraftRef.current === content) return
+    inFlightDraftRef.current = content
     setPosting(true)
     setError(null)
     // Optimistic clear: empty the composer the INSTANT the send starts, not
-    // after the POST resolves — which only happens once a best-effort
-    // mention reply completes (backend/app/routes/projects.py's
-    // post_group_turn_route), so waiting that long left the box holding
-    // stale text through the whole round trip.
+    // after the POST resolves.
     setDraft("")
     // Optimistic turn: render the sender's OWN turn the INSTANT they hit
-    // send — the POST resolves only after a best-effort agent reply runs, so
-    // with a degraded transport the human turn was invisible for seconds. The
-    // negative id keeps it out of `knownTurnIdsRef`/`cursorRef`; `applyTurns`
-    // swaps it for the real turn when it lands (broadcast or reconcile), so
-    // there is no duplicate.
+    // send — the POST's own gate decision (mention/solo/should_respond) adds
+    // a beat before it resolves, so with a degraded transport the human turn
+    // was invisible for seconds. The negative id keeps it out of
+    // `knownTurnIdsRef`/`cursorRef`; `applyTurns` swaps it for the real turn
+    // when it lands (broadcast or reconcile), so there is no duplicate.
     const tempId = optimisticIdRef.current
     optimisticIdRef.current -= 1
     const optimisticTurn: GroupTurn = {
@@ -567,14 +579,20 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     projectsApi
       .postGroupTurn(projectId, content)
       .then(() => {
-        // The POST resolves only after a best-effort mention reply completes
-        // (backend/app/routes/projects.py's post_group_turn_route), so a poll
-        // right after it reliably picks up both the human turn and any agent
-        // reply in one round trip.
+        // The POST resolves once the human turn is persisted + broadcast +
+        // the gate has decided — NOT after the agent reply, which the
+        // backend backgrounds (`routes/projects.py`'s `post_group_turn_route`
+        // / `_schedule_group_reply`) and delivers via the `project:{id}`
+        // realtime broadcast + this reconcile poll (or the 4s interval poll
+        // above, whichever lands first). Clearing the double-submit guard
+        // here — not after this poll — is what lets the composer take the
+        // NEXT draft immediately; nothing about the reply gates it.
+        inFlightDraftRef.current = null
         return projectsApi.groupTurns(projectId, cursorRef.current)
       })
       .then(applyTurns)
       .catch(() => {
+        inFlightDraftRef.current = null
         setError("Couldn't send that. Try again.")
         // Roll back the optimistic turn so a failed POST leaves no ghost.
         setTurns((prev) => prev.filter((t) => t.id !== tempId))
@@ -585,7 +603,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       .finally(() => {
         setPosting(false)
       })
-  }, [draft, posting, projectId, applyTurns, myUserId, myName])
+  }, [draft, projectId, applyTurns, myUserId, myName])
 
   // Idempotent per-turn save (UI-side guard — the backend does not dedupe
   // this endpoint). A turn already saved or already in flight is a no-op.
@@ -614,10 +632,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   // one still awaiting whatever comes next — v1 has no should-respond
   // classifier (AD-P10 is a later phase), so this is informational ("no
   // reply yet"), never a claim that the agent considered and declined.
-  // Suppressed while a send is in flight: during `posting` a reply may
-  // still be generating (the POST runs the best-effort reply before it
-  // resolves), so showing "stayed out" then is wrong — it's pending, not
-  // declined. The badge returns once posting settles and no reply arrived.
+  // Suppressed while this send's own POST + reconcile poll are in flight
+  // (`posting`): the backgrounded agent reply (see `handleSend`'s doc above)
+  // may still land any moment, so showing "stayed out" then is wrong — it's
+  // pending, not declined. The badge returns once posting settles and no
+  // reply arrived. Purely a display suppression window — it no longer has
+  // anything to do with whether the composer can take another message.
   const showStayedOut = !!lastTurn && lastTurn.role === "user" && !posting
 
   const rows = useMemo(
@@ -857,7 +877,14 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
 
       <div className={styles.composerWrap}>
         <ChatComposer
-          busy={posting}
+          // NOT `posting`: there is no group Stop UI (spec §6.2 keeps group
+          // streaming/Stop out), so `busy` swapping Send for a no-op Stop
+          // button was the actual composer-blocking bug — a member could not
+          // send a second message while the first send's own reconcile poll
+          // was still in flight. Always `false` here; the double-submit guard
+          // above is the only remaining in-flight protection, and Send
+          // itself is only ever disabled by an empty/too-short draft.
+          busy={false}
           draft={draft}
           pinnedSkill={null}
           attachments={[]}
@@ -906,9 +933,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           onRemoveAttachment={() => {}}
           onRemoveSkill={() => {}}
           onFileSelect={() => {}}
-          voiceSupported={false}
-          voiceListening={false}
-          onToggleVoice={() => {}}
           placeholder={COMPOSER_PLACEHOLDER}
         />
       </div>
