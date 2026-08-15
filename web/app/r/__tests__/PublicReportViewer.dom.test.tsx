@@ -107,6 +107,27 @@ describe("PublicReportViewer", () => {
     expect(screen.queryByTestId("saved-chat-markdown")).toBeNull()
   })
 
+  it("renders a scheduled monthly report (markdown body, report skill) as markdown", async () => {
+    // A scheduled monthly run (app.monthly_reports) saves the report skill's
+    // markdown answer — same skill id as legacy HTML rows, markdown body. The
+    // body sniff, not the skill id, decides the renderer.
+    publicGet.mockResolvedValue({
+      title: "Competitive Intelligence report · June 2026",
+      kind: "Competitive Intelligence",
+      skill: "competitive-intelligence-review",
+      html: "## Competitive review\n\n**Acme** shipped X",
+      created_at: "2026-08-01T06:00:00+00:00",
+    })
+
+    await mount()
+
+    await waitFor(() => expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy())
+    const body = screen.getByTestId("saved-chat-markdown")
+    expect(body.querySelector("h2")?.textContent).toBe("Competitive review")
+    expect(body.querySelector("strong")?.textContent).toBe("Acme")
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+
   it("never shows internal provenance to an outsider", async () => {
     publicGet.mockResolvedValue(REPORT)
 

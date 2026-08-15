@@ -275,6 +275,35 @@ describe("ReportsTab — a skill='saved-chat' report renders as markdown", () =>
   })
 })
 
+describe("ReportsTab — a scheduled monthly report (markdown body, report skill)", () => {
+  it("renders as markdown: the body decides, not only the skill id", async () => {
+    // A scheduled monthly run (app.monthly_reports) saves the report skill's
+    // markdown answer — same skill id as the legacy HTML-document rows, but
+    // the stored body is markdown. The sniff routes it to the markdown
+    // renderer; handing it to the iframe would show a wall of raw markdown.
+    reportGet.mockResolvedValue({
+      id: 8, skill: "competitive-intelligence-review",
+      title: "Competitive Intelligence report · June 2026", question: "",
+      html: "## Competitive review\n\n**Acme** shipped X\n\n- One\n- Two",
+      created_at: new Date().toISOString(), conversation_id: 77, prd_id: null,
+      share_mode: "private", share_token: null,
+    })
+
+    await renderTab()
+    await act(async () => {
+      fireEvent.click(document.querySelector('[data-report-id="8"]') as HTMLElement)
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy(),
+    )
+    const body = screen.getByTestId("saved-chat-markdown")
+    expect(body.querySelector("h2")?.textContent).toBe("Competitive review")
+    expect(body.querySelector("strong")?.textContent).toBe("Acme")
+    expect(document.querySelector("iframe")).toBeNull()
+  })
+})
+
 describe("ReportsTab — nothing to show", () => {
   it("says the chat has no reports", async () => {
     await renderTab([])
