@@ -232,6 +232,10 @@ export type ArtifactsModalViewProps = {
   onSelect: (a: ArtifactItem) => void
   onOpen: (a: ArtifactItem) => void
   onClose: () => void
+  /** Opens the "Add existing artifact" company-library picker
+   *  (`AddArtifactModal`) — the trigger used to live in the top bar; this
+   *  ticket relocates it into the modal header, same handler underneath. */
+  onAddExisting: () => void
 }
 
 export function ArtifactsModalView({
@@ -244,6 +248,7 @@ export function ArtifactsModalView({
   onSelect,
   onOpen,
   onClose,
+  onAddExisting,
 }: ArtifactsModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
@@ -318,9 +323,23 @@ export function ArtifactsModalView({
             </h2>
             <p className="modal-sub">Everything this project has produced — click a row to preview it inline.</p>
           </div>
-          <button type="button" className="modal-close" onClick={onClose} aria-label="Close" data-testid="artifacts-modal-close">
-            <IconClose size={16} title="Close" />
-          </button>
+          <div className={styles.headActions}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={onAddExisting}
+              data-testid="artifacts-modal-add-existing"
+            >
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Add existing artifact
+            </button>
+            <button type="button" className="modal-close" onClick={onClose} aria-label="Close" data-testid="artifacts-modal-close">
+              <IconClose size={16} title="Close" />
+            </button>
+          </div>
         </div>
 
         <div className="modal-body" data-testid="artifacts-modal-body">
@@ -423,6 +442,7 @@ export function ArtifactsModal({
   initialFilter,
   onClose,
   onOpenInPlace,
+  onAddExisting,
 }: {
   projectId: number | string
   open: boolean
@@ -433,6 +453,10 @@ export function ArtifactsModal({
    *  screen mounts a self-contained `ProjectArtifactDrawer` that renders the
    *  real body. Falls back to the deep-link navigation when absent. */
   onOpenInPlace?: (a: ArtifactItem) => void
+  /** Opens the "Add existing artifact" company-library picker — the caller
+   *  owns the actual modal swap (a mutually-exclusive `railModal` state on
+   *  `ProjectDetailScreen`), this container just forwards the trigger. */
+  onAddExisting: () => void
 }) {
   const router = useRouter()
   const [state, setState] = useState<LoadState>({ status: "loading" })
@@ -486,6 +510,7 @@ export function ArtifactsModal({
       onSelect={setSelected}
       onOpen={handleOpen}
       onClose={onClose}
+      onAddExisting={onAddExisting}
     />
   )
 }

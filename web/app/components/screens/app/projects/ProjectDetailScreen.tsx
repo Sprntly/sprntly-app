@@ -143,15 +143,6 @@ function ClockIcon() {
   )
 }
 
-function PlusIcon() {
-  return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-      <line x1="12" y1="5" x2="12" y2="19" />
-      <line x1="5" y1="12" x2="19" y2="12" />
-    </svg>
-  )
-}
-
 function ChecklistIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -201,10 +192,6 @@ export type ProjectDetailViewProps = {
   openArtifact: ArtifactItem | null
   /** Closes the in-place drawer and restores the rail. */
   onCloseArtifactDrawer: () => void
-  /** Opens the "Add existing artifact" company-library picker
-   *  (`AddArtifactModal`) — the rail's create button now attaches an
-   *  existing artifact rather than generating a new one (Deliverables). */
-  onAddExistingArtifact: () => void
   onOpenTasks: () => void
   /** Opens the top-bar "Project settings" gear (`ProjectSettingsModal`),
    *  landing on its default Instructions tab — the container owns the
@@ -246,7 +233,6 @@ export function ProjectDetailView({
   onOpenArtifactInPlace: _onOpenArtifactInPlace,
   openArtifact,
   onCloseArtifactDrawer,
-  onAddExistingArtifact,
   onOpenTasks,
   onOpenSettings,
   insightNote,
@@ -348,15 +334,6 @@ export function ProjectDetailView({
           <ArtifactsIcon />
           Artifacts
           <span className={styles.topbarCount}>{artifacts.length}</span>
-        </button>
-        <button
-          type="button"
-          className={styles.railToggle}
-          onClick={onAddExistingArtifact}
-          data-testid="artifact-add-existing"
-        >
-          <PlusIcon />
-          Add existing artifact
         </button>
         <button
           type="button"
@@ -832,7 +809,6 @@ export function ProjectDetailScreen({
         onOpenArtifactInPlace={onOpenArtifactInPlace}
         openArtifact={openArtifact}
         onCloseArtifactDrawer={onCloseArtifactDrawer}
-        onAddExistingArtifact={onAddExistingArtifact}
         onOpenTasks={onOpenTasks}
         onOpenSettings={onOpenSettings}
         currentUserId={currentUserId}
@@ -866,6 +842,7 @@ export function ProjectDetailScreen({
         initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onClose={onCloseRailModal}
         onOpenInPlace={onOpenArtifactInPlace}
+        onAddExisting={onAddExistingArtifact}
       />
       <TaskModal
         open={railModal?.kind === "tasks"}

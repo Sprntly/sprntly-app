@@ -99,6 +99,7 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
     onSelect: noop,
     onOpen: noop,
     onClose: noop,
+    onAddExisting: noop,
     ...overrides,
   }
 }
@@ -140,6 +141,32 @@ describe("ArtifactsModalView — app-faithful list (AC7)", () => {
     render(React.createElement(ArtifactsModalView, viewProps({ onFilterChange })))
     fireEvent.click(screen.getByTestId("artifacts-filter-evidence"))
     expect(onFilterChange).toHaveBeenCalledWith("evidence")
+  })
+})
+
+describe("ArtifactsModalView — relocated add-existing trigger (header)", () => {
+  it("test_artifacts_modal_renders_add_existing_trigger — a header button with the relocated trigger's testid/label is present, including in loading/empty states", () => {
+    const { unmount: unmountReady } = render(React.createElement(ArtifactsModalView, viewProps()))
+    const trigger = screen.getByTestId("artifacts-modal-add-existing")
+    expect(trigger.tagName).toBe("BUTTON")
+    expect(trigger.textContent).toContain("Add existing artifact")
+    unmountReady()
+
+    const { unmount: unmountLoading } = render(React.createElement(ArtifactsModalView, viewProps({ status: "loading" })))
+    expect(screen.getByTestId("artifacts-modal-add-existing")).toBeTruthy()
+    unmountLoading()
+
+    render(React.createElement(ArtifactsModalView, viewProps({ artifacts: [] })))
+    expect(screen.getByTestId("artifacts-modal-add-existing")).toBeTruthy()
+  })
+
+  it("test_artifacts_modal_add_existing_click_invokes_handler_only — clicking it calls onAddExisting exactly once and never onClose", () => {
+    const onAddExisting = vi.fn()
+    const onClose = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onAddExisting, onClose })))
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
+    expect(onAddExisting).toHaveBeenCalledTimes(1)
+    expect(onClose).not.toHaveBeenCalled()
   })
 })
 
@@ -212,7 +239,10 @@ describe("ArtifactsModalView — Tab focus-trap wraps within the dialog (regress
   it("Tab from the last focusable wraps to the first; Shift+Tab from the first wraps to the last", () => {
     render(React.createElement(ArtifactsModalView, viewProps()))
     const dialog = screen.getByRole("dialog")
-    const first = screen.getByTestId("artifacts-modal-close")
+    // The relocated "Add existing artifact" trigger now precedes the close
+    // button in the header, so it — not the close button — is the dialog's
+    // first focusable element.
+    const first = screen.getByTestId("artifacts-modal-add-existing")
     const last = screen.getByTestId(`artifacts-row-${ARTIFACTS[2].type}-${ARTIFACTS[2].id}`)
 
     last.focus()
@@ -261,14 +291,14 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("fetches artifacts from GET /projects/{id}/artifacts on open", async () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
     expect(artifactsMock).toHaveBeenCalledWith("101")
   })
 
   it("fetches nothing while closed", () => {
-    render(React.createElement(ArtifactsModal, { projectId: "101", open: false, onClose: noop }))
+    render(React.createElement(ArtifactsModal, { projectId: "101", open: false, onClose: noop, onAddExisting: noop }))
     expect(artifactsMock).not.toHaveBeenCalled()
   })
 
@@ -276,7 +306,13 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     await act(async () => {
       render(
-        React.createElement(ArtifactsModal, { projectId: "101", open: true, initialFilter: "prd", onClose: noop }),
+        React.createElement(ArtifactsModal, {
+          projectId: "101",
+          open: true,
+          initialFilter: "prd",
+          onClose: noop,
+          onAddExisting: noop,
+        }),
       )
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-filter-prd")).toBeTruthy())
@@ -286,7 +322,7 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
     artifactsMock.mockRejectedValue(new ApiError(403, "Not a member"))
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-forbidden")).toBeTruthy())
   })
@@ -294,8 +330,26 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("renders a graceful 'not found' state on a 404, never a crash", async () => {
     artifactsMock.mockRejectedValue(new ApiError(404, "Not found"))
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "999", open: true, onClose: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "999", open: true, onClose: noop, onAddExisting: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-not-found")).toBeTruthy())
+  })
+
+  it("test_artifacts_modal_container_forwards_on_add_existing — the container forwards onAddExisting straight to the View, and clicking it invokes the exact spy passed in", async () => {
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    const onAddExisting = vi.fn()
+    await act(async () => {
+      render(
+        React.createElement(ArtifactsModal, {
+          projectId: "101",
+          open: true,
+          onClose: noop,
+          onAddExisting,
+        }),
+      )
+    })
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
+    expect(onAddExisting).toHaveBeenCalledTimes(1)
   })
 })

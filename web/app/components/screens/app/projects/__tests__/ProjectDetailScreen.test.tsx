@@ -26,6 +26,12 @@ const markIndividualReadMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
 const emitDelegationEventMock = vi.fn()
+// The container mounts the real `AddArtifactModal` (unmocked); its
+// company-library fetch effect only fires once `railModal` reaches
+// `"add-artifact"` — a safe empty-list default keeps every other test in
+// this file, which never opens that state, unaffected.
+const artifactsListMock = vi.fn()
+const addArtifactMock = vi.fn()
 // The invite modal (mounted, unmocked) now fetches on open — default to an
 // empty candidate list so tests that never touch the invite surface aren't
 // affected; the one test that opens it sets its own resolved value.
@@ -78,7 +84,11 @@ vi.mock("../../../../../lib/api", () => {
       tagCandidate: (...a: unknown[]) => tagCandidateMock(...a),
       instructions: (...a: unknown[]) => instructionsMock(...a),
       setInstructions: (...a: unknown[]) => setInstructionsMock(...a),
+      addArtifact: (...a: unknown[]) => addArtifactMock(...a),
     },
+    // `AddArtifactModal` (mounted, unmocked) reads this for its
+    // company-library fetch — see `artifactsListMock` above.
+    artifactsApi: { list: (...a: unknown[]) => artifactsListMock(...a) },
     // Real implementation (no API call, no side effect) — mirrors
     // lib/api.ts's own five-value check, kept here rather than importing the
     // real module so this mock stays self-contained. Needed by both this
@@ -254,7 +264,6 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onOpenArtifactInPlace: noop,
     openArtifact: null,
     onCloseArtifactDrawer: noop,
-    onAddExistingArtifact: noop,
     onOpenTasks: noop,
     onOpenSettings: noop,
     currentUserId: "current-viewer",
@@ -287,6 +296,9 @@ afterEach(() => {
   instructionsMock.mockReset()
   instructionsMock.mockResolvedValue({ instructions: null })
   setInstructionsMock.mockReset()
+  artifactsListMock.mockReset()
+  artifactsListMock.mockResolvedValue([])
+  addArtifactMock.mockReset()
   authMock.mockReset()
   authMock.mockReturnValue({ kind: "authed", user: { id: "current-viewer" } })
 })
@@ -334,11 +346,15 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     expect(onOpenArtifacts).toHaveBeenCalledTimes(1)
   })
 
-  it("test_detail_add_existing_invokes_handler — clicking artifact-add-existing (now in the top bar) invokes onAddExistingArtifact", () => {
-    const onAddExistingArtifact = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onAddExistingArtifact })))
-    fireEvent.click(screen.getByTestId("artifact-add-existing"))
-    expect(onAddExistingArtifact).toHaveBeenCalledTimes(1)
+  it("test_detail_topbar_has_no_add_existing_trigger — the top bar renders no artifact-add-existing testid and no 'Add existing artifact' text (relocated into the Artifacts modal)", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    expect(screen.queryByTestId("artifact-add-existing")).toBeNull()
+    expect(screen.queryByText("Add existing artifact")).toBeNull()
+  })
+
+  it("test_detail_view_props_has_no_add_existing_field — viewProps() (no onAddExistingArtifact) satisfies ProjectDetailViewProps; a clean type-check is the proof PlusIcon and the prop were fully removed", () => {
+    const props: ProjectDetailViewProps = viewProps()
+    expect("onAddExistingArtifact" in props).toBe(false)
   })
 
   it("test_detail_topbar_chat_toggle_selects_private — topbar-chat-toggle wraps chat-row-group/chat-row-individual as a tablist", () => {
@@ -608,6 +624,28 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(artifactsMock).toHaveBeenCalledWith("101")
     expect(memorySummaryMock).toHaveBeenCalledWith("101")
     expect(memoryInsightMock).toHaveBeenCalledWith("101")
+  })
+
+  it("test_detail_in_modal_add_existing_opens_add_artifact_modal — clicking the in-modal trigger inside the open Artifacts modal opens AddArtifactModal and closes the Artifacts modal's list", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    artifactsListMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("topbar-artifacts")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("topbar-artifacts"))
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
+
+    // railModal flips {kind:"artifacts"} → {kind:"add-artifact"} in one
+    // update: the browse modal's list is gone and the picker is open.
+    await waitFor(() => expect(screen.getByTestId("add-artifact-modal")).toBeTruthy())
+    expect(screen.queryByTestId("artifacts-modal-list")).toBeNull()
   })
 
   it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
