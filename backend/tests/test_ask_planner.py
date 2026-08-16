@@ -593,7 +593,7 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     # ownership). The version is pinned here rather than merely compared to
     # itself because pooling rows across versions would pool two different
     # menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v8"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v9"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -636,6 +636,11 @@ def test_the_schema_property_order_is_load_bearing():
         # `open_artifact`'s two arguments sit with the action's other arguments,
         # before any choice of skill or pipeline — same rule as task/instruction.
         "artifact_type", "artifact_query",
+        # `share_to_slack`'s destination comes AFTER the two fields naming the
+        # document — same subject-before-form rule as the template pair above,
+        # one action over: a channel name in the message must not steer which
+        # document gets picked.
+        "share_channel", "share_note",
         # `list_artifacts`' KIND rides with the action arguments too — a pure
         # enum pick, no ordering subtlety beyond staying ahead of the
         # skill/pipeline choices like every other action argument.
@@ -662,6 +667,7 @@ def test_the_schema_property_order_is_load_bearing():
     # invite the model to pick one on every single build.
     for optional in ("constraints", "task", "instruction", "documents",
                      "artifact_type", "artifact_query",
+                     "share_channel", "share_note",
                      "artifact_template_id", "template_query", "list_kind",
                      "list_mode"):
         assert optional not in ap._PLANNER_SCHEMA["required"]

@@ -11,6 +11,12 @@
  * ONE question at a time, its options as buttons, a category chip, `‹ 1/2 ›`
  * pagination, Skip — click, click, click and the batch is sent.
  *
+ * ONE QUESTION AT A TIME INCLUDES SKIPPING — there is no "skip them all"
+ * footer (removed 2026-08-16 at the owner's request). Skip in the head is the
+ * only way past a question, so a batch nobody wants to answer is dismissed
+ * question by question, each with its stated assumption visible, rather than
+ * by one click that defaults the lot.
+ *
  * SENT ONCE, AT THE END — the owner's second directive, after testing a
  * version that submitted each answer as it was clicked: "let me finish all
  * the questions before you submit." Clicks are local; the user can page back
@@ -88,11 +94,6 @@ export type QuestionPopupProps = {
   /** Fires exactly once, when the last question settles. Every question is
    *  accounted for: unanswered ones ride as `skipped`. */
   onComplete: (answers: PopupAnswer[]) => void
-  /** Footer "skip the rest" affordance (the clarify gate's "Generate now").
-   *  Hidden when absent. */
-  onSkipAll?: () => void
-  /** Label the skip-all button carries (e.g. "Generate now"). */
-  skipAllLabel?: string
   /** Collapse the popup and answer in the composer instead. Hidden when
    *  absent. */
   onDismiss?: () => void
@@ -130,8 +131,6 @@ export function QuestionPopup({
   fallbackHeader = "Question",
   busy = false,
   onComplete,
-  onSkipAll,
-  skipAllLabel = "Skip all",
   onDismiss,
   initialAnswers,
   onProgress,
@@ -454,20 +453,6 @@ export function QuestionPopup({
 
       {q.skipDefault ? (
         <div className="qpu-skip-hint">if skipped, I&apos;ll assume: {q.skipDefault}</div>
-      ) : null}
-
-      {onSkipAll ? (
-        <div className="qpu-foot">
-          <button
-            type="button"
-            className="qpu-skip-all"
-            data-testid="question-popup-skip-all"
-            disabled={busy}
-            onClick={onSkipAll}
-          >
-            {skipAllLabel}
-          </button>
-        </div>
       ) : null}
     </div>
   )

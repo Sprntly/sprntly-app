@@ -74,6 +74,7 @@ from app.routes import (
     reports,
     reports_public,
     research,
+    slack_share as slack_share_routes,
     staff_admin,
     stories,
     synthesis,
@@ -498,6 +499,7 @@ app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
 app.include_router(internal_mcp.data_router)
 app.include_router(artifact_share.router)
+app.include_router(slack_share_routes.router)
 app.include_router(prd_access.router)
 app.include_router(projects.router)
 

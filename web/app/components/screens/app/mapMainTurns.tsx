@@ -21,6 +21,7 @@
 import { AGENT_NAME } from "../../../lib/agent"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
+import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
 import { ChatArtifactActions, ChatTicketSetActions, type ThreadTurn } from "./ChatScreen"
 
 export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): ChatTranscriptTurn[] {
@@ -58,6 +59,9 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleOpenEvidence,
     handleOpenPrd,
     handleViewPrototype,
+    onSendSlackShare,
+    onCancelSlackShare,
+    onPickSlackShareTarget,
     handlePrototypeSettled,
   } = deps
 
@@ -108,13 +112,38 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     // IN-CHAT COMMAND open: the insight/PRD card + clarifying questions render
     // as the reply BELOW the command turn — `inlinePrdAnchorIdx` resolves which
     // turn that is — instead of being pinned above the whole conversation.
+    // The share preview card rides its own turn, under the reply. It stays
+    // mounted after it settles — as the record of what was (or wasn't) posted —
+    // because a card that vanished would leave the thread's prose ("here's what
+    // I'll post") as the last word on a message that may already be in a team
+    // channel. `questionInPopup` keeps the picker out of it: which channel and
+    // which document are asked in the dock's QuestionPopup, like every other
+    // choice this product makes.
+    const shareNode = turn.slackShare && onSendSlackShare && onCancelSlackShare ? (
+      <SlackShareMessage
+        key={`share-${turn.id}`}
+        preview={turn.slackShare.preview}
+        busy={turn.slackShare.busy}
+        resolved={turn.slackShare.resolved}
+        onSend={(channelId, note) => onSendSlackShare(turn.id, channelId, note)}
+        onCancel={() => onCancelSlackShare(turn.id)}
+        onPickTarget={
+          onPickSlackShareTarget
+            ? (target) => onPickSlackShareTarget(turn.id, target)
+            : undefined
+        }
+        questionInPopup
+      />
+    ) : null
+
     const afterNode =
       inlinePrdCards && idx === inlinePrdAnchorIdx ? (
         <>
           {insightCardNode}
           {prdQuestionsNode}
+          {shareNode}
         </>
-      ) : null
+      ) : shareNode
 
     return {
       turnId: turn.id,

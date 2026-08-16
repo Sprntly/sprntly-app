@@ -150,15 +150,29 @@ class ExecutionOutcome:
 def _classify_error(exc: BaseException) -> str:
     """Map a raised exception to a typed, user-safe category — never the
     message itself. Order matters only where types could overlap (they do
-    not here): an anthropic status error (the shared-key exhaustion / billing
-    case) is `billing`; a transport/asyncio/httpx timeout is `timeout`; a
-    LOCAL FastAPI gate raised before/around the model (priority/auth) is
-    `local_gate`; anything else is a generic `app` fault."""
+    not here): a PROVIDER refusal is classified by `app.llm_errors`; a
+    transport/asyncio/httpx timeout is `timeout`; a LOCAL FastAPI gate raised
+    before/around the model (priority/auth) is `local_gate`; anything else is
+    a generic `app` fault.
+
+    THE PROVIDER ARM USED TO BE `billing` FOR EVERY `APIStatusError`, which was
+    both too broad and too vague: a malformed request read as a billing
+    problem, and a genuinely exhausted account got a label no surface could
+    turn into a sentence. `llm_errors` splits it into `provider_limit` /
+    `provider_unavailable` / `provider_error`, each with copy the client shows
+    — see that module for why an out-of-credits refusal arrives as a 400 and
+    cannot be recognised by status code alone. Nothing branched on `billing`
+    (it was stored and passed through, never compared), so narrowing it costs
+    no consumer.
+    """
     import anthropic
     from fastapi import HTTPException
 
-    if isinstance(exc, anthropic.APIStatusError):
-        return "billing"
+    from app.llm_errors import classify_provider_error
+
+    provider_code = classify_provider_error(exc)
+    if provider_code is not None:
+        return provider_code
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError, anthropic.APITimeoutError)):
         return "timeout"
     try:

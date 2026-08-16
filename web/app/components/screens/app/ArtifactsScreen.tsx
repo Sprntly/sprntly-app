@@ -511,7 +511,19 @@ export function ArtifactsView({
 
 // ── Screen ──
 
-export function ArtifactsScreen() {
+/** `?focus=<type>-<id>` — the artifact a link asked to open, or undefined.
+ *
+ *  A PROP, not a `useSearchParams()` call inside this component, and that is
+ *  deliberate. Reading the URL here made every existing suite that renders
+ *  this screen fail with "No useSearchParams export is defined on the
+ *  next/navigation mock" — fifteen tests across four files, none of them about
+ *  this feature. The route already owns the URL (and already carries the
+ *  Suspense boundary static export requires for that hook), so it reads the
+ *  param and hands it down; the screen stays a component you can render with
+ *  props alone. */
+export type ArtifactsScreenProps = { focus?: string | null }
+
+export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
   const {
     openContentPanel, openPrdTab, openReportTab, openTicketSetTab, showToast, contentPanelTab,
   } = useNavigation()
@@ -713,6 +725,38 @@ export function ArtifactsScreen() {
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
   }, [setContent, openContentPanel, openPrdTab, openReportTab, openTicketSetTab, router, showToast])
+
+  // ── `?focus=<type>-<id>` — open one artifact straight from a link ─────────
+  //
+  // What a Slack share links to. Reports, ticket sets and documents have no
+  // per-artifact route of their own (only PRDs do, via `?prd=` — see
+  // useArtifactUrlSync), so a link to one lands here and names the row. The
+  // key is exactly the `${type}-${id}` shape `activeArtifactKey` already uses,
+  // and the open runs through `openArtifact` — the SAME per-kind logic a click
+  // on the row runs, so a shared link can never open a document differently
+  // from the way the library does.
+  //
+  // Waits for the list, because the row is what carries the ids the open needs
+  // (`a.open.report_id`, the conversation to resume). A key that matches
+  // nothing — a deleted artifact, another tenant's id, a mangled link — simply
+  // leaves the library on screen, which is the honest outcome: the reader can
+  // see what they DO have rather than an error about what they don't.
+  const consumedFocusRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!focus) {
+      consumedFocusRef.current = null
+      return
+    }
+    // One-shot per distinct value: `openArtifact` mutates panel state and
+    // `useSearchParams()` can hand back a fresh object each render, so without
+    // the latch this would re-open on every re-render. Re-arms when the param
+    // goes away, so a later link to a different artifact still fires.
+    if (consumedFocusRef.current === focus) return
+    if (artifactsLoading || artifacts.length === 0) return
+    consumedFocusRef.current = focus
+    const row = artifacts.find((a) => `${a.type}-${a.id}` === focus)
+    if (row) void openArtifact(row)
+  }, [focus, artifacts, artifactsLoading, openArtifact])
 
   // A blank document, created and opened straight away.
   //
