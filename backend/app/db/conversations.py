@@ -498,6 +498,11 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
                 "author_name": name,
                 "author_job_role": job_role,
                 "created_at": t["created_at"],
+                # The FULL structured reply (assistant turns persisted after
+                # the `reply` column landed); None renders from `content`.
+                # Still a hard whitelist: internal columns (`attachments`,
+                # `client_message_id`, …) never ride the DTO.
+                "reply": t.get("reply"),
                 # Execution-run status, filled below for the human turn that
                 # triggered a run; None for every other turn.
                 "run_status": None,
@@ -570,12 +575,21 @@ def post_group_turn(
     content: str,
     *,
     role: str = "user",
+    reply: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Insert one turn into a group chat. Human turn: pass the poster's
     `author_user_id` (role defaults to 'user'). Agent turn (on an
     `@Sprntly` mention): pass `author_user_id=None, role='assistant'` — the
     ONLY conversation_turns rows with `author_user_id` set at all are group
     turns (single-owner individual chats never needed it, build spec §4.5).
+
+    `reply` (assistant turns): the FULL structured response — the engine's
+    answer payload plus any classify-envelope card data — persisted onto
+    `conversation_turns.reply` (jsonb). Best-effort, second statement:
+    the turn's base insert stays exactly the pre-column write, so a
+    missing/failed `reply` column can degrade a turn to content-only but
+    can never lose the turn itself (same posture as
+    `set_group_turn_trigger_kind`).
 
     Refuses (returns None, no write) when `conversation_id` does not
     resolve to a `kind='group'` row — mirrors `list_group_turns`'
@@ -608,7 +622,18 @@ def post_group_turn(
     client.table("conversations").update({"updated_at": utc_now()}).eq(
         "id", conversation_id
     ).execute()
-    return resp.data[0] if resp.data else None
+    row = resp.data[0] if resp.data else None
+    if row is not None and reply is not None:
+        try:
+            client.table("conversation_turns").update({"reply": reply}).eq(
+                "id", row["id"]
+            ).execute()
+            row["reply"] = reply
+        except Exception:  # noqa: BLE001 — the turn persisted; a reply-column hiccup degrades to content-only
+            logger.warning(
+                "group_turn_reply_persist_failed turn_id=%s", row.get("id"),
+            )
+    return row
 
 
 def set_group_turn_trigger_kind(turn_id: int, trigger_kind: str) -> None:

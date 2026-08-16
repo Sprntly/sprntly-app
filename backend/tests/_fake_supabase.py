@@ -109,7 +109,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
-    "conversation_turns":  {"attachments"},
+    "conversation_turns":  {"attachments", "reply"},
     # text[] + vector(1536) — JSON-encoded in the mirror.
     "document_catalog":    {"topics", "embedding"},
     "design_agent_map_cache": {"payload"},

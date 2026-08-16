@@ -98,6 +98,10 @@ _GROUP_CONTEXT_TURNS = 30
 _GROUP_TURN_DTO_KEYS = (
     "id", "role", "content", "author_user_id", "author_name",
     "author_job_role", "created_at",
+    # The FULL structured reply on an assistant turn (answer/key_points/
+    # citations + the classify envelope's card data) — on the broadcast too,
+    # so a realtime-delivered agent turn renders the same cards a reload does.
+    "reply",
     # Execution-run status, attached by `list_group_turns` onto the human turn
     # whose id == the run's source_turn_id (mapped to the FE AgentRunStatus
     # vocabulary at the DTO edge). On the broadcast too, so the realtime shape
@@ -1673,6 +1677,12 @@ class _GroupEditOutcome(NamedTuple):
     was_edit_request: bool
     refusal: str | None
     needs_prd_clarify: bool = False
+    # The classify envelope this pass produced (enriched in place with the
+    # shared render-data legs — artifact_list / nested open.candidates), so
+    # the caller's reply persist can carry the card data onto the assistant
+    # turn's structured `reply`. None on the applied-edit path (that path
+    # posts its own turn and never reaches the reply persist).
+    envelope: dict | None = None
 
 
 def _classify_and_maybe_edit_group_prd(
@@ -1735,7 +1745,7 @@ def _classify_and_maybe_edit_group_prd(
         # than fabricate a "done" (B2 no-fabrication).
         return _GroupEditOutcome(
             applied_turn=None, was_edit_request=was_edit_request, refusal=refusal,
-            needs_prd_clarify=needs_prd_clarify,
+            needs_prd_clarify=needs_prd_clarify, envelope=envelope,
         )
 
     result = apply_chat_edit_scoped(
@@ -1842,6 +1852,7 @@ async def _respond_as_group_agent(
         # applicable edit is applied in place and the run completes; anything
         # else falls through to the SAME unified-engine reply below.
         edit_note = ""
+        classify_envelope: dict | None = None
         if trigger is not None:
             history = [
                 {"role": t.get("role") or "user", "content": t.get("content") or ""}
@@ -1851,6 +1862,7 @@ async def _respond_as_group_agent(
             edit = _classify_and_maybe_edit_group_prd(
                 project_id, conversation_id, ctx, trigger["content"], history, dataset,
             )
+            classify_envelope = edit.envelope
             if edit.applied_turn is not None:
                 # The edit posted its own assistant turn; the run is a success.
                 # `edit_applied` in side_effects tells `_on_committed` to skip
@@ -1939,8 +1951,19 @@ async def _respond_as_group_agent(
             scope=scope,
         )
         reply = (result or {}).get("answer", "")
+        # Persist the FULL structured reply, not just the answer string:
+        # the engine's response (answer/key_points/citations) merged with the
+        # classify envelope's card data (artifact_list / counts / the nested
+        # open lookup) — so a reload renders the same cards the live turn
+        # does. `content` keeps the plain answer text as the fallback every
+        # pre-column consumer still reads.
+        reply_payload: dict = dict(result or {"answer": reply})
+        if classify_envelope:
+            for key in ("artifact_list", "artifact_counts", "open"):
+                if classify_envelope.get(key) is not None:
+                    reply_payload[key] = classify_envelope[key]
         assistant_turn = conversations_db.post_group_turn(
-            conversation_id, None, reply, role="assistant"
+            conversation_id, None, reply, role="assistant", reply=reply_payload
         )
         _publish_group_turn_created(project_id, conversation_id, assistant_turn)
         return ExecutionOutcome(status="ready", response=(result or {"answer": reply}))
