@@ -68,7 +68,11 @@ export function MentionBubble({ content }: { content: string }): ReactNode {
       seg.type === "mention"
         ? createElement(
             "span",
-            { key: i, className: styles.mentionChip, "data-testid": "gc-mention-chip" },
+            // The `gc-mention-chip` GLOBAL marker (alongside the hashed module
+            // class) lets ChatShell.module.css reach the chip across the module
+            // boundary for the own-bubble AA override (`.gcBubbleMe :global(.gc-
+            // mention-chip)`) restored at the fold (T3b, Fable #2).
+            { key: i, className: `${styles.mentionChip} gc-mention-chip`, "data-testid": "gc-mention-chip" },
             `@${seg.label}`,
           )
         : createElement(
@@ -196,15 +200,29 @@ export function useMentionPicker({ projectId, draftApiRef }: UseMentionPickerArg
       setAffordance(null)
       const api = draftApiRef.current
 
-      // Agent OR existing-member row: insert the chip, NO network write. Read
-      // the LIVE draft + caret at select time (lazily via the ref) so the chip
-      // lands at the CURRENT caret over CURRENT text — the shell re-seats the
-      // caret from the `setValue(text, caret)` write.
+      // Agent OR existing-member row: insert the chip, NO network write. Splice
+      // at the picker's TRACKED `mentionQuery` token (`start`/`end`), NOT the
+      // live caret (Fable #4): a mouse-moved caret + Enter must not insert
+      // mid-word and strand the `@token`. The live caret is only a fallback when
+      // the tracked token no longer maps onto the current draft (the user edited
+      // the text since it opened). The shell re-seats the caret from
+      // `setValue(text, caret)`.
       if (item.row === "agent" || (item.row === "candidate" && item.kind === "member")) {
         if (api) {
           const cur = api.getValue()
-          const caret = api.getCaret()
-          const { text, caret: newCaret } = insertMentionChip(cur, caret, item.label)
+          const q = mentionQuery
+          const tokenStillMaps = q.end <= cur.length && cur.slice(q.start, q.end) === `@${q.query}`
+          let text: string
+          let newCaret: number
+          if (tokenStillMaps) {
+            const marker = `@${item.label} `
+            text = cur.slice(0, q.start) + marker + cur.slice(q.end)
+            newCaret = q.start + marker.length
+          } else {
+            const res = insertMentionChip(cur, api.getCaret(), item.label)
+            text = res.text
+            newCaret = res.caret
+          }
           api.setValue(text, newCaret)
         }
         closePicker()

@@ -98,3 +98,28 @@
   color: var(--on-dark-alpha-95);
   border: 1px solid var(--nav);
 }
+
+/* A link inside the own dark-green bubble inherits the light bubble text colour
+   (relocated from the pre-fold `.bubbleMe :global(a)` — a default blue link is
+   illegible on `--nav`). */
+.gcBubbleMe :global(a) {
+  color: inherit;
+}
+
+/* An own-message @-mention chip inside the dark-green own bubble. The base chip
+   (`.gc-mention-chip`, from mention-picker.module.css) is a blue-on-light-blue
+   pill (`--info` / `--info-soft`) tuned for the light peer bubble — illegible
+   and the wrong hue on the dark `--nav` own bubble. Reproduce the pre-fold
+   `.bubbleMe .mentionChip` orphan: light brand-green inline text (`--accent-2`,
+   ~7.7:1 on `--nav`, AA), no pill. The chip carries a stable GLOBAL marker class
+   (`gc-mention-chip`) so this selector reaches across the module boundary the
+   fold introduced (chip in mention-picker.module.css, bubble here). Tokens only. */
+.gcBubbleMe :global(.gc-mention-chip) {
+  color: var(--accent-2);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  /* No pill on the dark bubble — keep a hair of trailing space so an inline
+     mention never glues to the following word. */
+  margin-right: 0.15em;
+}
