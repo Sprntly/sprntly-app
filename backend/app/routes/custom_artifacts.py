@@ -93,6 +93,18 @@ def _public(row: dict, *, with_body: bool = True) -> dict:
     Empty strings are returned rather than omitted: the editor renders every
     field and decides its own placeholder copy, so the API never decides that a
     blank title should disappear.
+
+    `error` — the raw `str(exc)` an operator needs — is NEVER included. That is
+    not an oversight to be corrected later: it is exception text, so it carries
+    URLs, provider wording and whatever else ended up in the message, into a
+    library every colleague can read. `error_code` is the half that is safe,
+    and it is what the failure copy is built from.
+
+    THE CODE RIDES WITH THE BODY, on the detail read only. Listings select a
+    fixed column set that does not include it, so returning the key there would
+    emit `error_code: null` for a document that genuinely failed — a field that
+    lies is worse than a field that is absent, and the listing already carries
+    `status` for the one thing it needs to show.
     """
     out = {
         "id": row["id"],
@@ -108,6 +120,7 @@ def _public(row: dict, *, with_body: bool = True) -> dict:
     }
     if with_body:
         out["body_html"] = row.get("body_html") or ""
+        out["error_code"] = row.get("error_code") or None
     return out
 
 

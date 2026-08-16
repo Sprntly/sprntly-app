@@ -5282,6 +5282,14 @@ export type CustomArtifactDoc = {
   conversation_id: number | null
   created_by: string | null
   updated_by: string | null
+  /** WHY a `failed` document failed, as a stable code — never the server's raw
+   *  error text, which stays operator-side. `documentFailureCopy` turns it into
+   *  the sentence a person reads.
+   *
+   *  Absent on listings (they select a fixed column set) and null on a document
+   *  that failed before the column existed, which is why the copy helper has an
+   *  unknown-reason case rather than assuming one is always present. */
+  error_code?: string | null
 }
 
 /** A save refused because someone else saved first. `current` is their
