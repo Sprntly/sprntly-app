@@ -1321,12 +1321,13 @@ def _answer_query(
         prompt_version="qa-voc-query-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=_VOC_SKILL,
-        max_tokens=3000,
+        max_tokens=_QUERY_MAX_TOKENS,
     )
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.5, "unanswered": "",
     }
+    payload = _ensure_answer(payload, result, window)
     payload.update({
         "_skill": _VOC_SKILL,
         "_skill_action": (
@@ -1341,6 +1342,60 @@ def _answer_query(
         "_skill_source": "voc-query",
     })
     return payload
+
+
+#: Output ceiling for the pointed-query pass. Was 3000, chosen when this path
+#: answered "did complaints about exports increase this week" in a paragraph.
+#: It also receives "give me a table week by week with every company we spoke
+#: with and what they asked for", which is thousands of tokens of table — one
+#: such answer measured 9,487 characters and only just fitted. Widening the
+#: corpus tipped the next one over, the JSON came back truncated, and the user
+#: got a blank reply (2026-08-16). Still half the report pass's 12000: this is
+#: the pointed path, and a ceiling that never binds is a cost with no owner.
+_QUERY_MAX_TOKENS = 8000
+
+
+def _ensure_answer(payload: dict, result, window: "Window") -> dict:
+    """Never hand back a payload with no answer in it.
+
+    A schema'd call that runs out of output tokens returns a truncated or empty
+    object. This function used to pass that straight through: the job was
+    stamped `ready`, the row carried `_skill_action` and `citations` and no
+    `answer`, and chat rendered nothing at all. A blank reply is the worst
+    possible failure — it looks like the product is broken and says nothing
+    about why, which is exactly what the user reported.
+
+    So an empty result becomes an honest, actionable message. `max_tokens` is
+    named separately from every other cause because it is the one the user can
+    do something about, and because it is the one that gets more likely as a
+    window widens."""
+    if isinstance(payload, dict) and str(payload.get("answer") or "").strip():
+        return payload
+
+    stop = getattr(result, "stop_reason", None)
+    logger.error(
+        "call-digest: voc-query produced no answer (stop_reason=%s, window=%s) "
+        "— returning an explanatory message instead of a blank reply",
+        stop, window.label,
+    )
+    if stop == "max_tokens":
+        text = (
+            f"I read the calls for {window.label}, but the answer ran longer "
+            "than I can return in one reply — so nothing came back. Ask for a "
+            "narrower slice (a shorter window, or one week at a time) and I "
+            "can give you the full detail for it."
+        )
+    else:
+        text = (
+            f"I read the calls for {window.label}, but couldn't compose an "
+            "answer from them just now. Please ask again — if it keeps "
+            "happening, a narrower window usually gets through."
+        )
+    return {
+        **(payload if isinstance(payload, dict) else {}),
+        "answer": text,
+        "key_points": [], "citations": [], "confidence": 0.0, "unanswered": "",
+    }
 
 
 def _voc_coverage_clause(voc) -> str:
@@ -1813,6 +1868,14 @@ def answer(
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
     }
+    # DELIBERATELY NOT `_ensure_answer`'d, unlike the query pass. This call
+    # STREAMS: by the time an empty synthesis is visible here the client has
+    # already received the fragments through `on_delta`, so replacing the text
+    # would leave the sink showing one answer and the stored row another. An
+    # empty synthesis is a legitimate terminal outcome on this path and must be
+    # returned as-is — see test_voc_answer_streams.py's
+    # `test_an_empty_synthesis_does_not_start_a_second_generation`, which
+    # records the desync that made it a rule.
     payload.update({
         "_skill": _VOC_SKILL,
         "_skill_action": f"Voice of customer · {sources} · {window.label}",

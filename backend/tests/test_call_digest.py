@@ -303,6 +303,44 @@ def test_an_empty_store_always_fetches(monkeypatch):
     assert cd._store_covers("co-1", "fireflies", _window(), None) is False
 
 
+# ── a blank reply is never an acceptable answer ──────────────────────────────
+#
+# A schema'd call that runs out of output tokens returns a truncated object.
+# Both digest passes handed that straight through, the Ask job was stamped
+# `ready` with `_skill_action` and `citations` and no `answer`, and chat
+# rendered NOTHING — the product looked broken and said nothing about why
+# (reported 2026-08-16, after a widened corpus tipped a 3000-token ceiling).
+
+
+class _Res:
+    def __init__(self, output, stop_reason="end_turn"):
+        self.output = output
+        self.stop_reason = stop_reason
+
+
+def test_a_truncated_model_reply_becomes_an_explanation_not_a_blank():
+    out = cd._ensure_answer({}, _Res({}, stop_reason="max_tokens"), _window(35))
+    assert out["answer"], "an empty payload survived as a blank reply"
+    assert "narrower" in out["answer"]
+    assert "the last 35 days" in out["answer"]
+
+
+def test_an_empty_reply_for_any_other_reason_still_explains():
+    out = cd._ensure_answer({}, _Res({}, stop_reason="end_turn"), _window(35))
+    assert "couldn't compose an answer" in out["answer"]
+
+
+def test_a_whitespace_only_answer_counts_as_empty():
+    out = cd._ensure_answer({"answer": "   "}, _Res({}), _window(35))
+    assert out["answer"].strip()
+
+
+def test_a_real_answer_is_passed_through_untouched():
+    payload = {"answer": "37 calls, here they are", "key_points": ["a"],
+               "citations": [], "confidence": 0.9, "unanswered": ""}
+    assert cd._ensure_answer(dict(payload), _Res(payload), _window(35)) == payload
+
+
 # ── corpus assembly ──────────────────────────────────────────────────────────
 
 def _call(i):
