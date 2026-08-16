@@ -165,14 +165,40 @@ async def test_run_execution_job_cancel_leaves_cancelled(monkeypatch):
 # ─────────────────────────── error classification ──────────────────────────
 
 def _api_status_error() -> Exception:
+    """A provider refusal that is NOT a quota problem — a malformed request.
+    Real SDK error rather than a stub, because the classifier's isinstance arm
+    is part of what these tests pin."""
     import anthropic
 
-    resp = httpx.Response(status_code=402, request=httpx.Request("POST", "http://x"))
-    return anthropic.APIStatusError("insufficient credit", response=resp, body=None)
+    resp = httpx.Response(status_code=400, request=httpx.Request("POST", "http://x"))
+    return anthropic.APIStatusError(
+        "messages.0.content: field required", response=resp, body=None
+    )
 
 
-def test_classify_error_billing():
-    assert runner._classify_error(_api_status_error()) == "billing"
+def _credit_exhausted_error() -> Exception:
+    """The 2026-08-16 outage, shaped the way Anthropic actually reports it: an
+    exhausted balance arrives as a 400 `invalid_request_error`, so only the
+    BODY distinguishes it from a bad request."""
+    import anthropic
+
+    resp = httpx.Response(status_code=400, request=httpx.Request("POST", "http://x"))
+    return anthropic.APIStatusError(
+        "Your credit balance is too low to access the Anthropic API. Please go "
+        "to Plans & Billing to upgrade or purchase credits.",
+        response=resp,
+        body=None,
+    )
+
+
+def test_classify_error_provider_refusals():
+    """The provider arm answered `billing` for EVERY `APIStatusError` — too
+    broad (a malformed request read as a billing problem) and too vague for any
+    surface to turn into a sentence. It now defers to `app.llm_errors`, which
+    separates the two by body: out of credits is a limit the user can be told
+    about, a bad request is not."""
+    assert runner._classify_error(_credit_exhausted_error()) == "provider_limit"
+    assert runner._classify_error(_api_status_error()) == "provider_error"
 
 
 def test_classify_error_timeout():
@@ -206,8 +232,11 @@ async def test_run_execution_job_error_class_classification(monkeypatch):
     class."""
     import anthropic
 
+    from app.llm_errors import PROVIDER_CODES
+
     cases = [
-        (_api_status_error(), "billing"),
+        (_credit_exhausted_error(), "provider_limit"),
+        (_api_status_error(), "provider_error"),
         (anthropic.APITimeoutError(request=httpx.Request("POST", "http://x")), "timeout"),
         (RuntimeError("kaboom"), "app"),
     ]
@@ -231,7 +260,9 @@ async def test_run_execution_job_error_class_classification(monkeypatch):
         # exposed on a read/broadcast), and the class is a clean fixed-vocab
         # category — never the message itself.
         assert row.error, "the raw debug message is preserved internally"
-        assert row.error_class in {"billing", "timeout", "local_gate", "app"}
+        # Membership, not a literal list, so a new provider code reaches this
+        # assertion automatically instead of silently passing under an old one.
+        assert row.error_class in PROVIDER_CODES | {"timeout", "local_gate", "app"}
         assert row.error_class != row.error
 
 

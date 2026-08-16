@@ -156,7 +156,12 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     ownership) or on a plain answer. Widening on v4's rule: a v8 row answers
 #     a question no v7 row was asked ("who should own these tickets"), so the
 #     two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v8"
+# v9: the action menu gained `share_to_slack` — "share this PRD on my slack
+#     channel and ask the team for feedback" used to land on `answer`, where
+#     the best available outcome was prose describing how to share it by hand.
+#     Widening on v4's rule: a v9 row answers a question no v8 row was asked
+#     (where does this document GO), so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v9"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -250,6 +255,21 @@ _ACTIONS: frozenset[str] = frozenset({
     # model's whole job is recognising the ask and naming the kind
     # (`list_kind`). Retrieval like open_artifact, so no task, no instruction.
     "list_artifacts",
+    # Post an artifact the user already has into their Slack — "share this PRD
+    # on my slack channel and ask the team for feedback". Its own action rather
+    # than a shading of `answer`, because the answer path can only ever TALK
+    # about sharing: the message goes out over the company's Slack connection,
+    # which is a side effect on a system outside this product, and the one
+    # thing that must never happen is the chat saying it posted when nothing
+    # was posted (create_artifact's note records that exact failure).
+    #
+    # It names WHAT to share the way open_artifact does (`artifact_type` +
+    # `artifact_query`, both optional here — "share this PRD" means the one on
+    # the tab), and WHERE with `share_channel`, and WITH WHAT FRAMING in
+    # `share_note`. Nothing is posted on this verdict alone: the client previews
+    # the message and the user confirms, so a misread channel costs a glance
+    # rather than a message in front of the wrong audience.
+    "share_to_slack",
 })
 
 #: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
@@ -301,6 +321,12 @@ _TASK_CHARS = 4000
 # question; it is logged, so it gets the same one-line clamp every other
 # user-derived string in a prompt/log gets.
 _ENTITY_CHARS = 200
+
+# A `share_note` becomes the top line of a real Slack message, so it is capped
+# where a note stops being a note. Slack's own block limit is 3000 characters
+# and the composer leaves room for the document's title, summary and link
+# underneath — this is well inside both.
+_SHARE_NOTE_CHARS = 600
 
 # The planner's `reason` is one short clause by contract. Clamped anyway before
 # it reaches the log — the comparison line is meant to be greppable, and one
@@ -416,16 +442,45 @@ _PLANNER_SCHEMA: dict = {
         "artifact_type": {
             "type": ["string", "null"],
             "description": (
-                "open_artifact only: which KIND of existing artifact to bring "
-                "up — prd, evidence, prototype, report or tickets."
+                "open_artifact / share_to_slack only: which KIND of existing "
+                "artifact is meant — prd, evidence, prototype, report or "
+                "tickets."
             ),
         },
         "artifact_query": {
             "type": ["string", "null"],
             "description": (
-                "open_artifact only: the subject the user named the document "
-                "by, in their own words. Required for an open request — without "
-                "it there is nothing to look up."
+                "open_artifact / share_to_slack only: the subject the user "
+                "named the document by, in their own words. Required for an "
+                "OPEN request — without it there is nothing to look up. "
+                "OPTIONAL for a share, where null means the document already "
+                "in play ('share this PRD')."
+            ),
+        },
+        # WHERE, decided after WHAT. Schema order is generation order, so the
+        # artifact is already named when the destination is chosen — a channel
+        # name in the message cannot steer which document gets picked.
+        "share_channel": {
+            "type": ["string", "null"],
+            "description": (
+                "share_to_slack only: the Slack channel the user named, "
+                "without the leading '#' — 'share this in #product-team' → "
+                "'product-team'. null when they named NO specific channel "
+                "('share this on slack', 'send it to my slack channel'), which "
+                "is the normal case and makes the product ask which one. Never "
+                "invent a channel name and never treat 'my slack channel' as "
+                "one — that phrase names no channel."
+            ),
+        },
+        "share_note": {
+            "type": ["string", "null"],
+            "description": (
+                "share_to_slack only: the message to post ALONGSIDE the "
+                "document, in the user's own intent — 'ask the team for "
+                "feedback' → 'Would love the team's feedback on this.' Write "
+                "it as the words that will appear in Slack, first person, one "
+                "or two sentences. null when they asked only to share it and "
+                "said nothing about what to say."
             ),
         },
         "list_kind": {
@@ -678,8 +733,39 @@ or wants an answer.
   a knowledge question sweeps connected sources for a tally no source keeps.
   `list_mode` is "items" for everything else. No task, no instruction, no
   sources, no pipeline.
+- share_to_slack — post a document the user ALREADY HAS into their Slack:
+  "share this PRD on my slack channel and ask the team for feedback", "send
+  the checkout tickets to #product", "post the weekly brief in slack", "share
+  that report with the team on slack". Name WHAT with `artifact_type` (prd,
+  tickets, report — the kinds that can be shared) and `artifact_query` (the
+  subject, their words); leave `artifact_query` null when they mean the
+  document already in play ("share THIS PRD", "post that in slack"), which is
+  the common case. Name WHERE with `share_channel` when they gave a channel,
+  and WHAT TO SAY with `share_note`. No task, no instruction, no sources, no
+  pipeline — nothing is generated and nothing is read.
+  NOTHING IS POSTED ON YOUR VERDICT. The product shows the user exactly what
+  will go to Slack and which channel, and waits for them to confirm — so
+  choosing this action when they asked to share is right even if you are
+  unsure which channel or which document they meant. Both are asked.
 
 Rules that decide the close calls:
+
+- SHARING IS NOT WRITING, and share_to_slack takes an EXISTING document. "Share
+  the checkout PRD on slack" posts the PRD they already have; it never writes
+  one. When the thread has no such document, this is still the action — the
+  product says it cannot find it, which is recoverable, where generating an
+  unrequested PRD is not. But a message that asks to WRITE something and send
+  it ("draft a launch update and post it in #general") is the WRITE action
+  (create_artifact / generate_prd) — the product offers to share it once it
+  exists, and a share cannot post what does not exist yet.
+- SLACK AS A DESTINATION vs SLACK AS A SOURCE. "Share this PRD on slack" sends
+  something TO Slack → share_to_slack. "What are people saying in slack about
+  onboarding?" reads FROM Slack → `answer` with slack in `sources`. The verb
+  decides: share / post / send / drop it in → the destination; what / who /
+  find / search → the source.
+- Asking HOW to share is not asking to share. "Can I share PRDs to slack?",
+  "how do I post this to my team?" are `answer`. Requesting > asking about,
+  the same rule create_artifact carries.
 
 - THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
   answer. "What are my PRDs / tickets / reports?" means the documents THEY
@@ -1111,6 +1197,14 @@ class Plan:
     #: exclusive with the id above (`_gate_template` enforces it), and its
     #: presence is what turns a build into a question about which format.
     template_query: Optional[str] = None
+    #: `share_to_slack` only: the channel the user named, without the '#'.
+    #: None — the common case — means they named none, and the product asks
+    #: which one rather than guessing a destination.
+    share_channel: Optional[str] = None
+    #: `share_to_slack` only: the words to post alongside the document. None
+    #: means they said nothing about what to say, and the share goes out with
+    #: the document alone.
+    share_note: Optional[str] = None
     #: `list_artifacts` only: which kind of the user's own creations to list.
     #: Always a member of LIST_ARTIFACT_KINDS once gated ("all" for junk or
     #: absence), and None on every other action — the listing itself is
@@ -1699,10 +1793,32 @@ def apply_gates(
     if action == "open_artifact" and not _artifact_query:
         action, task, instruction = ACTION_ANSWER, "", ""
         _artifact_type = _artifact_query = None
-    if action != "open_artifact":
+    if action not in ("open_artifact", "share_to_slack"):
         # Arguments belong to their action; a stray pair on any other verdict is
         # noise that downstream would otherwise try to honour.
         _artifact_type = _artifact_query = None
+    # A SHARE with no subject is not degraded, and that asymmetry with
+    # open_artifact one line up is the point: "share this PRD" names no subject
+    # because the subject is the document already on the tab, which the ROUTE
+    # resolves from the caller's context. An open has no such fallback — there
+    # is nothing to show — so it still needs its query.
+
+    # `share_to_slack`'s own two arguments. Neither is required: no channel
+    # means the product asks which one, and no note means the document goes out
+    # on its own. Same belongs-to-its-action clamp as every field above, so a
+    # channel name extracted from an unrelated message cannot ride along on a
+    # verdict that will never post anything.
+    _share_channel: Optional[str] = None
+    _share_note: Optional[str] = None
+    if action == "share_to_slack":
+        _share_channel = _clean_str(out.get("share_channel"))
+        if _share_channel:
+            # Slack channel names carry no '#' in the API and cap at 80 chars;
+            # the model is told this, and this is where it stops being advice.
+            _share_channel = _share_channel.lstrip("#").strip()[:80] or None
+        _share_note = _clean_str(out.get("share_note"))
+        if _share_note:
+            _share_note = _share_note[:_SHARE_NOTE_CHARS]
 
     # `create_artifact`'s own argument. Unlike `artifact_query` above, a MISSING
     # kind does not degrade the action: the user asked for a document and the
@@ -1774,6 +1890,8 @@ def apply_gates(
         # scope gate: partial output must never produce a canned refusal.
         artifact_type=_artifact_type,
         artifact_query=_artifact_query,
+        share_channel=_share_channel,
+        share_note=_share_note,
         artifact_kind=_artifact_kind,
         artifact_template_id=artifact_template_id,
         artifact_template_name=artifact_template_name,

@@ -28,6 +28,7 @@ import type {
   ChatArtifactItem,
   OpenArtifactCandidate,
   SkillInfo,
+  SlackShareTarget,
 } from "../../../lib/api"
 
 // ── Identity vocab ──────────────────────────────────────────────────────────
@@ -405,6 +406,20 @@ export interface MapMainTurnsDeps {
   handleOpenPrd: () => void
   handleViewPrototype: () => void
   handlePrototypeSettled?(result?: unknown): void
+  // ── share_to_slack ────────────────────────────────────────────────────────
+  // The preview card rides its own turn (`turn.slackShare`). Optional, like
+  // `handlePrototypeSettled`: a host with no share flow omits all three and the
+  // card simply never renders — this bag is structural, so it must not require
+  // a capability every host has to implement.
+  /** Post it — the one action here that reaches Slack. */
+  onSendSlackShare?: (turnId: string, channelId: string, note: string) => void
+  /** Declined. Nothing is posted, and the card records that rather than
+   *  vanishing and leaving the thread's prose as the last word. */
+  onCancelSlackShare?: (turnId: string) => void
+  /** A different document was chosen — re-preview on that one. Reached only
+   *  when the host renders the choice itself; main chat asks in the
+   *  QuestionPopup instead. */
+  onPickSlackShareTarget?: (turnId: string, target: SlackShareTarget) => void
 }
 
 // Re-export the finished per-turn prop shape the main mapping produces, so

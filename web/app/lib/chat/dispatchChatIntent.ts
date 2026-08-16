@@ -93,6 +93,17 @@ export interface ChatIntentExecutors {
    *  listing's own honest answer, not a fall-through. Only an ABSENT array
    *  (an older backend that doesn't attach rows) falls back to `onAnswer`. */
   onListArtifacts: (envelope: ChatIntentEnvelope) => void
+  /** share_to_slack: post an artifact into the company's Slack. Unguarded
+   *  here on purpose, unlike edit_prd and friends — the executor's FIRST step
+   *  is a preview call that resolves the target and the channel server-side,
+   *  and its answers to "which document?" and "which channel?" are questions
+   *  the user can answer in place. A client-side guard would turn both into a
+   *  grounded ask that has to re-derive what the preview already knows.
+   *
+   *  OPTIONAL, like `onClarify`: a surface with no share UI (the project chat)
+   *  omits it and the intent falls through to its ask path, rather than every
+   *  caller being required to implement a flow it does not have. */
+  onShareToSlack?: (envelope: ChatIntentEnvelope) => void
   /** `clarify` — the private project chat's classify route asks which PRD
    *  is meant (2+ PRDs, an unresolved edit target) instead of silently
    *  answering. OPTIONAL: `clarify` is only ever emitted by the project-
@@ -134,6 +145,9 @@ export type DispatchChatIntentResult = { handled: true } | { handled: false }
  *  - `list_artifacts` → `onListArtifacts` only when `envelope.artifact_list`
  *    is PRESENT (empty included — see the executor's note) — else `onAnswer`
  *    (an older backend attached no rows).
+ *  - `share_to_slack` → `onShareToSlack` when the caller supplied one — else
+ *    `onAnswer`. No target/channel guard: the executor's preview call resolves
+ *    both server-side and asks the user about whichever it could not settle.
  *  - anything else (`answer`, low confidence, unknown, `generate_prototype`)
  *    → `onAnswer`.
  *
@@ -211,6 +225,16 @@ export function dispatchChatIntent(
         executors.onListArtifacts(envelope)
         return { handled: true }
       }
+      executors.onAnswer()
+      return { handled: false }
+
+    case "share_to_slack":
+      if (executors.onShareToSlack) {
+        executors.onShareToSlack(envelope)
+        return { handled: true }
+      }
+      // No share UI on this surface — the grounded ask at least answers the
+      // message, and crucially does NOT claim anything was posted.
       executors.onAnswer()
       return { handled: false }
 

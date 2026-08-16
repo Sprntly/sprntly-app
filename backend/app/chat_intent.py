@@ -436,10 +436,33 @@ def _render_context(
     return "\n".join(lines) + "\n\n"
 
 
-def _fallback(reason: str) -> dict:
+def _fallback(reason: str, exc: BaseException | None = None) -> dict:
+    """The fail-open `answer` envelope.
+
+    When the failure was a PROVIDER REFUSAL, the envelope says so. This
+    endpoint's fail-open contract is right — a dead model must never break a
+    send — but it has a cost nobody could see: with the planner down, NO action
+    can be chosen, so every command in the product silently becomes a chat
+    reply. Observed 2026-08-16, on an exhausted Anthropic balance: commands
+    stopped working, the chat answered in prose, and the only evidence was a
+    line in the container log.
+
+    `provider_error` rides the envelope so the client can say what happened.
+    Absent on every ordinary fallback, so nothing changes for the failures that
+    are genuinely ours.
+    """
+    notice = None
+    if exc is not None:
+        try:
+            from app.llm_errors import limit_notice
+
+            notice = limit_notice(exc)
+        except Exception:  # noqa: BLE001 — the error path must not raise
+            notice = None
     return {
         "intent": "answer",
         "confidence": 0.0,
+        "provider_error": notice,
         "task": None,
         "instruction": None,
         "artifact_type": None,
@@ -517,6 +540,19 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # reason create_artifact's comment records: this set is the wire, and an
     # action missing from it is a silent half-feature, not an error.
     "list_artifacts",
+    # Post an artifact into the company's Slack. The client resolves the
+    # TARGET from its own context (the tab's PRD, the thread's ticket set or
+    # report) plus the envelope's `artifact_type`/`artifact_query`, previews
+    # what will be posted via POST /v1/share/slack/preview, and only sends on
+    # POST /v1/share/slack/send after the user confirms.
+    #
+    # Listed here for exactly the reason create_artifact's comment records —
+    # this set is the wire — and the stakes are higher for this one than for
+    # any other member. An action missing here falls through to `answer`, and
+    # the answer path, knowing the product can post to Slack, would reply that
+    # it had shared the document. Nothing would reach Slack, and unlike an
+    # empty library nobody can check a channel they were never told about.
+    "share_to_slack",
 }
 
 
@@ -583,6 +619,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # the planner's gate clears it there.
         "artifact_kind": plan.artifact_kind or None,
         "artifact_query": plan.artifact_query,
+        # `share_to_slack` only: WHERE it goes and WHAT is said with it. Both
+        # may be null — no channel means the client asks which one (never a
+        # guessed destination), no note means the document goes out on its
+        # own. The planner's gate clears the pair on every other intent.
+        "share_channel": plan.share_channel,
+        "share_note": plan.share_note,
         # The uploaded format this build must be written into, when the user
         # named one. The client forwards the id to the executor; the NAME is for
         # the client to say which format it is using, so an honoured request is
@@ -842,6 +884,6 @@ def resolve_chat_intent(
                 # actually lives.
                 envelope["artifact_type"] = "prd"
         return envelope
-    except Exception:  # noqa: BLE001 — dispatch must never break the send
+    except Exception as exc:  # noqa: BLE001 — dispatch must never break the send
         logger.exception("chat intent resolve failed; falling back to answer")
-        return _fallback("resolver error")
+        return _fallback("resolver error", exc)

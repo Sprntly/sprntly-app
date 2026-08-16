@@ -39,7 +39,13 @@ vi.mock("../../../../context/ContentContext", () => ({
 vi.mock("../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme" }),
 }))
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
+// `useSearchParams` backs the `?focus=<type>-<id>` deep link (what a Slack
+// share links to). Stubbed empty here — this suite is about the Import flow,
+// and an absent param is the no-op path.
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+}))
 vi.mock("../../../../lib/prd-adapter", () => ({ markdownToPrdState: () => ({}) }))
 vi.mock("../../../../lib/evidence-adapter", () => ({ markdownToEvidenceState: () => ({}) }))
 vi.mock("../../../../lib/routes", () => ({ prototypePath: () => "/prototype" }))
