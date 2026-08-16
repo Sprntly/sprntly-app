@@ -797,6 +797,29 @@ def _advance_own_cursor(conversation_id: int, user_id: str, turn_id: int) -> Non
         )
 
 
+def _update_owned_turn_content(turn_id: int, conversation_id: int, content: str) -> dict[str, Any]:
+    """Idempotent-key hit, but the incoming content differs from what's
+    already stored — a two-phase flow (park an interim answer under a
+    `client_message_id`, then re-persist the SAME key once the flow settles
+    on its real, final answer) reusing the key on purpose. Updates the
+    existing row's content in place and returns it, rather than the
+    read-check silently discarding the new content. Only called when a
+    content mismatch is already confirmed by the caller, so a same-key/
+    same-content retry never reaches here and never issues this write."""
+    client = require_client()
+    row = (
+        client.table("conversation_turns")
+        .update({"content": content})
+        .eq("id", turn_id)
+        .execute()
+        .data[0]
+    )
+    client.table("conversations").update({"updated_at": utc_now()}).eq(
+        "id", conversation_id
+    ).execute()
+    return row
+
+
 def _find_owned_turn(conversation_id: int, role: str, **key: Any) -> dict[str, Any] | None:
     """Read-check for the idempotent writers below: the existing row for
     this `(conversation_id, role, key)`, or None. `key` is exactly one of
@@ -884,13 +907,23 @@ def post_owned_individual_assistant_turn(
     """Write the ASSISTANT'S turn into the CALLER'S individual project chat
     (`author_user_id: None` — the agent, not the caller, said this; `user_id`
     only resolves WHICH owned conversation to write into). Same server-side
-    ownership resolution as the user-turn writer (AC6). Idempotent (AC4/AC5):
-    keyed on `(conversation_id, role='assistant', ask_job_id)` when
+    ownership resolution as the user-turn writer (AC6). Idempotent-keyed
+    (AC4/AC5) on `(conversation_id, role='assistant', ask_job_id)` when
     `ask_job_id` is given (the `/v1/ask` answer — the durable run link a
     resumed poll reuses), else on `(conversation_id, role='assistant',
     client_message_id)`. Exactly one of the two keys must be given — a
-    caller passing neither (or both) is a bug (asserted). Advances the
-    caller's own read cursor (AC8). Returns the row (incl. `id`)."""
+    caller passing neither (or both) is a bug (asserted).
+
+    Upsert-on-content: a key hit whose stored content already matches is a
+    true no-op (no write, same invariant as before — a retry/double-submit
+    never inserts a second row and never needlessly writes). A key hit whose
+    content DIFFERS updates that row's content in place instead of
+    discarding it — the two-phase private-clarify flow parks an interim
+    answer under a `client_message_id` and then re-persists the SAME key
+    once generation settles on the real, final answer; without this, the
+    final answer was silently dropped and a reload showed the stale interim
+    text forever. Advances the caller's own read cursor (AC8) either way.
+    Returns the row (incl. `id`)."""
     if (client_message_id is None) == (ask_job_id is None):
         raise ValueError(
             "post_owned_individual_assistant_turn requires exactly one of "
@@ -906,6 +939,8 @@ def post_owned_individual_assistant_turn(
 
     existing = _find_owned_turn(conversation_id, "assistant", **{key_col: key_val})
     if existing is not None:
+        if existing["content"] != content:
+            existing = _update_owned_turn_content(existing["id"], conversation_id, content)
         _advance_own_cursor(conversation_id, user_id, existing["id"])
         return existing
 
@@ -929,9 +964,14 @@ def post_owned_individual_assistant_turn(
     except APIError as exc:
         if not _is_unique_violation(exc, index_name):
             raise
+        # A concurrent write won the race for this key (§A partial-unique
+        # backstop) — re-read what it wrote and apply the same
+        # upsert-on-content rule as the pre-check above.
         existing = _find_owned_turn(conversation_id, "assistant", **{key_col: key_val})
         if existing is None:
             raise
+        if existing["content"] != content:
+            existing = _update_owned_turn_content(existing["id"], conversation_id, content)
         _advance_own_cursor(conversation_id, user_id, existing["id"])
         return existing
 
