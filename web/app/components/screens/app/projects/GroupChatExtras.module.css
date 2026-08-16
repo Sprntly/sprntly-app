@@ -1,6 +1,6 @@
 /* GroupChatExtras — the group-surface styling families that ride the shared
-   `ChatShell` through host-supplied nodes (roster, stayed-out badge, invoked-by
-   state badge) and engine-emitted nodes (typing indicator, error, posting-wait).
+   `ChatShell` through host-supplied nodes (roster, invoked-by state badge)
+   and engine-emitted nodes (typing indicator, error, posting-wait).
    Relocated verbatim from the deleted `ProjectGroupChat.module.css` at the fold:
    these families had no home in `ChatShell.module.css` (row/bubble/role/time
    went there in T3a; picker/chip/affordance live in `mention-picker.module.css`).
@@ -39,51 +39,6 @@
   border-radius: 50%;
   background: var(--accent);
   border: 1.5px solid var(--surface);
-}
-
-/* ── "Sprntly stayed out" badge (reply.runStatus) ── */
-.stayedOut {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--muted);
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 6px 15px;
-  margin: 2px auto;
-  width: fit-content;
-  box-shadow: var(--shadow-sm);
-}
-
-.stayedOutDot {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  border: 1.5px solid var(--accent);
-  position: relative;
-}
-
-.stayedOutDot::after {
-  content: "";
-  position: absolute;
-  top: 50%;
-  left: 2px;
-  right: 2px;
-  height: 1.5px;
-  transform: translateY(-50%);
-  background: var(--accent);
-}
-
-.stayedOutLead {
-  color: var(--accent-ink);
-  font-weight: 600;
-}
-
-.stayedOutRest {
-  color: var(--muted);
 }
 
 /* ── Smart-interjection state badge on an agent turn (turnHeadExtra) — the

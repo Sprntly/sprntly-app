@@ -181,14 +181,14 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     expect(within(agent).getByText("AGENT")).toBeTruthy()
   })
 
-  it("a human-to-human aside with no agent reply shows the stayed-out marker", async () => {
+  it("test_group_no_stayed_out_pill_rendered — a human-to-human aside with no agent reply renders no stayed-out marker (removed: debug-y internal state, not user-facing)", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "no mention here" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await screen.findByTestId("gc-msg-me")
-    expect(screen.getByTestId("gc-stayed-out")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
   it("does not show the stayed-out marker right after an agent turn", async () => {
@@ -473,8 +473,8 @@ describe("ProjectGroupChat — optimistic own-message send", () => {
   })
 })
 
-describe("ProjectGroupChat — stayed-out badge suppressed while posting", () => {
-  it("hides the stayed-out badge during posting, and shows it once posting settles with no reply", async () => {
+describe("ProjectGroupChat — no stayed-out badge, before or after posting settles", () => {
+  it("test_group_no_stayed_out_pill_rendered — never renders the stayed-out badge, during posting or once posting settles with no reply (removed: debug-y internal state, not user-facing)", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
@@ -486,7 +486,8 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       }),
     )
     // The refetch after the POST resolves shows only the human turn — no
-    // agent reply landed (a genuine "stayed out" outcome).
+    // agent reply landed (a genuine "stayed out" outcome, now logged
+    // backend-side instead of rendered).
     groupTurnsMock.mockResolvedValueOnce([
       turn({ id: 5, content: "hi team", author_user_id: "u1", author_name: "Me" }),
     ])
@@ -499,8 +500,8 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       fireEvent.click(screen.getByLabelText("Send"))
     })
 
-    // While posting: the optimistic turn is the last (user-role) turn, but
-    // the badge must stay hidden — a reply may still be generating.
+    // While posting: the optimistic turn is the last (user-role) turn; no
+    // badge either way.
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
 
@@ -509,8 +510,8 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       await Promise.resolve()
     })
 
-    // Posting has settled and no agent reply arrived — NOW it shows.
-    await waitFor(() => expect(screen.getByTestId("gc-stayed-out")).toBeTruthy())
+    // Posting has settled and no agent reply arrived — STILL no badge.
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 })
 

@@ -105,14 +105,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       </div>
     ) : null
 
-  const stayedOutBadge = (
-    <div className={extras.stayedOut} data-testid="gc-stayed-out">
-      <span className={extras.stayedOutDot} aria-hidden="true" />
-      <span className={extras.stayedOutLead}>Sprntly stayed out</span>
-      <span className={extras.stayedOutRest}> — no reply yet</span>
-    </div>
-  )
-
   const descriptor: ChatSurfaceDescriptor = {
     surface: "project_group",
     projectId: Number(projectId),
@@ -176,11 +168,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     },
     reply: {
       mode: "backgrounded",
-      // The stayed-out badge is gated on `engine.showStayedOut` (Fable #5), NOT
-      // `status === null` — the shell always passes null for group, so keying on
-      // null would render the badge under EVERY last turn, incl. the agent's own
-      // reply.
-      runStatus: () => (engine.showStayedOut ? stayedOutBadge : null),
+      // The "Sprntly stayed out" pill was removed from the UI (debug-y
+      // internal state, not user-facing) — the stay-out decision is now only
+      // logged (routes.py `gate_stayout` branch + the existing
+      // `group_gate_decision` log). The seam stays present-but-unwired for a
+      // later honest, persisted run-status.
+      runStatus: () => null,
     },
     send: { onSubmit: engine.post, pendingSendBubble: false },
     // Error + typing indicator (engine-fed, styled) + the picker's post-select
