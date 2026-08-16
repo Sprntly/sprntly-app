@@ -1356,7 +1356,7 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]:
+def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1373,8 +1373,17 @@ def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]
             enterprise_id,
         )
         return None
+    # THE PLAN'S WINDOW TRAVELS WITH THE QUESTION. Dropping it here is what
+    # made "a table week by week ... the last five weeks" run over four days:
+    # the planner extracted 2026-07-12 correctly, this call discarded it, and
+    # `parse_window`'s digits-only regex could not read a spelled-out "five",
+    # so the digest fell to its 7-day default and then reported the missing
+    # weeks as history that "was not captured" (2026-08-16). Same defect the
+    # calls leg had — a constraint the planner extracted, thrown away by the
+    # executor that needed it.
     return call_digest.answer(
-        enterprise_id=enterprise_id, question=question, history=history
+        enterprise_id=enterprise_id, question=question, history=history,
+        constraints=(plan.constraints if plan is not None else None),
     )
 
 
@@ -2870,9 +2879,15 @@ def answer(
         from app import call_digest
 
         if not pinned_skill:
+            # The ROUTER picked the digest here rather than the planner, but a
+            # planned turn still reached this line with a window the planner
+            # extracted (its plan simply named no machinery). Hand it over for
+            # the same reason `_m_call_digest` does — a window read from the
+            # whole sentence beats one re-derived from its surface words.
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
+                constraints=(plan.constraints if plan is not None else None),
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).

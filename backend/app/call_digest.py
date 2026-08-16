@@ -173,6 +173,53 @@ def _fmt_range(since: datetime, until: datetime) -> str:
     return f"{since:%b} {since.day} – {until:%b} {until.day}"
 
 
+def _planned_window(constraints: dict | None) -> Window | None:
+    """The planner's `since`/`until` as a Window, or None when it named none.
+
+    EXPLICIT by construction: a window a model extracted from the whole
+    sentence is a stated request, so the auto-widen below must not quietly
+    replace it with "the last 90 days" when the period is genuinely empty —
+    "no calls in those five weeks" is the answer to that question.
+
+    Never raises: an unparseable constraint falls back to reading the question,
+    which is strictly what this function replaced."""
+    if not constraints:
+        return None
+    raw_since = constraints.get("since")
+    raw_until = constraints.get("until")
+    if not isinstance(raw_since, str) or not raw_since.strip():
+        return None
+    try:
+        since = _start_of_day(
+            datetime.fromisoformat(raw_since.strip()).replace(tzinfo=timezone.utc)
+        )
+        until = (
+            datetime.fromisoformat(raw_until.strip()).replace(
+                tzinfo=timezone.utc, hour=23, minute=59, second=59,
+            )
+            if isinstance(raw_until, str) and raw_until.strip()
+            else _utc_now()
+        )
+    except ValueError:
+        logger.debug("call-digest: unparseable planner window %r/%r",
+                     raw_since, raw_until)
+        return None
+    if until <= since:
+        return None
+    return Window(since, until, _fmt_range(since, until), explicit=True)
+
+
+#: Spelled-out counts, because people SPEAK these questions. "the last five
+#: weeks" reached the digest as a 7-day default because the numeric regex below
+#: could not match a word — and nothing said so, which is worse than the wrong
+#: window itself. Ten covers what anyone says aloud before switching to digits.
+_WORD_NUMBERS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12,
+}
+
+
 def parse_window(question: str, *, now: datetime | None = None) -> Window:
     """Parse a time window from the question. Defaults to the last 7 days when no
     explicit window is named. `now` is injectable for deterministic tests."""
@@ -181,10 +228,19 @@ def parse_window(question: str, *, now: datetime | None = None) -> Window:
         now = now.replace(tzinfo=timezone.utc)
     q = question.lower()
 
-    # "last/past N days|weeks|months"
-    m = re.search(r"\b(?:last|past|previous)\s+(\d{1,3})\s+(day|week|month)s?\b", q)
+    # "last/past N days|weeks|months", where N is digits OR a spelled-out word.
+    # The separator is `\s*` rather than `\s+`, because dictation runs them
+    # together: "look at the last10 weeks" arrived exactly like that and fell
+    # through to the 7-day default. Both gaps produced a silently wrong window
+    # on a question whose period was perfectly clear to a reader.
+    m = re.search(
+        r"\b(?:last|past|previous)\s*(\d{1,3}|" + "|".join(_WORD_NUMBERS) + r")\s*"
+        r"(day|week|month)s?\b",
+        q,
+    )
     if m:
-        n = int(m.group(1))
+        raw = m.group(1)
+        n = int(raw) if raw.isdigit() else _WORD_NUMBERS[raw]
         unit = m.group(2)
         days = n * {"day": 1, "week": 7, "month": 30}[unit]
         since = _start_of_day(now - timedelta(days=days))
@@ -1426,6 +1482,7 @@ def answer(
     question: str,
     history: list[dict] | None = None,
     on_delta=None,
+    constraints: dict | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
 
@@ -1434,6 +1491,17 @@ def answer(
     answer text as it generates instead of landing all at once. Optional and
     advisory — every caller that omits it behaves exactly as before, and the
     returned payload is the authoritative answer either way.
+
+    `constraints` is the PLANNER's own reading of the question, and when it
+    carries a window that window WINS over re-parsing the text. The planner
+    read the whole sentence with a model; `parse_window` reads it with a regex
+    that only accepts digits. Asked for "a table week by week ... the last five
+    weeks", the planner correctly extracted 2026-07-12, this function threw
+    that away, the regex could not match a spelled-out "five", and the digest
+    silently ran over its 7-day default — so a five-week question was answered
+    with four days of calls and the report said the rest of the history "was
+    not captured" (reported 2026-08-16). Every caller that passes nothing keeps
+    parsing the question exactly as before.
 
     Parses the window, fetches the calls live, retrieves the knowledge graph's
     stored signal for the same question, MERGES the two, and then either runs
@@ -1445,7 +1513,7 @@ def answer(
     The two halves degrade independently, the same way Fireflies and Zoom
     already do inside `build_corpus`: an empty KG still answers from calls, and
     calls that could not be fetched still answer from the KG — saying so."""
-    window = parse_window(question)
+    window = _planned_window(constraints) or parse_window(question)
     query_mode = is_voc_query(question)
     compare_boundary: str | None = None
     if query_mode and _VOC_COMPARATIVE.search(question):

@@ -178,6 +178,33 @@ def test_call_digest_runs_when_a_call_source_is_connected(loud_ladder, monkeypat
     assert out["_skill_source"] == "call-digest"
 
 
+def test_the_digest_is_handed_the_plans_window(loud_ladder, monkeypatch):
+    """The 2026-08-16 failure: the planner extracted a five-week window
+    (`since: 2026-07-12`) and the dispatcher dropped it, so the digest
+    re-derived one from the raw text — where a digits-only regex could not read
+    "the last five weeks" and fell to its 7-day default. Four days of calls
+    answered a five-week question, and the report called the rest uncaptured."""
+    import app.call_digest as cd
+
+    seen: dict = {}
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+
+    def _answer(**kw):
+        seen["constraints"] = kw.get("constraints")
+        return {"answer": "digest", "_skill_source": "call-digest"}
+
+    monkeypatch.setattr(cd, "answer", _answer)
+
+    qa._dispatch_planned_method(
+        _plan("call-digest", constraints={"since": "2026-07-12", "until": "2026-08-16"}),
+        enterprise_id="ent", question="table week by week for the last five weeks",
+        history=None, prd_id=None, dataset="acme", fresh=lambda: True,
+        is_cancelled=None,
+    )
+
+    assert seen["constraints"] == {"since": "2026-07-12", "until": "2026-08-16"}
+
+
 def test_tracker_lookup_declines_when_no_tracker_is_connected(
     loud_ladder, monkeypatch
 ):

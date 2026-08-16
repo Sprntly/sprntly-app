@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 import app.call_digest as cd
 from app.connectors.zoom_oauth import ZoomContext
 from app.kg_ingest.pullers.fireflies import CallTranscript
@@ -138,6 +140,100 @@ def test_window_last_month():
     w = cd.parse_window("summarize last month's calls", now=NOW)
     assert w.since.day == 1 and w.since.month == 5  # May
     assert w.until.day == 1 and w.until.month == 6  # exclusive end = Jun 1
+
+
+# ── spoken windows, and the planner's window winning ─────────────────────────
+#
+# People SPEAK these questions. "give me a table week by week ... the last five
+# weeks" was answered with four days of calls, and the report then described the
+# missing weeks as history that "was not captured" — the digits-only regex could
+# not read "five", so the digest fell to its 7-day default and said nothing
+# about having done so (2026-08-16).
+
+
+def test_window_accepts_a_spelled_out_count():
+    w = cd.parse_window("give me the last five weeks of customer calls", now=NOW)
+    assert (NOW - w.since).days == 35
+    assert w.explicit
+
+
+def test_window_accepts_dictation_run_together():
+    """"look at the last10 weeks" arrived exactly like that."""
+    w = cd.parse_window("look much further and look at the last10 weeks", now=NOW)
+    assert (NOW - w.since).days == 70
+    assert w.explicit
+
+
+def test_a_bare_last_week_is_still_the_calendar_week():
+    """The number is required — relaxing the separator must not let "last
+    week" fall into the N-unit branch."""
+    w = cd.parse_window("summarize calls from last week", now=NOW)
+    assert "last week" in w.label
+
+
+def test_the_planners_window_beats_re_parsing_the_question(monkeypatch):
+    """The real fix. Even when the text defeats the regex, the planner read the
+    whole sentence and its window is the one that runs."""
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["since"] = window.since
+        seen["until"] = window.until
+        seen["explicit"] = window.explicit
+        raise RuntimeError("stop here — the window is all this test needs")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(
+            enterprise_id="ent-1",
+            question="table week by week for the last five weeks",
+            constraints={"since": "2026-07-12", "until": "2026-08-16"},
+        )
+
+    assert seen["since"].date().isoformat() == "2026-07-12"
+    assert seen["until"].date().isoformat() == "2026-08-16"
+    # EXPLICIT, so the auto-widen never quietly replaces a stated period:
+    # "no calls in those five weeks" is a real answer to that question.
+    assert seen["explicit"] is True
+
+
+def test_a_planner_window_that_will_not_parse_falls_back_to_the_question(
+    monkeypatch,
+):
+    """A bad constraint degrades to the behaviour this replaced, never to a
+    broken window."""
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["since"] = window.since
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(
+            enterprise_id="ent-1",
+            question="recap calls from the last 14 days",
+            constraints={"since": "not-a-date"},
+        )
+
+    assert (cd._utc_now() - seen["since"]).days >= 14
+
+
+def test_no_constraints_parses_the_question_exactly_as_before(monkeypatch):
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["label"] = window.label
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(enterprise_id="ent-1", question="recap calls from the last 14 days")
+
+    assert "14 day" in seen["label"]
 
 
 # ── corpus assembly ──────────────────────────────────────────────────────────
