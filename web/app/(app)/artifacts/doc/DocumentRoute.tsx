@@ -11,6 +11,7 @@ import {
   type Scheduler,
 } from "../../../lib/documentSave"
 import { AppLayout } from "../../../components/screens/app/AppLayout"
+import { documentFailureCopy } from "../../../lib/documentFailure"
 import { DocumentEditor } from "./DocumentEditor"
 
 // ── The team-document surface ────────────────────────────────────────────────
@@ -265,8 +266,8 @@ export function DocumentRoute() {
             <div data-doc-writing style={S.notice}>Writing this document…</div>
           )}
           {doc.status === "failed" && (
-            <div data-doc-failed style={S.notice}>
-              This document could not be written. Ask for it again in chat.
+            <div data-doc-failed data-failure-code={doc.error_code ?? "unknown"} style={S.notice}>
+              {documentFailureCopy(doc.error_code)}
             </div>
           )}
 

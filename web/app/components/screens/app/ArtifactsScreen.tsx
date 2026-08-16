@@ -186,6 +186,11 @@ function artifactSourceLine(a: ArtifactItem): string {
     const parts: string[] = []
     if (a.kind.trim()) parts.push(a.kind.trim())
     if (a.status === "generating") parts.push("Writing")
+    // A FAILED document said nothing here, so it sat in the library looking
+    // like any other row and opened blank — the state that made a failed
+    // generation invisible in the product. The row says so; the document
+    // itself says WHY (the panel and the page both read `error_code`).
+    if (a.status === "failed") parts.push("Couldn't be written")
     // Same rule as the report and ticket-set rows: a deleted chat leaves the
     // id but no title, and the row omits the clause rather than inventing one.
     if (a.source.conversation_title) parts.push(`from ${a.source.conversation_title}`)

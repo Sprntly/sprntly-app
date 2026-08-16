@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS custom_artifacts (
     body_html       TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'ready',
     error           TEXT,
+    error_code      TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
     created_by      TEXT,
     updated_by      TEXT,
@@ -543,3 +544,70 @@ def test_a_generating_document_is_readable_while_it_writes(docs_env, monkeypatch
     ).json()["id"]
     got = ctx.client.get(f"/v1/custom-artifacts/{doc_id}")
     assert got.status_code == 200 and got.json()["status"] == "generating"
+
+
+# ─── A failed document says why (and never says how) ─────────────────────────
+
+def _fail(company_id: str, doc_id: int, error: str, code: str | None) -> None:
+    from app.db.custom_artifacts import fail_artifact
+
+    fail_artifact(company_id, doc_id, error, code=code)
+
+
+def test_a_failed_document_returns_its_reason_code(docs_env, monkeypatch):
+    """Without this the API said nothing about a failure at all, so the product
+    could only ever show one sentence for every cause — and a user could not
+    tell "ask again and it will work" from "asking again fails the same way"."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "gateway down", "llm_error")
+
+    doc = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert doc["status"] == "failed"
+    assert doc["error_code"] == "llm_error"
+
+
+def test_the_raw_error_is_never_returned(docs_env, monkeypatch):
+    """THE POINT OF THE SPLIT. `error` is `str(exc)` — provider wording, URLs,
+    whatever ended up in the message — and this library is shared with the whole
+    team. The code is returned; the text stays operator-side."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "connect failed: https://internal.host/v1?key=abc", "llm_error")
+
+    body = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert "error" not in body
+    assert "internal.host" not in ctx.client.get(
+        f"/v1/custom-artifacts/{doc_id}"
+    ).text
+
+
+def test_a_document_that_failed_before_the_column_existed_reads_as_unknown(
+    docs_env, monkeypatch
+):
+    """NULL means "we do not know why", which is exactly true of every row that
+    failed before this column existed. The web has copy for that; inventing a
+    code here would be a guess rendered as a fact."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "some old failure", None)
+
+    doc = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert doc["status"] == "failed" and doc["error_code"] is None
+
+
+def test_listings_omit_the_code_rather_than_reporting_a_false_null(
+    docs_env, monkeypatch
+):
+    """The listing selects a fixed column set that does not include the code, so
+    emitting the key would say `error_code: null` for a document that genuinely
+    failed with a known reason. A field that lies is worse than one that is
+    absent — the listing carries `status`, which is all it renders."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "gateway down", "llm_error")
+
+    rows = ctx.client.get("/v1/custom-artifacts").json()["artifacts"]
+    row = next(r for r in rows if r["id"] == doc_id)
+    assert row["status"] == "failed"
+    assert "error_code" not in row

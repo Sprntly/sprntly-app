@@ -293,6 +293,7 @@ CREATE TABLE custom_artifacts (
     body_html       TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'ready',
     error           TEXT,
+    error_code      TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
     created_by      TEXT,
     updated_by      TEXT,
