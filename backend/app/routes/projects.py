@@ -736,6 +736,11 @@ def candidate_search_route(
     def _emit(user_id: str, name: str | None, email: str | None, kind: str) -> None:
         if not user_id or user_id in seen:
             return
+        # Self-exclude: the picker is only used to find someone ELSE to
+        # delegate/mention/add — every caller of this route reads the
+        # on-project roster elsewhere, so dropping the caller loses nothing.
+        if user_id == ctx.user_id:
+            return
         if needle:
             hay = f"{(name or '')} {(email or '')}".casefold()
             if needle not in hay:
