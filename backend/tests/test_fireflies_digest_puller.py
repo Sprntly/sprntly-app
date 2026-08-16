@@ -118,7 +118,14 @@ def test_pull_is_distilled_only_and_window_scoped():
         records = list(fireflies.pull("key", since=since, limit=10))
     body = post.call_args.kwargs["json"]
     assert "sentences" not in body["query"]
-    assert body["variables"] == {"limit": 10, "fromDate": "2026-06-01T00:00:00+00:00", "toDate": None}
+    # `skip` joined the variables on 2026-08-16. Without it this path could
+    # never see past the API's 50-per-query ceiling, which is why the KG held
+    # roughly three days of meetings however high the record cap was set. An
+    # explicit `since` keeps the pull cursor-free, so page one starts at 0.
+    assert body["variables"] == {
+        "limit": 10, "skip": 0,
+        "fromDate": "2026-06-01T00:00:00+00:00", "toDate": None,
+    }
     assert records[0].provider == "fireflies" and records[0].kind == "meeting"
     # No verbatim quotes leak into the persisted record.
     assert "SAML SSO" not in records[0].text
