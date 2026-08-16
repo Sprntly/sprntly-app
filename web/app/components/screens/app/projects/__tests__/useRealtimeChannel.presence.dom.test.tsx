@@ -452,7 +452,11 @@ describe("no persistence (AC-7)", () => {
   it("test_no_migration_no_db_write: the presence/typing surfaces add no DB call — only Realtime channel methods", () => {
     const here = dirname(fileURLToPath(import.meta.url))
     const hookSrc = readFileSync(join(here, "..", "useRealtimeChannel.ts"), "utf8")
-    const consumerSrc = readFileSync(join(here, "..", "ProjectGroupChat.tsx"), "utf8")
+    // RE-POINTED post-fold: the presence/typing + transport logic moved out of
+    // the thin `ProjectGroupChat.tsx` host into `useProjectGroupThread.ts` — scan
+    // the engine (where a stray DB write would now live), not the host (which
+    // trivially has none, a vacuous scan).
+    const consumerSrc = readFileSync(join(here, "..", "useProjectGroupThread.ts"), "utf8")
     const forbidden = [/supabase\.from\(/, /\.rpc\(/, /CREATE TABLE/i, /INSERT INTO/i, /ALTER TABLE/i]
     for (const pattern of forbidden) {
       expect(hookSrc).not.toMatch(pattern)
