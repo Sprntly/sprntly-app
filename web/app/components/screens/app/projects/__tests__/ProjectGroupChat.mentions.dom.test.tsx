@@ -123,18 +123,17 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     expect(await screen.findByTestId("gc-mention-picker")).toBeTruthy()
   })
 
-  it("the agent-invoke path (invokedBy) is unchanged for an @Sprntly-triggered reply", async () => {
+  it("test_group_no_invoked_by_badge", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly help" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    // Redesign: the invoke-only `gc-invoker` tag became the always-present agent
-    // `gc-state-badge` ("invoked by <first name>" here). Same invoked-by
-    // semantics.
-    const badge = await screen.findByTestId("gc-state-badge")
-    expect(badge.textContent).toContain("invoked by")
-    expect(badge.textContent).toContain("Shristi")
+    // The debug-y "invoked by <name>" / "detected this was for it" trigger
+    // badge is no longer user-facing — the agent turn still renders, but no
+    // badge node exists. `trigger_kind` stays recorded server-side.
+    await screen.findByTestId("gc-msg-agent")
+    expect(screen.queryByTestId("gc-state-badge")).toBeNull()
   })
 
   it("test_select_member_inserts_chip_no_network", async () => {
@@ -417,12 +416,12 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
-    // Multi-author bubbles + agent invoked-by state badge intact.
+    // Multi-author bubbles intact; no trigger badge (it's not user-facing).
     const other = await screen.findByTestId("gc-msg-other")
     expect(within(other).getByText("Shristi")).toBeTruthy()
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
     expect(screen.getByTestId("gc-msg-agent")).toBeTruthy()
-    expect(screen.getByTestId("gc-state-badge").textContent).toContain("Shristi")
+    expect(screen.queryByTestId("gc-state-badge")).toBeNull()
 
     // Send path unaffected: a plain message posts through postGroupTurn.
     postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))

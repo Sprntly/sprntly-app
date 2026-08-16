@@ -50,12 +50,32 @@ function initials(name: string | null | undefined): string {
 }
 
 /** The current viewer's display name for presence/typing — derived from the
- *  same `user_metadata` `signUpWithPassword` writes (no new fetch). */
+ *  same `user_metadata` `signUpWithPassword` writes (no new fetch). Password
+ *  sign-up populates `first_name`/`last_name`; Google OAuth instead populates
+ *  `full_name`/`name` (and separately `given_name`+`family_name`, the same
+ *  keys the repo's own `handle_new_user` triggers treat as valid OAuth name
+ *  sources) — those are read next, before falling back to the email
+ *  local-part. */
 function authDisplayName(user: { user_metadata?: unknown; email?: string | null } | null | undefined): string {
   if (!user) return "You"
-  const meta = user.user_metadata as { first_name?: string; last_name?: string } | undefined
-  const full = [meta?.first_name, meta?.last_name].map((s) => s?.trim()).filter(Boolean).join(" ")
-  if (full) return full
+  const meta = user.user_metadata as
+    | {
+        first_name?: string
+        last_name?: string
+        full_name?: string
+        name?: string
+        given_name?: string
+        family_name?: string
+      }
+    | undefined
+  const firstLast = [meta?.first_name, meta?.last_name].map((s) => s?.trim()).filter(Boolean).join(" ")
+  if (firstLast) return firstLast
+  const fullName = meta?.full_name?.trim()
+  if (fullName) return fullName
+  const name = meta?.name?.trim()
+  if (name) return name
+  const givenFamily = [meta?.given_name, meta?.family_name].map((s) => s?.trim()).filter(Boolean).join(" ")
+  if (givenFamily) return givenFamily
   if (user.email) {
     const local = user.email.split("@")[0]
     if (local) return local
