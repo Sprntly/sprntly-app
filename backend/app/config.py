@@ -499,6 +499,16 @@ class Settings(BaseSettings):
     # NOTE: the setting kept its historical WEEKLY_BRIEF_TICK_MINUTES env name so
     # existing staging/prod .env files keep working (they are hand-managed).
     weekly_brief_tick_minutes: int = 15
+    # Monthly intelligence reports (app.monthly_reports): once a month per
+    # company — the first configured brief weekday, at the brief time — run
+    # each registered report (competitive intelligence today), save it into
+    # the artifacts library, and announce it (Slack + email ready-ping). Rides
+    # SCHEDULER_ENABLED like every job here; this flag is the reports-only
+    # kill switch. The tick is hourly: the due window is 24h and the durable
+    # ledger (the saved reports row) makes extra ticks free no-ops, so a fine
+    # cadence buys nothing.
+    monthly_reports_enabled: bool = True
+    monthly_reports_tick_minutes: int = 60
     # Ticket tracker sync: every tick, two-way sync each PRD whose tickets were
     # pushed to ClickUp/Jira (prd_ticket_sync rows with auto_sync=true). 15 min
     # by default; raise via TICKET_SYNC_INTERVAL_MINUTES (e.g. 60–120) if

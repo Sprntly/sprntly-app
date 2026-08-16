@@ -18,6 +18,10 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
   refresh_connectors — re-pulls connector data into the KG every
                        CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
                        and KG read near-live data.
+  monthly_reports_tick — once a month per company (first configured brief
+                       weekday, at the brief time), runs each registered
+                       intelligence report, saves it into the artifacts
+                       library and announces it (app.monthly_reports).
 """
 from __future__ import annotations
 
@@ -537,6 +541,71 @@ async def _run_exact_delivery(
         )
 
 
+async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
+    """Drive the monthly intelligence reports for every company.
+
+    Ticks hourly (MONTHLY_REPORTS_TICK_MINUTES). For each company it resolves
+    the same timezone + configured day/time the brief uses and asks the pure
+    `app.monthly_reports.due_specs` decision — which forces the frequency to
+    MONTHLY (first configured weekday of the month) whatever brief cadence
+    the company picked, and reads its once-per-cycle state from the saved
+    reports themselves, so a restart can never double-run a month.
+
+    Single-phase by design, unlike the brief's generate-then-deliver split:
+    the report takes minutes to research and its announcement says "is
+    ready", so generating at the fire time and announcing on completion IS
+    the honest behaviour — there is no exact-instant delivery to protect.
+
+    Company-scoped, not per-workspace: the engines read company-level state
+    (companies.competitors, company profile) and the reports library is
+    shared across a company's workspaces. Per-company error isolation, like
+    every tick here.
+    """
+    from app import monthly_reports
+
+    now = now or datetime.now(timezone.utc)
+
+    try:
+        companies = list_companies()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Monthly reports tick: failed to list companies: %s", exc)
+        return
+
+    for company in companies:
+        company_id = company.get("id")
+        if not company_id:
+            continue
+        if not monthly_reports.monthly_reports_on(
+            company.get("notification_settings")
+        ):
+            continue
+        tz, schedule = _resolve_company_schedule(company)
+        try:
+            due = await asyncio.to_thread(
+                monthly_reports.due_specs, company_id, now, tz, schedule
+            )
+        except Exception as exc:  # noqa: BLE001 — one company never stops the tick
+            logger.error(
+                "Monthly reports tick: due-check failed for %s: %s",
+                company_id, exc,
+            )
+            continue
+        for spec in due:
+            logger.info(
+                "Monthly reports tick: running %s for company %s",
+                spec.skill, company_id,
+            )
+            try:
+                await asyncio.to_thread(
+                    monthly_reports.run_and_deliver, company, spec
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate per report
+                logger.error(
+                    "Monthly reports tick: %s failed for %s: %s",
+                    spec.skill, company_id, exc,
+                )
+
+
 async def _run_drip_email_cycle() -> None:
     """Onboarding drip / nudge email cycle (v0 checklist 2.1).
 
@@ -852,6 +921,24 @@ def start_scheduler() -> None:
         name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
         replace_existing=True,
     )
+    # Monthly intelligence reports: once a month per company, run each
+    # registered report (competitive intelligence today), save it into the
+    # artifacts library, and announce it. The day/time/tz decisions are the
+    # pure app.brief_schedule functions with the frequency forced to MONTHLY;
+    # this cadence just has to be finer than the 24h due window, and the
+    # durable reports-row ledger makes extra ticks free no-ops.
+    if settings.monthly_reports_enabled:
+        report_minutes = (
+            getattr(settings, "monthly_reports_tick_minutes", 60) or 60
+        )
+        _scheduler.add_job(
+            _run_monthly_reports_tick,
+            trigger=IntervalTrigger(minutes=report_minutes),
+            id="monthly_reports_tick",
+            name=f"Monthly intelligence reports (tick every {report_minutes}m)",
+            replace_existing=True,
+        )
+
     # Third job: onboarding drip / nudge emails (v0 checklist 2.1). Opt-in via
     # DRIP_EMAILS_ENABLED, on its own cadence (DRIP_INTERVAL_HOURS) since the
     # drip pass is cheap and benefits from finer granularity than the brief
