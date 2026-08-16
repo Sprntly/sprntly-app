@@ -154,15 +154,28 @@ function ChatShellInner(
   }, [isMain])
 
   // Esc-to-stop — project surfaces only (main keeps its own host listener).
+  // FOLDED-IN fix (the one confirmed live bug): the shipped project Esc listener
+  // called `stop` on ANY Escape, so pressing Esc to close a modal/drawer
+  // silently cancelled a running private answer. Add main chat's two
+  // long-standing guards:
+  //  (a) OVERLAY-YIELD — a sibling overlay (`useEscapeToClose`) calls
+  //      `preventDefault()` on a `document` listener that fires BEFORE this
+  //      `window` listener, so `e.defaultPrevented` yields to it; and
+  //  (b) BUSY-GATE — only stop when a turn is actually pending, so Esc with no
+  //      generation running is a no-op REGARDLESS of overlays.
+  // Esc with no overlay open still stops a generating answer (don't over-fix).
   useEffect(() => {
     if (isMain || !composer.escToStop || !composer.stop?.onStop) return
     const onStop = composer.stop.onStop
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onStop()
+      if (e.key !== "Escape") return
+      if (e.defaultPrevented) return
+      if (!(turns as ShellTurn[]).some((t) => t.pending)) return
+      onStop()
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [isMain, composer.escToStop, composer.stop])
+  }, [isMain, composer.escToStop, composer.stop, turns])
 
   // Re-seat the textarea caret after a programmatic draft write (chip
   // insertion) — project surfaces only.
