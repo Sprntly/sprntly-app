@@ -201,19 +201,17 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
-  it("an agent turn triggered by an @Sprntly mention shows the invoked-by state badge", async () => {
+  it("test_group_no_invoked_by_badge — an agent turn triggered by an @Sprntly mention renders no invoked-by/state badge (removed: debug-y internal state, not user-facing)", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly can you help?" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    // The redesign replaced the invoke-only `gc-invoker` tag with an
-    // always-present agent state badge (`gc-state-badge`): an @Sprntly-triggered
-    // turn reads "invoked by <first name>"; a mention-less one reads "detected
-    // this was for it". Same smart-interjection semantics, one durable hook.
-    const badge = await screen.findByTestId("gc-state-badge")
-    expect(badge.textContent).toContain("invoked by")
-    expect(badge.textContent).toContain("Shristi")
+    // The badge no longer renders — the smart-interjection state is still
+    // durably recorded via `trigger_kind` ("mention" vs "gate") backend-side,
+    // so nothing is lost for debugging.
+    await screen.findByTestId("gc-msg-agent")
+    expect(screen.queryByTestId("gc-state-badge")).toBeNull()
   })
 
   it("renders OpenArtifactChips on an agent turn and fires the open callback on click", async () => {

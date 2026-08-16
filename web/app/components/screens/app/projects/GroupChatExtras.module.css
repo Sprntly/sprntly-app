@@ -1,6 +1,6 @@
 /* GroupChatExtras — the group-surface styling families that ride the shared
-   `ChatShell` through host-supplied nodes (roster, invoked-by state badge)
-   and engine-emitted nodes (typing indicator, error, posting-wait).
+   `ChatShell` through host-supplied nodes (the presence roster) and
+   engine-emitted nodes (typing indicator, error, posting-wait).
    Relocated verbatim from the deleted `ProjectGroupChat.module.css` at the fold:
    these families had no home in `ChatShell.module.css` (row/bubble/role/time
    went there in T3a; picker/chip/affordance live in `mention-picker.module.css`).
@@ -39,23 +39,6 @@
   border-radius: 50%;
   background: var(--accent);
   border: 1.5px solid var(--surface);
-}
-
-/* ── Smart-interjection state badge on an agent turn (turnHeadExtra) — the
-   mockup's soft-green "detected this was for it" / "invoked by you" pill. ── */
-.stateBadge {
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 2px 9px;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-
-.stateDetected,
-.stateInvoked {
-  color: var(--accent-ink);
-  background: var(--accent-muted);
-  border: 1px solid var(--accent-soft);
 }
 
 /* ── Typing indicator (engine-emitted, dock.aboveComposer) ── */
