@@ -1207,6 +1207,25 @@ def project_ids(sb):
         sb.table("projects").delete().eq("id", pid).execute()
 
 
+def _second_human_id(sb, exclude_user_id: str) -> str:
+    """A REAL existing `auth.users`-backed id for the "second human" seeded
+    into a multi-human live-tier project — `project_members.user_id` (and
+    `project_delegations.assignee_user_id`) are `uuid NOT NULL FK ->
+    auth.users(id)`, so a fabricated non-uuid string errors immediately
+    with Postgres 22P02 before the gate is ever reached. `profiles` mirrors
+    `auth.users` 1:1 and is queryable via the service-role client (unlike
+    the `auth` schema itself), mirroring how `fixture_ids` elsewhere in
+    this file / `test_delegation_events.py`'s own `fixture_ids` resolve a
+    real user id — this one deliberately does NOT require same-company
+    membership (the FK only cares that the id is a real user), so it works
+    even when the seeded company itself only has one member."""
+    rows = (
+        sb.table("profiles").select("id").neq("id", exclude_user_id).limit(1).execute().data
+    )
+    assert rows, "need a second real profiles/auth.users row in the local rig"
+    return rows[0]["id"]
+
+
 @pytest.mark.integration
 @pytest.mark.real_interjection_gate  # opt OUT of conftest's autouse call_json stub
 @pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
@@ -1224,7 +1243,7 @@ def test_live_multi_human_project_relevant_message_interjects(client, fixture_id
     # A SECOND human member — see test_gate_live_stays_out_of_human_backforth;
     # otherwise the solo-project auto-respond shortcut answers this without
     # ever consulting the real classifier this test means to exercise.
-    second_human = f"live-gate-second-human-{uuid.uuid4().hex[:8]}"
+    second_human = _second_human_id(sb, fixture_ids["user_id"])
     sb.table("project_members").insert(
         {"project_id": project["id"], "user_id": second_human}
     ).execute()
@@ -1294,7 +1313,7 @@ def test_gate_live_stays_out_of_human_backforth(client, fixture_ids, project_ids
     # so this human-to-human scenario needs a real second person for the
     # gate to be consulted at all.
     sb.table("project_members").insert(
-        {"project_id": project["id"], "user_id": f"live-gate-second-human-{uuid.uuid4().hex[:8]}"}
+        {"project_id": project["id"], "user_id": _second_human_id(sb, fixture_ids["user_id"])}
     ).execute()
 
     client.post(
