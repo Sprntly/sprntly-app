@@ -307,7 +307,7 @@ async def test_run_execution_job_heartbeat_beats_and_stops(monkeypatch):
     import time as _time
 
     def _slow_body() -> ExecutionOutcome:
-        _time.sleep(0.08)
+        _time.sleep(0.15)               # ~15 beat intervals — reliably > 2
         return ExecutionOutcome(status="ready", response={"answer": "done"})
 
     await run_execution_job(
@@ -317,7 +317,11 @@ async def test_run_execution_job_heartbeat_beats_and_stops(monkeypatch):
         body=_slow_body,
     )
     assert len(beats) >= 2, f"a long run must be beaten (got {len(beats)})"
-    # The beat is cancelled with the job — no beats after it finishes.
+    # The beat is cancelled with the job. At most ONE straggler can land (a beat
+    # already inside `to_thread` when cancel fired — harmless, the write is
+    # guarded); it must NOT keep firing every interval after the run ends.
     before = len(beats)
-    await asyncio.sleep(0.03)
-    assert len(beats) == before, "the heartbeat outlived the run"
+    await asyncio.sleep(0.06)           # ~6 intervals: unbounded beating would add many
+    assert len(beats) <= before + 1, (
+        f"the heartbeat outlived the run (before={before}, after={len(beats)})"
+    )
