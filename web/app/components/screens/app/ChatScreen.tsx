@@ -23,6 +23,8 @@ import {
 } from "../../shared/AssistantWaitState"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import {
+  clarifyAnswersText,
+  clarifyQuestionsText,
   type ClarifyAnswer,
   type ClarifyQuestion,
   type ClarifyResolution,
@@ -298,44 +300,21 @@ type ChatTab = {
   ticketSetTask?: string
 }
 
-// The DURABLE form of the clarify gate's questions: a flattened numbered list.
-//
-// What the user actually sees is `ClarifyQuestionsCard` (options as buttons, one
-// submit for the batch) — this text is what gets PERSISTED as the assistant turn
-// and what a reloaded thread falls back to, since the card's answering machinery
-// (`pendingClarify`) is transient. It is also what `PRD_CLARIFY_ANSWER_RE`
-// matches to keep the questions out of the PRD's grounding transcript, so the
-// leading sentence must keep its "Before I write this PRD" opening.
-export function clarifyQuestionsText(questions: ClarifyQuestion[]): string {
-  const lines = questions.map((q, i) => {
-    const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
-    // Skips are informed, not silent: each question states the assumption the
-    // author proceeds with when it goes unanswered.
-    const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
-    // Blank-line separated: single newlines are soft-wrapped away by the
-    // markdown renderer, which ran the whole list together on one line.
-    return `${i + 1}. ${q.prompt}${opts}${skip}`
-  })
-  return (
-    "Before I write this PRD, a few details would make it much stronger. " +
-    "Answer what you can in one message — or say \"generate now\" and I'll " +
-    "proceed with what I have:\n\n" +
-    lines.join("\n\n")
-  )
-}
+// `clarifyQuestionsText`/`clarifyAnswersText` — the clarify gate's durable
+// text formatters — now live in `ClarifyQuestionsCard.tsx` (the shared card's
+// natural home, reused by the private project engine too) and are re-exported
+// here so this file's own callers below (and `ChatScreen.clarify-card.dom.
+// test.tsx`, which imports them from this module) keep resolving unchanged.
+// `PRD_CLARIFY_ANSWER_RE` matches `clarifyQuestionsText`'s output to keep the
+// questions out of the PRD's grounding transcript, so its leading sentence
+// must keep its "Before I write this PRD" opening.
+export { clarifyAnswersText, clarifyQuestionsText }
 
 function clarifyQuestionsReply(questions: ClarifyQuestion[]): AskResponse {
   return {
     answer: clarifyQuestionsText(questions),
     sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
   } as AskResponse
-}
-
-// The user's card answers, rendered as the message they'd otherwise have typed.
-// Q/A pairs (not bare answers) so the generator can tell which question each one
-// settles — the composer path sends prose, and this must be at least as legible.
-export function clarifyAnswersText(answers: ClarifyAnswer[]): string {
-  return answers.map((a) => `${a.prompt}\n${a.answer}`).join("\n\n")
 }
 
 // "generate now" / "just proceed" — the user declines the clarify questions

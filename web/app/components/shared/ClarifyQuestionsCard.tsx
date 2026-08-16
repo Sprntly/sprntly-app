@@ -68,6 +68,39 @@ export type ClarifyQuestionsCardProps = {
   onSkip: () => void
 }
 
+// The DURABLE form of the clarify gate's questions: a flattened numbered list.
+//
+// What the user actually sees is the interactive card above (options as
+// buttons, one submit for the batch) — this text is what gets PERSISTED as the
+// assistant turn and what a reloaded thread falls back to, since the card's
+// live answering machinery is transient. Shared by every host that renders
+// this card (main via `ChatScreen`'s re-export, the private project engine) so
+// the durable form and the live card can never drift against each other.
+export function clarifyQuestionsText(questions: ClarifyQuestion[]): string {
+  const lines = questions.map((q, i) => {
+    const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
+    // Skips are informed, not silent: each question states the assumption the
+    // author proceeds with when it goes unanswered.
+    const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
+    // Blank-line separated: single newlines are soft-wrapped away by the
+    // markdown renderer, which ran the whole list together on one line.
+    return `${i + 1}. ${q.prompt}${opts}${skip}`
+  })
+  return (
+    "Before I write this PRD, a few details would make it much stronger. " +
+    "Answer what you can in one message — or say \"generate now\" and I'll " +
+    "proceed with what I have:\n\n" +
+    lines.join("\n\n")
+  )
+}
+
+// The user's card answers, rendered as the message they'd otherwise have typed.
+// Q/A pairs (not bare answers) so the generator can tell which question each one
+// settles — the composer path sends prose, and this must be at least as legible.
+export function clarifyAnswersText(answers: ClarifyAnswer[]): string {
+  return answers.map((a) => `${a.prompt}\n${a.answer}`).join("\n\n")
+}
+
 /** The answer a question currently holds: the picked option, or the typed text
  *  when the free-text box is open and non-empty (typing beats a stale pick). */
 function resolveAnswer(picked: string | undefined, typed: string | undefined): string {

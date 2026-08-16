@@ -250,6 +250,8 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       descriptor={descriptor}
       turns={engine.turns}
       onPickOption={engine.pickOption}
+      onClarifySubmit={engine.submitClarify}
+      onClarifySkip={engine.skipClarify}
     />
   )
 }
