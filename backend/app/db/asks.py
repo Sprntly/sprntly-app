@@ -363,6 +363,26 @@ def claim_retry_attempt(
     }
 
 
+@retry_on_disconnect
+def get_run_by_client_message_id(client_message_id: str) -> dict | None:
+    """The ask_jobs row carrying this `client_message_id`, or None. Backs the
+    send-route idempotency check: a repeat submit of the same client message
+    must resolve to the SAME run rather than mint a second one (the
+    `ask_jobs_client_message_id_uidx` partial-unique makes at most one exist)."""
+    if not client_message_id:
+        return None
+    c = require_client()
+    rows = (
+        c.table("ask_jobs")
+        .select("*")
+        .eq("client_message_id", client_message_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
+
+
 def complete_ask_job(ask_id: int, payload: dict) -> None:
     """Store the citation-stripped answer payload and mark the job `ready`.
 

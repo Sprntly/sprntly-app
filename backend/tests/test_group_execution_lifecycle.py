@@ -23,6 +23,9 @@ The real-DB migration proof and the real-LLM behaviour arm live in
 """
 from __future__ import annotations
 
+import inspect
+import sys as _real_sys
+import types
 from types import SimpleNamespace
 
 import pytest
@@ -426,3 +429,81 @@ def test_active_attempt_index_enforces_one_live_attempt(
             company_id=t.company_id, dataset="acme", question="", conversation_id=conv_id,
             kind="project_group", project_id=project_id, source_turn_id=turn_id, run_id="r2",
         )
+
+
+# ─────────────── real async route path (masks that pytest-inline hid) ───────
+
+def _disable_pytest_inline(monkeypatch):
+    """Force `_schedule_group_reply` OFF the `"pytest" in sys.modules` inline
+    shortcut and ONTO the real `asyncio.create_task` background path — so a
+    sync-vs-async route mismatch (a sync route has no running loop for
+    create_task) surfaces exactly as it does over real HTTP."""
+    fake_sys = types.SimpleNamespace(
+        modules={k: v for k, v in _real_sys.modules.items() if k != "pytest"}
+    )
+    monkeypatch.setattr(projects_route, "sys", fake_sys)
+
+    async def _noop_reply(*a, **kw):
+        return None
+
+    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _noop_reply)
+
+
+def test_retry_route_is_async():
+    """DEFECT-1 structural guard: the retry route MUST be a coroutine function.
+    A sync `def` runs on a threadpool with no event loop, where
+    `_schedule_group_reply`'s `asyncio.create_task` raises → HTTP 500."""
+    assert inspect.iscoroutinefunction(projects_route.retry_group_turn_route)
+
+
+def test_retry_route_202_over_real_async_path_no_orphan(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """DEFECT-1 symptom test: drive the retry route through the ASGI app with
+    the pytest-inline shortcut DISABLED, so it hits the real
+    `asyncio.create_task` path. A sync route would 500 here (no running loop);
+    the async route returns 202. Exactly ONE new generating attempt is claimed
+    (no orphan)."""
+    from app.db.asks import fail_ask_job, start_ask_job
+
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv_id, turn_id = _seed_group_turn(t, project_id)
+    job = start_ask_job(
+        company_id=t.company_id, dataset="acme", question="", conversation_id=conv_id,
+        kind="project_group", project_id=project_id, source_turn_id=turn_id,
+        run_id="r0", attempt=1,
+    )
+    fail_ask_job(job, "TypeError: boom", "app")
+
+    _disable_pytest_inline(monkeypatch)
+    r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
+    assert r.status_code == 202, r.text  # would be 500 if the route were sync
+    assert r.json()["attempt"] == 2
+    live = [x for x in _group_runs(conv_id) if x["status"] == "generating"]
+    assert len(live) == 1, "exactly one new attempt claimed, no orphan"
+
+
+def test_duplicate_client_message_id_is_idempotent_on_send(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """DEFECT-2 symptom test: submitting the SAME client_message_id twice must
+    NOT 500 and must NOT post a second human turn or mint a second run — the
+    duplicate replays the original turn idempotently."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    _stub_answer(monkeypatch)
+    body = {"content": "@Sprntly hi", "client_message_id": "dup-1"}
+
+    r1 = t.client.post(f"/v1/projects/{project_id}/group/turns", json=body)
+    assert r1.status_code == 200, r1.text
+    r2 = t.client.post(f"/v1/projects/{project_id}/group/turns", json=body)
+    assert r2.status_code == 200, r2.text  # no 500 on the duplicate
+
+    assert r1.json()["id"] == r2.json()["id"], "the duplicate replays the same turn"
+    conv = conversations_db.get_group_chat(project_id)
+    turns = conversations_db.list_group_turns(conv["id"])
+    human = [x for x in turns if x["role"] == "user"]
+    assert len(human) == 1, "a duplicate client_message_id must not post a 2nd human turn"
+    runs = [x for x in _group_runs(conv["id"]) if x["client_message_id"] == "dup-1"]
+    assert len(runs) == 1, "a duplicate client_message_id must not mint a 2nd run"

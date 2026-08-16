@@ -136,6 +136,16 @@ def _run_group_reply_blocking(coro) -> None:
         ex.submit(asyncio.run, coro).result()
 
 
+def _is_unique_violation(exc: Exception) -> bool:
+    """True for a Postgres/PostgREST unique-constraint violation (23505) — or
+    the FakeSupabaseClient's sqlite `IntegrityError` equivalent."""
+    import sqlite3
+
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    return getattr(exc, "code", None) == "23505" or "duplicate key" in str(exc).lower()
+
+
 def _schedule_group_reply(
     project_id: int,
     conversation_id: int,
@@ -167,19 +177,32 @@ def _schedule_group_reply(
     it."""
     if job_id is None or run_id is None:
         run_id = str(uuid.uuid4())
-        job_id = start_ask_job(
-            company_id=ctx.company_id,
-            dataset=_dataset_for(ctx),
-            question="",
-            conversation_id=conversation_id,
-            kind="project_group",
-            project_id=project_id,
-            source_turn_id=source_turn_id,
-            run_id=run_id,
-            # A server-minted id when the client sent none — keeps the
-            # idempotency partial-unique meaningful for every group run.
-            client_message_id=client_message_id or str(uuid.uuid4()),
-        )
+        try:
+            job_id = start_ask_job(
+                company_id=ctx.company_id,
+                dataset=_dataset_for(ctx),
+                question="",
+                conversation_id=conversation_id,
+                kind="project_group",
+                project_id=project_id,
+                source_turn_id=source_turn_id,
+                run_id=run_id,
+                # A server-minted id when the client sent none — keeps the
+                # idempotency partial-unique meaningful for every group run.
+                client_message_id=client_message_id or str(uuid.uuid4()),
+            )
+        except Exception as exc:  # noqa: BLE001 — narrowed below
+            # Defense-in-depth for a concurrent duplicate-submit that slipped
+            # past the route's idempotency pre-check: the client_message_id
+            # partial-unique refuses the second insert. Treat it as an
+            # idempotent no-op (the first run stands) rather than a 500.
+            if client_message_id and _is_unique_violation(exc):
+                logger.info(
+                    "group_reply_dedup_on_client_message_id conversation_id=%s",
+                    conversation_id,
+                )
+                return
+            raise
     coro = _respond_as_group_agent(
         project_id, conversation_id, ctx, trigger_kind, job_id=job_id, run_id=run_id,
     )
@@ -189,6 +212,20 @@ def _schedule_group_reply(
     task = asyncio.create_task(coro)
     _group_reply_tasks.add(task)
     task.add_done_callback(_group_reply_tasks.discard)
+
+
+def _get_group_turn(conversation_id: int, turn_id: int | None) -> dict | None:
+    """One shaped group turn by id (via `list_group_turns`, so it carries the
+    same DTO shape incl. run_status), or None. Used by the send-route
+    idempotency replay to return the ORIGINAL human turn for a duplicate
+    client_message_id."""
+    if turn_id is None:
+        return None
+    try:
+        shaped = conversations_db.list_group_turns(conversation_id, since=turn_id - 1)
+        return next((t for t in shaped if t["id"] == turn_id), None)
+    except Exception:  # noqa: BLE001 — replay lookup is best-effort
+        return None
 
 
 def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dict | None) -> None:
@@ -1270,6 +1307,17 @@ async def post_group_turn_route(
     persisted + broadcast + the gate has decided, never after the reply."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    # Idempotency: a repeat submit carrying the SAME client_message_id must not
+    # post a second human turn or mint a second run. If a run already exists for
+    # this client message, replay the ORIGINAL human turn (no new write, no new
+    # schedule) — the `ask_jobs_client_message_id_uidx` partial-unique is the
+    # DB backstop; this pre-check makes the replay graceful instead of a 500.
+    if payload.client_message_id:
+        prior = asks_db.get_run_by_client_message_id(payload.client_message_id)
+        if prior is not None:
+            prior_turn = _get_group_turn(conversation["id"], prior.get("source_turn_id"))
+            if prior_turn is not None:
+                return prior_turn
     turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
     logger.info(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
@@ -1334,12 +1382,17 @@ async def post_group_turn_route(
 
 
 @router.post("/{project_id}/group/turns/{source_turn_id}/retry", status_code=202)
-def retry_group_turn_route(
+async def retry_group_turn_route(
     project_id: int,
     source_turn_id: int,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
     """Idempotently re-run a failed group reply for `source_turn_id`.
+
+    `async def` (like `post_group_turn_route`): the reply is scheduled via
+    `asyncio.create_task`, which needs the request's running event loop — a
+    sync route runs on a threadpool with no loop bound and would raise
+    `RuntimeError: no running event loop`.
 
     Member-gated. Side-effect presence is DERIVED at read time (inference over
     stored state, no new column): a prior attempt that recorded a delegation
@@ -1348,7 +1401,10 @@ def retry_group_turn_route(
     attempt is still `generating` the route returns 409 (DB-enforced by the
     `ask_jobs_active_attempt_uidx` partial-unique). Otherwise it claims a NEW
     run (`run_id` + `attempt = prev+1`) and re-enters the SAME background reply
-    path, returning 202 + the new run identity."""
+    path, returning 202 + the new run identity. If scheduling the reply raises
+    AFTER the claim committed, the just-claimed `generating` row is released
+    (`fail_ask_job`) so a failed schedule can't leave an orphan that 409s every
+    later retry until the reaper."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.get_group_chat(project_id)
     if not conversation:
@@ -1379,10 +1435,18 @@ def retry_group_turn_route(
     except asks_db.RetryAttemptLive:
         raise HTTPException(409, detail="a retry is already in flight for this turn")
     # Re-enter the SAME background reply path with the already-claimed run.
-    _schedule_group_reply(
-        project_id, conversation["id"], ctx, trigger_kind="mention",
-        source_turn_id=source_turn_id, job_id=claim["id"], run_id=claim["run_id"],
-    )
+    # If scheduling raises, release the committed claim so it doesn't orphan.
+    try:
+        _schedule_group_reply(
+            project_id, conversation["id"], ctx, trigger_kind="mention",
+            source_turn_id=source_turn_id, job_id=claim["id"], run_id=claim["run_id"],
+        )
+    except Exception:
+        try:
+            asks_db.fail_ask_job(claim["id"], "retry scheduling failed", "app")
+        except Exception:  # noqa: BLE001 — releasing the claim is best-effort
+            logger.exception("retry claim release failed job_id=%s", claim["id"])
+        raise
     return {"run_id": claim["run_id"], "attempt": claim["attempt"], "job_id": claim["id"]}
 
 
