@@ -517,6 +517,19 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # reason create_artifact's comment records: this set is the wire, and an
     # action missing from it is a silent half-feature, not an error.
     "list_artifacts",
+    # Post an artifact into the company's Slack. The client resolves the
+    # TARGET from its own context (the tab's PRD, the thread's ticket set or
+    # report) plus the envelope's `artifact_type`/`artifact_query`, previews
+    # what will be posted via POST /v1/share/slack/preview, and only sends on
+    # POST /v1/share/slack/send after the user confirms.
+    #
+    # Listed here for exactly the reason create_artifact's comment records —
+    # this set is the wire — and the stakes are higher for this one than for
+    # any other member. An action missing here falls through to `answer`, and
+    # the answer path, knowing the product can post to Slack, would reply that
+    # it had shared the document. Nothing would reach Slack, and unlike an
+    # empty library nobody can check a channel they were never told about.
+    "share_to_slack",
 }
 
 
@@ -583,6 +596,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # the planner's gate clears it there.
         "artifact_kind": plan.artifact_kind or None,
         "artifact_query": plan.artifact_query,
+        # `share_to_slack` only: WHERE it goes and WHAT is said with it. Both
+        # may be null — no channel means the client asks which one (never a
+        # guessed destination), no note means the document goes out on its
+        # own. The planner's gate clears the pair on every other intent.
+        "share_channel": plan.share_channel,
+        "share_note": plan.share_note,
         # The uploaded format this build must be written into, when the user
         # named one. The client forwards the id to the executor; the NAME is for
         # the client to say which format it is using, so an honoured request is

@@ -10,6 +10,7 @@ import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceCont
 import { useAuth } from "../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
+import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
@@ -28,6 +29,10 @@ import {
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
 import { QuestionPopup, type PopupAnswer } from "../../shared/QuestionPopup"
+import {
+  SlackShareMessage,
+  type SlackShareResolution,
+} from "../../shared/SlackSharePreviewCard"
 import { ChatSuggestionIcon, IconDocument, IconSparkle } from "../../shared/app-icons"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
@@ -39,7 +44,7 @@ import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -143,6 +148,22 @@ type ThreadTurn = {
    *  when one survives), never re-sends its label as a message. Persisted
    *  with the turn, so the listing is still clickable after a reload. */
   artifactList?: ChatArtifactItem[]
+  /** share_to_slack — the preview card riding this turn: what will be posted,
+   *  where, and (once settled) what happened.
+   *
+   *  PERSISTED with the turn, like `openCandidates`, and `resolved` is the
+   *  reason it must be. A share that reloaded back into its unsettled state
+   *  would offer a Send button for a message that may already have gone out;
+   *  a settled one reloads as the record of what was posted, which is the only
+   *  honest thing a thread can say about a message in a team channel. */
+  slackShare?: {
+    /** What to post — the same reference the preview resolved, sent back
+     *  verbatim so `send` re-reads the identical document. */
+    ref: SlackShareTargetRef
+    preview: SlackSharePreview
+    resolved?: SlackShareResolution
+    busy?: boolean
+  }
   /** The 12-minute client budget expired while the job was still generating.
    *  NOT a failure — the persisted ask_id is deliberately left in place, so a
    *  reload re-attaches and picks the answer up. Transient: after a reload the
@@ -256,6 +277,28 @@ type ChatTab = {
     applied: string[]
     /** The flow's turn, so the summary lands on the same conversation entry. */
     turnId: string
+  }
+  /** A share_to_slack question the popup is holding: which CHANNEL to post to,
+   *  or which DOCUMENT was meant.
+   *
+   *  Every choice this product asks for goes through the QuestionPopup (owner's
+   *  directive, 2026-08-16, after the first cut rendered a row of channel chips
+   *  inside the preview card) — the clarify gate, ticket assignment and this
+   *  now all ask the same way, in the dock above the composer.
+   *
+   *  Transient like `pendingAssign`: a reload drops the open question, and the
+   *  share it belongs to is left unsettled rather than posted. */
+  pendingShare?: {
+    /** Which turn's card this question belongs to. */
+    turnId: string
+    /** "channel" — the answer is a channel NAME (re-previewed server-side so
+     *  membership and the private-channel block are re-checked on the real
+     *  pick). "target" — the answer is a `${type}-${id}` key into the
+     *  preview's own candidates. */
+    kind: "channel" | "target"
+    header: string
+    prompt: string
+    options: { label: string; description?: string | null; value: string }[]
   }
   /** True from the moment a PRD command is acknowledged until the agent's NEXT
    *  visible response — the clarifying questions, or the generation starting.
@@ -1143,7 +1186,16 @@ export function ChatScreen() {
           ...rest,
           thread: rest.thread
             .filter((tn) => !(tn.summaryPending && !tn.reply))
-            .map(({ partial: _partial, streamDropped: _sd, timedOut: _to, ...turn }) => turn),
+            .map(({ partial: _partial, streamDropped: _sd, timedOut: _to, ...turn }) =>
+              // An in-flight Slack send dies with the page, so `busy` must not
+              // come back with it — a restored spinner would sit forever on a
+              // share whose outcome nothing can now report. The preview and
+              // the `resolved` record both persist (a settled share must still
+              // say what was posted after a reload); only the in-flight flag
+              // is dropped, exactly like `ticketSetRunning` above.
+              turn.slackShare?.busy
+                ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
+                : turn),
         }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
@@ -3622,6 +3674,271 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation])
 
+  // ── share_to_slack ────────────────────────────────────────────────────────
+  //
+  // "Share this PRD on my slack channel and ask the team for feedback."
+  //
+  // Two steps, always, and the split is the feature: this flow only ever
+  // PREVIEWS. It resolves the document and the channel, seeds a turn carrying
+  // the preview card, and stops. The post happens in `sendSlackShare` below,
+  // when the person has looked at the message and pressed the button — because
+  // a message in a team channel is public and cannot be recalled.
+
+  /** Patch one turn's `slackShare` state in place. Used by every step after
+   *  the seed (picking a different document, sending, cancelling, failing), so
+   *  the card and the record it becomes live on the same persisted turn. */
+  const patchSlackShare = useCallback((
+    tabId: string,
+    turnId: string,
+    patch: Partial<NonNullable<ThreadTurn["slackShare"]>>,
+  ) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t,
+          thread: t.thread.map((tn) => tn.id === turnId && tn.slackShare
+            ? { ...tn, slackShare: { ...tn.slackShare, ...patch } }
+            : tn),
+        }
+      : t))
+  }, [])
+
+  /** The reference a share posts back — the client's OWN context first.
+   *
+   *  "Share this PRD" means the document in front of the user, so an explicit
+   *  id from the tab beats the planner's reading of the phrase every time; the
+   *  phrase is the fallback for "share the checkout PRD", where there is no
+   *  tab context to prefer. The backend applies the same precedence, so the
+   *  two cannot disagree about which document was meant. */
+  const shareRefFor = useCallback((
+    envelope: ChatIntentEnvelope,
+    tab: ChatTab | undefined,
+    /** The report the panel is currently showing (`content.reportFocusId`) —
+     *  passed in rather than read here so this stays a pure mapping of
+     *  context → reference, testable without the content store. */
+    reportId: number | null,
+  ): SlackShareTargetRef => {
+    const prdId = envelope.prd_id ?? tab?.prdId ?? null
+    // A KIND the user named wins over the tab's default document: "share the
+    // tickets" in a thread that has both a PRD and a set means the set, and
+    // falling through to prd_id there would share the wrong artifact under a
+    // name the user did give us.
+    const named = (envelope.artifact_type || "").toLowerCase()
+    if (named === "tickets" && tab?.ticketSetId) {
+      return { ticket_set_id: tab.ticketSetId }
+    }
+    if (named === "report" && reportId) {
+      return { report_id: reportId }
+    }
+    if (named === "prd" && prdId) {
+      return { prd_id: prdId }
+    }
+    // No subject named ("share this on slack") → whatever is in front of them,
+    // in the order the panel stacks it.
+    if (!envelope.artifact_query) {
+      if (prdId) return { prd_id: prdId }
+      if (tab?.ticketSetId) return { ticket_set_id: tab.ticketSetId }
+      if (reportId) return { report_id: reportId }
+    }
+    // A named subject with no matching tab context — "share the checkout PRD"
+    // — resolves by title against the caller's own library, server-side.
+    return {
+      artifact_type: envelope.artifact_type ?? null,
+      artifact_query: envelope.artifact_query ?? null,
+    }
+  }, [])
+
+  const shareToSlackFlow = useCallback(async (
+    query: string, targetTabId: string, envelope: ChatIntentEnvelope,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, query, targetTabId)
+    const asReply = (answer: string) => ({
+      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse)
+    const finalize = (reply: AskResponse, share?: ThreadTurn["slackShare"]) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? {
+              ...t,
+              thread: t.thread.map((tn) => tn.id === id
+                ? { ...tn, reply, ...(share ? { slackShare: share } : {}) }
+                : tn),
+            }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+
+    const tab = tabsRef.current.find((t) => t.id === targetTabId)
+    const ref = shareRefFor(envelope, tab, content.reportFocusId ?? null)
+    try {
+      const preview = await slackShareApi.preview(ref, {
+        channel: envelope.share_channel ?? null,
+        note: envelope.share_note ?? null,
+      })
+      // The prose is deliberately short and NEVER claims a post happened — the
+      // card below it is the whole interaction, and a reply that got ahead of
+      // it is exactly the failure this two-step flow exists to prevent.
+      const lead =
+        preview.status === "ready"
+          ? "Here's what I'll post — have a look before I send it."
+          : preview.status === "needs_channel"
+            ? "Almost — I just need to know where this should go."
+            : preview.status === "blocked"
+              ? "I can't post there yet."
+              : preview.status === "unsupported_type"
+                ? "That one can't be shared to Slack."
+                : "Which document did you mean?"
+      finalize(asReply(lead), { ref, preview })
+      const question = slackShareQuestionFor(preview)
+      if (question) {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, pendingShare: { turnId: id, ...question } }
+          : t))
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      // Says plainly that nothing went out. An error here is most often "Slack
+      // is not connected", and the user must not be left wondering whether a
+      // half-failed share reached the channel anyway.
+      finalize(asReply(
+        `I couldn't set that share up — ${msg}. Nothing was posted to Slack.`,
+      ))
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, shareRefFor, content.reportFocusId])
+
+  const sendSlackShare = useCallback(async (
+    tabId: string, turnId: string, channelId: string, note: string,
+  ) => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
+    if (!share || share.resolved || share.busy) return
+    const channelName =
+      share.preview.channel?.name
+      ?? (share.preview.channels ?? []).find((c) => c.id === channelId)?.name
+      ?? "the channel"
+    patchSlackShare(tabId, turnId, { busy: true })
+    try {
+      await slackShareApi.send(share.ref, channelId, note)
+      patchSlackShare(tabId, turnId, {
+        busy: false,
+        resolved: { outcome: "sent", channelName },
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Slack rejected the message"
+      patchSlackShare(tabId, turnId, {
+        busy: false,
+        resolved: { outcome: "failed", error: msg },
+      })
+    }
+  }, [patchSlackShare])
+
+  /** The user picked which document from an ambiguous match — re-preview on
+   *  that one, keeping the channel and note they already had. */
+  const repreviewSlackShare = useCallback(async (
+    tabId: string, turnId: string, target: SlackShareTarget,
+  ) => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
+    if (!share || share.resolved) return
+    const ref: SlackShareTargetRef =
+      target.type === "prd" ? { prd_id: target.id }
+      : target.type === "report" ? { report_id: target.id }
+      : target.type === "ticket_set" ? { ticket_set_id: target.id }
+      : { custom_artifact_id: target.id }
+    patchSlackShare(tabId, turnId, { busy: true })
+    try {
+      const preview = await slackShareApi.preview(ref, {
+        channel: share.preview.channel?.name ?? share.preview.channel_query ?? null,
+      })
+      patchSlackShare(tabId, turnId, { busy: false, ref, preview })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      patchSlackShare(tabId, turnId, {
+        busy: false,
+        resolved: { outcome: "failed", error: msg },
+      })
+    }
+  }, [patchSlackShare])
+
+  /** The share question settled — re-preview on the answer.
+   *
+   *  A re-preview rather than a local patch, and for both kinds: the server is
+   *  what knows whether the chosen channel is one Sprntly can post to, and
+   *  patching `status: "ready"` client-side would offer a Send for a private
+   *  channel the bot cannot join. One round trip buys the same guarantees the
+   *  first preview gave. */
+  const completeShareQuestion = useCallback(async (
+    tabId: string, answers: PopupAnswer[],
+  ) => {
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    const ps = tab?.pendingShare
+    if (!ps) return
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
+    const share = tabsRef.current
+      .find((t) => t.id === tabId)?.thread.find((tn) => tn.id === ps.turnId)?.slackShare
+    if (!share || share.resolved) return
+
+    const picked = answers.find((a) => !a.skipped)
+    if (!picked) {
+      // Skipped or dismissed — nothing was posted, and the card says exactly
+      // that rather than leaving an unanswered question in the thread.
+      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
+      return
+    }
+    // A typed answer has no `value`; take the text (minus any leading '#') as
+    // the channel name, which the server matches exactly like a picked one.
+    const answer = (picked.value ?? picked.answer ?? "").trim()
+    if (!answer) {
+      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
+      return
+    }
+
+    if (ps.kind === "target") {
+      const target = (share.preview.candidates ?? [])
+        .find((c) => `${c.type}-${c.id}` === answer)
+      if (!target) return
+      await repreviewSlackShare(tabId, ps.turnId, target)
+      return
+    }
+
+    patchSlackShare(tabId, ps.turnId, { busy: true })
+    try {
+      const preview = await slackShareApi.preview(share.ref, {
+        channel: answer.replace(/^#/, ""),
+      })
+      patchSlackShare(tabId, ps.turnId, { busy: false, preview })
+      // A typed channel that still doesn't resolve asks again rather than
+      // silently dropping the share.
+      const next = slackShareQuestionFor(preview)
+      if (next) {
+        setTabs((prev) => prev.map((t) => t.id === tabId
+          ? { ...t, pendingShare: { turnId: ps.turnId, ...next } }
+          : t))
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      patchSlackShare(tabId, ps.turnId, {
+        busy: false, resolved: { outcome: "failed", error: msg },
+      })
+    }
+  }, [patchSlackShare, repreviewSlackShare])
+
+  /** Dismissing the question settles the share as NOT SENT. Deliberate: an
+   *  abandoned question would otherwise leave a thread whose last word is
+   *  "here's what I'll post" about a message that never went anywhere. */
+  const cancelShareQuestion = useCallback((tabId: string) => {
+    const ps = tabsRef.current.find((t) => t.id === tabId)?.pendingShare
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
+    if (ps) patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
+  }, [patchSlackShare])
+
+  /** The one place anything is actually posted to Slack. */
   /** The assign batch's ONE landing: the popup collected every pick (owner
    *  directive — finish all the questions before anything is sent), and only
    *  now do the writes happen, each through the ordinary fields endpoint. The
@@ -4795,6 +5112,14 @@ export function ChatScreen() {
                 // from the message being swallowed, which is the very
                 // complaint this flow exists to fix.
                 documentCommandFlow(trimmed, env)
+                settlePendingSend()
+              },
+              onShareToSlack: (env) => {
+                // "Share this PRD on my slack channel and ask the team for
+                // feedback." PREVIEWS ONLY — the flow resolves the document
+                // and the channel and puts the message on screen; the post
+                // waits for the user's confirmation in the card.
+                void shareToSlackFlow(trimmed, activeTab!.id, env)
                 settlePendingSend()
               },
               onAssignTickets: (instruction, prdId) => {
@@ -6314,6 +6639,12 @@ export function ChatScreen() {
   // command, and the PRD's input items keep until both are done.
   const pendingAssignState = activeTab?.pendingAssign
   const assignPopupOpen = !clarifyPopupOpen && !!pendingAssignState?.questions.length
+  // The share question queues behind both, on the same precedence rule: a
+  // clarify gate decides whether a generation even starts, an assign batch is
+  // a command already in flight, and a share is waiting on the user either way.
+  const pendingShareState = activeTab?.pendingShare
+  const sharePopupOpen =
+    !clarifyPopupOpen && !assignPopupOpen && !!pendingShareState?.options.length
 
   // ── Insight/PRD card + clarifying questions, as reusable nodes ──────────────
   // Same markup, two placements: a HEADER open (brief insight / ideation /
@@ -7025,13 +7356,40 @@ export function ChatScreen() {
                         // instead of being pinned above the whole conversation.
                         // Header opens render them at the top (see `leading`
                         // below) and skip this.
+                        // The share preview card rides its own turn, under the
+                        // reply. It stays mounted after it settles — as the
+                        // record of what was (or wasn't) posted — because a
+                        // card that vanished would leave the thread's prose
+                        // ("here's what I'll post") as the last word on a
+                        // message that may already be in a team channel.
+                        const shareNode = turn.slackShare ? (
+                          <SlackShareMessage
+                            key={`share-${turn.id}`}
+                            preview={turn.slackShare.preview}
+                            busy={turn.slackShare.busy}
+                            resolved={turn.slackShare.resolved}
+                            onSend={(channelId, note) =>
+                              void sendSlackShare(activeTab!.id, turn.id, channelId, note)}
+                            onCancel={() =>
+                              patchSlackShare(activeTab!.id, turn.id, {
+                                resolved: { outcome: "cancelled" },
+                              })}
+                            onPickTarget={(target) =>
+                              void repreviewSlackShare(activeTab!.id, turn.id, target)}
+                            // Every open choice is asked in the dock's
+                            // QuestionPopup, so the card renders the message
+                            // and never a second picker beside it.
+                            questionInPopup
+                          />
+                        ) : null
                         const afterNode =
                           inlinePrdCards && idx === inlinePrdAnchorIdx ? (
                             <>
                               {insightCardNode}
                               {prdQuestionsNode}
+                              {shareNode}
                             </>
-                          ) : null
+                          ) : shareNode
 
                         return {
                           turnId: turn.id,
@@ -7237,6 +7595,31 @@ export function ChatScreen() {
                     fallbackHeader="Assign"
                     onComplete={(answers) => void completeAssign(activeTabId, answers)}
                     onDismiss={() => cancelAssign(activeTabId)}
+                  />
+                ) : null}
+                {/* The share question — which channel, or which document.
+                    Every choice this product asks for comes through here
+                    (owner's directive, 2026-08-16); the preview card renders
+                    the MESSAGE, never the picker. Answering re-previews
+                    server-side, so a private channel Sprntly can't join is
+                    still caught after the pick. Dismissing settles the share
+                    as not-sent rather than leaving it hanging. */}
+                {sharePopupOpen && pendingShareState && activeTabId ? (
+                  <QuestionPopup
+                    questions={[{
+                      header: pendingShareState.header,
+                      prompt: pendingShareState.prompt,
+                      options: pendingShareState.options,
+                      // Channels: free text is a real answer — a workspace can
+                      // have more channels than anyone wants to scroll, and the
+                      // typed name is matched server-side exactly like a picked
+                      // one. Documents: the candidates ARE the answer space.
+                      allowOther: pendingShareState.kind === "channel",
+                    }]}
+                    fallbackHeader="Share"
+                    onComplete={(answers) =>
+                      void completeShareQuestion(activeTabId, answers)}
+                    onDismiss={() => cancelShareQuestion(activeTabId)}
                   />
                 ) : null}
                 {/* Portal slot for lower-priority question batches (PRD input

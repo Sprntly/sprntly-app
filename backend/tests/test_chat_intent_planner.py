@@ -50,6 +50,12 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # assertion is what caught the key being added — which is the job it
         # exists to do, so it is updated rather than loosened.
         "artifact_kind": None,
+        # And `share_to_slack`'s destination pair, on the same
+        # present-on-every-verdict terms. A channel riding an unrelated verdict
+        # would name a destination nothing is going to, so the planner's gate
+        # clears the pair everywhere else and this pins that it does.
+        "share_channel": None,
+        "share_note": None,
         # Likewise the requested FORMAT: present on every verdict, None when the
         # message named none — which is the normal case and means the executor
         # resolves the company's active format exactly as it always has.

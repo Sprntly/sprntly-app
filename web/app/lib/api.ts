@@ -975,6 +975,15 @@ export type ChatIntentEnvelope = {
      *  conversation history, exactly like clicking it on the Artifacts
      *  screen. */
     | "list_artifacts"
+    /** "Share this PRD on my slack channel and ask the team for feedback" —
+     *  post an artifact the user already has into their Slack. The client
+     *  resolves the TARGET from its own context (the tab's PRD, the thread's
+     *  ticket set or report) plus `artifact_type`/`artifact_query`, calls
+     *  POST /v1/share/slack/preview, and shows what will be posted and where.
+     *  NOTHING IS SENT until the user confirms — the send is a second call
+     *  (POST /v1/share/slack/send), because a message in a team channel is
+     *  public and cannot be taken back. */
+    | "share_to_slack"
     /** The private project chat's classify route ONLY (`POST /{project_id}/
      *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
      *  main chat runs, so a `switch (envelope.intent)` consumer that never
@@ -995,8 +1004,21 @@ export type ChatIntentEnvelope = {
   artifact_kind: string | null
   /** open_artifact: which existing artifact kind to bring up. */
   artifact_type: OpenArtifactKind | null
-  /** open_artifact: the subject the user named the document by. */
+  /** open_artifact / share_to_slack: the subject the user named the document
+   *  by. Null on a share means "the document already in play" — the client's
+   *  own tab/thread context decides, which is the common case ("share THIS
+   *  PRD"). */
   artifact_query: string | null
+  /** share_to_slack ONLY — the channel the user named, without the '#'. Null
+   *  (the common case: "share this on slack") means they named none, and the
+   *  preview comes back `needs_channel` with the picker's options. Never a
+   *  guessed destination. */
+  share_channel?: string | null
+  /** share_to_slack ONLY — the words to post alongside the document, in the
+   *  user's own intent ("ask the team for feedback" → "Would love the team's
+   *  feedback on this."). Null means the document goes out on its own. The
+   *  user can edit this in the preview before confirming. */
+  share_note?: string | null
   /** generate_prd / generate_tickets: the uploaded FORMAT the user asked this
    *  document to be written in ("…using our Acme format"). Null — the normal
    *  case — means the company's active format, which the backend resolves on
@@ -3916,6 +3938,111 @@ export type TicketAssignPlan = {
   /** One honest line for anything not honoured (unknown name, no tickets).
    *  Empty when everything resolved. */
   note: string
+}
+
+// ── Share to Slack (the chat's `share_to_slack` action) ─────────────────────
+
+/** A Slack channel the bot can see. `is_member` is what decides whether the
+ *  post needs a self-join first — and for a PRIVATE channel, whether it can
+ *  succeed at all (the bot cannot add itself to one). */
+export type SlackShareChannel = {
+  id: string
+  name: string
+  is_private: boolean
+  is_member: boolean
+}
+
+/** The artifact being shared, as the preview resolved it. `url` is the link
+ *  that will appear in Slack, so the preview shows the real destination
+ *  rather than a description of one. */
+export type SlackShareTarget = {
+  type: "prd" | "ticket_set" | "report" | "custom_artifact"
+  id: number
+  title: string
+  kind_label: string
+  url: string
+}
+
+/** WHICH artifact to share. The explicit ids are the client's own context and
+ *  win over the phrase — "share this PRD" means the one on the tab, not the
+ *  best title match for words the user never typed. */
+export type SlackShareTargetRef = {
+  prd_id?: number | null
+  report_id?: number | null
+  ticket_set_id?: number | null
+  custom_artifact_id?: number | null
+  artifact_type?: string | null
+  artifact_query?: string | null
+}
+
+export type SlackSharePreview = {
+  /** "ready" — target + channel resolved, show the preview and a Send.
+   *  "needs_target" / "ambiguous_target" — ask which document (`candidates`).
+   *  "unsupported_type" — that kind can't be shared (`named_type` says which).
+   *  "needs_channel" — ask which channel (`channels`).
+   *  "blocked" — a private channel Sprntly can't join; `warning` says why. */
+  status:
+    | "ready"
+    | "needs_target"
+    | "ambiguous_target"
+    | "unsupported_type"
+    | "needs_channel"
+    | "blocked"
+  target: SlackShareTarget | null
+  candidates?: SlackShareTarget[]
+  named_type?: string | null
+  channel?: SlackShareChannel | null
+  channels?: SlackShareChannel[]
+  /** What the user typed that didn't resolve, so the picker can say so. */
+  channel_query?: string | null
+  channel_status?: "resolved" | "ambiguous" | "not_found" | "needs_channel"
+  /** Exactly what will be posted — the same composition `send` rebuilds
+   *  server-side, so what is approved here is what Slack receives. `summary`
+   *  is the document teaser, handed back separately so the card can render
+   *  the FIXED part of the message (document, teaser, link) while the user is
+   *  still editing the note; echoing `text` would go stale on every keystroke. */
+  message?: {
+    text: string
+    blocks: Record<string, unknown>[]
+    summary: string
+  }
+  /** A heads-up shown BEFORE the user confirms (Sprntly will join the channel
+   *  to post; or, on `blocked`, that it cannot). Null when there is nothing
+   *  to say. */
+  warning?: string | null
+}
+
+export const slackShareApi = {
+  /** Resolve what and where, and compose the message — WITHOUT posting.
+   *  Read-only in every branch. */
+  preview: (
+    target: SlackShareTargetRef,
+    opts: { channel?: string | null; note?: string | null } = {},
+  ) =>
+    api.post<SlackSharePreview>("/v1/share/slack/preview", {
+      ...target,
+      channel: opts.channel ?? null,
+      note: opts.note ?? null,
+    }),
+  /** Post it. Takes the CONFIRMED channel id (not a name) and the same target
+   *  ref the preview took; the message body is rebuilt server-side from the
+   *  database, so the client never dictates what our bot posts. `note` is the
+   *  one exception — the user's own words, which they may have edited. */
+  send: (
+    target: SlackShareTargetRef,
+    channelId: string,
+    note?: string | null,
+  ) =>
+    api.post<{
+      ok: boolean
+      channel: string
+      ts: string | null
+      target: SlackShareTarget
+    }>("/v1/share/slack/send", {
+      ...target,
+      channel_id: channelId,
+      note: note ?? null,
+    }),
 }
 
 export const ticketDataApi = {

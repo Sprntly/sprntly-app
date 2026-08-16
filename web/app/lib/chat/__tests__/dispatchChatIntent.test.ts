@@ -331,3 +331,46 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
     expect(result).toEqual({ handled: false })
   })
 })
+
+describe("dispatchChatIntent — share_to_slack", () => {
+  it("routes to onShareToSlack with the envelope, unguarded", () => {
+    // No target/channel guard on purpose: the executor's preview call resolves
+    // both server-side and ASKS about whichever it couldn't settle. Guarding
+    // here would turn "share this on slack" — the commonest phrasing, which
+    // names no channel — into a grounded ask.
+    const ex = executors()
+    const onShareToSlack = vi.fn()
+    const env = envelope({ intent: "share_to_slack" })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onShareToSlack })
+    expect(onShareToSlack).toHaveBeenCalledWith(env)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("carries the channel and note the planner extracted", () => {
+    const ex = executors()
+    const onShareToSlack = vi.fn()
+    const env = envelope({
+      intent: "share_to_slack",
+      share_channel: "product-team",
+      share_note: "Would love the team's feedback on this.",
+      artifact_type: "prd",
+    })
+    dispatchChatIntent(env, ctx(), { ...ex, onShareToSlack })
+    expect(onShareToSlack.mock.calls[0][0]).toMatchObject({
+      share_channel: "product-team",
+      share_note: "Would love the team's feedback on this.",
+    })
+  })
+
+  it("falls through to onAnswer on a surface with no share UI", () => {
+    // `onShareToSlack` is OPTIONAL (the project chat omits it). The fall-
+    // through must reach the ask path — which crucially does NOT claim
+    // anything was posted — rather than silently doing nothing.
+    const ex = executors()
+    const env = envelope({ intent: "share_to_slack" })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onAnswer).toHaveBeenCalledTimes(1)
+    expect(result).toEqual({ handled: false })
+  })
+})

@@ -8279,6 +8279,187 @@
     color: var(--ink-2);
   }
 
+  /* Share-to-Slack preview (SlackSharePreviewCard) — what will be posted, and
+     where, before it is. Rendered inside an existing .bc-agent-body, so it
+     styles only its own internals and inherits the agent chrome, exactly like
+     the clarify card above. */
+  .ssc-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .ssc-intro,
+  .ssc-line {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink);
+  }
+
+  .ssc-line--muted {
+    font-size: 13px;
+    color: var(--ink-4);
+  }
+
+  .ssc-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .ssc-choice,
+  .ssc-channel {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .ssc-choice-kind {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .ssc-channel-hash {
+    color: var(--ink-4);
+  }
+
+  .ssc-channel-note {
+    font-size: 11px;
+    color: var(--ink-4);
+    font-style: italic;
+  }
+
+  .ssc-channel--active,
+  .ssc-choice--active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .ssc-filter {
+    width: 100%;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .ssc-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* The message, split in two: the editable note above, the fixed document
+     block below. The border ties them into one "this is the post" unit while
+     keeping visible which half the user controls. */
+  .ssc-message {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--surface-1);
+  }
+
+  .ssc-note {
+    min-height: 58px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    resize: vertical;
+  }
+
+  .ssc-note:focus {
+    outline: none;
+    background: var(--surface-2);
+  }
+
+  .ssc-doc {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+  }
+
+  .ssc-doc-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .ssc-doc-kind {
+    flex: none;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .ssc-doc-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .ssc-doc-summary {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+
+  .ssc-doc-link {
+    font-size: 11.5px;
+    color: var(--ink-4);
+    word-break: break-all;
+  }
+
+  .ssc-warning {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+
+  .ssc-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* Settled: one quiet line saying what happened. Deliberately understated —
+     it is a record, not an announcement. */
+  .ssc-card--resolved {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .ssc-resolved-mark {
+    flex: none;
+    font-weight: 700;
+    color: var(--ink-4);
+  }
+
+  .ssc-card--sent .ssc-resolved-mark {
+    color: var(--accent);
+  }
+
   /* QuestionPopup — the chat's question stepper, docked above the composer.
      One question at a time: category chip + ‹ 1/2 › + Skip in the head,
      options as full-width rows with a description subline. Elevated so it
