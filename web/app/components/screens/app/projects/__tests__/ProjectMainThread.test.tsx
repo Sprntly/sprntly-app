@@ -3,10 +3,10 @@
 // ProjectMainThread — the group⇆individual swap host. Renders exactly one of
 // the two chats per `activeChat`, in place (AD-P14 — no route change).
 // Neither side imports the app's existing multi-tab chat container (AD-P13);
-// both `ProjectGroupChat` and `ProjectIndividualChat` are mocked here — this
+// both `ProjectGroupChat` and `ProjectPrivateChat` are mocked here — this
 // file verifies the SWAP/mount wiring, not either component's own internal
 // behaviour (that's `ProjectGroupChat.test.tsx` and
-// `ProjectIndividualChat.test.tsx`'s job).
+// `ProjectPrivateChat.test.tsx`'s job).
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -15,11 +15,11 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-const individualChatMock = vi.fn((props: unknown) =>
-  React.createElement("div", { "data-testid": "real-individual-chat", "data-props": JSON.stringify(props) }),
+const privateChatMock = vi.fn((props: unknown) =>
+  React.createElement("div", { "data-testid": "real-private-chat", "data-props": JSON.stringify(props) }),
 )
-vi.mock("../ProjectIndividualChat", () => ({
-  ProjectIndividualChat: (props: unknown) => individualChatMock(props),
+vi.mock("../ProjectPrivateChat", () => ({
+  ProjectPrivateChat: (props: unknown) => privateChatMock(props),
 }))
 
 const groupChatMock = vi.fn((props: unknown) =>
@@ -33,7 +33,7 @@ import { ProjectMainThread } from "../ProjectMainThread"
 
 afterEach(() => {
   cleanup()
-  individualChatMock.mockClear()
+  privateChatMock.mockClear()
   groupChatMock.mockClear()
 })
 
@@ -45,12 +45,12 @@ describe("ProjectMainThread — swap", () => {
     expect(screen.getByTestId("main-thread-group")).toBeTruthy()
     expect(screen.queryByTestId("main-thread-individual")).toBeNull()
     expect(groupChatMock).toHaveBeenCalledTimes(1)
-    expect(individualChatMock).not.toHaveBeenCalled()
+    expect(privateChatMock).not.toHaveBeenCalled()
 
     rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual" }))
     expect(screen.queryByTestId("main-thread-group")).toBeNull()
     expect(screen.getByTestId("main-thread-individual")).toBeTruthy()
-    expect(individualChatMock).toHaveBeenCalledTimes(1)
+    expect(privateChatMock).toHaveBeenCalledTimes(1)
   })
 
   it("the swap is state-only — no route/URL API is touched", () => {
@@ -62,12 +62,12 @@ describe("ProjectMainThread — swap", () => {
 })
 
 describe("ProjectMainThread — neither side forks or imports the chat monolith (AD-P13)", () => {
-  it("mounts the thin ProjectIndividualChat on the individual side, with the project id threaded through", () => {
+  it("mounts the thin ProjectPrivateChat on the individual side, with the project id threaded through", () => {
     render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual" }))
     const host = screen.getByTestId("main-thread-individual")
     expect(host.getAttribute("data-project-id")).toBe("202")
-    expect(screen.getByTestId("real-individual-chat")).toBeTruthy()
-    expect(individualChatMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 202 }))
+    expect(screen.getByTestId("real-private-chat")).toBeTruthy()
+    expect(privateChatMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 202 }))
   })
 
   it("group chat receives the project id + the artifact-open callback", () => {
@@ -80,24 +80,65 @@ describe("ProjectMainThread — neither side forks or imports the chat monolith 
     )
   })
 
-  it("neither ProjectMainThread nor ProjectIndividualChat imports or mounts the chat monolith container (AD-P13a)", () => {
-    // Migrated to the post-amendment invariant: AD-P13a explicitly allows
-    // BOTH sides to consume the shared `dispatchChatIntent` PRIMITIVE (proven
-    // here on the individual side, which actually uses it) while the
-    // container import/mount prohibition still holds.
+  it("neither ProjectMainThread nor ProjectPrivateChat imports or mounts the chat monolith container (AD-P13a)", () => {
+    // Migrated to the post-amendment invariant: AD-P13a explicitly allows the
+    // private surface to consume the shared `dispatchChatIntent` PRIMITIVE
+    // (now in its engine hook, where the classify → dispatch → ask pipeline
+    // lives) while the container import/mount prohibition still holds for both
+    // the host and the engine.
     const mainThreadSrc = readFileSync(join(__dirname, "../ProjectMainThread.tsx"), "utf8")
-    const individualSrc = readFileSync(join(__dirname, "../ProjectIndividualChat.tsx"), "utf8")
+    const hostSrc = readFileSync(join(__dirname, "../ProjectPrivateChat.tsx"), "utf8")
+    const engineSrc = readFileSync(join(__dirname, "../useProjectPrivateThread.ts"), "utf8")
     expect(mainThreadSrc).not.toContain("ChatScreen")
-    expect(individualSrc).not.toContain("from \"../ChatScreen\"")
-    expect(individualSrc).not.toMatch(/import\s*\{[^}]*\bChatScreen\b[^}]*\}\s*from/)
-    expect(individualSrc).toContain('from "../../../../lib/chat/dispatchChatIntent"')
+    expect(hostSrc).not.toContain("ChatScreen")
+    expect(engineSrc).not.toContain("from \"../ChatScreen\"")
+    expect(engineSrc).not.toMatch(/import\s*\{[^}]*\bChatScreen\b[^}]*\}\s*from/)
+    expect(engineSrc).toContain('from "../../../../lib/chat/dispatchChatIntent"')
   })
 
-  it("passes the insightNote prop through to ProjectIndividualChat unchanged", () => {
+  it("passes the insightNote prop through to ProjectPrivateChat unchanged", () => {
     const insightNote = { by: "Shristi", text: "the pricing model changed" }
     render(
       React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual", insightNote }),
     )
-    expect(individualChatMock).toHaveBeenCalledWith(expect.objectContaining({ insightNote }))
+    expect(privateChatMock).toHaveBeenCalledWith(expect.objectContaining({ insightNote }))
+  })
+})
+
+describe("ProjectMainThread — private host + surface-keyed toggle", () => {
+  it("test_main_thread_mounts_private_chat_host (AC1/AC11): the private arm mounts ProjectPrivateChat and the AD-P13a monolith-import assertion holds for the host", () => {
+    render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual" }))
+    // The private arm mounts the thin ProjectPrivateChat host with the id threaded.
+    expect(screen.getByTestId("real-private-chat")).toBeTruthy()
+    expect(privateChatMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 202 }))
+    // AD-P13a: the retargeted monolith-import assertion holds for the new host.
+    const hostSrc = readFileSync(join(__dirname, "../ProjectPrivateChat.tsx"), "utf8")
+    expect(hostSrc).not.toContain("ChatScreen")
+  })
+
+  it("test_private_group_toggle_surface_keyed_no_state_leak (AC9): toggling group→private→group remounts each side fresh, never reusing the subtree", () => {
+    const { rerender } = render(
+      React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group" }),
+    )
+    expect(screen.getByTestId("main-thread-group")).toBeTruthy()
+
+    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual" }))
+    // Group unmounts; the private host mounts fresh (surface-keyed <ChatShell>).
+    expect(screen.queryByTestId("main-thread-group")).toBeNull()
+    expect(screen.getByTestId("main-thread-individual")).toBeTruthy()
+    expect(privateChatMock).toHaveBeenCalledTimes(1)
+
+    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group" }))
+    // The private host unmounts; the group side mounts fresh again — two
+    // distinct group mounts prove the subtree is not reused across the toggle,
+    // so scroll/draft/focus cannot leak between the two chats.
+    expect(screen.queryByTestId("main-thread-individual")).toBeNull()
+    expect(screen.getByTestId("main-thread-group")).toBeTruthy()
+    expect(groupChatMock).toHaveBeenCalledTimes(2)
+
+    // The private host keys its <ChatShell> by surface, the remount mechanism
+    // that guarantees the isolation this test asserts at the swap boundary.
+    const hostSrc = readFileSync(join(__dirname, "../ProjectPrivateChat.tsx"), "utf8")
+    expect(hostSrc).toContain('key="project_private"')
   })
 })
