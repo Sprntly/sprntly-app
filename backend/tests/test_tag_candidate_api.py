@@ -405,6 +405,16 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
     from app.db.client import require_client
     from app.db.workspaces import upsert_workspace_member
 
+    # A second real project member (a "kind=member" candidate that is NOT
+    # the caller) — proves the caller-exclusion is scoped to self, not
+    # every member.
+    peer_uid = "cand-peer-1"
+    require_client().table("profiles").insert(
+        {"id": peer_uid, "email": "peer@acme.example", "full_name": "Peyton Peer"}
+    ).execute()
+    upsert_workspace_member(project["workspace_id"], peer_uid, "member")
+    projects_db.add_member(project["id"], peer_uid)
+
     # An in-tenant workspace non-member with a profile.
     ws_uid = "cand-ws-1"
     require_client().table("profiles").insert(
@@ -427,7 +437,8 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
     assert r.status_code == 200, r.text
     cands = r.json()["candidates"]
     uids = {c["user_id"] for c in cands}
-    assert ctx.user_id in uids  # the creator, a project member
+    assert ctx.user_id not in uids  # the caller never lists themselves
+    assert peer_uid in uids  # a non-caller project member still appears
     assert ws_uid in uids  # in-tenant workspace non-member
     assert "foreign-1" not in uids  # cross-company never listed
     assert all(c["kind"] in ("member", "workspace", "company") for c in cands)
@@ -439,3 +450,16 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
         f"/v1/projects/{project['id']}/candidates?q=", headers=non_member_headers
     )
     assert r2.status_code == 403
+
+
+def test_candidate_search_excludes_caller(isolated_settings, monkeypatch):
+    """AC3: the caller never appears in their own candidate/pick list, even
+    when the caller is the ONLY project member — a non-empty list still
+    excludes them rather than falling back to including self."""
+    ctx = company_client(monkeypatch)
+    project = _new_project(ctx)
+
+    r = ctx.client.get(f"/v1/projects/{project['id']}/candidates?q=")
+    assert r.status_code == 200, r.text
+    cands = r.json()["candidates"]
+    assert ctx.user_id not in {c["user_id"] for c in cands}

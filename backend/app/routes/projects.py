@@ -635,6 +635,14 @@ def candidate_search_route(
     def _emit(user_id: str, name: str | None, email: str | None, kind: str) -> None:
         if not user_id or user_id in seen:
             return
+        # Never list the caller as their own delegate/mention candidate.
+        # Checked: every current consumer of this route (the group chat
+        # @-mention picker + the project invite/add-someone search) is an
+        # add/invite/mention flow, never a plain "who's on this project"
+        # roster display (that reads project.members directly) — so
+        # excluding self here loses nothing real.
+        if user_id == ctx.user_id:
+            return
         if needle:
             hay = f"{(name or '')} {(email or '')}".casefold()
             if needle not in hay:
