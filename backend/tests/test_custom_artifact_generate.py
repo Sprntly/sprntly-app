@@ -340,6 +340,35 @@ def test_sweep_fails_an_old_abandoned_generation(gen_env):
     assert row["error_code"] == gen.FAILURE_INTERRUPTED
 
 
+def test_the_age_gate_outlasts_the_longest_possible_healthy_generation(gen_env):
+    """THE GATE IS NOT A PREFERENCE, it is arithmetic.
+
+    These rows carry no heartbeat, so age is the only signal the sweep has — and
+    now that the sweep RECURS every 5 minutes it is pointed at live generations
+    owned by this very process, not just at rows left by a dead one. A gate
+    shorter than the longest healthy run marks a document failed WHILE IT IS
+    STILL WRITING; the user is shown a failure, and then `finish_artifact` lands
+    the document afterwards and flips the row to ready. Telling someone their
+    document died and then silently producing it is worse than either outcome.
+
+    One call can take MAX_ATTEMPTS × LONG_REQUEST_TIMEOUT_S before backoff, and
+    it queues behind every other generation on the shared LLM gate.
+    """
+    from app.llm import LONG_REQUEST_TIMEOUT_S, MAX_ATTEMPTS
+
+    worst_case_minutes = MAX_ATTEMPTS * LONG_REQUEST_TIMEOUT_S / 60
+    assert gen.ORPHAN_AFTER_MINUTES > worst_case_minutes
+
+
+def test_a_generation_at_the_old_thirty_minute_mark_is_left_alone(gen_env):
+    """The regression in concrete terms: a document 45 minutes into a retrying
+    generation is HEALTHY, and the old 30-minute gate would have failed it."""
+    doc_id = _pending(gen_env)
+    _age(gen_env, doc_id, 45)
+    assert gen.sweep_orphan_generating() == 0
+    assert get_artifact(gen_env, doc_id)["status"] == "generating"
+
+
 def test_sweep_leaves_a_generation_that_is_still_running(gen_env):
     """THE ONE THAT MATTERS: staging and prod share one Supabase project, so
     both environments' rows live in this table. A blanket "fail everything

@@ -661,7 +661,9 @@ def _run_orphan_ask_job_sweep() -> None:
     business-context refreshes abandoned in 'generating' (companies.
     business_context_refresh_status) the same way — a stale row there would
     otherwise wedge the "Save Company Shape" trigger's start-guard until this
-    sweep or a restart heals it."""
+    sweep or a restart heals it, and team documents (`custom_artifacts`)
+    abandoned in 'generating', whose age gate makes the startup sweep alone
+    unable to heal the very restart that orphaned them."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -690,6 +692,21 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned company-research run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan company-research sweep failed")
+    try:
+        # Team documents (`custom_artifacts`) abandoned mid-generation. Added
+        # here because the startup sweep alone could not heal them: with a
+        # 30-minute age gate, the restart that orphans a document is by
+        # definition too early to sweep it, so the panel spun on `generating`
+        # until the NEXT restart — which on prod can be days. A recurring sweep
+        # is what makes the age gate work at all.
+        from app.custom_artifact_generate import sweep_orphan_generating
+
+        n = sweep_orphan_generating()
+        if n:
+            logger.info(
+                "Failed %d abandoned document generation(s) stuck in generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan document-generation sweep failed")
     try:
         from app.db.business_context_refresh import (
             fail_orphan_business_context_refreshes,

@@ -533,6 +533,118 @@ def test_generate_refuses_a_foreign_conversation(docs_env, monkeypatch):
     assert r.status_code == 404
 
 
+def test_the_generation_handler_is_async_not_a_threadpool_hog(docs_env):
+    """STRUCTURAL, because the cost is invisible in any functional test.
+
+    A sync `def` handler runs on the SAME anyio threadpool FastAPI serves every
+    sync route from — 40 tokens, one process — and `long_output=True` lets a
+    single document generation hold one for up to 600 seconds. Enough concurrent
+    documents and unrelated sync routes queue behind them, which a user
+    experiences as the whole app being slow for no visible reason.
+
+    Asserted on the function rather than on behaviour because behaviour cannot
+    see it: the sync version passes every functional test in this file.
+    """
+    import inspect
+
+    import app.routes.custom_artifacts as mod
+
+    assert inspect.iscoroutinefunction(mod.generate)
+
+
+def test_the_handlers_supabase_calls_do_not_run_on_the_event_loop(docs_env):
+    """Making a handler async without moving its blocking calls trades a
+    threadpool problem for a worse one: two Supabase round trips per request
+    would stall the WHOLE process, and a wedged client (the h2 hang) would take
+    the API down rather than one worker thread.
+
+    Asserted on the source because there is no runtime signal for it — a
+    blocking call on the loop looks identical to a fast one until the day it
+    hangs.
+    """
+    import inspect
+
+    import app.routes.custom_artifacts as mod
+
+    src = inspect.getsource(mod.generate)
+    assert "await asyncio.to_thread(\n        conversation_belongs_to_company" in src
+    assert "await asyncio.to_thread(\n        create_artifact" in src
+
+
+def test_generations_run_on_their_own_pool_not_a_shared_one(docs_env):
+    """A generation holds its thread for minutes. Both pools it might otherwise
+    borrow — anyio's (every sync route) and asyncio's default (~120 to_thread
+    sites) — carry work that has to stay responsive, so a burst of documents
+    must only ever make other documents wait."""
+    import app.routes.custom_artifacts as mod
+
+    assert mod._GENERATION_POOL._max_workers == 4
+    assert "custom-artifact-gen" in mod._GENERATION_POOL._thread_name_prefix
+
+
+def test_the_generation_actually_runs(docs_env, monkeypatch):
+    """The scheduling mechanism changed (BackgroundTasks → to_thread on a
+    tracked task), so this pins the property that must survive it: by the time
+    the row is polled, the writer has been called with the caller's arguments."""
+    import app.routes.custom_artifacts as mod
+
+    seen: dict = {}
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: seen.update(kw))
+
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "board memo", "task": "Q3", "context": "p99 fell to 210ms"},
+    )
+
+    assert r.status_code == 200
+    assert seen["kind"] == "board memo"
+    assert seen["task"] == "Q3"
+    assert seen["context"] == "p99 fell to 210ms"
+    assert seen["artifact_id"] == r.json()["id"]
+    # The RESPONSE is the row as created, on this path and in production alike —
+    # the id to poll, still generating. A test asserting a shape production
+    # never returns would be worse than no test.
+    assert r.json()["status"] == "generating"
+
+
+@pytest.mark.parametrize(
+    "field, size",
+    [("task", 8_001), ("context", 60_001), ("kind", 501)],
+)
+def test_oversized_generation_input_is_refused(docs_env, monkeypatch, field, size):
+    """Every field here is forwarded into an LLM prompt, and none was bounded.
+    Unbounded input on a prompt path is a caller able to spend the TENANT's
+    tokens by the megabyte — the cost lands on them, not on the sender."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t", **{field: "x" * size}},
+    )
+    assert r.status_code == 422
+
+
+def test_a_real_sized_request_is_comfortably_under_the_ceilings(
+    docs_env, monkeypatch
+):
+    """The bounds exist to refuse the pathological case, never a real one. The
+    client caps its thread transcript at 12k, so that must pass untouched."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "leadership update", "task": "Q3", "context": "x" * 12_000},
+    )
+    assert r.status_code == 200
+
+
 def test_a_generating_document_is_readable_while_it_writes(docs_env, monkeypatch):
     """The panel polls this row, so it has to be fetchable mid-generation."""
     import app.routes.custom_artifacts as mod

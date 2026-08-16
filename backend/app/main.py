@@ -198,8 +198,15 @@ async def lifespan(app: FastAPI):
     # exist. Unguarded, that window turns a housekeeping task into "the API
     # will not boot", and this repo has a documented history of migrations and
     # deploys getting out of order. Failing orphaned documents is best-effort
-    # by nature: the scheduler and the next restart both retry it, and the
-    # worst case of skipping it is a spinner on a document nobody is writing.
+    # by nature: the scheduler's 5-minute sweep and the next restart both retry
+    # it, and the worst case of skipping it is a spinner on a document nobody
+    # is writing.
+    #
+    # That claim was FALSE when it was first written — the sweep was never
+    # added beside its four siblings in `_run_orphan_ask_job_sweep`, so this
+    # startup call was the only caller. With the 30-minute age gate, the
+    # restart that orphans a document is too early to sweep it, which left the
+    # panel spinning until the next restart. The scheduler now runs it too.
     try:
         from app.custom_artifact_generate import sweep_orphan_generating
 

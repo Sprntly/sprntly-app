@@ -38,9 +38,13 @@ is covered without each having to remember. Read paths return what is stored.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
@@ -62,6 +66,29 @@ from app.db.custom_artifacts import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/custom-artifacts", tags=["custom-artifacts"])
+
+# Strong references to in-flight generations. asyncio holds only a WEAK
+# reference to a running task, so a bare `create_task(...)` result can be
+# garbage-collected mid-generation — the same set-plus-discard pattern every
+# other create_task site in this codebase uses (routes/ask.py, evidence.py,
+# brief.py, design_agent.py).
+_inflight_tasks: set[asyncio.Task] = set()
+
+# Document generations run HERE and nowhere else. A small dedicated pool, so a
+# burst of documents can only ever make other documents wait: each one holds its
+# thread for minutes (`long_output=True` = a 600s read timeout, plus queueing on
+# the process-wide `_llm_gate`), and both pools it might otherwise borrow are
+# shared with work that must stay responsive — the anyio pool serves every sync
+# route, and asyncio's default executor backs ~120 `to_thread` calls across this
+# codebase.
+#
+# FOUR because generations are bounded by the LLM gate long before they are
+# bounded by threads; more threads here would only queue in a different place,
+# and the queue that matters is already durable — an unstarted generation is a
+# `generating` row, which is precisely what that row exists to survive.
+_GENERATION_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="custom-artifact-gen"
+)
 
 # The ceiling is the db module's (imported, not redeclared, so the two cannot
 # drift). It is enforced there — this route only turns the resulting error into
@@ -260,23 +287,39 @@ def update(
 
 
 class GenerateIn(BaseModel):
+    """BOUNDED, all three text fields.
+
+    Everything here is forwarded into an LLM prompt, and none of it was
+    bounded: the client sends a 12k thread transcript as `context` and the
+    server accepted whatever arrived. An unbounded field on a prompt path is
+    not a validation nicety — it is a caller (or a bug in one) able to spend
+    this company's tokens by the megabyte on a single request, and the cost
+    lands on the tenant, not on the sender.
+
+    The ceilings are deliberately far above any real request — the client's own
+    transcript cap is 12k — so a legitimate document can never hit one. They
+    exist to make the pathological case a 422 instead of a bill.
+    """
+
     # WHAT KIND of document. Free text, straight from the user's own words
-    # ("leadership update"), never coerced onto a list.
-    kind: str = ""
+    # ("leadership update"), never coerced onto a list. Stored truncated to 120;
+    # the bound here is about what gets PARSED, not what gets kept.
+    kind: str = Field(default="", max_length=500)
     # The self-contained brief for what to write. On the chat path this is the
     # planner's synthesized `task`, not the raw last message.
-    task: str = ""
+    task: str = Field(default="", max_length=8_000)
     # Facts the document may assert. Supplied by the caller (the chat turn that
     # asked), because the thread already established what this is about — see
     # custom_artifact_generate's note on why there is no retrieval pass here.
-    context: str = ""
+    # 60k matches the attachment-content ceiling in routes/conversations.py,
+    # which is the same kind of caller-supplied context.
+    context: str = Field(default="", max_length=60_000)
     conversation_id: int | None = None
 
 
 @router.post("/generate")
-def generate(
+async def generate(
     body: GenerateIn,
-    background: BackgroundTasks,
     company: CompanyContext = Depends(require_company),
 ):
     """Start writing a document. Returns the row immediately, `generating`.
@@ -295,12 +338,20 @@ def generate(
     A document appearing in someone's library because they asked a question is
     the failure mode this rule exists to prevent.
     """
-    if body.conversation_id is not None and not conversation_belongs_to_company(
-        body.conversation_id, company.company_id
+    # BOTH SUPABASE CALLS GO TO A THREAD, because this handler is now `async`
+    # and they are blocking sync HTTP. Left inline they would run ON THE EVENT
+    # LOOP: two round trips of the whole process stalled per request, and a
+    # wedged Supabase client (a documented event here — see the h2 hang) would
+    # take the entire API down instead of one worker thread. Making a handler
+    # async without moving its blocking calls trades a threadpool problem for a
+    # strictly worse one.
+    if body.conversation_id is not None and not await asyncio.to_thread(
+        conversation_belongs_to_company, body.conversation_id, company.company_id
     ):
         raise HTTPException(404, "Conversation not found")
 
-    row = create_artifact(
+    row = await asyncio.to_thread(
+        create_artifact,
         company.company_id,
         kind=body.kind,
         # Provisional: the generator replaces it with the document's own <h1>.
@@ -311,26 +362,67 @@ def generate(
         created_by=company.user_id,
     )
 
-    # Scheduled with BackgroundTasks, NOT `asyncio.create_task`.
+    # OFF THE REQUEST THREADPOOL, deliberately — this is the shape every other
+    # long generation in this codebase uses (ask, evidence, brief, design).
     #
-    # This handler is a sync `def`, so FastAPI runs it in a worker thread where
-    # there is no running event loop — `create_task` raises RuntimeError there,
-    # which would have made every generation 500 while looking perfectly correct
-    # in review. BackgroundTasks runs after the response is sent and puts a sync
-    # callable on the threadpool itself, which is exactly the shape of this work
-    # (one long blocking LLM call).
+    # The handler used to be a sync `def` scheduling `BackgroundTasks`. The
+    # argument for it was true as far as it went (a sync handler has no running
+    # loop, so `create_task` would raise) but it answered the wrong question:
+    # the fix for "a sync handler cannot create_task" is not "keep the sync
+    # handler", it is "do not be a sync handler". BackgroundTasks runs the
+    # callable on the SAME anyio threadpool FastAPI uses to serve every sync
+    # route — 40 tokens, single process — and `long_output=True` lets one
+    # document generation hold a token for up to 600 seconds. Enough concurrent
+    # documents and sync routes queue behind them for no reason a user could
+    # ever see.
+    #
+    # A DEDICATED, BOUNDED EXECUTOR runs the generation — not `to_thread`'s
+    # default one. `asyncio.to_thread` would hand this to the loop's shared
+    # default executor (min(32, cpu+4) threads), which ~120 other `to_thread`
+    # sites in this codebase also use for short blocking work: ask-job
+    # execution, attachment staging, the ask cache. A document generation holds
+    # its thread for MINUTES (`long_output=True`, plus queueing on the
+    # process-wide `_llm_gate`), so a burst of documents would occupy that pool
+    # and stall everything sharing it. Moving the problem from the anyio pool
+    # to the default pool would have been a smaller version of the bug, not a
+    # fix. Documents get their own small pool and can only ever starve each
+    # other; the queue beyond it is the durable `generating` row, which is
+    # exactly what that row is for.
+    #
+    # The handler is async, so the loop is running and `create_task` is legal.
+    #
+    # The task is held in a module-level set, the pattern every create_task site
+    # here follows: asyncio keeps only a weak reference, so a bare task can be
+    # garbage-collected mid-generation.
     #
     # The DURABLE ROW is the job state — there is no in-memory job store to lose
     # — so a process death mid-write is recoverable by `sweep_orphan_generating`
     # rather than invisible.
-    background.add_task(
-        generate_into,
+    kwargs = dict(
         company_id=company.company_id,
         artifact_id=row["id"],
         kind=body.kind,
         task=body.task,
         context=body.context,
     )
+    if "pytest" in sys.modules:
+        # The TestClient does not keep the app's event loop alive between
+        # requests, so a fire-and-forget task would never run and a test that
+        # polls the row would spin forever. Inline under pytest, exactly as
+        # routes/ask.py does for the same reason. `generate_into` is total, so
+        # this cannot fail the request.
+        await asyncio.to_thread(generate_into, **kwargs)
+    else:
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(
+            loop.run_in_executor(_GENERATION_POOL, partial(generate_into, **kwargs))
+        )
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+
+    # THE ROW AS CREATED, on both paths. The response is the same contract in
+    # tests as in production — `generating`, with the id to poll — rather than
+    # a re-read that would let a test assert a shape production never returns.
     return _public(row)
 
 

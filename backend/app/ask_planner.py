@@ -1143,6 +1143,13 @@ class Plan:
             # from a build that named none.
             "template": self.artifact_template_name or self.artifact_template_id,
             "template_query": self.template_query,
+            # WHAT KIND of document a `create_artifact` plan decided to write,
+            # in the user's own words. Logged for the same reason `template` is
+            # above: this is the argument the action is DISPATCHED with, so a
+            # plan line without it cannot answer "what did it think it was
+            # writing" — the first question asked of any document that came out
+            # wrong. None on every other action, by the planner's own gate.
+            "artifact_kind": self.artifact_kind,
             "list_kind": self.list_kind,
             "list_mode": self.list_mode,
             # "pipeline" rather than false when a pipeline owns the turn, because
