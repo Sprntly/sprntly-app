@@ -36,6 +36,8 @@ import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
 // The composer — extracted 2026-08-10 so the individual chat and the project
 // group chat share ONE implementation instead of two.
 import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
+import { SlashSkillMenu } from "../../shared/SlashSkillMenu"
+import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
@@ -698,59 +700,6 @@ function AttachmentViewer({
           )}
         </div>
       </div>
-    </div>
-  )
-}
-
-// Claude-style slash-command palette shown above the composer when the draft
-// starts with "/". Rendered by BOTH composers (landing + thread) — the `inset`
-// prop is the only positional difference (the dock composer is inset 8px).
-// Keyboard-driven: the parent owns `activeIndex` (↑/↓/Enter) and the active row
-// scrolls itself into view.
-function SlashSkillMenu({ skills, activeIndex, onSelect, onHover, inset = false }: {
-  skills: SkillInfo[]
-  activeIndex: number
-  onSelect: (skill: SkillInfo) => void
-  onHover: (index: number) => void
-  inset?: boolean
-}) {
-  const listRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    const active = listRef.current?.querySelector<HTMLElement>(".chat-slash-item.is-active")
-    active?.scrollIntoView({ block: "nearest" })
-  }, [activeIndex])
-  if (skills.length === 0) return null
-  return (
-    <div
-      ref={listRef}
-      className={`chat-slash-menu${inset ? " chat-slash-menu--inset" : ""}`}
-      role="listbox"
-      aria-label="Skills"
-    >
-      <div className="chat-slash-head">
-        <span>Skills</span>
-        <span className="chat-slash-count">{skills.length}</span>
-      </div>
-      {skills.map((s, i) => (
-        <button
-          key={s.id}
-          type="button"
-          role="option"
-          aria-selected={i === activeIndex}
-          className={`chat-slash-item${i === activeIndex ? " is-active" : ""}`}
-          // Select on mousedown (before the textarea blurs) so the click always
-          // lands even as focus moves.
-          onMouseDown={(e) => { e.preventDefault(); onSelect(s) }}
-          onMouseEnter={() => onHover(i)}
-        >
-          <span className="chat-slash-trigger">{s.trigger}</span>
-          <span className="chat-slash-text">
-            <span className="chat-slash-label">{s.label}</span>
-            <span className="chat-slash-desc">{s.description}</span>
-          </span>
-          <span className="chat-slash-enter" aria-hidden>↵</span>
-        </button>
-      ))}
     </div>
   )
 }
@@ -4843,40 +4792,12 @@ export function ChatScreen() {
           // chip can render/download the real document after a reload. The upload
           // is best-effort (a failure leaves the text-only chip, never blocks the
           // send). Order is preserved via the resolved array.
-          const extracted = await Promise.all(
-            pending.map(async (a, idx) => {
-              const [text, stored] = await Promise.all([
-                // Text files were already read client-side (content present) — use
-                // it. Only binary docs (content empty, raw file kept) need the
-                // server-side markdown extraction.
-                //
-                // `earlyExtracted` is that extraction, already done above so the
-                // planner could see it. Reused here rather than repeated: without
-                // this, giving the planner the attachment text would have cost a
-                // second parse of every document on every send.
-                a.content
-                  ? Promise.resolve(a.content)
-                  : earlyExtracted?.[idx] != null
-                  ? Promise.resolve(earlyExtracted[idx] as string)
-                  : a.file
-                  ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
-                  : Promise.resolve(a.content),
-                // Best-effort — an upload failure (or a missing storage backend)
-                // must never block the send. The `.then` wrapper also catches a
-                // synchronous throw, not just a rejection.
-                a.file
-                  ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
-                  : Promise.resolve(null),
-              ])
-              return {
-                name: a.name,
-                content: text,
-                key: stored?.key ?? null,
-                mime: stored?.mime ?? null,
-                size: stored?.size ?? null,
-              }
-            }),
-          )
+          // The per-attachment extract (client-text | early-extracted | server
+          // markdown) + best-effort upload → `AttachmentRef[]` is defined ONCE in
+          // `resolveAttachmentRefs` (shared with the project composers via
+          // `buildSendCommand`). `earlyExtracted` (done above so the planner could
+          // see the text) is passed through so a document is never parsed twice.
+          const extracted = await resolveAttachmentRefs(pending, { preExtracted: earlyExtracted })
           // Clamp the TOTAL context so question + attachments stay under the
           // ask endpoint's 120k question cap even with several attachments.
           ctx = extracted
@@ -5752,7 +5673,7 @@ export function ChatScreen() {
     // would have produced — the chip is a composer affordance, not a new
     // protocol. The trigger stays visible on the sent turn, which is what makes
     // the wait's skill chip verifiable from the thread itself.
-    const sent = pinnedSkill ? `${pinnedSkill.trigger} ${q}` : q
+    const sent = spliceSkill(pinnedSkill, q)
     // Sending ends the dictation that produced the question — and CANCELS it
     // rather than stopping it. A graceful stop still delivers the phrase the
     // engine was finalising, and the hook's transcript is cumulative, so that

@@ -21,6 +21,7 @@
 // defined once (spec §2.5, AD-P13).
 import { useRef, useState } from "react"
 import { ChatShell } from "../../../shared/chat-shell/ChatShell"
+import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
 import type { ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { AskReplyBody } from "../../../shared/AskReplyBody"
@@ -68,6 +69,17 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const draftApiRef = useRef<ComposerDraftApi | null>(null)
   const engine = useProjectGroupThread({ projectId, draftApiRef })
   const mentions = useMentionPicker({ projectId, draftApiRef })
+  // The shared composer controller unifies the send producer: group's send now
+  // builds a `SendCommand` and hands it to `engine.post`. Group attachments/
+  // skills are gated OFF (the backend can't carry them yet), so the features
+  // bag is undefined — the composer keeps today's inert defaults and its
+  // mention picker rides the existing `slashMenu`/`onKeyDownCapture` seams.
+  const composerCtl = useChatComposerController({
+    scope: { surface: "project_group", projectId: Number(projectId) },
+    onCommand: engine.post,
+    attachmentsEnabled: false,
+    skillsEnabled: false,
+  })
   // A one-shot flag flipped when the shell hands the draft API back — it forces
   // exactly one post-mount re-render so the per-render `onInputCapture`
   // assignment below runs against the now-populated ref (the ref assignment in
@@ -104,14 +116,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
         ))}
       </div>
     ) : null
-
-  const stayedOutBadge = (
-    <div className={extras.stayedOut} data-testid="gc-stayed-out">
-      <span className={extras.stayedOutDot} aria-hidden="true" />
-      <span className={extras.stayedOutLead}>Sprntly stayed out</span>
-      <span className={extras.stayedOutRest}> — no reply yet</span>
-    </div>
-  )
 
   const descriptor: ChatSurfaceDescriptor = {
     surface: "project_group",
@@ -176,13 +180,21 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     },
     reply: {
       mode: "backgrounded",
-      // The stayed-out badge is gated on `engine.showStayedOut` (Fable #5), NOT
-      // `status === null` — the shell always passes null for group, so keying on
-      // null would render the badge under EVERY last turn, incl. the agent's own
-      // reply.
-      runStatus: () => (engine.showStayedOut ? stayedOutBadge : null),
+      // The FE agent run-status consume, replacing the old alarming "Sprntly
+      // stayed out" pill. Real `ShellTurn.runStatus` takes precedence once the
+      // backend feeds it; until then `engine.showStayedOut` is the interim
+      // driver, mapped to the QUIET declined treatment (not the alarming pill).
+      // `failed` shows error+Retry when `engine.retryRun` exists (dark until the
+      // backend exposes retry); `done`/null render nothing.
+      runStatus: (status, turn) =>
+        renderRunStatus({
+          status: status ?? (engine.showStayedOut ? "declined" : null),
+          turn,
+          prefix: "gc",
+          retryRun: engine.retryRun,
+        }),
     },
-    send: { onSubmit: engine.post, pendingSendBubble: false },
+    send: { onSubmit: composerCtl.submit, pendingSendBubble: false },
     // Error + typing indicator (engine-fed, styled) + the picker's post-select
     // affordance ride above the composer, OUTSIDE the scroll viewport so they
     // never scroll out of view.
