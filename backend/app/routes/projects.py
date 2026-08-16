@@ -70,6 +70,7 @@ from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
 from app.delegation_status_ingest import maybe_ingest_status
 from app.project_memory import maybe_promote_turn, schedule_regen
+from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
@@ -97,6 +98,10 @@ _GROUP_CONTEXT_TURNS = 30
 _GROUP_TURN_DTO_KEYS = (
     "id", "role", "content", "author_user_id", "author_name",
     "author_job_role", "created_at",
+    # The FULL structured reply on an assistant turn (answer/key_points/
+    # citations + the classify envelope's card data) — on the broadcast too,
+    # so a realtime-delivered agent turn renders the same cards a reload does.
+    "reply",
     # Execution-run status, attached by `list_group_turns` onto the human turn
     # whose id == the run's source_turn_id (mapped to the FE AgentRunStatus
     # vocabulary at the DTO edge). On the broadcast too, so the realtime shape
@@ -395,10 +400,14 @@ class PostGroupTurnRequest(BaseModel):
     # is WIRED: it lands on `ask_jobs.client_message_id`, so a double-submit of
     # the same id cannot mint two runs (the client_message_id partial-unique
     # backstop).
-    # `pinned_skill` / `attachments` are ACCEPTED-BUT-INERT this ticket (wired by
-    # the FE SendCommand in a following change) — declared so the payload shape
-    # is forward-compatible and the parity guard sees a decision, not a silent
-    # no-op (recorded residual).
+    # `attachments` is WIRED: persisted on the human turn (existing
+    # `conversation_turns.attachments` column, whitelist-stripped from every
+    # group read/broadcast) and folded into the agent reply's question —
+    # mirroring the private surface's attachment ride.
+    # `pinned_skill` names the FE's pick on the wire; the skill itself rides
+    # the SPLICED trigger in `content` (the one splice rule every surface
+    # uses — the engine's slash-trigger routing reads it from the text), so
+    # this field is informational, not a second routing input.
     client_message_id: str | None = None
     pinned_skill: dict | None = None
     attachments: list | None = None
@@ -1397,7 +1406,10 @@ async def post_group_turn_route(
             prior_turn = _get_group_turn(conversation["id"], prior.get("source_turn_id"))
             if prior_turn is not None:
                 return prior_turn
-    turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
+    turn = conversations_db.post_group_turn(
+        conversation["id"], ctx.user_id, payload.content,
+        attachments=payload.attachments,
+    )
     logger.info(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
         project_id, conversation["id"], turn.get("id") if turn else None,
@@ -1573,9 +1585,11 @@ def project_chat_intent(
 
     Returns the envelope in the SAME shape `/v1/chat/intent` returns, so
     the client's `dispatchChatIntent` needs no project-specific branch.
-    No `open_artifact` lookup leg here — the private thread has no
-    artifact viewer to open into; the client already falls that intent
-    through to `onAnswer`.
+    That includes the render-data legs: `enrich_chat_envelope` (shared
+    with `/v1/chat/intent`) attaches the same `open` lookup (with its
+    conversation stamps) and `artifact_list`/`artifact_counts` rows main
+    chat's envelope carries, so the private surface renders the same
+    cards from the same data.
     """
     _require_project_member(project_id, ctx)
     dataset = _dataset_for(ctx)
@@ -1599,6 +1613,10 @@ def project_chat_intent(
             envelope["prd_options"] = prd_options
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = None
+    # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
+    # conversation stamps, artifact rows/counts) — same enrichment, same
+    # data, passing the already-resolved dataset instead of a second lookup.
+    enrich_chat_envelope(envelope, ctx, dataset)
     return envelope
 
 
@@ -1666,6 +1684,12 @@ class _GroupEditOutcome(NamedTuple):
     was_edit_request: bool
     refusal: str | None
     needs_prd_clarify: bool = False
+    # The classify envelope this pass produced (enriched in place with the
+    # shared render-data legs — artifact_list / nested open.candidates), so
+    # the caller's reply persist can carry the card data onto the assistant
+    # turn's structured `reply`. None on the applied-edit path (that path
+    # posts its own turn and never reaches the reply persist).
+    envelope: dict | None = None
 
 
 def _classify_and_maybe_edit_group_prd(
@@ -1706,6 +1730,11 @@ def _classify_and_maybe_edit_group_prd(
     envelope, prd_id, refusal = resolve_project_chat_intent(
         project_id, message, history, dataset, ctx
     )
+    # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
+    # conversation stamps, artifact rows/counts), stamped onto THIS turn's
+    # classify envelope in place — a no-op unless the intent is an
+    # open/list ask, so the edit path below pays nothing for it.
+    enrich_chat_envelope(envelope, ctx, dataset)
     # Content-derived clarify signal — computed from THIS turn's own classify
     # outcome, never from `refusal` truthiness (which depends only on the
     # project's PRD count, not on what was asked — see `_GroupEditOutcome`'s
@@ -1723,7 +1752,7 @@ def _classify_and_maybe_edit_group_prd(
         # than fabricate a "done" (B2 no-fabrication).
         return _GroupEditOutcome(
             applied_turn=None, was_edit_request=was_edit_request, refusal=refusal,
-            needs_prd_clarify=needs_prd_clarify,
+            needs_prd_clarify=needs_prd_clarify, envelope=envelope,
         )
 
     result = apply_chat_edit_scoped(
@@ -1830,6 +1859,7 @@ async def _respond_as_group_agent(
         # applicable edit is applied in place and the run completes; anything
         # else falls through to the SAME unified-engine reply below.
         edit_note = ""
+        classify_envelope: dict | None = None
         if trigger is not None:
             history = [
                 {"role": t.get("role") or "user", "content": t.get("content") or ""}
@@ -1839,6 +1869,7 @@ async def _respond_as_group_agent(
             edit = _classify_and_maybe_edit_group_prd(
                 project_id, conversation_id, ctx, trigger["content"], history, dataset,
             )
+            classify_envelope = edit.envelope
             if edit.applied_turn is not None:
                 # The edit posted its own assistant turn; the run is a success.
                 # `edit_applied` in side_effects tells `_on_committed` to skip
@@ -1899,6 +1930,19 @@ async def _respond_as_group_agent(
             transcript if _GROUP_TRANSCRIPT_AS_QUESTION
             else (trigger["content"] if trigger else transcript)
         )
+        # The trigger turn's attachments ride the QUESTION only (mirrors the
+        # private surface's attachment fold onto its ask) — never the
+        # transcript/DTO, so file text stays out of the visible thread and
+        # off the wire. Best-effort raw read; same clamp as the private fold.
+        if trigger is not None:
+            attach_rows = conversations_db.get_group_turn_attachments(trigger["id"])
+            if attach_rows:
+                folded = "\n\n[Attached files]\n" + "\n\n".join(
+                    f"--- {a.get('name') or 'file'} ---\n{a.get('content') or ''}"
+                    for a in attach_rows
+                    if isinstance(a, dict)
+                )
+                question = f"{question}{folded[:100_000]}"
         scope = SurfaceScope(
             surface=Surface.project_group,
             project_id=project_id,
@@ -1927,8 +1971,19 @@ async def _respond_as_group_agent(
             scope=scope,
         )
         reply = (result or {}).get("answer", "")
+        # Persist the FULL structured reply, not just the answer string:
+        # the engine's response (answer/key_points/citations) merged with the
+        # classify envelope's card data (artifact_list / counts / the nested
+        # open lookup) — so a reload renders the same cards the live turn
+        # does. `content` keeps the plain answer text as the fallback every
+        # pre-column consumer still reads.
+        reply_payload: dict = dict(result or {"answer": reply})
+        if classify_envelope:
+            for key in ("artifact_list", "artifact_counts", "open"):
+                if classify_envelope.get(key) is not None:
+                    reply_payload[key] = classify_envelope[key]
         assistant_turn = conversations_db.post_group_turn(
-            conversation_id, None, reply, role="assistant"
+            conversation_id, None, reply, role="assistant", reply=reply_payload
         )
         _publish_group_turn_created(project_id, conversation_id, assistant_turn)
         return ExecutionOutcome(status="ready", response=(result or {"answer": reply}))

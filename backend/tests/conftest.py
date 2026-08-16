@@ -1519,6 +1519,11 @@ CREATE TABLE conversation_turns (
     -- new owned individual-chat writers set one of these.
     client_message_id TEXT,
     ask_job_id         INTEGER,
+    -- The FULL structured reply on an assistant turn (mirrors
+    -- 20260816160000_conversation_turns_reply.sql). NULL for every human
+    -- turn and every assistant turn persisted before the column existed —
+    -- those render from `content`.
+    reply           TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);

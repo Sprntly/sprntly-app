@@ -106,7 +106,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     // `bc-agent-body`, matching main — no invented green agent bubble).
     const agent = screen.getByTestId("gc-msg-agent")
     expect(agent.className).toMatch(/gcMsgAgent/)
-    expect(within(agent).getByText("AGENT")).toBeTruthy()
+    expect(within(agent).getByText("Product Coworker")).toBeTruthy()
     expect(agent.querySelector(".bc-agent-body")).toBeTruthy()
     expect(agent.querySelector("[class*='gcBubble']")).toBeNull()
   })

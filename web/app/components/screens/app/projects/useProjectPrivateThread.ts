@@ -55,9 +55,12 @@ import {
   projectsApi,
   storiesApi,
   type AskResponse,
+  type ChatArtifactItem,
   type ChatIntentEnvelope,
   type DelegationLedgerRow,
   type IndividualTurn,
+  type OpenArtifactCandidate,
+  type OpenArtifactResult,
 } from "../../../../lib/api"
 
 /** The on-join greeting's short/expandable-body split marker — mirrors
@@ -111,6 +114,13 @@ type SessionTurn = {
    *  to dedup this session turn against its own now-persisted history row
    *  once one lands (AC9). */
   clientMessageId: string
+  /** Open-artifact candidates riding this turn (the classify envelope's
+   *  nested `open.candidates`) — a live click affordance, session-only
+   *  (main persists the prose only; same contract here). */
+  openCandidates?: OpenArtifactCandidate[]
+  /** Artifact-list rows riding this turn (the classify envelope's
+   *  `artifact_list`) — same live-affordance contract. */
+  artifactList?: ChatArtifactItem[]
 }
 
 /** What the private surface's insight banner needs — a note surfaced from the
@@ -602,6 +612,89 @@ export function useProjectPrivateThread(
         persistTurnPair(clientMessageId, question, message)
         settleError(message)
       }
+      // Card-carrying settle (list/open intents): the prose persists (owned
+      // turn-pair route, same as main's persist-the-prose-only contract) and
+      // the chips/cards ride the SESSION turn as a live affordance.
+      const settleCardsPersisted = (
+        answerText: string,
+        cards: { openCandidates?: OpenArtifactCandidate[]; artifactList?: ChatArtifactItem[] },
+      ) => {
+        if (stoppedRef.current) return
+        persistTurnPair(clientMessageId, question, answerText)
+        setSessionTurns((prev) =>
+          prev.map((t) =>
+            t.id === id
+              ? { ...t, reply: reply(answerText), pending: false, createdAt: Date.now(), ...cards }
+              : t,
+          ),
+        )
+        setBusy(false)
+      }
+
+      // list_artifacts — the same reply main chat's listing flow composes:
+      // count-mode leads with the full-library numbers, the capped rows
+      // render as clickable cards under the prose.
+      const runListArtifacts = (env: ChatIntentEnvelope) => {
+        const items = env.artifact_list ?? []
+        const kind = env.list_kind && env.list_kind !== "all" ? env.list_kind : null
+        const kindNoun: Record<string, [string, string]> = {
+          prd: ["PRD", "PRDs"],
+          evidence: ["evidence document", "evidence documents"],
+          prototype: ["prototype", "prototypes"],
+          report: ["report", "reports"],
+          ticket_set: ["ticket set", "ticket sets"],
+          custom_artifact: ["document", "documents"],
+        }
+        const [one, many] = kind ? kindNoun[kind] ?? ["artifact", "artifacts"] : ["artifact", "artifacts"]
+        const counts = env.list_mode === "count" ? env.artifact_counts : null
+        const answer = counts
+          ? [
+              `You've created ${counts.today} ${counts.today === 1 ? one : many} today and ${counts.yesterday} yesterday`,
+              counts.total > counts.today + counts.yesterday ? ` — ${counts.total} in total.` : ".",
+              items.length ? ` The newest are below — click one to open it.` : "",
+            ].join("")
+          : items.length === 0
+            ? `You haven't created any ${many} yet — generate one from a chat and it'll show up here.`
+            : items.length === 1
+              ? `Here's your most recent ${one} — click it to open it.`
+              : `Here are your ${items.length} newest ${many} — click one to open it.`
+        settleCardsPersisted(answer, items.length ? { artifactList: items } : {})
+      }
+
+      // open_artifact — main's 1-opens / 2+-asks / 0-says-so contract,
+      // adapted to this surface's destination: a chip click opens the
+      // project's artifacts modal (there is no side panel here), so the
+      // RESOLVED case renders its single candidate as the click-to-open chip
+      // rather than auto-opening a panel.
+      const runOpenArtifact = (open: OpenArtifactResult) => {
+        const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+        if (open.status === "unsupported_type") {
+          settleCardsPersisted(
+            "That kind of artifact doesn't open here — you'll find it in this project's artifacts.",
+            {},
+          )
+          return
+        }
+        if (open.status === "resolved" && open.artifact) {
+          settleCardsPersisted(
+            `I found "${open.artifact.title}" — click it below to open it.`,
+            { openCandidates: open.candidates.length ? open.candidates : [open.artifact] },
+          )
+          return
+        }
+        if (open.status === "ambiguous") {
+          settleCardsPersisted(
+            `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
+            { openCandidates: open.candidates },
+          )
+          return
+        }
+        settleCardsPersisted(
+          `I couldn't find a ${noun} for "${open.query}". Nothing was opened — tell me to generate one if you'd like it written.`,
+          {},
+        )
+      }
+
       const reply = (answer: string): AskResponse => ({
         answer,
         key_points: [],
@@ -702,10 +795,10 @@ export function useProjectPrivateThread(
               onEditPrd: (instruction) => void runEditPrd(instruction),
               onGenerateTickets: () => void runGenerateTickets(),
               onGeneratePrd: (env) => void runGeneratePrd(env.task || question),
-              onOpenArtifact: () => void runAsk(),
+              onOpenArtifact: (open) => runOpenArtifact(open),
               onChangeTemplate: () => void runAsk(),
               onChangeTicketsTemplate: () => void runAsk(),
-              onListArtifacts: () => void runAsk(),
+              onListArtifacts: (env) => runListArtifacts(env),
               onCreateArtifact: () => void runAsk(),
               onAssignTickets: () => void runAsk(),
               onClarify: (clarification, prdOptions) => {
@@ -937,6 +1030,8 @@ export function useProjectPrivateThread(
         clarify: t.clarify
           ? { questions: t.clarify.questions, resolved: t.clarify.resolved, busy: t.clarify.busy }
           : undefined,
+        openCandidates: t.openCandidates,
+        artifactList: t.artifactList,
       }))
 
     return [...historyTurns, ...session]

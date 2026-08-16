@@ -30,8 +30,9 @@ import { createElement, useCallback, useEffect, useMemo, useRef, useState, type 
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
-import { projectsApi, type GroupTurn } from "../../../../lib/api"
+import { projectsApi, type AskResponse, type GroupTurn } from "../../../../lib/api"
 import type { ComposerDraftApi, SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
+import { spliceSkill } from "../../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { useRealtimeChannel, type PresenceIdentity } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -47,6 +48,14 @@ const POLL_MS = 4000
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+}
+
+/** A legacy assistant turn's plain `content` shaped into the minimal
+ *  `AskResponse` the shared reply ladder needs — turns persisted before the
+ *  full-reply column carry no key-points/citations, so those are the honest
+ *  empty values. Turns persisted WITH a full reply never come through here. */
+function contentAsReply(content: string): AskResponse {
+  return { answer: content, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
 /** The current viewer's display name for presence/typing — derived from the
@@ -294,11 +303,13 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
   const post = useCallback(
     // Thin `SendCommand` adapter. A bare string (the shell fallback / the engine
     // suite) is forwarded as-is; a `SendCommand` (from the shared controller)
-    // forwards `.text` today — its pinnedSkill/attachments/clientMessageId ride
-    // the wire once `postGroupTurn` is widened to accept them (the api.ts
-    // signature is untouched here).
+    // rides its pinned-skill SPLICE onto the posted content (the same single
+    // splice rule main/private use — the engine's slash-trigger routing reads
+    // it from the turn text) and forwards attachments + the idempotency
+    // client_message_id on the wire.
     (input: string | SendCommand) => {
-      const content = (typeof input === "string" ? input : input.text).trim()
+      const cmd = typeof input === "string" ? null : input
+      const content = (cmd ? spliceSkill(cmd.pinnedSkill, cmd.text) : input as string).trim()
       if (content.length < DRAFT_MIN_CHARS) return
       // Same-content double-submit guard ONLY (a rapid double click/Enter of the
       // EXACT same draft) — deliberately weaker than main's `pendingSend` gate:
@@ -354,7 +365,16 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
 
       const gen = genRef.current
       projectsApi
-        .postGroupTurn(projectId, content)
+        .postGroupTurn(
+          projectId, content,
+          cmd
+            ? {
+                pinned_skill: cmd.pinnedSkill ?? undefined,
+                attachments: cmd.attachments?.length ? cmd.attachments : undefined,
+                client_message_id: cmd.clientMessageId,
+              }
+            : undefined,
+        )
         .then(() => {
           inFlightDraftRef.current = null
           if (gen !== genRef.current) return [] as GroupTurn[]
@@ -411,9 +431,20 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
           createdAt: new Date(turn.created_at).getTime(),
           invokedBy,
           invokedByMe,
-          // Group agent turns carry their artifact-open candidates for the
-          // host's `renderAgentBody`/`turnFooter` at fold; a plain group turn
-          // has none.
+          // Agent turns feed ChatBubble's NATIVE reply ladder: the persisted
+          // full reply when the backend sent one, else the plain content
+          // shaped into a minimal AskResponse (pre-column turns). Card data
+          // rides alongside — the persisted reply's `artifact_list` and
+          // nested `open.candidates`, falling back to the legacy
+          // `open_candidates` turn field.
+          reply: isAgent ? (turn.reply ?? contentAsReply(turn.content)) : undefined,
+          openCandidates: isAgent
+            ? (turn.reply?.open?.candidates ?? turn.open_candidates ?? [])
+            : undefined,
+          artifactList: isAgent ? (turn.reply?.artifact_list ?? []) : undefined,
+          // Kept for compatibility with existing consumers of the fold-era
+          // footer shape (the engine suite asserts it); the render path now
+          // reads the native fields above.
           footerData: isAgent ? { openCandidates: turn.open_candidates ?? [] } : undefined,
         }
       }),

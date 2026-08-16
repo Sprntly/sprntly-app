@@ -85,9 +85,13 @@ describe("ProjectGroupChat — thin host delegates to ChatShell + the T3a engine
     expect(src).toContain('from "../../../shared/chat-shell/ChatShell"')
     expect(src).toContain('from "./useProjectGroupThread"')
     expect(src).toContain('from "./useMentionPicker"')
-    // The shared render primitives it still uses are imported, never reimplemented.
-    expect(src).toContain('from "../../../shared/AskReplyBody"')
-    expect(src).toContain('from "../../../shared/OpenArtifactChips"')
+    // Agent replies render through ChatBubble's NATIVE ladder (the shell
+    // feeds `ShellTurn.reply`/`openCandidates`/`artifactList`) — the host
+    // overrides no agent body and imports no reply primitive of its own; it
+    // only wires the open-destination callbacks.
+    expect(src).not.toContain("renderAgentBody:")
+    expect(src).toContain("onOpenCandidate")
+    expect(src).toContain("onOpenArtifactItem")
     expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
     // No bespoke primitives, and — post-fold — no transport/dedup/mention logic
     // (all in the engines): the host imports neither react-markdown nor the
@@ -176,9 +180,10 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     const agent = screen.getByTestId("gc-msg-agent")
     // NAMED INTENDED CHANGE (fold): the pre-fold literal `gc-msg--ai` global
     // class became the shell-owned `gcMsgAgent` module class (same agent-lane
-    // intent, same `gc-msg-agent` testid). The AGENT badge still renders.
+    // intent, same `gc-msg-agent` testid). The role badge still renders —
+    // main's "Product Coworker" label, shared via AGENT_BADGE.
     expect(agent.className).toMatch(/gcMsgAgent/)
-    expect(within(agent).getByText("AGENT")).toBeTruthy()
+    expect(within(agent).getByText("Product Coworker")).toBeTruthy()
   })
 
   it("a human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {
@@ -258,7 +263,7 @@ describe("ProjectGroupChat — send + refetch", () => {
       fireEvent.click(sendBtn)
     })
 
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team"))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) })))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(2))
     await waitFor(() => {
       expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
@@ -287,7 +292,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
     // Cleared IMMEDIATELY — postGroupTurn has not resolved yet.
     expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
-    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team")
+    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) }))
 
     await act(async () => {
       resolvePost(turn({ id: 5, content: "hi team" }))

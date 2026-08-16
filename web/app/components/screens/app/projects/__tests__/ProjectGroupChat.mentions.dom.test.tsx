@@ -405,7 +405,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     await act(async () => {
       fireEvent.click(screen.getByLabelText("Send"))
     })
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, draftBeforeSend))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, draftBeforeSend, expect.objectContaining({ client_message_id: expect.any(String) })))
   })
 
   it("test_existing_group_chat_behaviour_unchanged", async () => {
@@ -435,6 +435,6 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     await act(async () => {
       fireEvent.click(sendBtn)
     })
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team"))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) })))
   })
 })

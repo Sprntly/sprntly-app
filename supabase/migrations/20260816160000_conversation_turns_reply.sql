@@ -1,0 +1,23 @@
+-- Conversation turns — the FULL structured reply on an assistant turn.
+--
+-- `conversation_turns` is LIVE and prod-shared (main chat, group project
+-- chat, individual project chat all read/write it; staging/prod share ONE
+-- Supabase project). Same discipline as the idempotency migration before
+-- this one: nullable, NO default (no volatile default on ADD COLUMN — that
+-- forces a full table rewrite of a live table), so existing rows are
+-- untouched.
+--
+-- Purpose: the group agent's reply used to persist only the answer STRING
+-- onto `content`, collapsing the engine's structured response
+-- (key_points/citations) and the classify envelope's card data
+-- (artifact_list, the nested open.candidates) — so a reload rendered a
+-- bare paragraph where the live turn had cards. `reply` carries the full
+-- structured payload; `content` keeps the plain answer text as the
+-- backward-compatible fallback every pre-existing row and every
+-- non-structured writer still renders from (NULL = "render from content",
+-- i.e. every row written before this column existed).
+--
+-- `if not exists` for idempotent re-run, matching the repo's additive-
+-- migration pattern.
+
+alter table public.conversation_turns add column if not exists reply jsonb;

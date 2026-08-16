@@ -170,6 +170,14 @@ export interface ShellTurn {
   runStatus?: AgentRunStatus | null
   runId?: string
   footerData?: unknown
+  /** Open-artifact candidates riding an agent turn (the classify envelope's
+   *  nested `open.candidates`, or a persisted group reply's). Rendered by
+   *  `ChatBubble`'s native `OpenArtifactChips` when the host supplies no
+   *  `renderAgentBody` override for the turn. */
+  openCandidates?: OpenArtifactCandidate[] | null
+  /** Artifact-list rows riding an agent turn (the classify envelope's
+   *  `artifact_list`) — `ChatBubble`'s native `ArtifactListCards`. */
+  artifactList?: ChatArtifactItem[] | null
 }
 
 // ── The descriptor ──────────────────────────────────────────────────────────
@@ -216,7 +224,8 @@ export interface ChatSurfaceDescriptor {
   // ── Transcript ────────────────────────────────────────────────────────────
   transcript: {
     agentName: string
-    /** main "Product Coworker" · group "AGENT" · private null. */
+    /** One label everywhere: main renders "Product Coworker" and both
+     *  project surfaces pass the shared `AGENT_BADGE` constant. */
     agentBadge?: string | null
     /** project-group: speaker heads, role chips, avatars, start-aligned
      *  non-self turns (mirrors `SurfaceScope.multi_party`). */
@@ -240,6 +249,12 @@ export interface ChatSurfaceDescriptor {
     turnActions?: (turn: ShellTurn) => ReactNode
     /** project-private: DelegationActions; main: action rows. */
     turnFooter?: (turn: ShellTurn) => ReactNode
+    /** Open-destination for a `ShellTurn.openCandidates` chip rendered by the
+     *  native ladder (project surfaces route to the artifacts modal; main
+     *  never routes through the project mapping). */
+    onOpenCandidate?: (candidate: OpenArtifactCandidate) => void
+    /** Open-destination for a `ShellTurn.artifactList` card — same contract. */
+    onOpenArtifactItem?: (item: ChatArtifactItem) => void
     /** main: the inline PRD-card anchor. */
     turnAfterNode?: (turn: ShellTurn, idx: number) => ReactNode
     leading?: ReactNode
