@@ -991,6 +991,7 @@ def count_calls(
     *,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
+    provider: Optional[str] = None,
 ) -> Optional[int]:
     """The TRUE number of calls in a window, without fetching them.
 
@@ -998,6 +999,11 @@ def count_calls(
     number, and a number taken from `len(rows)` is really "the number of rows
     the cap happened to return" — which is how "how many calls did we have last
     week" answered *50* on a 485-call index, for every window, forever.
+
+    `provider` narrows the count to one source. Defaulted to None (every
+    source) so every existing caller is unchanged; the call digest passes it,
+    because "does my stored transcript set cover this window" is a question
+    about ONE provider's calls and a mixed-source total would answer it wrong.
 
     Returns None when the count cannot be read, and the caller then declines to
     state a total rather than stating a wrong one.
@@ -1009,6 +1015,8 @@ def count_calls(
             require_client().table("call_index").select("id", count="exact")
             .eq("company_id", company_id)
         )
+        if provider is not None:
+            query = query.eq("provider", provider)
         if since is not None:
             query = query.gte("call_date", since.isoformat())
         if until is not None:

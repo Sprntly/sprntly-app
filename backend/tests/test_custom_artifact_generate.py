@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS custom_artifacts (
     body_html       TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'ready',
     error           TEXT,
+    error_code      TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
     created_by      TEXT,
     updated_by      TEXT,
@@ -158,6 +159,127 @@ def test_an_llm_failure_is_recorded_and_never_raises(gen_env, monkeypatch):
     assert "gateway down" in (row["error"] or "")
 
 
+# ─── A failure says WHY, in a form the product can show ──────────────────────
+#
+# Every one of these asserts the CODE rather than the message: the code is the
+# contract the API returns and the web maps to copy, and it is the half a person
+# who asked for the document can actually be shown. `error` stays the operator's
+# raw text and is never returned — the tests below check both halves land,
+# because writing only one is how a failed generation stayed invisible.
+
+def test_an_empty_generation_records_the_empty_code(gen_env, monkeypatch):
+    _stub_llm(monkeypatch, "   ")
+    doc_id = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+    assert get_artifact(gen_env, doc_id)["error_code"] == gen.FAILURE_EMPTY
+
+
+def test_an_llm_failure_records_the_llm_code_and_keeps_the_raw_error(
+    gen_env, monkeypatch
+):
+    monkeypatch.setattr(
+        gen, "llm_call", lambda **kw: (_ for _ in ()).throw(RuntimeError("gateway down"))
+    )
+    doc_id = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+    row = get_artifact(gen_env, doc_id)
+    assert row["error_code"] == gen.FAILURE_LLM
+    # The operator's half is still there — the code replaces what the API
+    # RETURNS, not what the row records.
+    assert "gateway down" in (row["error"] or "")
+
+
+def test_a_document_too_large_to_store_is_classified_as_such(gen_env, monkeypatch):
+    """Distinct from a generic model failure, and the distinction is the whole
+    point: asking again gets the same 400KB document, so the copy has to say
+    "ask for a shorter one" rather than "try again"."""
+    _stub_llm(monkeypatch, "<h1>T</h1><p>x</p>")
+
+    def _too_large(*a, **kw):
+        from app.db.custom_artifacts import BodyTooLarge
+
+        raise BodyTooLarge("body is 2000000 chars (max 400000)")
+
+    monkeypatch.setattr(gen, "finish_artifact", _too_large)
+    doc_id = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "failed"
+    assert row["error_code"] == gen.FAILURE_TOO_LARGE
+
+
+def test_a_failure_AFTER_the_model_answered_is_not_blamed_on_the_model(
+    gen_env, monkeypatch
+):
+    """THE DISTINCTION THAT MATTERS. The model answers, and then the write
+    fails — a Supabase disconnect, an unparseable fragment. Reporting that as
+    "the generator could not be reached" is a confident false statement about a
+    generation that plainly succeeded, which is the exact failure mode this
+    whole change exists to remove."""
+    _stub_llm(monkeypatch, "<h1>T</h1><p>real content</p>")
+    monkeypatch.setattr(
+        gen, "finish_artifact",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("connection reset")),
+    )
+    doc_id = _pending(gen_env)
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    assert get_artifact(gen_env, doc_id)["error_code"] == gen.FAILURE_STORAGE
+
+
+def test_the_same_exception_classifies_differently_by_phase(gen_env, monkeypatch):
+    """Same exception TYPE, opposite meaning, decided by which side of the model
+    call it was raised on — so the phase bit is doing real work rather than
+    being a second name for the exception type."""
+    boom = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("connection reset"))
+
+    monkeypatch.setattr(gen, "llm_call", boom)
+    before = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=before, kind="memo", task="t")
+
+    _stub_llm(monkeypatch, "<h1>T</h1><p>x</p>")
+    monkeypatch.setattr(gen, "finish_artifact", boom)
+    after = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=after, kind="memo", task="t")
+
+    assert get_artifact(gen_env, before)["error_code"] == gen.FAILURE_LLM
+    assert get_artifact(gen_env, after)["error_code"] == gen.FAILURE_STORAGE
+
+
+def test_classification_is_by_type_not_by_message_text(gen_env, monkeypatch):
+    """A provider that rewords its errors must not silently reclassify every
+    failure. Nothing here reads the message, so an exception whose text SAYS
+    "too large" is still a generic model failure unless its type says so."""
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("body is too large")),
+    )
+    doc_id = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+    assert get_artifact(gen_env, doc_id)["error_code"] == gen.FAILURE_LLM
+
+
+def test_a_successful_generation_clears_a_previous_failures_code(
+    gen_env, monkeypatch
+):
+    """A stale code on a row that has since succeeded is worse than a stale
+    error: the API returns it, so the panel would say "could not be written"
+    over a document that plainly was."""
+    from app.db.custom_artifacts import fail_artifact
+
+    doc_id = _pending(gen_env)
+    fail_artifact(gen_env, doc_id, "gateway down", code=gen.FAILURE_LLM)
+    _stub_llm(monkeypatch, "<h1>T</h1><p>second time lucky</p>")
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    assert row["error_code"] is None
+    assert row["error"] is None
+
+
 # ─── The prompt carries the grounding rule ───────────────────────────────────
 
 def test_context_is_passed_to_the_model_and_named_as_the_only_facts(
@@ -213,6 +335,38 @@ def test_sweep_fails_an_old_abandoned_generation(gen_env):
     row = get_artifact(gen_env, doc_id)
     assert row["status"] == "failed"
     assert row["error"] == gen.ORPHAN_ERROR
+    # The one failure the product can speak about with certainty — nothing is
+    # writing this row, so "ask again" is genuinely the right advice.
+    assert row["error_code"] == gen.FAILURE_INTERRUPTED
+
+
+def test_the_age_gate_outlasts_the_longest_possible_healthy_generation(gen_env):
+    """THE GATE IS NOT A PREFERENCE, it is arithmetic.
+
+    These rows carry no heartbeat, so age is the only signal the sweep has — and
+    now that the sweep RECURS every 5 minutes it is pointed at live generations
+    owned by this very process, not just at rows left by a dead one. A gate
+    shorter than the longest healthy run marks a document failed WHILE IT IS
+    STILL WRITING; the user is shown a failure, and then `finish_artifact` lands
+    the document afterwards and flips the row to ready. Telling someone their
+    document died and then silently producing it is worse than either outcome.
+
+    One call can take MAX_ATTEMPTS × LONG_REQUEST_TIMEOUT_S before backoff, and
+    it queues behind every other generation on the shared LLM gate.
+    """
+    from app.llm import LONG_REQUEST_TIMEOUT_S, MAX_ATTEMPTS
+
+    worst_case_minutes = MAX_ATTEMPTS * LONG_REQUEST_TIMEOUT_S / 60
+    assert gen.ORPHAN_AFTER_MINUTES > worst_case_minutes
+
+
+def test_a_generation_at_the_old_thirty_minute_mark_is_left_alone(gen_env):
+    """The regression in concrete terms: a document 45 minutes into a retrying
+    generation is HEALTHY, and the old 30-minute gate would have failed it."""
+    doc_id = _pending(gen_env)
+    _age(gen_env, doc_id, 45)
+    assert gen.sweep_orphan_generating() == 0
+    assert get_artifact(gen_env, doc_id)["status"] == "generating"
 
 
 def test_sweep_leaves_a_generation_that_is_still_running(gen_env):

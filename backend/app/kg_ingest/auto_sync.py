@@ -388,11 +388,24 @@ def _run_slack_corpus_sync(company_id: str) -> None:
             )
             return
         result = sync_slack(slug, company_id=company_id)
-        logger.info(
-            "slack-refresh done: %s (slug=%s) channels=%s messages=%s errors=%s",
-            company_id, slug, result.channels_count, result.messages_count,
-            len(result.errors),
-        )
+        # A SYNC THAT READ NOTHING IS NOT "done". Six staging tenants spent
+        # days logging this line at INFO with `channels=0 messages=0 errors=1`
+        # while their Slack credential was dead — the word "done" and the INFO
+        # level are why nobody looked (found 2026-08-16). A run that produced
+        # no messages AND carried errors is reported at WARNING, with the
+        # reasons, so it reads as the failure it is.
+        if result.errors and not result.messages_count:
+            logger.warning(
+                "slack-refresh FAILED: %s (slug=%s) channels=%s messages=0 — %s",
+                company_id, slug, result.channels_count,
+                "; ".join(result.errors)[:400],
+            )
+        else:
+            logger.info(
+                "slack-refresh done: %s (slug=%s) channels=%s messages=%s errors=%s",
+                company_id, slug, result.channels_count, result.messages_count,
+                len(result.errors),
+            )
         # The corpus file landed — extract it into the KG now instead of
         # waiting for the next brief's seed (same path as the manual sync
         # route's _seed_corpus_after_sync).

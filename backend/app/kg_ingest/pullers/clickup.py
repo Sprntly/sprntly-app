@@ -17,7 +17,10 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.clickup.com/api/v2"
 _TIMEOUT = 30
-_PAGE_LIMIT = 5  # pages per list — pilot-scale cap; bump when needed
+# Pages per list. Was 5 — "bump when needed"; see the Jira puller's note for
+# why 2026-08-16 is when. ClickUp rate limits per-minute (100 req/min on the
+# free tier), so 20 pages once per refresh cycle stays well inside it.
+_PAGE_LIMIT = 20
 
 
 def _get(token: str, path: str, params: dict | None = None) -> dict:

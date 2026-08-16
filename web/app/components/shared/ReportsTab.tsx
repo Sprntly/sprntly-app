@@ -10,6 +10,7 @@ import { EmptyPane } from "./EmptyPane"
 import { IconArrowLeft } from "@tabler/icons-react"
 import { reportKindLabel } from "../../lib/reportKind"
 import { formatRelativeDate } from "../../lib/sources-helpers"
+import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { reportsApi, type ReportDoc, type ReportSummary } from "../../lib/api"
 
 /**
@@ -220,11 +221,15 @@ export function ReportsTab({
           </div>
         )}
         {doc && (
-          // "saved-chat" is the ONE skill whose `html` column holds raw
-          // markdown rather than a self-contained document — see
-          // `project_artifact_capture.py`. Every other report keeps
-          // rendering exactly as before, in the sandboxed iframe.
-          doc.skill === "saved-chat"
+          // Markdown vs document is decided by the BODY, not only the skill:
+          // "saved-chat" rows always hold raw markdown
+          // (`project_artifact_capture.py`), and the scheduled monthly runs
+          // save the report skills' answers as markdown too
+          // (`app.monthly_reports`) — while the legacy rows for those same
+          // skills are self-contained HTML documents. Sniffing the stored
+          // body (the same `looksLikeHtmlBrief` test chat uses to pick an
+          // iframe) renders every combination correctly.
+          doc.skill === "saved-chat" || !looksLikeHtmlBrief(doc.html)
             ? <SavedChatMarkdown markdown={doc.html} />
             : <HtmlReportView html={doc.html} title={title} fitPanel />
         )}

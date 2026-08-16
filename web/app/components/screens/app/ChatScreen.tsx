@@ -2392,6 +2392,10 @@ export function ChatScreen() {
   // and keying on activeTabId alone would leave the panel on a stale thread.
   const activeConvId = tabs.find((t) => t.id === activeTabId)?.dbConvId ?? null
   const prevConvForFocusRef = useRef(activeConvId)
+  // The TAB the previous conversation id belonged to. Tracked because the id
+  // alone cannot tell a thread SWITCH from a thread coming into EXISTENCE —
+  // see the reset effect below, where confusing the two blanked the panel.
+  const prevTabForFocusRef = useRef(activeTabId)
   // A loaded thread's project binding, keyed by its DB conversation id —
   // populated by checkResume from the resume payload the instant it's
   // parsed, read by the restore effect just below the reset effect.
@@ -2408,8 +2412,30 @@ export function ChatScreen() {
     // Guarded on an actual change rather than running on mount, because the
     // Artifacts → report hand-off sets the focus a beat AFTER the tab it belongs
     // to gains its conversation id.
-    const changed = prevConvForFocusRef.current !== activeConvId
+    // WHAT COUNTS AS A THREAD CHANGE, stated in one place because getting it
+    // wrong is silent in both directions.
+    //
+    // Keying on the conversation id ALONE treated null → 412 as a switch. On a
+    // brand-new chat that transition is not a switch at all: it is THIS tab
+    // gaining its identity the moment its conversation row is created. The
+    // clear then fired a beat after a document was written from that chat,
+    // wiping `documentId` out from under a panel that was already open — the
+    // blank Document tab found on staging. The tab stayed visible (we never
+    // pull the current tab out from under a reader) over nothing at all.
+    //
+    // Keying on the TAB alone has the mirror problem: moving between two chats
+    // that both have no conversation row yet is a real switch with no id change
+    // to notice, and the previous thread's document would ride along.
+    //
+    // So: a change of TAB is always a switch; a change of ID is a switch unless
+    // it is this same tab acquiring its first one.
+    const tabChanged = prevTabForFocusRef.current !== activeTabId
+    const convChanged = prevConvForFocusRef.current !== activeConvId
+    const gainedFirstId =
+      !tabChanged && prevConvForFocusRef.current == null && activeConvId != null
+    const changed = (tabChanged || convChanged) && !gainedFirstId
     prevConvForFocusRef.current = activeConvId
+    prevTabForFocusRef.current = activeTabId
     setContent(changed
       ? {
           conversationId: activeConvId,
@@ -2430,7 +2456,11 @@ export function ChatScreen() {
           documentGenerating: false,
         }
       : { conversationId: activeConvId })
-  }, [activeConvId, setContent])
+    // `activeTabId` is a REAL dependency, not a lint appeasement: without it
+    // this effect does not run when the active tab changes between two chats
+    // that both still have no conversation row, which is the exact case
+    // `tabChanged` exists to catch.
+  }, [activeConvId, activeTabId, setContent])
 
   // Restore the project-menu affordance on a REVISITED thread — the binding
   // itself is a THREAD attribute (unlike the fork bind above, which is a
@@ -3813,6 +3843,36 @@ export function ChatScreen() {
 
     void (async () => {
       try {
+        // THE CONVERSATION HAS TO EXIST BEFORE THE DOCUMENT DOES.
+        //
+        // `convId` above is read synchronously off the tab, and on a tab's
+        // FIRST message that is null: `pushPendingConversation` fires the
+        // create and deliberately does not await it. So the most common path
+        // there is — ask a brand-new chat for a leadership update — stored the
+        // document with `conversation_id` NULL, orphaning it from the thread
+        // that asked for it. `useThreadDocumentSync` then could not re-attach
+        // it on reload or on coming back to the thread, and the panel had
+        // nothing to show.
+        //
+        // Exactly the defect #969 fixed for reports and the ticket-set flow
+        // fixed for its own rows, with the same instrument: `ensureConversation`
+        // shares the very same in-flight create the turn persistence just fired
+        // (create-once per tab), so awaiting it costs at most the remainder of
+        // one already-issued request and never mints a second conversation. It
+        // resolves null on failure, which leaves an unlinked document — still
+        // generated, still readable in the library — rather than no document.
+        const attachTo = convId ?? await persistence.ensureConversation(tabId, {
+          turnId,
+          // THE SAME TITLE `pushPendingConversation` WOULD HAVE USED, not the
+          // tab's `handle`. Whichever of the two calls wins the create race
+          // names the stored row, and this one now usually wins — so a
+          // different truncation here (37 chars vs 49) would silently rename
+          // the conversation in Chat history for this flow alone, leaving the
+          // in-session rail and the reloaded list disagreeing about the same
+          // thread.
+          title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
+          query: seedQuery,
+        })
         const created = await customArtifactsApi.generate({
           kind,
           task: envelope.task?.trim() || seedQuery,
@@ -3822,8 +3882,23 @@ export function ChatScreen() {
           // whole subject was discussed in the thread above it. The planner's
           // `task` is a brief, not the evidence behind it.
           context: threadContextFor(tabId),
-          conversation_id: convId,
+          conversation_id: attachTo,
         })
+        // NEVER OPEN THIS TAB'S DOCUMENT OVER SOMEONE ELSE'S THREAD. The
+        // create + generate round trips mean the user can have moved on by
+        // now, and this pair is unconditional: it would put chat A's document
+        // in front of whoever is reading chat B.
+        //
+        // The clear-on-switch used to paper over that — B gaining its own
+        // conversation id wiped the stray id — but a conversation coming into
+        // existence is no longer treated as a switch (that is the fix above),
+        // so the guard has to be stated where the assumption actually lives.
+        // The same rule `startTicketSetRun` already follows.
+        //
+        // Nothing is lost by skipping it: the document is now attached to its
+        // conversation, so returning to this thread re-opens it through
+        // `useThreadDocumentSync`.
+        if (activeTabIdRef.current !== tabId) return
         setContent({ documentId: created.id, documentGenerating: true })
         openContentPanel("document")
       } catch {
@@ -3835,7 +3910,7 @@ export function ChatScreen() {
     })()
   }, [
     reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
-    setContent, openContentPanel, showToast, threadContextFor,
+    setContent, openContentPanel, showToast, threadContextFor, persistence,
   ])
 
   /** The reply-footer button: reopen a finished set, or re-run a failed one. */

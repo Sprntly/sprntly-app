@@ -611,6 +611,12 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         "answer": report, "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
         "_skill": PF_SKILL,
+        # The ONE return in this module that is an actual feedback report —
+        # captured records, synthesised. `_skill` cannot carry that meaning:
+        # `_plain_payload` stamps it on the degraded apologies too, and query
+        # mode stamps it on follow-ups answered off a stored run. Unattended
+        # callers (`app.monthly_reports`) need the distinction explicit.
+        "_report": True,
         "_skill_action": f"Public feedback · {len(records)} posts",
         "_skill_source": "public-feedback",
     }

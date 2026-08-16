@@ -36,12 +36,13 @@ forever.
 from __future__ import annotations
 
 import logging
+import math
 
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.client import require_client, retry_on_disconnect
 from app.db.custom_artifacts import fail_artifact, finish_artifact
 from app.graph.gateway import llm_call
-from app.llm import strip_code_fence
+from app.llm import LONG_REQUEST_TIMEOUT_S, MAX_ATTEMPTS, strip_code_fence
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,58 @@ def _render_input(*, kind: str, task: str, context: str) -> str:
     return "\n".join(parts)
 
 
+# ── failure codes ────────────────────────────────────────────────────────────
+#
+# The CLOSED SET of reasons a document can fail, written to
+# `custom_artifacts.error_code` and returned by the API. The web maps each to
+# its own sentence; nothing here is user-visible text, which is the point —
+# copy belongs to the surface, meaning belongs to the row.
+#
+# Kept deliberately coarse. The question a code has to answer is "will asking
+# again help?", because that is the only decision the person reading it can
+# make. `interrupted` and `llm_error` say yes; `empty` says maybe; `too_large`
+# says not without changing the request. A finer taxonomy would carry provider
+# detail into a shared library for no additional decision.
+FAILURE_EMPTY = "empty"
+FAILURE_LLM = "llm_error"
+FAILURE_TOO_LARGE = "too_large"
+FAILURE_INTERRUPTED = "interrupted"
+# The document was WRITTEN and then could not be kept — a Supabase disconnect
+# on the final update, an unparseable fragment, anything after the model
+# answered. Distinct from `llm_error` because the two are opposite facts about
+# the same run, and a product that tells someone "the generator could not be
+# reached" about a generation that plainly succeeded is making exactly the
+# confident false statement this whole change exists to stop.
+FAILURE_STORAGE = "storage_error"
+
+FAILURE_CODES = (
+    FAILURE_EMPTY,
+    FAILURE_LLM,
+    FAILURE_TOO_LARGE,
+    FAILURE_INTERRUPTED,
+    FAILURE_STORAGE,
+)
+
+
+def _classify(exc: BaseException, *, after_model_answered: bool) -> str:
+    """Which failure code an exception is.
+
+    Matched on TYPE and on PHASE, never on message text. Parsing a provider's
+    wording is a contract with someone else's copy: it works until they reword
+    it, and then it silently reclassifies every failure as the generic one
+    while still looking correct in review.
+
+    `after_model_answered` is the phase bit, and it is the difference between
+    two true sentences and one false one: everything raised before the call
+    returns is a failure to GENERATE, everything after it is a failure to KEEP.
+    """
+    from app.db.custom_artifacts import BodyTooLarge
+
+    if isinstance(exc, BodyTooLarge):
+        return FAILURE_TOO_LARGE
+    return FAILURE_STORAGE if after_model_answered else FAILURE_LLM
+
+
 def _title_from(html: str, fallback: str) -> str:
     """The document's own <h1> is its title, so the library row and the first
     line of the document cannot disagree. Falls back to the requested kind."""
@@ -144,6 +197,10 @@ def generate_into(
     spinning on a generation that is not running. The stored error string is
     for operators; the web maps failures onto its own recovery copy.
     """
+    # Which side of the model call we are on when something raises. Set the
+    # instant the call returns, so "the generator could not be reached" is only
+    # ever said about a run where that is true.
+    answered = False
     try:
         result = llm_call(
             enterprise_id=company_id,
@@ -156,26 +213,59 @@ def generate_into(
             max_tokens=_MAX_TOKENS,
             long_output=True,
         )
+        answered = True
         html = sanitize_artifact_html(strip_code_fence(result.text or ""))
         if not html.strip():
             # A generation that produced nothing is a failure, not an empty
             # document: an empty document looks like the user's own blank page
             # and hides the fact that a call was made and came back with
             # nothing.
-            fail_artifact(company_id, artifact_id, "generation returned no content")
+            fail_artifact(
+                company_id,
+                artifact_id,
+                "generation returned no content",
+                code=FAILURE_EMPTY,
+            )
             return
         finish_artifact(
             company_id, artifact_id, title=_title_from(html, kind), body_html=html
         )
     except Exception as exc:  # noqa: BLE001 — see the docstring's total contract
         logger.exception("custom artifact %s generation failed", artifact_id)
-        fail_artifact(company_id, artifact_id, str(exc))
+        fail_artifact(
+            company_id,
+            artifact_id,
+            str(exc),
+            code=_classify(exc, after_model_answered=answered),
+        )
 
 
 # How long a document may sit in `generating` before a sweep calls it orphaned.
-# Comfortably longer than any real generation (a long document is ~60-90s), so
-# a slow run is never killed while it is still writing.
-ORPHAN_AFTER_MINUTES = 30
+#
+# DERIVED FROM THE CALL'S OWN CEILING rather than picked, because the two must
+# not drift: `custom_artifacts` rows carry NO HEARTBEAT (unlike `ask_jobs`,
+# which bump theirs precisely so a sweep cannot fail a long-but-healthy job),
+# so `updated_at` is stamped once at creation and age is the ONLY signal. A gate
+# shorter than the longest possible healthy run therefore does not just fail
+# early — it stamps `failed` on a generation that is still writing, shows the
+# user a failure, and then `finish_artifact` lands the document afterwards and
+# flips the row to `ready`. Telling someone their document died and then
+# silently producing it is worse than either outcome alone.
+#
+# A single call can take MAX_ATTEMPTS × LONG_REQUEST_TIMEOUT_S (4 × 600s = 40
+# minutes) before backoff, and it also queues on the process-wide `_llm_gate`
+# behind every other generation. The doubling plus headroom covers the queue.
+#
+# THIS MATTERS MORE NOW THAN IT DID: while this sweep only ran at startup, a
+# too-short gate was mostly theoretical (the process that owned the generation
+# had died by then, or it would not be sweeping). Running it every 5 minutes
+# points it at LIVE generations owned by this very process.
+#
+# The cost of the wider gate is honest and small: a genuinely orphaned document
+# now spins for up to 90 minutes instead of 30 before it is marked failed. A
+# late true failure beats a prompt false one.
+_MAX_CALL_MINUTES = math.ceil(MAX_ATTEMPTS * LONG_REQUEST_TIMEOUT_S / 60)  # 40
+ORPHAN_AFTER_MINUTES = _MAX_CALL_MINUTES * 2 + 10  # 90
 ORPHAN_ERROR = "interrupted by a server restart"
 
 
@@ -220,6 +310,14 @@ def sweep_orphan_generating(older_than_minutes: int = ORPHAN_AFTER_MINUTES) -> i
     ids = [r["id"] for r in rows]
     if ids:
         c.table("custom_artifacts").update(
-            {"status": "failed", "error": ORPHAN_ERROR}
+            {
+                "status": "failed",
+                "error": ORPHAN_ERROR,
+                # The one failure the product can speak about with certainty:
+                # nothing is writing this row and asking again WILL start a
+                # fresh generation. Written here rather than left NULL so the
+                # panel says that instead of "we do not know why".
+                "error_code": FAILURE_INTERRUPTED,
+            }
         ).in_("id", ids).eq("status", "generating").execute()
     return len(ids)

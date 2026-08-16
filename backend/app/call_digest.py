@@ -173,6 +173,53 @@ def _fmt_range(since: datetime, until: datetime) -> str:
     return f"{since:%b} {since.day} – {until:%b} {until.day}"
 
 
+def _planned_window(constraints: dict | None) -> Window | None:
+    """The planner's `since`/`until` as a Window, or None when it named none.
+
+    EXPLICIT by construction: a window a model extracted from the whole
+    sentence is a stated request, so the auto-widen below must not quietly
+    replace it with "the last 90 days" when the period is genuinely empty —
+    "no calls in those five weeks" is the answer to that question.
+
+    Never raises: an unparseable constraint falls back to reading the question,
+    which is strictly what this function replaced."""
+    if not constraints:
+        return None
+    raw_since = constraints.get("since")
+    raw_until = constraints.get("until")
+    if not isinstance(raw_since, str) or not raw_since.strip():
+        return None
+    try:
+        since = _start_of_day(
+            datetime.fromisoformat(raw_since.strip()).replace(tzinfo=timezone.utc)
+        )
+        until = (
+            datetime.fromisoformat(raw_until.strip()).replace(
+                tzinfo=timezone.utc, hour=23, minute=59, second=59,
+            )
+            if isinstance(raw_until, str) and raw_until.strip()
+            else _utc_now()
+        )
+    except ValueError:
+        logger.debug("call-digest: unparseable planner window %r/%r",
+                     raw_since, raw_until)
+        return None
+    if until <= since:
+        return None
+    return Window(since, until, _fmt_range(since, until), explicit=True)
+
+
+#: Spelled-out counts, because people SPEAK these questions. "the last five
+#: weeks" reached the digest as a 7-day default because the numeric regex below
+#: could not match a word — and nothing said so, which is worse than the wrong
+#: window itself. Ten covers what anyone says aloud before switching to digits.
+_WORD_NUMBERS: dict[str, int] = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+    "eleven": 11, "twelve": 12,
+}
+
+
 def parse_window(question: str, *, now: datetime | None = None) -> Window:
     """Parse a time window from the question. Defaults to the last 7 days when no
     explicit window is named. `now` is injectable for deterministic tests."""
@@ -181,10 +228,19 @@ def parse_window(question: str, *, now: datetime | None = None) -> Window:
         now = now.replace(tzinfo=timezone.utc)
     q = question.lower()
 
-    # "last/past N days|weeks|months"
-    m = re.search(r"\b(?:last|past|previous)\s+(\d{1,3})\s+(day|week|month)s?\b", q)
+    # "last/past N days|weeks|months", where N is digits OR a spelled-out word.
+    # The separator is `\s*` rather than `\s+`, because dictation runs them
+    # together: "look at the last10 weeks" arrived exactly like that and fell
+    # through to the 7-day default. Both gaps produced a silently wrong window
+    # on a question whose period was perfectly clear to a reader.
+    m = re.search(
+        r"\b(?:last|past|previous)\s*(\d{1,3}|" + "|".join(_WORD_NUMBERS) + r")\s*"
+        r"(day|week|month)s?\b",
+        q,
+    )
     if m:
-        n = int(m.group(1))
+        raw = m.group(1)
+        n = int(raw) if raw.isdigit() else _WORD_NUMBERS[raw]
         unit = m.group(2)
         days = n * {"day": 1, "week": 7, "month": 30}[unit]
         since = _start_of_day(now - timedelta(days=days))
@@ -643,6 +699,58 @@ def _fit_corpus(
     return selected, "\n\n".join(c.render(max_quotes=0) for c in selected), 0
 
 
+def _store_covers(
+    company_id: str, provider: str, window: Window, rows: list | None
+) -> bool:
+    """Does the transcript store hold THIS PROVIDER'S WHOLE WINDOW?
+
+    The stored-first path (owner decision 2026-08-12) asked only whether the
+    store had ANY row for the window, which silently treats a partial store as
+    a complete one. That is not hypothetical: a workspace whose earlier digests
+    ran over a 7-day window had exactly those days stored, and the first
+    correct 10-week question then found 37 rows, skipped the live fetch, and
+    reported the other 175 calls as weeks where "absence of records is not
+    evidence of no activity" — a confident account of a gap that only existed
+    in our own cache (2026-08-16).
+
+    `call_index` is the cheap authority on how many calls the window really
+    holds: it is one indexed COUNT, it is filled by the same connector sync,
+    and it needs no third-party call. More calls indexed than stored means the
+    store is short and the live fetch runs (and writes through, so the next
+    ask over that window is warm).
+
+    FAILS TOWARD THE STORE, deliberately. An unreadable or empty index count is
+    "we cannot tell", and in that state the old behaviour — trust the store —
+    is right: forcing a minutes-long live fetch on every question because a
+    count query blipped is a worse failure than a possibly-short corpus, and
+    the corpus reports what it contains either way.
+    """
+    if not rows:
+        return False
+    try:
+        from app import call_index
+
+        indexed = call_index.count_calls(
+            company_id, since=window.since, until=window.until, provider=provider,
+        )
+    except Exception:  # noqa: BLE001 — cannot tell → trust the store
+        logger.warning(
+            "call-digest: could not check %s store coverage for %s",
+            provider, company_id, exc_info=True,
+        )
+        return True
+    if not indexed:
+        return True
+    if indexed > len(rows):
+        logger.info(
+            "call-digest: %s store holds %d of %d indexed calls for %s in %s — "
+            "fetching the window live",
+            provider, len(rows), indexed, company_id, window.label,
+        )
+        return False
+    return True
+
+
 def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     """Assemble the voice corpus for the window: every call from every connected
     LIVE source — Fireflies and/or Zoom — MERGED with documents uploaded into the
@@ -704,7 +812,7 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
 
     if api_key:
         sources.append(_SOURCE_LABELS["fireflies"])
-        if stored.get("fireflies"):
+        if _store_covers(company_id, "fireflies", window, stored.get("fireflies")):
             fireflies_calls = _revive(stored["fireflies"])
         else:
             try:
@@ -721,7 +829,9 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
 
     if zoom_ctx is not None:
         sources.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-        if stored.get(_ZOOM_PROVIDER):
+        if _store_covers(
+            company_id, _ZOOM_PROVIDER, window, stored.get(_ZOOM_PROVIDER)
+        ):
             zoom_calls = _revive(stored[_ZOOM_PROVIDER])
         else:
             try:
@@ -1211,12 +1321,13 @@ def _answer_query(
         prompt_version="qa-voc-query-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=_VOC_SKILL,
-        max_tokens=3000,
+        max_tokens=_QUERY_MAX_TOKENS,
     )
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.5, "unanswered": "",
     }
+    payload = _ensure_answer(payload, result, window)
     payload.update({
         "_skill": _VOC_SKILL,
         "_skill_action": (
@@ -1231,6 +1342,60 @@ def _answer_query(
         "_skill_source": "voc-query",
     })
     return payload
+
+
+#: Output ceiling for the pointed-query pass. Was 3000, chosen when this path
+#: answered "did complaints about exports increase this week" in a paragraph.
+#: It also receives "give me a table week by week with every company we spoke
+#: with and what they asked for", which is thousands of tokens of table — one
+#: such answer measured 9,487 characters and only just fitted. Widening the
+#: corpus tipped the next one over, the JSON came back truncated, and the user
+#: got a blank reply (2026-08-16). Still half the report pass's 12000: this is
+#: the pointed path, and a ceiling that never binds is a cost with no owner.
+_QUERY_MAX_TOKENS = 8000
+
+
+def _ensure_answer(payload: dict, result, window: "Window") -> dict:
+    """Never hand back a payload with no answer in it.
+
+    A schema'd call that runs out of output tokens returns a truncated or empty
+    object. This function used to pass that straight through: the job was
+    stamped `ready`, the row carried `_skill_action` and `citations` and no
+    `answer`, and chat rendered nothing at all. A blank reply is the worst
+    possible failure — it looks like the product is broken and says nothing
+    about why, which is exactly what the user reported.
+
+    So an empty result becomes an honest, actionable message. `max_tokens` is
+    named separately from every other cause because it is the one the user can
+    do something about, and because it is the one that gets more likely as a
+    window widens."""
+    if isinstance(payload, dict) and str(payload.get("answer") or "").strip():
+        return payload
+
+    stop = getattr(result, "stop_reason", None)
+    logger.error(
+        "call-digest: voc-query produced no answer (stop_reason=%s, window=%s) "
+        "— returning an explanatory message instead of a blank reply",
+        stop, window.label,
+    )
+    if stop == "max_tokens":
+        text = (
+            f"I read the calls for {window.label}, but the answer ran longer "
+            "than I can return in one reply — so nothing came back. Ask for a "
+            "narrower slice (a shorter window, or one week at a time) and I "
+            "can give you the full detail for it."
+        )
+    else:
+        text = (
+            f"I read the calls for {window.label}, but couldn't compose an "
+            "answer from them just now. Please ask again — if it keeps "
+            "happening, a narrower window usually gets through."
+        )
+    return {
+        **(payload if isinstance(payload, dict) else {}),
+        "answer": text,
+        "key_points": [], "citations": [], "confidence": 0.0, "unanswered": "",
+    }
 
 
 def _voc_coverage_clause(voc) -> str:
@@ -1426,6 +1591,7 @@ def answer(
     question: str,
     history: list[dict] | None = None,
     on_delta=None,
+    constraints: dict | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
 
@@ -1434,6 +1600,17 @@ def answer(
     answer text as it generates instead of landing all at once. Optional and
     advisory — every caller that omits it behaves exactly as before, and the
     returned payload is the authoritative answer either way.
+
+    `constraints` is the PLANNER's own reading of the question, and when it
+    carries a window that window WINS over re-parsing the text. The planner
+    read the whole sentence with a model; `parse_window` reads it with a regex
+    that only accepts digits. Asked for "a table week by week ... the last five
+    weeks", the planner correctly extracted 2026-07-12, this function threw
+    that away, the regex could not match a spelled-out "five", and the digest
+    silently ran over its 7-day default — so a five-week question was answered
+    with four days of calls and the report said the rest of the history "was
+    not captured" (reported 2026-08-16). Every caller that passes nothing keeps
+    parsing the question exactly as before.
 
     Parses the window, fetches the calls live, retrieves the knowledge graph's
     stored signal for the same question, MERGES the two, and then either runs
@@ -1445,7 +1622,7 @@ def answer(
     The two halves degrade independently, the same way Fireflies and Zoom
     already do inside `build_corpus`: an empty KG still answers from calls, and
     calls that could not be fetched still answer from the KG — saying so."""
-    window = parse_window(question)
+    window = _planned_window(constraints) or parse_window(question)
     query_mode = is_voc_query(question)
     compare_boundary: str | None = None
     if query_mode and _VOC_COMPARATIVE.search(question):
@@ -1691,6 +1868,14 @@ def answer(
         "answer": str(result.output), "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
     }
+    # DELIBERATELY NOT `_ensure_answer`'d, unlike the query pass. This call
+    # STREAMS: by the time an empty synthesis is visible here the client has
+    # already received the fragments through `on_delta`, so replacing the text
+    # would leave the sink showing one answer and the stored row another. An
+    # empty synthesis is a legitimate terminal outcome on this path and must be
+    # returned as-is — see test_voc_answer_streams.py's
+    # `test_an_empty_synthesis_does_not_start_a_second_generation`, which
+    # records the desync that made it a rule.
     payload.update({
         "_skill": _VOC_SKILL,
         "_skill_action": f"Voice of customer · {sources} · {window.label}",

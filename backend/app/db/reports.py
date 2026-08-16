@@ -106,6 +106,34 @@ def get_report(report_id: int, company_id: str) -> dict | None:
 
 
 @retry_on_disconnect
+def latest_report_at(
+    company_id: str, *, skill: str, question: str,
+) -> str | None:
+    """`created_at` of the newest report matching (company, skill, question),
+    or None when no such row exists.
+
+    This is the monthly scheduler's DURABLE once-per-cycle ledger
+    (`app.monthly_reports`): a scheduled run stamps its spec's canonical
+    `question` on the row it saves, so matching on it here is what separates
+    scheduler-generated rows from the same skill run by a human in chat —
+    whose rows carry the human's own words and must not suppress the
+    scheduled cycle.
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select("created_at")
+        .eq("company_id", company_id)
+        .eq("skill", skill)
+        .eq("question", question)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0].get("created_at") if resp.data else None
+
+
+@retry_on_disconnect
 def list_reports_for_conversation(conversation_id: int, company_id: str) -> list[dict]:
     """Every report captured in one chat thread, newest first.
 

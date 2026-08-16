@@ -190,3 +190,111 @@ def test_answer_still_accepts_no_plan():
     param = inspect.signature(qa_agent.answer).parameters["plan"]
     assert param.default is None
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+# ── the single-call backstop ────────────────────────────────────────────────
+#
+# "give me more details on the maverik meeting" planned `pipeline_id: none`
+# with `sources: [fireflies, slack]` and the reason "best answered by reading
+# Fireflies for a recorded transcript" — it knew where the answer lived and
+# still named no machinery, so the transcript was never fetched and the answer
+# came from distilled signals that had already lost the attendees and the
+# objections (2026-08-16). The backstop refines that plan; it never claims a
+# turn the planner routed somewhere else.
+
+
+def _served(text="## Maverik + ChaosTrack\n- full transcript"):
+    return {
+        "answer": text, "key_points": [], "citations": [],
+        "confidence": 1.0, "unanswered": "", "_skill": None,
+        "_skill_source": "call-index",
+    }
+
+
+def test_a_named_call_reaches_the_transcript_even_when_the_plan_named_none(
+    monkeypatch,
+):
+    """The reported failure, end to end."""
+    from app import call_index
+
+    seen: dict = {}
+
+    def _single(enterprise_id, question, *, history=None, fresh=None):
+        seen["question"] = question
+        return _served()
+
+    monkeypatch.setattr(call_index, "answer_single_call", _single)
+    monkeypatch.setattr(call_index, "ensure_fresh", lambda *a, **k: True)
+
+    out = qa_agent.answer(
+        plan=Plan(action="answer", sources=["fireflies", "slack"]),
+        enterprise_id="ent-1",
+        question="give me more details on the maverik meeting",
+        dataset="d",
+    )
+
+    assert "full transcript" in out["answer"]
+    assert seen["question"] == "give me more details on the maverik meeting"
+
+
+def test_the_backstop_stands_down_when_the_plan_named_no_call_source(
+    monkeypatch,
+):
+    """It refines the planner's decision — it does not overrule it. A plan
+    that never mentioned calls is left entirely alone."""
+    from app import call_index
+
+    monkeypatch.setattr(
+        call_index, "answer_single_call",
+        lambda *a, **k: pytest.fail("the backstop claimed a non-call plan"),
+    )
+    monkeypatch.setattr(qa_agent, "compose_ask_answer", lambda *a, **k: _served("generic"))
+
+    out = qa_agent.answer(
+        plan=Plan(action="answer", sources=["jira"]),
+        enterprise_id="ent-1",
+        question="give me more details on the maverik meeting",
+        dataset="d",
+    )
+
+    assert out["answer"] == "generic"
+
+
+def test_the_backstop_stands_down_for_a_plural_ask(monkeypatch):
+    """"our recent customer calls" names no ONE call — that belongs to the
+    listing and digest paths, and `is_single_call_request` already says so."""
+    from app import call_index
+
+    monkeypatch.setattr(
+        call_index, "answer_single_call",
+        lambda *a, **k: pytest.fail("a plural ask was resolved to one call"),
+    )
+    monkeypatch.setattr(qa_agent, "compose_ask_answer", lambda *a, **k: _served("generic"))
+
+    out = qa_agent.answer(
+        plan=Plan(action="answer", sources=["fireflies"]),
+        enterprise_id="ent-1",
+        question="summarize our recent customer calls",
+        dataset="d",
+    )
+
+    assert out["answer"] == "generic"
+
+
+def test_an_unresolvable_call_reference_falls_through(monkeypatch):
+    """A decline is not a failure: `answer_single_call` returning None means
+    the reference matched no indexed call, and the turn carries on."""
+    from app import call_index
+
+    monkeypatch.setattr(call_index, "answer_single_call", lambda *a, **k: None)
+    monkeypatch.setattr(call_index, "ensure_fresh", lambda *a, **k: True)
+    monkeypatch.setattr(qa_agent, "compose_ask_answer", lambda *a, **k: _served("generic"))
+
+    out = qa_agent.answer(
+        plan=Plan(action="answer", sources=["fireflies"]),
+        enterprise_id="ent-1",
+        question="more details on the meeting with Nonesuch Industries",
+        dataset="d",
+    )
+
+    assert out["answer"] == "generic"

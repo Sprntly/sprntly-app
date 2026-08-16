@@ -5248,9 +5248,16 @@ export type ArtifactItem =
        *  <h1>). The row renders its own fallback rather than a fabricated
        *  title stored on the record. */
       title: string
-      /** Lifecycle. Aggregation filters to generating|ready — a `failed`
-       *  generation produced nothing and is not an artifact. */
-      status: "generating" | "ready"
+      /** Lifecycle, all three states.
+       *
+       *  `failed` used to be filtered out of the aggregation on the grounds
+       *  that "a run that produced nothing is not an artifact". True of the
+       *  ROW and false of the PRODUCT: the person who asked for the document
+       *  went looking for it, and excluding it meant the library answered by
+       *  showing nothing at all — no document, no failure, no reason. That is
+       *  what made a failed generation invisible. It is listed, labelled, and
+       *  openable onto its own reason. */
+      status: "generating" | "ready" | "failed"
       /** LAST EDIT, not birth. A library of living documents is browsed by
        *  last touch, and this is the key the unified listing sorts on. The
        *  birth date is `born_at` below — the two are separate precisely so a
@@ -5288,6 +5295,14 @@ export type CustomArtifactDoc = {
   conversation_id: number | null
   created_by: string | null
   updated_by: string | null
+  /** WHY a `failed` document failed, as a stable code — never the server's raw
+   *  error text, which stays operator-side. `documentFailureCopy` turns it into
+   *  the sentence a person reads.
+   *
+   *  Absent on listings (they select a fixed column set) and null on a document
+   *  that failed before the column existed, which is why the copy helper has an
+   *  unknown-reason case rather than assuming one is always present. */
+  error_code?: string | null
 }
 
 /** A save refused because someone else saved first. `current` is their

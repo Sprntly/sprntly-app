@@ -1355,7 +1355,7 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]:
+def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1372,8 +1372,17 @@ def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]
             enterprise_id,
         )
         return None
+    # THE PLAN'S WINDOW TRAVELS WITH THE QUESTION. Dropping it here is what
+    # made "a table week by week ... the last five weeks" run over four days:
+    # the planner extracted 2026-07-12 correctly, this call discarded it, and
+    # `parse_window`'s digits-only regex could not read a spelled-out "five",
+    # so the digest fell to its 7-day default and then reported the missing
+    # weeks as history that "was not captured" (2026-08-16). Same defect the
+    # calls leg had — a constraint the planner extracted, thrown away by the
+    # executor that needed it.
     return call_digest.answer(
-        enterprise_id=enterprise_id, question=question, history=history
+        enterprise_id=enterprise_id, question=question, history=history,
+        constraints=(plan.constraints if plan is not None else None),
     )
 
 
@@ -1465,8 +1474,34 @@ _PLANNED_MACHINERY: dict = {
 }
 
 
+#: Providers whose presence in a plan's `sources` means "this question is
+#: about recorded calls". Exactly `live_read._LOCAL_LEGS`' call half — the two
+#: describe the same fact, so they must not drift.
+_CALL_SOURCES = frozenset({"fireflies", "zoom"})
+
+
+def _plan_named_call_source(plan: "AskPlan") -> bool:
+    """Did the planner say calls are where this answer lives?
+
+    The gate on the single-call backstop: it refines the planner's own
+    decision rather than second-guessing it, so a plan that never mentioned a
+    call source is left entirely alone."""
+    return bool(plan is not None and _CALL_SOURCES.intersection(plan.sources or []))
+
+
+def _routing_text_for_calls(question: str, history) -> str:
+    """The text the call-reference gate reads.
+
+    The bare question, never the folded thread: `is_single_call_request`
+    extracts NAMING words, so a previous turn's vocabulary would let an
+    unrelated follow-up resolve to whatever call that turn discussed. This is
+    the same reason the ladder hands it `routing_text` rather than history."""
+    return question or ""
+
+
 def _planned_live_context(
-    enterprise_id: Optional[str], plan: "AskPlan", question: str
+    enterprise_id: Optional[str], plan: "AskPlan", question: str,
+    *, local_only: bool = False,
 ) -> str:
     """Read the sources the PLANNER named, and render them for the answer.
 
@@ -1496,9 +1531,11 @@ def _planned_live_context(
             plan.sources,
             query=query,
             constraints=plan.constraints,
+            local_only=local_only,
         )
         logger.info(
-            "[planner] exec live-read company=%s %s",
+            "[planner] exec %s company=%s %s",
+            "local-read" if local_only else "live-read",
             enterprise_id, result.outcome_summary(),
         )
         block = result.render_block()
@@ -2116,6 +2153,45 @@ def answer(
             return planned
         # The plan named no machinery — which is the normal outcome — so this
         # turn continues to the routed/generic path below with the ladder off.
+        #
+        # ONE BACKSTOP, for the one case where "no machinery" is measurably
+        # wrong: the question names a single call AND the plan named a call
+        # source. "give me more details on the maverik meeting" planned
+        # `pipeline_id: none` with `sources: [fireflies, slack]` and reason
+        # "best answered by reading Fireflies for a recorded transcript" — it
+        # knew, and still picked nothing, so the transcript was never fetched
+        # and the answer was assembled from distilled signals that had already
+        # lost the attendees and the objections (reported 2026-08-16).
+        #
+        # Deliberately narrow, and not a reopening of the regex ladder:
+        #   * the PLAN must already name a call source, so this only refines a
+        #     decision the planner made — it never claims a turn the planner
+        #     routed elsewhere (a named pipeline returned above);
+        #   * `is_single_call_request` is the ladder's own tested gate, which
+        #     stands itself down for plurals and windows ("our recent customer
+        #     calls" belongs to the listing/digest paths, not to one call);
+        #   * `_m_single_call_read` DECLINES to None when the reference
+        #     resolves to no indexed call, so a wrong guess costs one indexed
+        #     lookup and the turn carries on.
+        if _plan_named_call_source(plan) and call_index.is_single_call_request(
+            _routing_text_for_calls(question, history), history
+        ):
+            try:
+                single = _m_single_call_read(
+                    enterprise_id=enterprise_id, question=question,
+                    history=history, fresh=_index_fresh,
+                )
+            except Exception:  # noqa: BLE001 — a backstop must never break chat
+                logger.exception(
+                    "[planner] single-call backstop failed for %s", enterprise_id
+                )
+                single = None
+            if single is not None:
+                logger.info(
+                    "[planner] single-call backstop served %s (plan named no "
+                    "machinery)", enterprise_id,
+                )
+                return single
 
     # Sources the user NAMED in this very message, and whether any of them is
     # one we can actually open live for this company. Naming a source is the
@@ -2685,12 +2761,26 @@ def answer(
         live_reads_on = bool(
             getattr(_settings, "live_connector_reads_enabled", False)
         )
-        if not prd_context and live_reads_on:
+        # LOCAL LEGS ARE NOT LIVE READS, and standing them down with the live
+        # ones is what made "past calls are missing" (2026-08-15) possible.
+        # `_LOCAL_LEGS` (fireflies/zoom → the call index, github → synced PR
+        # rows) are Postgres SELECTs against tables THIS SAME connector sync
+        # fills — no third-party call, no API quota, microseconds. The flag's
+        # stated cost is "up to 8s of third-party I/O", which they do not
+        # incur, so with the flag off they now run in `local_only` mode
+        # instead of not running at all: the answer path keeps the call
+        # history the sync already indexed (522 calls back to 2023 for the
+        # tenant that reported this), and only the networked fan-out is
+        # actually stood down. A networked source the plan named is still
+        # reported as unread with its reason — see `read_sources`.
+        if not prd_context:
             if plan is not None:
                 live_context_fn = lambda: _planned_live_context(  # noqa: E731
-                    enterprise_id, plan, question
+                    enterprise_id, plan, question, local_only=not live_reads_on
                 )
-            else:
+            elif live_reads_on:
+                # The keyword sweep has no local half to preserve — it probes
+                # connectors and nothing else — so it stays fully gated.
                 live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
         if plan is not None:
             # The library read is a Postgres SELECT, not a connector call — it
@@ -2786,6 +2876,25 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
+    # Market-intelligence routed: the report is public-web news about the
+    # CATEGORY (funding, M&A, entrants, category movement, regulation, analyst
+    # coverage), which the generic skill answer can't reach — the KG holds
+    # first-party signal, not the trade press. Run the dedicated web-search
+    # pipeline instead; it returns None only when the company profile can't be
+    # read, falling through to the generic answer.
+    if decision.skill_id == "market-intelligence-report":
+        from app import market_intel
+
+        mi = market_intel.answer(
+            enterprise_id=enterprise_id, question=question, history=history,
+            # The capture is paid web search and the synthesis is a
+            # document-scale call; the boundary between them is a cancellation
+            # checkpoint, so a Stop actually stops the second spend.
+            is_cancelled=is_cancelled,
+        )
+        if mi is not None:
+            return _maybe_verify(mi, enterprise_id)
+
     # VoC routed by ANY stage — including the haiku intent router. One path
     # answers it, and that path reads BOTH halves of the evidence: the live call
     # sources and the knowledge graph. A phrasing only the LLM router
@@ -2813,9 +2922,15 @@ def answer(
         from app import call_digest
 
         if not pinned_skill:
+            # The ROUTER picked the digest here rather than the planner, but a
+            # planned turn still reached this line with a window the planner
+            # extracted (its plan simply named no machinery). Hand it over for
+            # the same reason `_m_call_digest` does — a window read from the
+            # whole sentence beats one re-derived from its surface words.
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
+                constraints=(plan.constraints if plan is not None else None),
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).

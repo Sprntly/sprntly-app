@@ -328,6 +328,25 @@ def _local_github(enterprise_id: str, query: str, constraints: dict) -> str:
     return f"{len(hits)} open pull request(s) match:\n" + "\n".join(listed)
 
 
+#: Attendees listed on one call line before "+N more". A briefing can carry a
+#: dozen; the first several identify the room, and the rest cost prompt budget
+#: that the summary text uses better.
+_ATTENDEES_PER_CALL = 8
+
+
+def _attendees(participants: list) -> str:
+    """Attendees as 'with: a@x.com, b@y.com (+3 more)'.
+
+    Kept whole rather than reduced to a count: the question this answers is
+    "who was on it", and "5 participants" answers the arithmetic instead."""
+    names = [str(p).strip() for p in (participants or []) if str(p).strip()]
+    if not names:
+        return ""
+    shown = ", ".join(names[:_ATTENDEES_PER_CALL])
+    extra = len(names) - _ATTENDEES_PER_CALL
+    return f"with: {shown}" + (f" (+{extra} more)" if extra > 0 else "")
+
+
 def _local_calls(enterprise_id: str, query: str, constraints: dict) -> str:
     """Recorded calls from the INDEX — never the Fireflies/Zoom API.
 
@@ -364,12 +383,20 @@ def _local_calls(enterprise_id: str, query: str, constraints: dict) -> str:
         return (
             f"{total} recorded calls are indexed for this workspace, but none of "
             "their titles or accounts match this. That says nothing about what "
-            "was SAID on them — the index holds titles, dates and accounts, not "
-            "transcripts."
+            "was SAID on them — the index holds titles, dates, attendees and "
+            "accounts, not transcripts."
         )
     listed = [
         f"- {c.call_date or 'undated'} · {c.title or 'untitled'}"
         + (f" · {c.account}" if c.account else "")
+        # WHO WAS ON IT, and for how long. The index has stored both since it
+        # was built, and this leg dropped them — so an answer about a named
+        # call apologised that "names or titles of the attendees" were not
+        # available while the row listed all five email addresses and a
+        # 51-minute duration (reported 2026-08-15). Attendees are the single
+        # most-asked fact about a meeting after what was said.
+        + (f" · {_attendees(c.participants)}" if c.participants else "")
+        + (f" · {c.duration_min:.0f} min" if c.duration_min else "")
         + (f" · {c.summary}" if c.summary else "")
         for c in matches
     ]
@@ -553,7 +580,7 @@ def _windowed_calls_digest(enterprise_id: str, since, until) -> str:
 
     parts.append(
         "Counts above are complete for the window; the index holds titles, "
-        "dates and accounts, not transcripts."
+        "dates, attendees and accounts, not transcripts."
     )
     return "\n".join(parts)
 
@@ -620,6 +647,7 @@ def read_sources(
     query: str,
     constraints: Optional[dict] = None,
     budget_s: float = BUDGET_S,
+    local_only: bool = False,
 ) -> LiveReadResult:
     """Read every named provider live, in parallel, under one shared deadline.
 
@@ -627,6 +655,18 @@ def read_sources(
     company has connected. This function does NOT re-decide it; a provider with
     no live leg is reported as unreadable rather than dropped, because the
     planner named it and the user deserves to know it could not be reached.
+
+    `local_only` runs ONLY the legs served from our own storage (`_LOCAL_LEGS`)
+    and skips the networked fan-out entirely. That is the shape the
+    `LIVE_CONNECTOR_READS_ENABLED` stand-down actually wanted: its stated cost
+    is "up to 8s of third-party I/O per answer", which a Postgres SELECT does
+    not incur. Standing the local legs down with the live ones took the
+    already-synced call index off the answer path, so a question about calls
+    the sync had indexed since 2023 was answered from the KG's ~3-day signal
+    horizon instead — the 2026-08-15 "past calls are missing" report. A
+    provider with a networked leg is still NAMED as unread in this mode, for
+    the same honesty rule that governs a timeout: silently omitting it reads
+    as "there was nothing there".
 
     Never raises. A source that fails degrades to an unread entry; the whole
     read failing degrades to an empty result and a plain answer.
@@ -645,6 +685,21 @@ def read_sources(
     for provider in providers:
         leg = _LEGS.get(provider)
         if leg is not None:
+            if local_only:
+                # Named, not read — and SAID so, rather than dropped. The
+                # answer prompt renders unread sources with their reason, so
+                # the model can say "I didn't check Slack" instead of implying
+                # it looked and found nothing.
+                result.sources.append(SourceRead(
+                    key=provider,
+                    display_name=_display(provider),
+                    status=STATUS_NOT_READABLE,
+                    detail=(
+                        "was not read live for this answer — it is covered by "
+                        "the connector sync into the knowledge graph"
+                    ),
+                ))
+                continue
             runnable.append(leg)
             continue
         local_key = _LOCAL_LEGS.get(provider)
