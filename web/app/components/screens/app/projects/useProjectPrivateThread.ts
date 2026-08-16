@@ -58,6 +58,22 @@ import {
  *  engine that produces the turns. */
 export const MORE_MARKER = "<!--more-->"
 
+/** Merge two persisted-turn lists, dedup by id, and re-sort by the persisted
+ *  clock (tie-broken by id) — `loaded` is the authority; any turn present only
+ *  in `current` (e.g. a `brief.delivered` that arrived mid-load) is preserved.
+ *  Closes the brief-loss race without replacing state (a review / an adversarial review). */
+function mergeHistoryById(loaded: IndividualTurn[], current: IndividualTurn[]): IndividualTurn[] {
+  const byId = new Map<number, IndividualTurn>()
+  for (const t of loaded) byId.set(t.id, t)
+  for (const t of current) if (!byId.has(t.id)) byId.set(t.id, t)
+  return Array.from(byId.values()).sort((a, b) => {
+    const ta = new Date(a.created_at).getTime()
+    const tb = new Date(b.created_at).getTime()
+    if (ta !== tb) return ta - tb
+    return a.id - b.id
+  })
+}
+
 /** One question+answer pair in the current browser session. Purely
  *  client-side and in-memory — the individual chat has no group-turn table to
  *  poll; each send is one `/v1/ask` job. `createdAt` is minted once, at
@@ -175,7 +191,14 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
     projectsApi
       .individualTurns(projectId)
       .then((loaded) => {
-        if (!cancelled) setHistory(loaded)
+        if (cancelled) return
+        // Merge-not-replace (a review / an adversarial review brief-loss race): a
+        // `brief.delivered` that lands via realtime WHILE this initial read is
+        // in flight is already in `history`; `setHistory(loaded)` would wipe it.
+        // Merge loaded (the authority) with any turn only in current state,
+        // dedup by id, and re-sort by the persisted clock so nothing is lost or
+        // mis-ordered.
+        setHistory((prev) => mergeHistoryById(loaded, prev))
       })
       .catch((err: unknown) => {
         if (cancelled) return
@@ -366,6 +389,9 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
             }),
           )
           .then((reply) => {
+            // A deliberate Stop already settled this turn (stopped) — do not
+            // overwrite it with a late-arriving answer.
+            if (stoppedRef.current) return
             setSessionTurns((prev) =>
               prev.map((t) =>
                 t.id === id
@@ -399,11 +425,16 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
         return
       }
 
+      // A deliberate Stop already settled the turn (stopped) and freed the
+      // composer — never let a classify-dispatched generation that finishes
+      // afterwards overwrite that with a reply/error (an adversarial review dead-Stop fix).
       const settleReply = (reply: AskResponse) => {
+        if (stoppedRef.current) return
         setSessionTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false, createdAt: Date.now() } : t)))
         setBusy(false)
       }
       const settleError = (message: string) => {
+        if (stoppedRef.current) return
         setSessionTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message, createdAt: Date.now() } : t)))
         setBusy(false)
       }
@@ -425,11 +456,16 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           const startedAt = Date.now()
           let status: string = "generating"
           while (Date.now() - startedAt < 3 * 60 * 1000) {
+            // A deliberate Stop short-circuits the poll loop at once — the
+            // composer is already freed by `stop()`, so keep polling no longer
+            // (an adversarial review dead-Stop fix).
+            if (stoppedRef.current) return
             const job = await storiesApi.getJob(start.job_id)
             status = job.status
             if (status !== "generating") break
             await sleepUntilNextPoll(3000)
           }
+          if (stoppedRef.current) return
           if (status !== "ready") {
             settleError("That ticket run didn't finish. Try again.")
             return
@@ -452,7 +488,16 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           settleError(result.message)
           return
         }
-        await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
+        // Guard the artifact-attach await (an adversarial review): an unguarded rejection
+        // here left the turn `pending` FOREVER, locking the composer. Wrap it
+        // like `runGenerateTickets` so a rejection settles the turn to an error
+        // state and frees the composer.
+        try {
+          await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
+        } catch {
+          settleError("I generated that PRD but couldn't attach it. Try again.")
+          return
+        }
         settleReply(
           reply(`I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`),
         )
@@ -493,6 +538,7 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
               onCreateArtifact: () => void runAsk(),
               onAssignTickets: () => void runAsk(),
               onClarify: (clarification, prdOptions) => {
+                if (stoppedRef.current) return
                 setSessionTurns((prev) =>
                   prev.map((t) =>
                     t.id === id
@@ -579,6 +625,15 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
   // late answer is discarded server-side.
   const stop = useCallback(() => {
     stoppedRef.current = true
+    // Settle any in-flight session turn locally AND free the composer at once.
+    // On a `/v1/ask` job this races the AskStoppedError path (idempotent); on a
+    // classify-dispatched generation (PRD/ticket/edit) there is NO `/v1/ask`
+    // job to cancel and nothing else settles the turn — so without this the
+    // turn stayed `pending` forever and Stop was a dead button (an adversarial review).
+    setSessionTurns((prev) =>
+      prev.map((t) => (t.pending ? { ...t, pending: false, stopped: true, createdAt: t.createdAt ?? Date.now() } : t)),
+    )
+    setBusy(false)
     const pending = getPendingAsk(activeCompany, tabId)
     if (pending) {
       const askId = Number(pending.id)

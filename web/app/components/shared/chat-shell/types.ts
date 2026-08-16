@@ -19,7 +19,7 @@
  * structurally so this module has no dependency on the main-chat screen.
  */
 
-import type { MutableRefObject, ReactNode, Ref } from "react"
+import type { CSSProperties, MutableRefObject, ReactNode, Ref } from "react"
 import type { ChatTranscriptTurn } from "../ChatTranscript"
 import type { ClarifyAnswer } from "../ClarifyQuestionsCard"
 import type {
@@ -59,13 +59,21 @@ export interface ChatShellHandle {
  * content; `ComposerDraftApi` is never constructed on the main path.
  */
 export interface ComposerDraftApi {
-  value: string
+  /** The live draft text. A METHOD, not a data property (an adversarial review
+   *  #1): the API is handed out ONCE on mount, so a frozen `value` field could
+   *  never reflect a draft that changes after the handoff — the failure-restore
+   *  compare-and-set would read a stale `""` and clobber freshly-typed text,
+   *  and chip insertion would splice at a dead caret. `getValue()` reads the
+   *  shell's live draft/textarea at call time instead. */
+  getValue(): string
+  /** The live caret offset (real `selectionStart`), read at call time. */
+  getCaret(): number
   /** Programmatic write with optional caret re-seat (mention chip insertion;
    *  failure restore). */
   setValue(text: string, caret?: number): void
-  getCaret(): number
-  /** Surface hook: mention detection, typing broadcast — fires before the
-   *  shell's own draft state update. */
+  /** Surface hook the picker assigns: mention detection, typing broadcast —
+   *  the shell invokes it with the REAL `selectionStart` BEFORE its own draft
+   *  state update, so mid-string `@` detection sees the true caret. */
   onInputCapture?(value: string, caret: number): void
 }
 
@@ -84,7 +92,14 @@ export interface ShellTurn {
     name?: string
     role?: string | null
     userId?: string | null
-    avatarStyle?: string | null
+    /** Precomputed avatar monogram — the engine derives it so the shell never
+     *  imports a project-side helper (module-graph gate). */
+    initials?: string | null
+    /** Precomputed inline avatar tint. The engine feeds the real
+     *  `personAvatarStyle` OBJECT the multi-party avatar renders; the `string`
+     *  member preserves the T1-frozen placeholder shape (the shell only applies
+     *  an object, ignoring a bare string). */
+    avatarStyle?: CSSProperties | string | null
   }
   content?: string
   reply?: AskResponse | null
@@ -110,6 +125,13 @@ export interface ShellTurn {
     snippet: string
     role?: string | null
   } | null
+  /** NEXT-WAVE (a later run-status wave: real per-turn agent run state, and the
+   *  multi-row S1 wave). Contract-only + seam-tested inert-when-unset now, so
+   *  the wave that feeds real statuses/ids does not reopen the frozen shell
+   *  (a review). Today only `reply.runStatus` reads `runStatus`, and only
+   *  its "no reply yet" (null) arm is ever driven. */
+  runStatus?: AgentRunStatus | null
+  runId?: string
   footerData?: unknown
 }
 
@@ -206,8 +228,12 @@ export interface ChatSurfaceDescriptor {
     slashMenu?: ReactNode
     /** NEXT-WAVE (a later queue+replies wave: composer reply pill). */
     aboveInput?: ReactNode
-    /** project-group: picker keys outrank Enter-to-send. */
-    onKeyDownCapture?: (e: unknown) => boolean
+    /** project-group: picker keys outrank Enter-to-send. Returning `true`
+     *  means the key was CONSUMED by the picker (arrow/enter-selects/escape-
+     *  closes) — the shell then neither submits the draft nor fires
+     *  `escToStop`. Returning `false`/undefined lets the shell's own
+     *  Enter-to-send / Esc handling run (an adversarial review). */
+    onKeyDownCapture?: (e: KeyboardEvent) => boolean
     minChars?: number
     hint?: ReactNode
   }
