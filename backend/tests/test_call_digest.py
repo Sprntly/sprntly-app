@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 import app.call_digest as cd
 from app.connectors.zoom_oauth import ZoomContext
 from app.kg_ingest.pullers.fireflies import CallTranscript
@@ -138,6 +140,205 @@ def test_window_last_month():
     w = cd.parse_window("summarize last month's calls", now=NOW)
     assert w.since.day == 1 and w.since.month == 5  # May
     assert w.until.day == 1 and w.until.month == 6  # exclusive end = Jun 1
+
+
+# ── spoken windows, and the planner's window winning ─────────────────────────
+#
+# People SPEAK these questions. "give me a table week by week ... the last five
+# weeks" was answered with four days of calls, and the report then described the
+# missing weeks as history that "was not captured" — the digits-only regex could
+# not read "five", so the digest fell to its 7-day default and said nothing
+# about having done so (2026-08-16).
+
+
+def test_window_accepts_a_spelled_out_count():
+    w = cd.parse_window("give me the last five weeks of customer calls", now=NOW)
+    assert (NOW - w.since).days == 35
+    assert w.explicit
+
+
+def test_window_accepts_dictation_run_together():
+    """"look at the last10 weeks" arrived exactly like that."""
+    w = cd.parse_window("look much further and look at the last10 weeks", now=NOW)
+    assert (NOW - w.since).days == 70
+    assert w.explicit
+
+
+def test_a_bare_last_week_is_still_the_calendar_week():
+    """The number is required — relaxing the separator must not let "last
+    week" fall into the N-unit branch."""
+    w = cd.parse_window("summarize calls from last week", now=NOW)
+    assert "last week" in w.label
+
+
+def test_the_planners_window_beats_re_parsing_the_question(monkeypatch):
+    """The real fix. Even when the text defeats the regex, the planner read the
+    whole sentence and its window is the one that runs."""
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["since"] = window.since
+        seen["until"] = window.until
+        seen["explicit"] = window.explicit
+        raise RuntimeError("stop here — the window is all this test needs")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(
+            enterprise_id="ent-1",
+            question="table week by week for the last five weeks",
+            constraints={"since": "2026-07-12", "until": "2026-08-16"},
+        )
+
+    assert seen["since"].date().isoformat() == "2026-07-12"
+    assert seen["until"].date().isoformat() == "2026-08-16"
+    # EXPLICIT, so the auto-widen never quietly replaces a stated period:
+    # "no calls in those five weeks" is a real answer to that question.
+    assert seen["explicit"] is True
+
+
+def test_a_planner_window_that_will_not_parse_falls_back_to_the_question(
+    monkeypatch,
+):
+    """A bad constraint degrades to the behaviour this replaced, never to a
+    broken window."""
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["since"] = window.since
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(
+            enterprise_id="ent-1",
+            question="recap calls from the last 14 days",
+            constraints={"since": "not-a-date"},
+        )
+
+    assert (cd._utc_now() - seen["since"]).days >= 14
+
+
+def test_no_constraints_parses_the_question_exactly_as_before(monkeypatch):
+    seen: dict = {}
+
+    def _corpus(enterprise_id, window):
+        seen["label"] = window.label
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(cd, "build_corpus", _corpus)
+
+    with pytest.raises(RuntimeError):
+        cd.answer(enterprise_id="ent-1", question="recap calls from the last 14 days")
+
+    assert "14 day" in seen["label"]
+
+
+# ── the store must cover the window, not merely touch it ─────────────────────
+#
+# The stored-first path asked only whether ANY row existed for the window. A
+# workspace whose earlier digests ran over 7 days had exactly those days
+# stored, so the first correct 10-week question found 37 rows, skipped the live
+# fetch, and described the missing 175 calls as weeks where "absence of records
+# is not evidence of no activity" — a gap that existed only in our own cache.
+
+
+def _window(days=70):
+    now = cd._utc_now()
+    return cd.Window(now - timedelta(days=days), now, f"the last {days} days",
+                     explicit=True)
+
+
+def test_a_short_store_does_not_pass_as_a_covered_window(monkeypatch):
+    import app.call_index as ci
+
+    monkeypatch.setattr(
+        ci, "count_calls",
+        lambda cid, since=None, until=None, provider=None: 212,
+    )
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 37) is False
+
+
+def test_a_complete_store_is_used_without_a_live_fetch(monkeypatch):
+    import app.call_index as ci
+
+    monkeypatch.setattr(
+        ci, "count_calls",
+        lambda cid, since=None, until=None, provider=None: 37,
+    )
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 37) is True
+
+
+def test_coverage_is_checked_per_provider(monkeypatch):
+    """A mixed-source total would answer a single-provider question wrong."""
+    import app.call_index as ci
+
+    seen: dict = {}
+
+    def _count(cid, since=None, until=None, provider=None):
+        seen["provider"] = provider
+        return 5
+
+    monkeypatch.setattr(ci, "count_calls", _count)
+    cd._store_covers("co-1", "zoom", _window(), [{}] * 5)
+    assert seen["provider"] == "zoom"
+
+
+def test_an_unreadable_index_trusts_the_store(monkeypatch):
+    """Cannot tell → keep the old behaviour. Forcing a minutes-long live fetch
+    on every question because a count query blipped is the worse failure."""
+    import app.call_index as ci
+
+    def _boom(*a, **k):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(ci, "count_calls", _boom)
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 3) is True
+
+
+def test_an_empty_store_always_fetches(monkeypatch):
+    assert cd._store_covers("co-1", "fireflies", _window(), []) is False
+    assert cd._store_covers("co-1", "fireflies", _window(), None) is False
+
+
+# ── a blank reply is never an acceptable answer ──────────────────────────────
+#
+# A schema'd call that runs out of output tokens returns a truncated object.
+# Both digest passes handed that straight through, the Ask job was stamped
+# `ready` with `_skill_action` and `citations` and no `answer`, and chat
+# rendered NOTHING — the product looked broken and said nothing about why
+# (reported 2026-08-16, after a widened corpus tipped a 3000-token ceiling).
+
+
+class _Res:
+    def __init__(self, output, stop_reason="end_turn"):
+        self.output = output
+        self.stop_reason = stop_reason
+
+
+def test_a_truncated_model_reply_becomes_an_explanation_not_a_blank():
+    out = cd._ensure_answer({}, _Res({}, stop_reason="max_tokens"), _window(35))
+    assert out["answer"], "an empty payload survived as a blank reply"
+    assert "narrower" in out["answer"]
+    assert "the last 35 days" in out["answer"]
+
+
+def test_an_empty_reply_for_any_other_reason_still_explains():
+    out = cd._ensure_answer({}, _Res({}, stop_reason="end_turn"), _window(35))
+    assert "couldn't compose an answer" in out["answer"]
+
+
+def test_a_whitespace_only_answer_counts_as_empty():
+    out = cd._ensure_answer({"answer": "   "}, _Res({}), _window(35))
+    assert out["answer"].strip()
+
+
+def test_a_real_answer_is_passed_through_untouched():
+    payload = {"answer": "37 calls, here they are", "key_points": ["a"],
+               "citations": [], "confidence": 0.9, "unanswered": ""}
+    assert cd._ensure_answer(dict(payload), _Res(payload), _window(35)) == payload
 
 
 # ── corpus assembly ──────────────────────────────────────────────────────────

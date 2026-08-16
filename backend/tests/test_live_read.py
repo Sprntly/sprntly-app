@@ -281,11 +281,12 @@ def test_calls_read_the_index_and_say_so(stub_registry, monkeypatch):
     "indexed" so the model never implies it read a transcript."""
     import app.call_index as call_index
 
+    # The real `IndexedCall`, not a hand-rolled namespace: a partial stub goes
+    # stale silently the moment this leg renders another column it has always
+    # had (participants and duration, added 2026-08-16).
     monkeypatch.setattr(
         call_index, "resolve_calls",
-        lambda eid, q: [SimpleNamespace(
-            call_date="2026-08-01", title="Acme QBR", account="Acme", summary=None
-        )],
+        lambda eid, q: [_indexed_call("1", "2026-08-01", "Acme QBR", "Acme")],
     )
 
     result = live_read.read_sources("co-1", ["fireflies"], query="Acme")
@@ -320,13 +321,81 @@ def test_an_empty_call_index_states_what_it_holds(stub_registry, monkeypatch):
     assert "not transcripts" in result.read[0].text
 
 
-def _indexed_call(external_id, call_date, title, account=None):
+def _indexed_call(external_id, call_date, title, account=None,
+                  participants=None, duration_min=None):
     from app.call_index import IndexedCall
 
     return IndexedCall(
         external_id=external_id, title=title, call_date=call_date,
-        duration_min=None, participants=[], account=account, summary="",
+        duration_min=duration_min, participants=participants or [],
+        account=account, summary="",
     )
+
+
+def test_local_only_reads_our_tables_and_skips_the_network(
+    stub_registry, monkeypatch
+):
+    """The stand-down's stated cost is third-party I/O, which a Postgres
+    SELECT does not incur. In local-only mode the call index is still read and
+    the networked legs are not opened at all — the fix for an indexed call
+    history going unread behind a 3-day KG horizon (2026-08-15)."""
+    import app.call_index as call_index
+
+    stub_registry["slack"] = _StubAdapter(text="- #eng: shipping friday")
+    monkeypatch.setattr(
+        call_index, "resolve_calls",
+        lambda eid, q: [_indexed_call("1", "2026-08-13T20:00:00+00:00",
+                                      "Maverik + ChaosTrack", "Maverik")],
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies", "slack"], query="Maverik", local_only=True,
+    )
+
+    by_key = {s.key: s for s in result.sources}
+    assert "Maverik + ChaosTrack" in by_key["fireflies"].text
+    # Slack was NAMED but not opened — and says so, rather than being dropped,
+    # which would read as "I looked and there was nothing".
+    assert stub_registry["slack"].calls == []
+    assert not by_key["slack"].usable
+    assert "knowledge graph" in by_key["slack"].detail
+
+
+def test_a_call_line_names_who_was_on_it(stub_registry, monkeypatch):
+    """An answer about a named call apologised that attendee names were not
+    available while the index row held all five addresses and a 51-minute
+    duration. Both are stored; this leg simply never rendered them."""
+    import app.call_index as call_index
+
+    call = _indexed_call(
+        "1", "2026-08-13T20:00:00+00:00", "Maverik + ChaosTrack", "Maverik",
+        participants=["dtung@chaostrack.com", "daniel.hagen@maverik.com"],
+        duration_min=51.0,
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
+
+    result = live_read.read_sources("co-1", ["fireflies"], query="Maverik")
+
+    text = result.read[0].text
+    assert "with: dtung@chaostrack.com, daniel.hagen@maverik.com" in text
+    assert "51 min" in text
+
+
+def test_a_long_attendee_list_is_capped_with_a_remainder(
+    stub_registry, monkeypatch
+):
+    """A big briefing must not spend the whole per-source budget on names."""
+    import app.call_index as call_index
+
+    call = _indexed_call(
+        "1", "2026-08-13T20:00:00+00:00", "All hands", None,
+        participants=[f"p{i}@acme.com" for i in range(12)],
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
+
+    result = live_read.read_sources("co-1", ["fireflies"], query="all hands")
+
+    assert "(+4 more)" in result.read[0].text
 
 
 def test_a_windowed_plan_renders_the_whole_window_not_a_keyword_probe(

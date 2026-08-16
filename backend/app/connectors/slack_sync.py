@@ -77,6 +77,35 @@ class SlackSyncError(Exception):
     """Raised when a Slack sync operation fails."""
 
 
+#: Slack error codes that mean THE CREDENTIAL IS DEAD, not that the workspace
+#: is empty. Re-authorising is the only fix for any of them, so they are worth
+#: separating from every other not-ok response — which the readers below
+#: legitimately treat as "stop and return what you have".
+_AUTH_ERRORS = frozenset({
+    "invalid_auth", "not_authed", "account_inactive", "token_revoked",
+    "token_expired",
+})
+
+
+class SlackAuthError(SlackSyncError):
+    """The Slack credential is no longer usable — reconnect required.
+
+    Separate from SlackSyncError so a caller can tell "we could not read
+    Slack" from "Slack said this token is finished", and report the one thing
+    the user can actually act on."""
+
+
+#: What the user is told when the credential is dead. Names the action, not
+#: the API code — "invalid_auth" is not something anyone can act on, and the
+#: message it replaced ("ensure the Slack bot is invited to a channel") sent
+#: people to check a setting that was already correct.
+_AUTH_ERROR_MESSAGE = (
+    "Slack rejected our credentials ({reason}) — nothing was synced. "
+    "Reconnect Slack from the connectors page; re-inviting the bot will not "
+    "fix this."
+)
+
+
 @dataclass
 class SyncResult:
     dataset: str
@@ -179,10 +208,23 @@ def _slack_get(
     )
     if not resp.ok:
         logger.warning("Slack API error: %s %s", resp.status_code, resp.text[:300])
+        if resp.status_code in (401, 403):
+            raise SlackAuthError(f"http_{resp.status_code}")
         return {"ok": False, "error": f"http_{resp.status_code}"}
     data = resp.json()
     if not data.get("ok"):
-        logger.warning("Slack API error: %s", data.get("error", "unknown"))
+        error = str(data.get("error") or "unknown")
+        logger.warning("Slack API error: %s", error)
+        # A DEAD CREDENTIAL IS NOT AN EMPTY WORKSPACE. Every reader here
+        # treats "not ok" as "stop, return what you have", so an
+        # `invalid_auth` arrived at `sync_slack` indistinguishable from a bot
+        # that simply is not in any channel — and got reported as "ensure the
+        # Slack bot is invited to at least one channel", which sends the user
+        # to fix a thing that is not broken. Found 2026-08-16: six staging
+        # tenants had been failing this way every 20 minutes, each cycle
+        # logging a cheerful "slack-refresh done".
+        if error in _AUTH_ERRORS:
+            raise SlackAuthError(error)
     return data
 
 
@@ -548,6 +590,17 @@ def sync_slack(
     try:
         user_map = fetch_users(access_token)
         logger.info("Fetched %d Slack users for name resolution", len(user_map))
+    except SlackAuthError as exc:
+        # Nothing below can succeed with a dead token, and every later step
+        # would report its own misleading symptom. Stop here and say the one
+        # true thing.
+        result.errors.append(_AUTH_ERROR_MESSAGE.format(reason=exc))
+        logger.error(
+            "Slack sync for %s: credential rejected (%s) — reconnect required",
+            dataset, exc,
+        )
+        _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
+        return result
     except Exception as exc:
         user_map = {}
         result.errors.append(f"user lookup: {exc}")
@@ -558,6 +611,14 @@ def sync_slack(
         channels = fetch_channels(access_token)
         result.channels_count = len(channels)
         logger.info("Found %d Slack channels for %s", len(channels), dataset)
+    except SlackAuthError as exc:
+        result.errors.append(_AUTH_ERROR_MESSAGE.format(reason=exc))
+        logger.error(
+            "Slack sync for %s: credential rejected (%s) — reconnect required",
+            dataset, exc,
+        )
+        _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
+        return result
     except Exception as exc:
         msg = f"channels: {exc}"
         result.errors.append(msg)

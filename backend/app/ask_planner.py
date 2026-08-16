@@ -783,8 +783,15 @@ answer instead.
 - call-listing: list or count recorded calls/transcripts ("the 5 latest
   transcripts", "which calls did we have last week"). The index answers this
   instantly; do not send a listing question anywhere else.
-- single-call-read: read or summarize ONE named call ("summarize the Mayer
-  Brown call").
+- single-call-read: read ONE named call, whatever the verb. "Summarize the
+  Mayer Brown call", "more details on the Maverik meeting", "what happened on
+  the Acme call", "who was on the Thermo Fisher briefing" are all this. The
+  test is that the question names ONE meeting — usually by the company or
+  person on it — not that it says "summarize". If a question names a company
+  AND a meeting/call/demo/briefing, this is almost always the right pick, and
+  picking it beats naming fireflies in `sources`: only this reads the actual
+  transcript, so attendees, objections and figures survive. Naming the source
+  instead gets the distilled summary, which has already lost them.
 - data-analysis: compute over the company's uploaded CSV/Excel tables
   ("analyze my data", "what do the numbers say"). A real analysis engine over
   the actual rows, not a text answer.
