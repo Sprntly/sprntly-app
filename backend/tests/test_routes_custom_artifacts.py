@@ -551,6 +551,36 @@ def test_the_generation_handler_is_async_not_a_threadpool_hog(docs_env):
     assert inspect.iscoroutinefunction(mod.generate)
 
 
+def test_the_handlers_supabase_calls_do_not_run_on_the_event_loop(docs_env):
+    """Making a handler async without moving its blocking calls trades a
+    threadpool problem for a worse one: two Supabase round trips per request
+    would stall the WHOLE process, and a wedged client (the h2 hang) would take
+    the API down rather than one worker thread.
+
+    Asserted on the source because there is no runtime signal for it — a
+    blocking call on the loop looks identical to a fast one until the day it
+    hangs.
+    """
+    import inspect
+
+    import app.routes.custom_artifacts as mod
+
+    src = inspect.getsource(mod.generate)
+    assert "await asyncio.to_thread(\n        conversation_belongs_to_company" in src
+    assert "await asyncio.to_thread(\n        create_artifact" in src
+
+
+def test_generations_run_on_their_own_pool_not_a_shared_one(docs_env):
+    """A generation holds its thread for minutes. Both pools it might otherwise
+    borrow — anyio's (every sync route) and asyncio's default (~120 to_thread
+    sites) — carry work that has to stay responsive, so a burst of documents
+    must only ever make other documents wait."""
+    import app.routes.custom_artifacts as mod
+
+    assert mod._GENERATION_POOL._max_workers == 4
+    assert "custom-artifact-gen" in mod._GENERATION_POOL._thread_name_prefix
+
+
 def test_the_generation_actually_runs(docs_env, monkeypatch):
     """The scheduling mechanism changed (BackgroundTasks → to_thread on a
     tracked task), so this pins the property that must survive it: by the time

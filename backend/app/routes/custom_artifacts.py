@@ -41,6 +41,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -71,6 +73,22 @@ router = APIRouter(prefix="/v1/custom-artifacts", tags=["custom-artifacts"])
 # other create_task site in this codebase uses (routes/ask.py, evidence.py,
 # brief.py, design_agent.py).
 _inflight_tasks: set[asyncio.Task] = set()
+
+# Document generations run HERE and nowhere else. A small dedicated pool, so a
+# burst of documents can only ever make other documents wait: each one holds its
+# thread for minutes (`long_output=True` = a 600s read timeout, plus queueing on
+# the process-wide `_llm_gate`), and both pools it might otherwise borrow are
+# shared with work that must stay responsive — the anyio pool serves every sync
+# route, and asyncio's default executor backs ~120 `to_thread` calls across this
+# codebase.
+#
+# FOUR because generations are bounded by the LLM gate long before they are
+# bounded by threads; more threads here would only queue in a different place,
+# and the queue that matters is already durable — an unstarted generation is a
+# `generating` row, which is precisely what that row exists to survive.
+_GENERATION_POOL = ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="custom-artifact-gen"
+)
 
 # The ceiling is the db module's (imported, not redeclared, so the two cannot
 # drift). It is enforced there — this route only turns the resulting error into
@@ -307,12 +325,20 @@ async def generate(
     A document appearing in someone's library because they asked a question is
     the failure mode this rule exists to prevent.
     """
-    if body.conversation_id is not None and not conversation_belongs_to_company(
-        body.conversation_id, company.company_id
+    # BOTH SUPABASE CALLS GO TO A THREAD, because this handler is now `async`
+    # and they are blocking sync HTTP. Left inline they would run ON THE EVENT
+    # LOOP: two round trips of the whole process stalled per request, and a
+    # wedged Supabase client (a documented event here — see the h2 hang) would
+    # take the entire API down instead of one worker thread. Making a handler
+    # async without moving its blocking calls trades a threadpool problem for a
+    # strictly worse one.
+    if body.conversation_id is not None and not await asyncio.to_thread(
+        conversation_belongs_to_company, body.conversation_id, company.company_id
     ):
         raise HTTPException(404, "Conversation not found")
 
-    row = create_artifact(
+    row = await asyncio.to_thread(
+        create_artifact,
         company.company_id,
         kind=body.kind,
         # Provisional: the generator replaces it with the document's own <h1>.
@@ -337,9 +363,20 @@ async def generate(
     # documents and sync routes queue behind them for no reason a user could
     # ever see.
     #
-    # `asyncio.to_thread` uses the DEFAULT executor instead, so the blocking LLM
-    # call cannot starve request handling. The handler is async, so the loop is
-    # running and `create_task` is legal.
+    # A DEDICATED, BOUNDED EXECUTOR runs the generation — not `to_thread`'s
+    # default one. `asyncio.to_thread` would hand this to the loop's shared
+    # default executor (min(32, cpu+4) threads), which ~120 other `to_thread`
+    # sites in this codebase also use for short blocking work: ask-job
+    # execution, attachment staging, the ask cache. A document generation holds
+    # its thread for MINUTES (`long_output=True`, plus queueing on the
+    # process-wide `_llm_gate`), so a burst of documents would occupy that pool
+    # and stall everything sharing it. Moving the problem from the anyio pool
+    # to the default pool would have been a smaller version of the bug, not a
+    # fix. Documents get their own small pool and can only ever starve each
+    # other; the queue beyond it is the durable `generating` row, which is
+    # exactly what that row is for.
+    #
+    # The handler is async, so the loop is running and `create_task` is legal.
     #
     # The task is held in a module-level set, the pattern every create_task site
     # here follows: asyncio keeps only a weak reference, so a bare task can be
@@ -363,7 +400,10 @@ async def generate(
         # this cannot fail the request.
         await asyncio.to_thread(generate_into, **kwargs)
     else:
-        task = asyncio.create_task(asyncio.to_thread(generate_into, **kwargs))
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(
+            loop.run_in_executor(_GENERATION_POOL, partial(generate_into, **kwargs))
+        )
         _inflight_tasks.add(task)
         task.add_done_callback(_inflight_tasks.discard)
 
