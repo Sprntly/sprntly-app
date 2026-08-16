@@ -190,12 +190,21 @@ def deliver_ready_ping_to_slack(enterprise_id: str) -> dict:
     """Fan the static ready-ping out to every member who connected their own
     Slack and picked a target — same routing as deliver_brief_to_slack, minus
     the LLM-drafted announcement. Never raises."""
+    text, blocks = ready_ping_slack_blocks()
+    return deliver_ping_to_slack(enterprise_id, text=text, blocks=blocks)
+
+
+def deliver_ping_to_slack(enterprise_id: str, *, text: str,
+                          blocks: list[dict]) -> dict:
+    """Fan an already-composed static notification out to every member who
+    connected their own Slack and picked a target — the shared transport under
+    the brief ready-ping and the monthly-report ping. Same per-user routing as
+    deliver_brief_to_slack; never raises."""
     try:
         rows = db.list_slack_connections(enterprise_id)
         if not rows:
             return {"delivered": False, "reason": "slack_not_connected",
                     "recipients": []}
-        text, blocks = ready_ping_slack_blocks()
         recipients = [_deliver_to_one(row, text, blocks) for row in rows]
         any_delivered = any(r.get("delivered") for r in recipients)
         out: dict = {"delivered": any_delivered, "recipients": recipients}
@@ -203,9 +212,36 @@ def deliver_ready_ping_to_slack(enterprise_id: str) -> dict:
             out["reason"] = recipients[0].get("reason", "not_delivered")
         return out
     except Exception as e:  # noqa: BLE001 — delivery never breaks generation
-        logger.exception("brief ready-ping slack delivery failed for %s",
-                         enterprise_id)
+        logger.exception("slack ping delivery failed for %s", enterprise_id)
         return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
+def artifacts_deep_link() -> str:
+    """The monthly-report CTA target — the artifacts library, where the report
+    was just saved (a per-report deep link needs a URL contract the artifacts
+    screen doesn't have yet; the fresh report is the newest row). Mirrors
+    brief_deep_link's frontend_url handling."""
+    base = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    return f"{base}/artifacts"
+
+
+def report_ping_slack_blocks(report_label: str) -> tuple[str, list[dict]]:
+    """(plain-text fallback, Block Kit blocks) announcing a scheduled monthly
+    report. Static copy like the brief's ready-ping — a notification, not the
+    report itself, which lives in the artifacts library."""
+    text = f"Your monthly {report_label} is ready."
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions",
+         "elements": [
+             {"type": "button",
+              "text": {"type": "plain_text", "text": "Open your reports"},
+              "url": artifacts_deep_link(),
+              "style": "primary"},
+         ]},
+    ]
+    return text, blocks
 
 
 # ── PRD-ready ping ────────────────────────────────────────────────────────────

@@ -293,6 +293,7 @@ CREATE TABLE custom_artifacts (
     body_html       TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'ready',
     error           TEXT,
+    error_code      TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
     created_by      TEXT,
     updated_by      TEXT,
@@ -317,6 +318,17 @@ CREATE TABLE ask_jobs (
     -- 20260802120000_ask_jobs_routed_skill.sql). NULL = no skill was routed.
     routed_skill        TEXT,
     routed_skill_action TEXT,
+    -- Chat-parity execution-identity columns (mirrors 20260816120000_ask_
+    -- jobs_execution_identity.sql). All nullable; NULL = existing main/
+    -- private rows / current behavior. run_id has no default here either —
+    -- code sets it on insert for parity runs only.
+    kind            TEXT,
+    project_id      INTEGER,
+    source_turn_id  INTEGER,
+    run_id          TEXT,
+    client_message_id TEXT,
+    error_class     TEXT,
+    attempt         INTEGER,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -324,6 +336,12 @@ CREATE TABLE ask_jobs (
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
+CREATE UNIQUE INDEX ask_jobs_client_message_id_uidx ON ask_jobs (client_message_id) WHERE client_message_id IS NOT NULL;
+CREATE INDEX ask_jobs_source_turn_idx ON ask_jobs (project_id, source_turn_id) WHERE source_turn_id IS NOT NULL;
+-- Mirrors 20260816130000_ask_jobs_active_attempt_unique.sql — at most one LIVE
+-- (`generating`) attempt per triggering group turn, so a concurrent retry
+-- claim is DB-refused (see db/asks.py::claim_retry_attempt).
+CREATE UNIQUE INDEX ask_jobs_active_attempt_uidx ON ask_jobs (source_turn_id) WHERE status = 'generating' AND source_turn_id IS NOT NULL;
 
 -- Fire-and-forget onboarding website-analysis job rows (mirrors
 -- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready
@@ -1491,9 +1509,25 @@ CREATE TABLE conversation_turns (
     -- 20260813130100_conversations_project_columns.sql). NULL for
     -- assistant turns and every pre-existing single-owner-chat turn.
     author_user_id  TEXT,
+    -- Why the group agent did/did not reply to this turn (mirrors
+    -- 20260815180000_conversation_turns_trigger_kind.sql). NULL for every
+    -- pre-existing turn and every non-group-decision turn.
+    trigger_kind    TEXT,
+    -- Owned-write idempotency (mirrors
+    -- 20260816140000_conversation_turns_idempotency.sql). NULL for every
+    -- pre-existing turn and every cross-user brief/group turn — only the
+    -- new owned individual-chat writers set one of these.
+    client_message_id TEXT,
+    ask_job_id         INTEGER,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
+CREATE UNIQUE INDEX conversation_turns_client_msg_uidx
+    ON conversation_turns (conversation_id, role, client_message_id)
+    WHERE client_message_id IS NOT NULL;
+CREATE UNIQUE INDEX conversation_turns_ask_job_uidx
+    ON conversation_turns (conversation_id, role, ask_job_id)
+    WHERE ask_job_id IS NOT NULL;
 
 -- Unified per-call LLM usage ledger (20260725120000_llm_usage_events.sql).
 -- The `llm_usage_summary` rollup is a Postgres function with no SQLite

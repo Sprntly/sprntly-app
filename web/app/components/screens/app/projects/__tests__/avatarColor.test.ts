@@ -42,16 +42,19 @@ describe("personAvatarStyle — determinism + stability (AC-9)", () => {
     expect(nameOnly.background).toBeTruthy()
   })
 
-  it("the @Sprntly agent avatar glyph is never routed through this helper (source scan)", () => {
-    // Static proof: ProjectGroupChat's agent bubble ("aiMark", the plain "s"
-    // glyph) never calls personAvatarStyle — only the human av/topAv/
-    // memberAv/rosterMember sites do (behavioural proof in
-    // ProjectGroupChat.test.tsx / ProjectDetailScreen.test.tsx).
-    const src = readFileSync(
-      join(__dirname, "../ProjectGroupChat.tsx"),
-      "utf8",
-    )
-    const aiMarkBlock = src.slice(src.indexOf("styles.aiMark"), src.indexOf("styles.aiMark") + 200)
-    expect(aiMarkBlock).not.toContain("personAvatarStyle")
+  it("the @Sprntly agent avatar is never routed through this helper (source scan) — RETARGETED to the engine post-fold", () => {
+    // Post-fold the pre-fold host's `styles.aiMark` scan went VACUOUS (the thin
+    // host has no aiMark → indexOf(-1) → empty slice → passes proving nothing).
+    // The agent avatar now renders bubble-less through ChatBubble; the group
+    // engine (`useProjectGroupThread`) is where a turn's `avatarStyle` is
+    // assigned, and it deliberately sets an AGENT turn's `avatarStyle` to
+    // `undefined` (never personAvatarStyle) — only human self/peer turns get a
+    // per-person tint. Assert that guard exists where the logic now lives.
+    const engineSrc = readFileSync(join(__dirname, "../useProjectGroupThread.ts"), "utf8")
+    expect(engineSrc).toContain("avatarStyle: isAgent ? undefined : personAvatarStyle(")
+    // Non-vacuous negative: the aiMark scan is gone (the host is thin) — the
+    // agent avatar is not colour-keyed anywhere in the host.
+    const hostSrc = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
+    expect(hostSrc).not.toContain("styles.aiMark")
   })
 })

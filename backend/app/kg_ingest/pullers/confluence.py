@@ -70,7 +70,11 @@ _TEXT_CHARS = 4000
 #: cataloguing, so a large space cannot spend a later space's extraction budget
 #: (the starvation the old flat global cap caused). The 18-month window is the
 #: real extraction boundary; this is the fairness backstop under it.
-_MAX_EXTRACT_RECORDS_PER_SPACE = 200
+#: Raised from 200 on 2026-08-16, with the other pullers' pilot-scale caps.
+#: This one was already the least harmful of them — it is a per-(space, kind)
+#: FAIRNESS backstop under an 18-month window, not the history boundary — so it
+#: moves less far than the others.
+_MAX_EXTRACT_RECORDS_PER_SPACE = 500
 #: First-scan volume guardrail: DOCUMENTS catalogued per (space, kind) before
 #: the deep walk is bounded and LOGGED (never silently truncated). A DOCUMENT
 #: count, decoupled from _PAGE_SIZE — this replaces the old 5-results-pages

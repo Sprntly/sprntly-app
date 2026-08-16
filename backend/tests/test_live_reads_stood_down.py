@@ -10,12 +10,22 @@ thing standing the machinery down; everything it gates keeps its own tests
 flag back is a working revert, not an archaeology project.
 
 What this file pins:
-  - the direct answer path hands compose_ask_answer NO live thunk by default,
-    with a plan (planner sources ignored at execution) and without one (the
-    sweep not consulted)
+  - a planned turn still hands over a thunk, but in LOCAL-ONLY mode: the
+    networked fan-out is down while the legs served from our own tables (the
+    call index, synced PR rows) keep running — see below for why
+  - an unplanned turn does not fall back to the keyword sweep, which has no
+    local half to preserve
   - the planned LIBRARY read — a Postgres SELECT, not a connector call — stays
     on regardless of the flag
-  - LIVE_CONNECTOR_READS_ENABLED=true restores the planned live read intact
+  - LIVE_CONNECTOR_READS_ENABLED=true restores the full live read intact
+
+LOCAL LEGS ARE NOT LIVE READS (2026-08-15). Standing them down with the live
+ones took the already-synced call index off the answer path, so "how many
+customer calls did I have each week" was answered from the KG's ~3-day signal
+horizon and rendered zeros for every earlier week, while `call_index` held 522
+calls going back to 2023. `_LOCAL_LEGS` are Postgres SELECTs against tables
+this same connector sync fills; the flag's stated cost is third-party I/O,
+which they do not incur.
 """
 from __future__ import annotations
 
@@ -48,14 +58,21 @@ def _boom(name):
     return _f
 
 
-def test_a_planned_turn_executes_no_live_read_by_default(monkeypatch):
-    """The planner still NAMES sources — nothing about planning changed — but
-    the execution leg is down: no live thunk reaches the composer, and the
-    live executors are never touched."""
+def test_a_planned_turn_reads_local_legs_but_not_the_network(monkeypatch):
+    """The planner still NAMES sources — nothing about planning changed — and
+    the thunk still runs, in LOCAL-ONLY mode: our own tables are read, the
+    networked fan-out is not. Standing the local legs down too is what hid an
+    indexed call history behind a 3-day KG horizon."""
     _no_custom_skills(monkeypatch)
     _connected(monkeypatch, ["slack", "jira"])
     captured = _capture_compose(monkeypatch)
-    monkeypatch.setattr(qa, "_planned_live_context", _boom("_planned_live_context"))
+    seen: dict = {}
+
+    def _planned(eid, plan, q, *, local_only=False):
+        seen["local_only"] = local_only
+        return "### Recorded calls (indexed)\n- 2026-08-13 · Maverik"
+
+    monkeypatch.setattr(qa, "_planned_live_context", _planned)
     monkeypatch.setattr(qa, "_sweep_context", _boom("_sweep_context"))
 
     out = qa.answer(
@@ -66,7 +83,10 @@ def test_a_planned_turn_executes_no_live_read_by_default(monkeypatch):
     )
 
     assert out["answer"] == "ok"
-    assert captured["live_fn"] is None
+    assert captured["live_fn"] is not None
+    assert "Maverik" in captured["live_fn"]()
+    # ...and it ran with the network half switched off.
+    assert seen["local_only"] is True
     # The library thunk survives — it is a table read, not a connector call.
     assert captured["library_fn"] is not None
 
@@ -102,9 +122,13 @@ def test_the_flag_restores_the_planned_live_read_intact(monkeypatch):
     _connected(monkeypatch, ["slack"])
     captured = _capture_compose(monkeypatch)
     monkeypatch.setattr(settings, "live_connector_reads_enabled", True, raising=False)
-    monkeypatch.setattr(
-        qa, "_planned_live_context", lambda eid, plan, q: "### Slack\n- live block"
-    )
+    seen: dict = {}
+
+    def _planned(eid, plan, q, *, local_only=False):
+        seen["local_only"] = local_only
+        return "### Slack\n- live block"
+
+    monkeypatch.setattr(qa, "_planned_live_context", _planned)
 
     out = qa.answer(
         plan=Plan(sources=["slack"]),
@@ -116,3 +140,5 @@ def test_the_flag_restores_the_planned_live_read_intact(monkeypatch):
     assert out["answer"] == "ok"
     assert captured["live_fn"] is not None
     assert captured["live_fn"]() == "### Slack\n- live block"
+    # The whole point of the flag: the network half is back on.
+    assert seen["local_only"] is False

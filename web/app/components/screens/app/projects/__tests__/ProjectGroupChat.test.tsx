@@ -77,53 +77,85 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe("ProjectGroupChat — AD-P13 reuse (source scan)", () => {
-  it("imports the shared primitives and defines no bespoke markdown/chip/skeleton implementation", () => {
-    const src = readFileSync(
-      join(__dirname, "../ProjectGroupChat.tsx"),
-      "utf8",
-    )
+describe("ProjectGroupChat — thin host delegates to ChatShell + the T3a engines (AD-P13 reuse, post-fold)", () => {
+  it("is a thin host: renders through ChatShell, composes the two engines, and defines no bespoke markdown/chip/skeleton/transport implementation", () => {
+    const src = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
+    // The fold: presentation through the shared shell, data + picker through the
+    // T3a engines. No second implementation of any primitive lives here.
+    expect(src).toContain('from "../../../shared/chat-shell/ChatShell"')
+    expect(src).toContain('from "./useProjectGroupThread"')
+    expect(src).toContain('from "./useMentionPicker"')
+    // The shared render primitives it still uses are imported, never reimplemented.
     expect(src).toContain('from "../../../shared/AskReplyBody"')
-    expect(src).toContain('from "react-markdown"')
-    expect(src).toContain('from "remark-gfm"')
-    expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
-    expect(src).toContain('from "../../../shared/AssistantWaitState"')
     expect(src).toContain('from "../../../shared/OpenArtifactChips"')
-    // The redesign renders the agent avatar as the plain Sprntly wordmark glyph
-    // ("s"), so the shared IconSparkle/app-icons import is no longer pulled in
-    // here — a removed dependency, not a bespoke reimplementation (the reuse
-    // guard below still holds: no second markdown/chip/skeleton is defined).
-    expect(src).toContain('from "../../../shared/ChatComposer"')
-    // No second implementation of any of these.
+    expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
+    // No bespoke primitives, and — post-fold — no transport/dedup/mention logic
+    // (all in the engines): the host imports neither react-markdown nor the
+    // realtime channel nor the mentions helpers directly.
     expect(src).not.toMatch(/function\s+AskReplyBody/)
     expect(src).not.toMatch(/function\s+OpenArtifactChips/)
-    expect(src).not.toMatch(/function\s+AssistantThinkingSkeleton/)
+    expect(src).not.toContain('from "react-markdown"')
+    expect(src).not.toContain('from "./useRealtimeChannel"')
+    expect(src).not.toContain("postGroupTurn")
+    expect(src).not.toContain("applyTurns")
   })
 
-  it("the composer is extracted to shared/ChatComposer.tsx and BOTH ChatScreen and ProjectGroupChat import it", () => {
-    const composerSrc = readFileSync(
-      join(__dirname, "../../../../shared/ChatComposer.tsx"),
-      "utf8",
-    )
+  it("the composer is extracted to shared/ChatComposer.tsx; the SHELL owns it post-fold (the host no longer imports it directly)", () => {
+    const composerSrc = readFileSync(join(__dirname, "../../../../shared/ChatComposer.tsx"), "utf8")
     expect(composerSrc).toContain("export function ChatComposer(")
 
-    const chatScreenSrc = readFileSync(
-      join(__dirname, "../../ChatScreen.tsx"),
-      "utf8",
-    )
+    const chatScreenSrc = readFileSync(join(__dirname, "../../ChatScreen.tsx"), "utf8")
     expect(chatScreenSrc).toContain('from "../../shared/ChatComposer"')
     expect(chatScreenSrc).not.toMatch(/^function ChatComposer\(/m)
 
+    // Post-fold the group composer is constructed by ChatShell from the
+    // descriptor — the thin host does NOT import ChatComposer itself.
+    const shellSrc = readFileSync(join(__dirname, "../../../../shared/chat-shell/ChatShell.tsx"), "utf8")
+    expect(shellSrc).toContain('from "../ChatComposer"')
     const groupChatSrc = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
-    expect(groupChatSrc).toContain('from "../../../shared/ChatComposer"')
+    expect(groupChatSrc).not.toContain('from "../../../shared/ChatComposer"')
   })
 })
 
-describe("ProjectGroupChat — component-scoped CSS is tokens only", () => {
-  it("resolves every color to a globals.css custom property — no new palette", () => {
-    const css = readFileSync(join(__dirname, "../ProjectGroupChat.module.css"), "utf8")
+describe("ProjectGroupChat — relocated group CSS is tokens only", () => {
+  it("GroupChatExtras.module.css resolves every color to a globals.css custom property — no new palette", () => {
+    // The pre-fold `ProjectGroupChat.module.css` is deleted; its retained group
+    // families (roster/status/state/typing/error/posting-wait) now live here.
+    const css = readFileSync(join(__dirname, "../GroupChatExtras.module.css"), "utf8")
     const found = css.match(/#[0-9A-Fa-f]{3,8}/g) ?? []
     expect(found).toEqual([])
+  })
+})
+
+describe("ProjectGroupChat — thin host renders through ChatShell (AC1/AC5)", () => {
+  it("test_group_host_renders_through_chatshell_project_group — mounts the shared shell with the group surface; the 868px bc-thread column carries the rows", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hi" }),
+      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "yo" }),
+    ])
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    // The group turns render inside the shell's shared 868px thread column.
+    const thread = await waitFor(() => {
+      const el = container.querySelector(".bc-thread")
+      expect(el).toBeTruthy()
+      return el as HTMLElement
+    })
+    expect(within(thread).getByTestId("gc-msg-other")).toBeTruthy()
+    expect(within(thread).getByTestId("gc-msg-me")).toBeTruthy()
+  })
+
+  it("test_group_host_wires_draftApiRef_via_onDraftApiReady — the picker reads the lazily-populated draft API, so typing @ opens the picker (proves the ref handoff)", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByLabelText("Send")
+    // If onDraftApiReady never populated the ref, onInputCapture would stay
+    // undefined and the picker would be dead — typing @ would do nothing.
+    const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(ta, { target: { value: "@", selectionStart: 1 } })
+      await Promise.resolve()
+    })
+    expect(await screen.findByTestId("gc-mention-picker")).toBeTruthy()
   })
 })
 
@@ -142,18 +174,25 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
 
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
     const agent = screen.getByTestId("gc-msg-agent")
-    expect(agent.className).toContain("gc-msg--ai")
+    // NAMED INTENDED CHANGE (fold): the pre-fold literal `gc-msg--ai` global
+    // class became the shell-owned `gcMsgAgent` module class (same agent-lane
+    // intent, same `gc-msg-agent` testid). The AGENT badge still renders.
+    expect(agent.className).toMatch(/gcMsgAgent/)
     expect(within(agent).getByText("AGENT")).toBeTruthy()
   })
 
-  it("a human-to-human aside with no agent reply shows the stayed-out marker", async () => {
+  it("a human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "no mention here" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await screen.findByTestId("gc-msg-me")
-    expect(screen.getByTestId("gc-stayed-out")).toBeTruthy()
+    // The alarming "Sprntly stayed out — no reply yet" pill is gone; the interim
+    // `showStayedOut` stay-out case now renders the QUIET declined treatment
+    // (visually distinct from a failure).
+    expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
   it("does not show the stayed-out marker right after an agent turn", async () => {
@@ -465,8 +504,9 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
     })
 
     // While posting: the optimistic turn is the last (user-role) turn, but
-    // the badge must stay hidden — a reply may still be generating.
+    // the marker must stay hidden — a reply may still be generating.
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out-quiet")).toBeNull()
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
 
     await act(async () => {
@@ -474,8 +514,10 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       await Promise.resolve()
     })
 
-    // Posting has settled and no agent reply arrived — NOW it shows.
-    await waitFor(() => expect(screen.getByTestId("gc-stayed-out")).toBeTruthy())
+    // Posting has settled and no agent reply arrived — NOW the QUIET stay-out
+    // marker shows (the old alarming pill is gone).
+    await waitFor(() => expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy())
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 })
 

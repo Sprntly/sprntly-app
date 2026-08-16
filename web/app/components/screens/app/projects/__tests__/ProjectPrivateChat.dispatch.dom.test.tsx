@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// ProjectIndividualChat — private classify→dispatch (AD-P13a / AC14). With
+// ProjectPrivateChat — private classify→dispatch (AD-P13a / AC14). With
 // the classifier flag ON, a send classifies via the project-scoped
 // `projectsApi.resolveIntent` (server-resolves the edit target over this
 // project's own PRDs — NOT `chatIntentApi.resolve(question, {})`, which
@@ -9,7 +9,7 @@
 // `edit_prd` hits the project chat-edit route, `generate_prd`/
 // `generate_tickets` hit the generate routes THEN auto-attach, `answer`
 // (and any classify failure) falls open to the prior `/v1/ask`-only send —
-// see `ProjectIndividualChat.test.tsx` for the flag-OFF / byte-identical-
+// see `ProjectPrivateChat.test.tsx` for the flag-OFF / byte-identical-
 // send suite.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
@@ -40,6 +40,7 @@ const individualTurnsMock = vi.fn().mockResolvedValue([])
 const ledgerMock = vi.fn().mockResolvedValue([])
 const generateFromInsightMock = vi.fn()
 const getJobMock = vi.fn()
+const persistIndividualTurnsMock = vi.fn().mockResolvedValue({ user_turn_id: 1, assistant_turn_id: 2 })
 
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
@@ -73,6 +74,7 @@ vi.mock("../../../../../lib/api", async () => {
       ledger: (...a: unknown[]) => ledgerMock(...a),
       prdChatEdit: (...a: unknown[]) => prdChatEditMock(...a),
       addArtifact: (...a: unknown[]) => addArtifactMock(...a),
+      persistIndividualTurns: (...a: unknown[]) => persistIndividualTurnsMock(...a),
       // Same `resolveIntentMock` the pre-fix suite mounted on
       // `chatIntentApi.resolve` — re-mounted here because the component
       // now classifies via the project-scoped resolver instead. Mock-
@@ -101,7 +103,7 @@ vi.mock("../../../../../lib/auth", () => ({
   useAuth: () => ({ kind: "authed" as const, user: { id: "u1" } }),
 }))
 // Pre-existing, out-of-scope gap this ticket does NOT fix (verified against
-// unmodified origin/release/projects@ca2f6f92 — `ProjectIndividualChat.test.
+// unmodified origin/release/projects@ca2f6f92 — `ProjectPrivateChat.test.
 // tsx`'s own component-rendering tests are ALREADY red there): the always-
 // mounted `ProjectPrdPatchBanner` (the retired propose/review PRD-edit
 // banner, left in place for a later ticket to delete) calls `useNavigation()`
@@ -112,7 +114,7 @@ vi.mock("../../../../../context/NavigationContext", () => ({
   useNavigation: () => ({ showToast: vi.fn() }),
 }))
 
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 
 beforeEach(() => {
   runAskGenerationMock.mockReset()
@@ -125,11 +127,12 @@ beforeEach(() => {
   generateFromInsightMock.mockReset()
   getJobMock.mockReset()
   runPrdGenerationFromTaskMock.mockReset()
+  persistIndividualTurnsMock.mockReset().mockResolvedValue({ user_turn_id: 1, assistant_turn_id: 2 })
 })
 afterEach(() => cleanup())
 
 async function sendMessage(text: string) {
-  render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+  render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
   const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   await act(async () => {
     fireEvent.change(textarea, { target: { value: text } })
@@ -139,7 +142,7 @@ async function sendMessage(text: string) {
   })
 }
 
-describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
+describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
   it("edit_prd calls the project route, not /v1/ask", async () => {
     resolveIntentMock.mockResolvedValue({
       intent: "edit_prd", confidence: 0.9, task: null,
@@ -154,7 +157,11 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     await sendMessage("tighten the problem statement")
 
     await waitFor(() => expect(prdChatEditMock).toHaveBeenCalledTimes(1))
-    expect(prdChatEditMock).toHaveBeenCalledWith(202, "tighten the problem statement")
+    // Server persists both sides via prdChatEdit (§D) — the 4th arg is this
+    // send's client_message_id, minted once and threaded through.
+    expect(prdChatEditMock).toHaveBeenCalledWith(
+      202, "tighten the problem statement", undefined, expect.any(String),
+    )
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     await waitFor(() =>
       expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Tightened the problem statement."),
@@ -177,6 +184,14 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     expect(addArtifactMock).toHaveBeenCalledWith(202, "ticket_set", 7)
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    // No dedicated chat route for this branch — it persists via the owned
+    // turn-pair route at settle time (§H/AC2).
+    await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
+    expect(persistIndividualTurnsMock).toHaveBeenCalledWith(202, {
+      clientMessageId: expect.any(String),
+      question: "break this into work items",
+      answer: expect.stringContaining("ticket set"),
+    })
   })
 
   it("generate_prd kicks off the generate route THEN auto-attaches", async () => {
@@ -195,6 +210,12 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     expect(runPrdGenerationFromTaskMock).toHaveBeenCalledWith("dark mode on mobile")
     expect(addArtifactMock).toHaveBeenCalledWith(202, "prd", 501)
     expect(runAskGenerationMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
+    expect(persistIndividualTurnsMock).toHaveBeenCalledWith(202, {
+      clientMessageId: expect.any(String),
+      question: "generate a PRD for dark mode",
+      answer: expect.stringContaining("Dark mode"),
+    })
   })
 
   it("an answer verdict calls /v1/ask, same as the flag-off send", async () => {
@@ -211,9 +232,12 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(1))
     expect(runAskGenerationMock).toHaveBeenCalledWith(
       "what did we land on for pricing?", "acme", "project-individual-202",
-      expect.objectContaining({ project_id: 202 }),
+      // The send's minted client_message_id rides the /v1/ask call — the
+      // server persists both sides keyed on it (§C); no client persist call.
+      expect.objectContaining({ project_id: 202, client_message_id: expect.any(String) }),
     )
     expect(prdChatEditMock).not.toHaveBeenCalled()
+    expect(persistIndividualTurnsMock).not.toHaveBeenCalled()
   })
 
   it("a classify failure falls open to the prior /v1/ask-only send", async () => {
@@ -281,8 +305,10 @@ describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
     // The SAME original instruction re-issued with the CHOSEN id attached —
     // not a re-classify, no second `resolveIntent` call.
     await waitFor(() => expect(prdChatEditMock).toHaveBeenCalledTimes(1))
+    // The pick's OWN client_message_id (minted for the pick's session turn,
+    // distinct from the source turn's) rides as the 4th arg.
     expect(prdChatEditMock).toHaveBeenCalledWith(
-      202, "tighten the problem statement", 502,
+      202, "tighten the problem statement", 502, expect.any(String),
     )
     expect(resolveIntentMock).toHaveBeenCalledTimes(1)
     await waitFor(() =>

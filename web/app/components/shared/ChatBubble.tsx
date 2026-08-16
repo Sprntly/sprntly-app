@@ -99,6 +99,11 @@ export interface ChatBubbleProps {
    *  top. */
   wrapperClassName?: string
   dataTestId?: string
+  /** Opt-in stable per-turn DOM anchor (`data-turn-id`) for scoped
+   *  scroll-to-turn lookups. Rendered ONLY when set — the main chat never
+   *  passes it, so main's golden DOM stays byte-identical; project surfaces set
+   *  it on every mapped turn so the shell's `scrollToTurn` can resolve them. */
+  dataTurnId?: string
   /** Forces `aria-busy`; otherwise derived from `isGenerating && !reply`. */
   ariaBusy?: boolean
 
@@ -224,6 +229,7 @@ export function ChatBubble(props: ChatBubbleProps) {
   const {
     wrapperClassName = "bc-turn",
     dataTestId,
+    dataTurnId,
     ariaBusy,
     user,
     userHeadExtra,
@@ -277,7 +283,12 @@ export function ChatBubble(props: ChatBubbleProps) {
 
   return (
     <>
-      <div className={wrapperClassName} data-testid={dataTestId} {...(busy ? { "aria-busy": true } : {})}>
+      <div
+        className={wrapperClassName}
+        data-testid={dataTestId}
+        {...(dataTurnId != null ? { "data-turn-id": dataTurnId } : {})}
+        {...(busy ? { "aria-busy": true } : {})}
+      >
         {user && humanAlign === "start" ? (
           // A third party's turn in a multi-party thread — left-aligned,
           // avatar flanking a name/role header + bubble, deliberately its

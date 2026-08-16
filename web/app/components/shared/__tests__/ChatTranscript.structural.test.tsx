@@ -14,7 +14,7 @@ const webRoot = path.resolve(here, "../../../..")
 
 const SHELLS = [
   path.join(webRoot, "app/components/screens/app/ChatScreen.tsx"),
-  path.join(webRoot, "app/components/screens/app/projects/ProjectIndividualChat.tsx"),
+  path.join(webRoot, "app/components/screens/app/projects/ProjectPrivateChat.tsx"),
   path.join(webRoot, "app/components/screens/app/projects/ProjectGroupChat.tsx"),
 ]
 

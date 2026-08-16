@@ -106,10 +106,15 @@ def test_project_id_threads_through_run_ask_job(isolated_settings, monkeypatch):
     )
     assert calls == [], "default project_id=None must fire nothing"
 
+    # The hook's own gate requires project_id, conversation_id, AND user_id
+    # (the same identity the caller's `_on_committed` closure also attributes
+    # the persisted assistant turn to) — every production caller in
+    # `routes/ask.py` passes all three together, so `user_id` is supplied
+    # here too.
     asyncio.run(
         ajr.run_ask_job(
             ask_id=2, enterprise_id="c1", question="q", dataset="d",
-            conversation_id=5, project_id=9,
+            conversation_id=5, project_id=9, user_id="u1",
         )
     )
     assert len(calls) == 1

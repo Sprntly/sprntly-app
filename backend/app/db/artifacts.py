@@ -459,15 +459,22 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     #
     #    'generating' rows ARE listed — a document the user just asked for
     #    should appear immediately, marked as writing and not yet clickable,
-    #    the same treatment building prototypes and ticket sets get. 'failed'
-    #    ones are excluded: a run that produced nothing is not an artifact.
+    #    the same treatment building prototypes and ticket sets get.
+    #
+    #    SO ARE 'failed' ONES, which they previously were not. The old rule
+    #    ("a run that produced nothing is not an artifact") is true of the row
+    #    and false of the product: someone asked for that document and came
+    #    here to find it. Excluding it meant the library answered with nothing
+    #    at all — no document, no failure, no reason to look anywhere else —
+    #    which is exactly how a failed generation stayed invisible. The row
+    #    says it could not be written, and opens onto the reason.
     doc_rows = (
         c.table("custom_artifacts")
         .select(
             "id, kind, title, status, created_at, updated_at, conversation_id"
         )
         .eq("company_id", company_id)
-        .in_("status", ["generating", "ready"])
+        .in_("status", ["generating", "ready", "failed"])
         # ORDERED BY LAST EDIT, not by id, because the CAP is applied here and
         # the sort below cannot rescue a row the query already dropped. With
         # `id desc` the 200 most recently CREATED documents were selected and

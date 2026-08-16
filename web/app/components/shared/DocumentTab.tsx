@@ -10,6 +10,7 @@ import {
   type Scheduler,
 } from "../../lib/documentSave"
 import { DocumentEditor } from "../../(app)/artifacts/doc/DocumentEditor"
+import { documentFailureCopy } from "../../lib/documentFailure"
 
 // ── The chat panel's Document tab ────────────────────────────────────────────
 //
@@ -164,8 +165,8 @@ export function DocumentTab({ documentId }: { documentId: number }) {
         <div data-document-writing style={S.notice}>Writing this document…</div>
       )}
       {doc.status === "failed" && (
-        <div data-document-failed style={S.notice}>
-          This document could not be written. Ask for it again in chat.
+        <div data-document-failed data-failure-code={doc.error_code ?? "unknown"} style={S.notice}>
+          {documentFailureCopy(doc.error_code)}
         </div>
       )}
       {saveState.kind === "conflict" && (

@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// ProjectIndividualChat — live subscribe to the caller's per-user channel.
+// ProjectPrivateChat — live subscribe to the caller's per-user channel.
 // `useRealtimeChannel` itself is mocked here (its own subscribe/reconnect/
 // degrade lifecycle is covered by useRealtimeChannel.dom.test.tsx, and its
 // no-subscribe-on-null-topic behaviour by that same file) — this file
 // asserts the CONSUMER wiring: one channel for the caller's own
 // `project:{id}:user:{uid}` topic, a `brief.delivered` broadcast appended
 // live into `history` (rendered via the same standalone-agent-turn markup
-// `ProjectIndividualChat.history.dom.test.tsx` covers), the id-dedup
+// `ProjectPrivateChat.history.dom.test.tsx` covers), the id-dedup
 // guarantee (live event vs. reconcile read vs. the initial history load),
 // the null-topic/degraded-reconcile fallback, unmount cleanup, and
 // non-breakage of the send path + load-on-open effect.
@@ -75,7 +75,7 @@ vi.mock("../../../../../context/CompanyContext", () => ({
 // The component now reads the classifier flag (`chatIntentEnvelopeOn`) to
 // decide whether to classify-then-dispatch at all. Explicit OFF here keeps
 // every assertion in this file byte-identical to pre-classifier behaviour —
-// same stub shape `ProjectIndividualChat.test.tsx` uses.
+// same stub shape `ProjectPrivateChat.test.tsx` uses.
 vi.mock("../../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => ({
     loading: false, profile: null,
@@ -104,7 +104,7 @@ vi.mock("../useRealtimeChannel", () => ({
   },
 }))
 
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 import type { IndividualTurn } from "../../../../../lib/api"
 
 const turn = (overrides: Partial<IndividualTurn>): IndividualTurn => ({
@@ -145,9 +145,9 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-describe("ProjectIndividualChat — live subscribe (AC-1)", () => {
+describe("ProjectPrivateChat — live subscribe (AC-1)", () => {
   it("test_subscribes_to_per_user_topic_on_open: one channel for project:{id}:user:{uid}", async () => {
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
@@ -156,10 +156,10 @@ describe("ProjectIndividualChat — live subscribe (AC-1)", () => {
   })
 })
 
-describe("ProjectIndividualChat — live apply (AC-2)", () => {
+describe("ProjectPrivateChat — live apply (AC-2)", () => {
   it("test_brief_delivered_appends_live: broadcast -> brief in history, no re-open, no poll", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
     const callsAfterLoad = individualTurnsMock.mock.calls.length
 
@@ -176,7 +176,7 @@ describe("ProjectIndividualChat — live apply (AC-2)", () => {
 
   it("ignores unknown broadcast event names", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     await act(async () => {
@@ -186,10 +186,10 @@ describe("ProjectIndividualChat — live apply (AC-2)", () => {
   })
 })
 
-describe("ProjectIndividualChat — reconnect reconcile (AC-3)", () => {
+describe("ProjectPrivateChat — reconnect reconcile (AC-3)", () => {
   it("test_reconnect_runs_one_individual_reconcile: onReconcile -> single individualTurns read, merged", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     individualTurnsMock.mockResolvedValueOnce([turn({ id: 4, content: "reconciled brief" })])
@@ -204,10 +204,10 @@ describe("ProjectIndividualChat — reconnect reconcile (AC-3)", () => {
   })
 })
 
-describe("ProjectIndividualChat — idempotency / dedup (AC-4)", () => {
+describe("ProjectPrivateChat — idempotency / dedup (AC-4)", () => {
   it("test_duplicate_brief_event_and_reconcile_renders_once: same id via event + reconcile -> one bubble", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     const dup = turn({ id: 9, content: "dup brief" })
@@ -230,7 +230,7 @@ describe("ProjectIndividualChat — idempotency / dedup (AC-4)", () => {
   it("a brief already present in the loaded history is not re-rendered when its broadcast arrives", async () => {
     const existing = turn({ id: 3, content: "already loaded" })
     individualTurnsMock.mockResolvedValueOnce([existing])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(screen.getAllByTestId("ic-history-agent")).toHaveLength(1))
 
     await act(async () => {
@@ -242,13 +242,13 @@ describe("ProjectIndividualChat — idempotency / dedup (AC-4)", () => {
   })
 })
 
-describe("ProjectIndividualChat — degradation (AC-5)", () => {
+describe("ProjectPrivateChat — degradation (AC-5)", () => {
   it("test_null_topic_falls_back_to_open_only: unresolved uid -> no subscribe topic, today behaviour", async () => {
     authState = { kind: "anonymous" }
     individualTurnsMock.mockResolvedValueOnce([
       { id: 1, role: "assistant", content: "loaded on open", created_at: new Date().toISOString() },
     ])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
 
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(202))
     expect(await screen.findByText("loaded on open")).toBeTruthy()
@@ -261,7 +261,7 @@ describe("ProjectIndividualChat — degradation (AC-5)", () => {
     individualTurnsMock.mockResolvedValueOnce([
       { id: 1, role: "assistant", content: "existing brief", created_at: new Date().toISOString() },
     ])
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     individualTurnsMock.mockRejectedValueOnce(new Error("channel degraded"))
@@ -277,10 +277,10 @@ describe("ProjectIndividualChat — degradation (AC-5)", () => {
   })
 })
 
-describe("ProjectIndividualChat — non-breakage / cleanup (AC-6/AC-7)", () => {
+describe("ProjectPrivateChat — non-breakage / cleanup (AC-6/AC-7)", () => {
   it("test_unmount_tears_down_channel: no further reconcile/apply activity survives unmount", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    const { unmount } = render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    const { unmount } = render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
     const handlers = lastHandlers()
     const callsAtUnmount = individualTurnsMock.mock.calls.length
@@ -298,7 +298,7 @@ describe("ProjectIndividualChat — non-breakage / cleanup (AC-6/AC-7)", () => {
   it("test_send_path_and_open_effect_unchanged: same props, load-on-open + composer/send path untouched", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
     runAskGenerationMock.mockResolvedValue(reply("still works"))
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
 
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(202))
     expect(individualChatMock).not.toHaveBeenCalled()

@@ -28,17 +28,22 @@ import logging
 import os
 import re
 import sys
+import uuid
 from typing import Literal, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app import qa_agent
+from app.ask_job_runner import ExecutionOutcome, run_execution_job
 from app.auth import WorkspaceContext, require_workspace
 from app.chat_intent import resolve_chat_intent
+from app.db import asks as asks_db
+from app.db.asks import start_ask_job, touch_ask_job
 from app.db import conversation_read_cursors as read_cursors_db
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
+from app.db import project_delegations as project_delegations_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
 from app.db import team as team_db
@@ -63,7 +68,9 @@ from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
+from app.delegation_status_ingest import maybe_ingest_status
 from app.project_memory import maybe_promote_turn, schedule_regen
+from app.report_capture import capture_report
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
 from app.surface_scope import PROJECT_TOOL_NUDGE, Surface, SurfaceScope
@@ -90,6 +97,11 @@ _GROUP_CONTEXT_TURNS = 30
 _GROUP_TURN_DTO_KEYS = (
     "id", "role", "content", "author_user_id", "author_name",
     "author_job_role", "created_at",
+    # Execution-run status, attached by `list_group_turns` onto the human turn
+    # whose id == the run's source_turn_id (mapped to the FE AgentRunStatus
+    # vocabulary at the DTO edge). On the broadcast too, so the realtime shape
+    # matches the poll read.
+    "run_status", "error_class",
 )
 
 # Strong refs to in-flight background group-reply tasks — mirrors
@@ -110,32 +122,110 @@ _group_reply_tasks: set[asyncio.Task] = set()
 _GROUP_TRANSCRIPT_AS_QUESTION = False
 
 
-def _schedule_group_reply(
-    project_id: int, conversation_id: int, ctx: WorkspaceContext, trigger_kind: str,
-) -> None:
-    """Fire-and-forget the group agent's reply, backgrounded off the
-    request path (spec §5.5; Gate-1 BLOCKER-1 fix). `post_group_turn_route`
-    is `async def` so a loop is running here, letting `asyncio.create_task`
-    schedule `asyncio.to_thread(_respond_as_group_agent, ...)` — `to_thread`
-    because `_respond_as_group_agent` stays a SYNC function (its LLM/DB
-    calls are blocking and belong on the threadpool, not the event loop). A
-    bare `create_task(_respond_as_group_agent(...))` would raise twice over
-    (no running loop outside a request, and the target isn't a coroutine).
+def _run_group_reply_blocking(coro) -> None:
+    """pytest-only: run the async group reply to COMPLETION synchronously so a
+    TestClient request (and a direct-call unit test) returns only AFTER the
+    reply is posted — the suite asserts on the posted turn. A fresh loop on a
+    worker thread is used because `post_group_turn_route` is itself `async def`:
+    the request is already inside a running loop, where `asyncio.run()` would
+    raise. FakeSupabaseClient is thread-safe (`check_same_thread=False` + a
+    global lock), so the reply's own `to_thread` DB work is safe here."""
+    import concurrent.futures
 
-    Under `"pytest" in sys.modules` runs the reply INLINE instead (mirrors
-    `routes.ask.py`'s own `:457` guard) — the TestClient does not keep the
-    app's event loop alive between requests, so a fire-and-forget task would
-    never run and a test asserting on the posted reply would hang/miss it."""
-    if "pytest" in sys.modules:
-        _respond_as_group_agent(project_id, conversation_id, ctx, trigger_kind=trigger_kind)
-        return
-    task = asyncio.create_task(
-        asyncio.to_thread(
-            _respond_as_group_agent, project_id, conversation_id, ctx, trigger_kind,
-        )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        ex.submit(asyncio.run, coro).result()
+
+
+def _is_unique_violation(exc: Exception) -> bool:
+    """True for a Postgres/PostgREST unique-constraint violation (23505) — or
+    the FakeSupabaseClient's sqlite `IntegrityError` equivalent."""
+    import sqlite3
+
+    if isinstance(exc, sqlite3.IntegrityError):
+        return True
+    return getattr(exc, "code", None) == "23505" or "duplicate key" in str(exc).lower()
+
+
+def _schedule_group_reply(
+    project_id: int,
+    conversation_id: int,
+    ctx: WorkspaceContext,
+    trigger_kind: str,
+    *,
+    source_turn_id: int | None = None,
+    client_message_id: str | None = None,
+    job_id: int | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Mint the run's execution identity + persist a `generating` `ask_jobs`
+    row SYNCHRONOUSLY (so a crash before the background thread starts leaves a
+    row, not a guess), then background the reply through the SHARED
+    `run_execution_job` primitive (group *inherits* the lifecycle by using the
+    same code as main/private, not a wrapper).
+
+    On a fresh trigger `job_id`/`run_id` are None and are minted + inserted
+    here; a RETRY passes an already-claimed `job_id`/`run_id`
+    (`claim_retry_attempt` inserted the row) and re-enters this SAME path with
+    no second insert.
+
+    `post_group_turn_route` is `async def`, so `asyncio.create_task` schedules
+    the async `_respond_as_group_agent` coroutine directly (the primitive is
+    async and itself `to_thread`s the sync reply body — no outer `to_thread`
+    wrapper). The module strong-ref set keeps the fire-and-forget task alive.
+    Under `"pytest" in sys.modules` the reply runs to completion inline (via a
+    worker-thread loop) so a test asserting on the posted reply never misses
+    it."""
+    if job_id is None or run_id is None:
+        run_id = str(uuid.uuid4())
+        try:
+            job_id = start_ask_job(
+                company_id=ctx.company_id,
+                dataset=_dataset_for(ctx),
+                question="",
+                conversation_id=conversation_id,
+                kind="project_group",
+                project_id=project_id,
+                source_turn_id=source_turn_id,
+                run_id=run_id,
+                # A server-minted id when the client sent none — keeps the
+                # idempotency partial-unique meaningful for every group run.
+                client_message_id=client_message_id or str(uuid.uuid4()),
+            )
+        except Exception as exc:  # noqa: BLE001 — narrowed below
+            # Defense-in-depth for a concurrent duplicate-submit that slipped
+            # past the route's idempotency pre-check: the client_message_id
+            # partial-unique refuses the second insert. Treat it as an
+            # idempotent no-op (the first run stands) rather than a 500.
+            if client_message_id and _is_unique_violation(exc):
+                logger.info(
+                    "group_reply_dedup_on_client_message_id conversation_id=%s",
+                    conversation_id,
+                )
+                return
+            raise
+    coro = _respond_as_group_agent(
+        project_id, conversation_id, ctx, trigger_kind, job_id=job_id, run_id=run_id,
     )
+    if "pytest" in sys.modules:
+        _run_group_reply_blocking(coro)
+        return
+    task = asyncio.create_task(coro)
     _group_reply_tasks.add(task)
     task.add_done_callback(_group_reply_tasks.discard)
+
+
+def _get_group_turn(conversation_id: int, turn_id: int | None) -> dict | None:
+    """One shaped group turn by id (via `list_group_turns`, so it carries the
+    same DTO shape incl. run_status), or None. Used by the send-route
+    idempotency replay to return the ORIGINAL human turn for a duplicate
+    client_message_id."""
+    if turn_id is None:
+        return None
+    try:
+        shaped = conversations_db.list_group_turns(conversation_id, since=turn_id - 1)
+        return next((t for t in shaped if t["id"] == turn_id), None)
+    except Exception:  # noqa: BLE001 — replay lookup is best-effort
+        return None
 
 
 def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dict | None) -> None:
@@ -301,6 +391,17 @@ class SaveChatArtifactRequest(BaseModel):
 
 class PostGroupTurnRequest(BaseModel):
     content: str = Field(min_length=1)
+    # Execution-identity / SendCommand plumbing (Contract B). `client_message_id`
+    # is WIRED: it lands on `ask_jobs.client_message_id`, so a double-submit of
+    # the same id cannot mint two runs (the client_message_id partial-unique
+    # backstop).
+    # `pinned_skill` / `attachments` are ACCEPTED-BUT-INERT this ticket (wired by
+    # the FE SendCommand in a following change) — declared so the payload shape
+    # is forward-compatible and the parity guard sees a decision, not a silent
+    # no-op (recorded residual).
+    client_message_id: str | None = None
+    pinned_skill: dict | None = None
+    attachments: list | None = None
 
 
 class EmitDelegationEventRequest(BaseModel):
@@ -768,6 +869,11 @@ class ProjectChatEditIn(BaseModel):
     # `test_project_chat_edit_explicit_id_cross_project_denied` for the
     # mutation-proofed IDOR guard.
     prd_id: int | None = Field(default=None, ge=1)
+    # The idempotency key a retry/double-submit carries for the owned
+    # both-sides persist below — client-issued when the sender's engine
+    # mints one; the route mints a server uuid4 when absent so persistence
+    # is never skipped for an older client.
+    client_message_id: str | None = None
 
 
 @router.post("/{project_id}/prd/chat-edit")
@@ -812,6 +918,32 @@ def project_chat_edit(
             "answer": "PRD editing from chat isn't turned on for this project yet.",
         }
 
+    resolved_client_message_id = body.client_message_id or str(uuid.uuid4())
+
+    def _persist_edit_turns(answer_text: str) -> None:
+        """Owned, idempotent both-sides persist (AC2): the user's
+        instruction + the assistant's shown answer, keyed on the SAME
+        client_message_id so a double-submit dedups per side. Best-effort —
+        a persist failure never blocks the edit's already-computed result."""
+        try:
+            conversations_db.post_owned_individual_user_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=body.instruction,
+                client_message_id=resolved_client_message_id,
+            )
+            conversations_db.post_owned_individual_assistant_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=answer_text,
+                client_message_id=resolved_client_message_id,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist individual-chat edit turns project_id=%s",
+                project_id, exc_info=True,
+            )
+
     dataset = _dataset_for(ctx)
     # `body.prd_id` present (the caller picked a PRD off a prior `clarify`
     # envelope's `prd_options`) -> thread it through explicitly, same shape
@@ -821,18 +953,20 @@ def project_chat_edit(
     tool_input = {"prd_id": body.prd_id} if body.prd_id is not None else {}
     prd_id, refusal = _resolve_prd_id(tool_input, project_id, dataset, ctx.company_id)
     if prd_id is None:
-        return {"edited": False, "answer": refusal or "I couldn't work out which PRD to edit."}
+        answer = refusal or "I couldn't work out which PRD to edit."
+        _persist_edit_turns(answer)
+        return {"edited": False, "answer": answer}
 
     try:
         result = apply_chat_edit_scoped(
             prd_id, body.instruction, ctx, project_id=project_id, dataset=dataset,
         )
     except ProjectPrdWriteDenied:
-        return {
-            "edited": False,
-            "answer": "I can only edit a PRD that's attached to this project.",
-        }
+        answer = "I can only edit a PRD that's attached to this project."
+        _persist_edit_turns(answer)
+        return {"edited": False, "answer": answer}
 
+    _persist_edit_turns(result.get("summary") or "Updated the PRD.")
     return {"edited": True, **result}
 
 
@@ -1070,6 +1204,47 @@ def create_individual_chat_route(
     return conversation
 
 
+class PostIndividualTurnsRequest(BaseModel):
+    """The owned turn-pair body for the branches with no chat-route home:
+    a generate branch, a clarify settle, or a terminal outcome (error/
+    cancel/artifact-attach-failed) — each persists the question actually
+    asked and the assistant text actually shown, so a reload restores the
+    real dialogue rather than a blank."""
+    client_message_id: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1, max_length=120_000)
+    answer: str = Field(..., min_length=1, max_length=120_000)
+
+
+@router.post("/{project_id}/individual/turns")
+def persist_individual_turns_route(
+    project_id: int,
+    body: PostIndividualTurnsRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Persist the CALLER'S OWN user+assistant turn pair into THEIR
+    individual project chat (AC2/AC3) — the explicit-owner home for the
+    branches whose backend work doesn't already have a chat-route home
+    (`runGeneratePrd`/`runGenerateTickets`/clarify-settle/terminal
+    outcomes). Membership-gated; ownership is resolved SERVER-side from
+    `(project_id, ctx.user_id)` by the §B writers — the client supplies no
+    `conversation_id` (AC6). Idempotent on `client_message_id` (AC4): a
+    double-submit returns the SAME pair rather than writing a second one."""
+    _require_project_member(project_id, ctx)
+    user_turn = conversations_db.post_owned_individual_user_turn(
+        project_id=project_id,
+        user_id=ctx.user_id,
+        content=body.question,
+        client_message_id=body.client_message_id,
+    )
+    assistant_turn = conversations_db.post_owned_individual_assistant_turn(
+        project_id=project_id,
+        user_id=ctx.user_id,
+        content=body.answer,
+        client_message_id=body.client_message_id,
+    )
+    return {"user_turn_id": user_turn["id"], "assistant_turn_id": assistant_turn["id"]}
+
+
 @router.get("/{project_id}/individual/turns")
 def list_individual_turns_route(
     project_id: int,
@@ -1159,16 +1334,20 @@ def list_group_turns_route(
 
 def _is_solo_project(project_id: int) -> bool:
     """True when the project has exactly ONE human member — the user plus the
-    virtual Sprntly agent, no other people. `projects_db.list_members` returns
-    HUMAN members only (the AD-P6 agent member is prepended at the route layer,
-    never stored), so its length IS the human count and no agent-exclusion is
-    needed. Best-effort: any read failure returns False, falling back to the
-    normal gate (never widens Sprntly's participation on error)."""
+    virtual Sprntly agent, no other people. Uses `projects_db.count_project_
+    members` (a plain `project_members` count, NO `profiles` enrichment
+    join) so a profile-display hiccup can never reach this decision —
+    `list_members`'s join is for display, not for this check.
+
+    Fail OPEN toward responding, not silence: on a count-read failure this
+    returns True (treat as solo, respond) rather than False. A silent
+    opener in a genuinely-solo project is the worse failure than a rare
+    over-reply in a project that turns out to have more than one member."""
     try:
-        return len(projects_db.list_members(project_id)) == 1
-    except Exception:  # noqa: BLE001 — a roster read failure must not break the post
+        return projects_db.count_project_members(project_id) == 1
+    except Exception:  # noqa: BLE001 — fail-open toward responding, not silence
         logger.warning("solo_project_check_failed project_id=%s", project_id)
-        return False
+        return True
 
 
 @router.post("/{project_id}/group/turns")
@@ -1202,6 +1381,17 @@ async def post_group_turn_route(
     persisted + broadcast + the gate has decided, never after the reply."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    # Idempotency: a repeat submit carrying the SAME client_message_id must not
+    # post a second human turn or mint a second run. If a run already exists for
+    # this client message, replay the ORIGINAL human turn (no new write, no new
+    # schedule) — the `ask_jobs_client_message_id_uidx` partial-unique is the
+    # DB backstop; this pre-check makes the replay graceful instead of a 500.
+    if payload.client_message_id:
+        prior = asks_db.get_run_by_client_message_id(payload.client_message_id)
+        if prior is not None:
+            prior_turn = _get_group_turn(conversation["id"], prior.get("source_turn_id"))
+            if prior_turn is not None:
+                return prior_turn
     turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
     logger.info(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
@@ -1209,7 +1399,13 @@ async def post_group_turn_route(
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
-        _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="mention")
+        if turn:
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "mention")
+        _schedule_group_reply(
+            project_id, conversation["id"], ctx, trigger_kind="mention",
+            source_turn_id=turn["id"] if turn else None,
+            client_message_id=payload.client_message_id,
+        )
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
         # Sprntly responds to EVERY message, no @mention needed and never
@@ -1219,7 +1415,13 @@ async def post_group_turn_route(
         # This short-circuits the gate exactly like `mention`/`continuation`.
         # Multi-human projects fall through to the unchanged gate below, so the
         # AD-P10 conservative posture is preserved wherever it still applies.
-        _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="solo")
+        if turn:
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "solo")
+        _schedule_group_reply(
+            project_id, conversation["id"], ctx, trigger_kind="solo",
+            source_turn_id=turn["id"] if turn else None,
+            client_message_id=payload.client_message_id,
+        )
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
         # The turn just posted is `recent[-1]`; `recent[-2]` (if any) is the
@@ -1235,10 +1437,91 @@ async def post_group_turn_route(
         if should_respond(
             project_id, conversation["id"], recent, payload.content,
             agent_spoke_last=agent_spoke_last,
+            dataset=_dataset_for(ctx), company_id=ctx.company_id,
         ):
             trigger_kind = "continuation" if agent_spoke_last else "gate"
-            _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind=trigger_kind)
+            if turn:
+                conversations_db.set_group_turn_trigger_kind(turn["id"], trigger_kind)
+            _schedule_group_reply(
+                project_id, conversation["id"], ctx, trigger_kind=trigger_kind,
+                source_turn_id=turn["id"] if turn else None,
+                client_message_id=payload.client_message_id,
+            )
+        elif turn:
+            # No reply scheduled — the stay-out decision has no agent turn
+            # to carry it, so the just-posted human turn is the only place
+            # it can be recorded (Fix observability).
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "gate_stayout")
     return turn
+
+
+@router.post("/{project_id}/group/turns/{source_turn_id}/retry", status_code=202)
+async def retry_group_turn_route(
+    project_id: int,
+    source_turn_id: int,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Idempotently re-run a failed group reply for `source_turn_id`.
+
+    `async def` (like `post_group_turn_route`): the reply is scheduled via
+    `asyncio.create_task`, which needs the request's running event loop — a
+    sync route runs on a threadpool with no loop bound and would raise
+    `RuntimeError: no running event loop`.
+
+    Member-gated. Side-effect presence is DERIVED at read time (inference over
+    stored state, no new column): a prior attempt that recorded a delegation
+    for this turn is NOT auto-retryable — re-running the body would
+    double-delegate — so the route returns 422 (`resend_as_new_turn`). While an
+    attempt is still `generating` the route returns 409 (DB-enforced by the
+    `ask_jobs_active_attempt_uidx` partial-unique). Otherwise it claims a NEW
+    run (`run_id` + `attempt = prev+1`) and re-enters the SAME background reply
+    path, returning 202 + the new run identity. If scheduling the reply raises
+    AFTER the claim committed, the just-claimed `generating` row is released
+    (`fail_ask_job`) so a failed schedule can't leave an orphan that 409s every
+    later retry until the reaper."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_group_chat(project_id)
+    if not conversation:
+        raise HTTPException(404, "Group chat not found")
+    # DERIVED side-effect signal — a delegation recorded for this turn blocks
+    # auto-retry (execute_task PRD artifacts are not turn-keyed yet, so the
+    # delegation ledger is the derivable signal this ticket ships).
+    had_side_effects = project_delegations_db.has_delegation_for_source_turn(source_turn_id)
+    run_id = str(uuid.uuid4())
+    # Resolve the helper AND its typed refusal signals through the module
+    # object (not by-value imports): the test harness reloads `app.db.asks`
+    # in place, which redefines these classes — a by-value `except
+    # RetryAttemptLive` would hold a stale class and miss the raise.
+    try:
+        claim = asks_db.claim_retry_attempt(
+            source_turn_id=source_turn_id,
+            kind="project_group",
+            project_id=project_id,
+            company_id=ctx.company_id,
+            dataset=_dataset_for(ctx),
+            question="",
+            conversation_id=conversation["id"],
+            run_id=run_id,
+            had_side_effects=had_side_effects,
+        )
+    except asks_db.RetryHasSideEffects:
+        raise HTTPException(422, detail={"error": "resend_as_new_turn"})
+    except asks_db.RetryAttemptLive:
+        raise HTTPException(409, detail="a retry is already in flight for this turn")
+    # Re-enter the SAME background reply path with the already-claimed run.
+    # If scheduling raises, release the committed claim so it doesn't orphan.
+    try:
+        _schedule_group_reply(
+            project_id, conversation["id"], ctx, trigger_kind="mention",
+            source_turn_id=source_turn_id, job_id=claim["id"], run_id=claim["run_id"],
+        )
+    except Exception:
+        try:
+            asks_db.fail_ask_job(claim["id"], "retry scheduling failed", "app")
+        except Exception:  # noqa: BLE001 — releasing the claim is best-effort
+            logger.exception("retry claim release failed job_id=%s", claim["id"])
+        raise
+    return {"run_id": claim["run_id"], "attempt": claim["attempt"], "job_id": claim["id"]}
 
 
 class ProjectChatIntentIn(BaseModel):
@@ -1493,64 +1776,50 @@ _ADDRESSING_NOTES = {
 }
 
 
-def _respond_as_group_agent(
+async def _respond_as_group_agent(
     project_id: int, conversation_id: int, ctx: WorkspaceContext,
-    trigger_kind: str = "mention",
+    trigger_kind: str = "mention", *, job_id: int, run_id: str,
 ) -> None:
-    """Called on an `@Sprntly` mention OR a `should_respond=True`
-    smart-interjection decision (`post_group_turn_route` decides which, and
-    derives `trigger_kind` — "mention" / "continuation" / "gate" / "solo" —
-    for THIS call, then BACKGROUNDS this whole call via
-    `_schedule_group_reply` — spec §5.5; this function itself stays SYNC and
-    runs on the threadpool, never on the event loop). This function's own
-    body runs the SAME single classify-and-edit path first regardless of
-    `trigger_kind`: classify the triggering turn via
-    `_classify_and_maybe_edit_group_prd` — a real edit applies in place and
-    returns; a requested-but-unwritten edit steers the fallback reply with
-    an `edit_note` so it never fabricates a completed change (B2
-    no-fabrication); everything else (including `answer` and any
-    generate/open phrasing — group generate/open is DEFERRED, spec ⭐)
-    falls through to assemble recent group-turn context (each speaker
-    tagged with their `author_name`/`author_job_role`) and produce ONE
-    assistant turn (`role='assistant', author_user_id=NULL`) via the
-    unified answer engine (`qa_agent.answer`, scoped to this project —
-    RELOCATED from this function's own former inline `run_tool_loop` body,
-    not reimplemented). Never raises (AD-P7 best-effort contract) — a
-    failure (including a refused edit) yields no assistant turn and the
-    human turn that triggered this already persisted, so the chat is never
-    blocked.
+    """Produce the group agent's reply THROUGH the shared execution
+    lifecycle primitive (`run_execution_job`), so the group surface *inherits*
+    the same heartbeat / terminal-once / `error_class` envelope main and
+    private already run — not a wrapper around a status column.
 
-    The reply carries the `delegate_task`/`execute_task`/read tools —
-    zero new LLM calls: delegation and task execution piggyback on this
-    same reply. `ctx` is threaded in only to derive `dataset`/`company_id`
-    for the project tool handlers' artifact fold-in; reply/promotion
-    behavior is otherwise unchanged.
+    The reply WORK is the `body` closure below: run the SAME single
+    classify-and-edit path first regardless of `trigger_kind`
+    (`_classify_and_maybe_edit_group_prd` — a real edit applies in place and
+    the run completes; a requested-but-unwritten edit steers the fallback with
+    an `edit_note` so it never fabricates a completed change, B2), then
+    assemble the recent speaker-attributed group context and produce ONE
+    assistant turn via the unified engine (`qa_agent.answer`, scoped to this
+    project). On a forced failure the primitive writes `status='error'` +
+    `error_class` and NO assistant turn is fabricated — the old
+    `except`-that-only-logs is GONE, the primitive owns failure.
 
-    After a reply is actually produced, runs the best-effort memory-
-    promotion classifier (`maybe_promote_turn`) over the same clamped
-    transcript — reusing it rather than re-querying. `maybe_promote_turn`
-    is itself never-raising, so this call cannot turn a successful reply
-    into a failure; it only ever runs on the agent-reply path, never on a
-    human-to-human turn or a structured edit_prd dispatch."""
-    try:
-        recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
-        transcript = render_group_transcript(recent)
-        # The human who addressed Sprntly — the most recent turn with an
-        # author_user_id (an agent turn has none). Used as the delegation
-        # assigner if the model calls delegate_task on this reply, AND as
-        # the message classified below.
-        trigger = next((t for t in reversed(recent) if t.get("author_user_id")), None)
-        assigner_user_id = trigger["author_user_id"] if trigger else None
-        source_turn_id = trigger["id"] if trigger else None
-        dataset = _dataset_for(ctx)
+    Group inherits report/promote/ingest via the primitive's `on_committed`
+    hook, reusing the SAME project-gated calls main/private use
+    (`capture_report`, `maybe_promote_turn`, `maybe_ingest_status`) — run on a
+    produced reply, not the edit-applied path (which posted its own turn).
+    Group opts OUT of cancel (`is_cancelled=lambda: False`) — a backgrounded,
+    multi-party run has no Stop this wave (matches `capabilities.cancel=False`
+    on the group scope); recorded in the opt-out ledger, not silently
+    different."""
+    recent = conversations_db.list_group_turns(conversation_id)[-_GROUP_CONTEXT_TURNS:]
+    transcript = render_group_transcript(recent)
+    # The human who addressed Sprntly — the most recent turn with an
+    # author_user_id (an agent turn has none). Used as the delegation assigner
+    # if the model calls delegate_task on this reply, AND as the message
+    # classified below / promoted-and-ingested after.
+    trigger = next((t for t in reversed(recent) if t.get("author_user_id")), None)
+    assigner_user_id = trigger["author_user_id"] if trigger else None
+    source_turn_id = trigger["id"] if trigger else None
+    dataset = _dataset_for(ctx)
+    trigger_content = trigger["content"] if trigger else transcript
 
-        # Every trigger kind (mention, continuation, gate, solo) runs the
-        # ONE classify-then-edit path first — an applicable edit is applied
-        # in place here and we return; anything else falls through to the
-        # SAME unified-engine reply below. `edit_note` carries forward
-        # whether this turn was an un-applied edit request so the fallback
-        # reply can ask/answer honestly instead of fabricating a completed
-        # edit (B2 no-fabrication).
+    def _body() -> ExecutionOutcome:
+        # Every trigger kind runs the ONE classify-then-edit path first — an
+        # applicable edit is applied in place and the run completes; anything
+        # else falls through to the SAME unified-engine reply below.
         edit_note = ""
         if trigger is not None:
             history = [
@@ -1562,14 +1831,18 @@ def _respond_as_group_agent(
                 project_id, conversation_id, ctx, trigger["content"], history, dataset,
             )
             if edit.applied_turn is not None:
-                return
+                # The edit posted its own assistant turn; the run is a success.
+                # `edit_applied` in side_effects tells `_on_committed` to skip
+                # promote/ingest (faithful to the pre-primitive edit path).
+                return ExecutionOutcome(
+                    status="ready",
+                    response={"answer": (edit.applied_turn.get("content") or "")},
+                    side_effects=["edit_applied"],
+                )
             if edit.needs_prd_clarify:
                 # Content-derived signal (NOT `edit.refusal` truthiness — see
-                # `_GroupEditOutcome`'s docstring): this turn asked to edit
-                # the PRD and the project genuinely has 2+ PRDs to choose
-                # from. Ask which one via the single-sourced listing
-                # (`_project_prd_ids` + the `_resolve_prd_id` refusal
-                # string) instead of silently answering.
+                # `_GroupEditOutcome`'s docstring): this turn asked to edit the
+                # PRD and the project genuinely has 2+ PRDs. Ask which one.
                 listing = (edit.refusal or "more than one PRD exists on this project").rstrip(".")
                 edit_note = (
                     "EDIT STATUS: The latest turn asked to change the PRD, but "
@@ -1578,11 +1851,7 @@ def _respond_as_group_agent(
                     "PRD is meant before doing anything else."
                 )
             elif edit.was_edit_request:
-                # An edit was asked for but NOT written for some OTHER reason
-                # (flag off, or a target that failed to resolve without a
-                # genuine 2+-PRD choice — e.g. zero PRDs). The reply has no
-                # edit tool, so it must not claim a change was made; steer it
-                # to explain.
+                # An edit was asked for but NOT written for some OTHER reason.
                 reason = (edit.refusal or "the edit could not be applied").rstrip(".")
                 edit_note = (
                     "EDIT STATUS: The latest turn asked to change the PRD, but "
@@ -1593,12 +1862,9 @@ def _respond_as_group_agent(
 
         roster = projects_db.list_members(project_id)
 
-        # Inject the bounded project-context block (best-effort, never
-        # raises) onto the roster system prompt, and hand the agent the
-        # read tools alongside delegate_task/execute_task so it can answer
-        # AND act on demand — exactly the six tools the private surface
-        # carries, so both project surfaces stay single-sourced on the
-        # unified engine's tool set.
+        # Bounded project-context block + the six project tools (4 read +
+        # delegate/execute), exactly the private surface's set — both project
+        # surfaces stay single-sourced on the unified engine's tool set.
         context_block = project_group_context.assemble_group_agent_context(
             project_id, dataset, ctx.company_id
         )
@@ -1616,12 +1882,10 @@ def _respond_as_group_agent(
         if instr_block:
             system_parts.append(instr_block)
 
-        # LT-8 input-shape switch (build-spec §Group) — `question` is either
-        # the full attributed transcript or just the latest triggering
-        # message; `prerendered_transcript` ALWAYS carries the full
-        # attributed transcript either way, so the model never loses the
-        # thread — it is never re-flattened into `answer()`'s single-user
-        # history model (Invariant 4).
+        # LT-8 input-shape switch — `question` is either the full attributed
+        # transcript or just the latest triggering message;
+        # `prerendered_transcript` ALWAYS carries the full attributed
+        # transcript either way (Invariant 4).
         question = (
             transcript if _GROUP_TRANSCRIPT_AS_QUESTION
             else (trigger["content"] if trigger else transcript)
@@ -1640,9 +1904,6 @@ def _respond_as_group_agent(
             assigner_identity={
                 "assigner_user_id": assigner_user_id,
                 "source_turn_id": source_turn_id,
-                # Carried for the cost-log identifier only (qa_agent's
-                # sixth branch) — matches the pre-collapse group log line's
-                # identifier shape (project_id + conversation_id).
                 "conversation_id": conversation_id,
             },
             post_turn=lambda content: conversations_db.post_group_turn(
@@ -1661,12 +1922,36 @@ def _respond_as_group_agent(
             conversation_id, None, reply, role="assistant"
         )
         _publish_group_turn_created(project_id, conversation_id, assistant_turn)
-        maybe_promote_turn(project_id, conversation_id, transcript)
-    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the chat
-        logger.warning(
-            "group_chat_mention_reply_failed project_id=%s conversation_id=%s error=%s",
-            project_id, conversation_id, type(exc).__name__,
+        return ExecutionOutcome(status="ready", response=(result or {"answer": reply}))
+
+    def _on_committed(outcome: ExecutionOutcome) -> None:
+        # Report/promote/ingest inheritance — the SAME project-gated calls
+        # `_run_sync`'s `on_committed` uses. Skipped on the edit-applied path
+        # (no produced reply to capture/promote), faithful to the pre-primitive
+        # behaviour where only the answer path promoted.
+        if "edit_applied" in outcome.side_effects:
+            return
+        capture_report(
+            outcome.response,
+            company_id=ctx.company_id,
+            question=trigger_content,
+            workspace_id=ctx.workspace_id,
+            ask_id=job_id,
+            conversation_id=conversation_id,
+            prd_id=None,
+            is_cancelled=lambda: False,
         )
+        maybe_promote_turn(project_id, conversation_id, transcript)
+        maybe_ingest_status(project_id, conversation_id, assigner_user_id, trigger_content)
+
+    await run_execution_job(
+        job_id=job_id,
+        run_id=run_id,
+        is_cancelled=lambda: False,
+        heartbeat=lambda: touch_ask_job(job_id),
+        body=_body,
+        on_committed=_on_committed,
+    )
 
 
 # ── Delegation ledger (walking skeleton — the accountability ledger's one

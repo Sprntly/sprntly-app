@@ -98,6 +98,31 @@ describe("MemoryModalView — synthesized summary block", () => {
     expect(within(block).queryByRole("button")).toBeNull()
   })
 
+  it("renders the synthesized Markdown as structured, safe prose instead of raw syntax", () => {
+    render(
+      React.createElement(
+        MemoryModalView,
+        viewProps({
+          state: {
+            status: "ready",
+            summary: {
+              ...SUMMARY,
+              summary_md: "## Priorities\n\n- **Fast** quoting\n- Keep `lead time` visible\n\n<script>alert('no')</script>",
+            },
+          },
+        }),
+      ),
+    )
+
+    const body = screen.getByTestId("memory-synth-body")
+    expect(within(body).getByRole("heading", { level: 2, name: "Priorities" })).toBeTruthy()
+    expect(within(body).getAllByRole("listitem")).toHaveLength(2)
+    expect(within(body).getByText("Fast").tagName).toBe("STRONG")
+    expect(within(body).getByText("lead time").tagName).toBe("CODE")
+    expect(body.textContent).not.toContain("##")
+    expect(body.querySelector("script")).toBeNull()
+  })
+
   it("renders a muted 'Synthesis pending' placeholder when summary_md is null, without crashing", () => {
     render(
       React.createElement(
@@ -248,9 +273,23 @@ describe("MemoryModalView — Escape listener cleanup (no leaked listener)", () 
 describe("MemoryModal.module.css — tokens only", () => {
   it("resolves every color to a globals.css custom property — no new palette", () => {
     const css = readFileSync(join(__dirname, "../MemoryModal.module.css"), "utf8")
+    const globals = readFileSync(join(__dirname, "../../../../../globals.css"), "utf8")
     const found = css.match(/#[0-9A-Fa-f]{3,8}/g) ?? []
     const disallowed = found.filter((hex) => hex.toLowerCase() !== "#fff")
     expect(disallowed).toEqual([])
+
+    const synthBlocks = [...css.matchAll(/([^{}]*\.synthBody[^{}]*)\{([^{}]*)\}/g)]
+      .map(([, , declarations]) => declarations)
+      .join("\n")
+    const colorDeclarations = synthBlocks
+      .split(";")
+      .filter((declaration) => /^\s*(?:color|background|border(?:-[\w-]+)?)\s*:/.test(declaration))
+      .join("\n")
+    const referencedTokens = [...colorDeclarations.matchAll(/var\((--[\w-]+)\)/g)].map(([, token]) => token)
+    const declaredTokens = new Set([...globals.matchAll(/(--[\w-]+)\s*:/g)].map(([, token]) => token))
+
+    expect(referencedTokens.length).toBeGreaterThan(0)
+    expect(referencedTokens.filter((token) => !declaredTokens.has(token))).toEqual([])
   })
 })
 

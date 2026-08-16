@@ -818,6 +818,22 @@ def test_the_log_dict_is_one_flat_greppable_record():
     assert record["reason"] == "ticket context"
 
 
+def test_the_log_dict_records_what_kind_of_document_was_decided():
+    """`artifact_kind` is the ARGUMENT `create_artifact` dispatches with, so a
+    plan line without it cannot answer "what did it think it was writing" —
+    the first question asked of a document that came out wrong."""
+    plan = ap.Plan(action="create_artifact", task="Q3 for the board",
+                   artifact_kind="leadership update")
+    assert plan.as_log_dict()["artifact_kind"] == "leadership update"
+
+
+def test_the_log_dict_carries_the_kind_key_even_when_there_is_none():
+    """Logged unconditionally, like `template` beside it: an omitted key makes
+    "no kind was named" indistinguishable from "this line predates the field"
+    when grepping a journal."""
+    assert "artifact_kind" in ap.Plan(action="answer").as_log_dict()
+
+
 # ── the feature flag ─────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize(

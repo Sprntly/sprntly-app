@@ -57,7 +57,6 @@ from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
     active_conversation_attachment_names,
-    active_project_id,
     company_facts_block,
     compose_ask_answer,
     document_grounding,
@@ -1356,7 +1355,7 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]:
+def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1373,8 +1372,17 @@ def _m_call_digest(*, enterprise_id, question, history, **_kw) -> Optional[dict]
             enterprise_id,
         )
         return None
+    # THE PLAN'S WINDOW TRAVELS WITH THE QUESTION. Dropping it here is what
+    # made "a table week by week ... the last five weeks" run over four days:
+    # the planner extracted 2026-07-12 correctly, this call discarded it, and
+    # `parse_window`'s digits-only regex could not read a spelled-out "five",
+    # so the digest fell to its 7-day default and then reported the missing
+    # weeks as history that "was not captured" (2026-08-16). Same defect the
+    # calls leg had — a constraint the planner extracted, thrown away by the
+    # executor that needed it.
     return call_digest.answer(
-        enterprise_id=enterprise_id, question=question, history=history
+        enterprise_id=enterprise_id, question=question, history=history,
+        constraints=(plan.constraints if plan is not None else None),
     )
 
 
@@ -1466,8 +1474,34 @@ _PLANNED_MACHINERY: dict = {
 }
 
 
+#: Providers whose presence in a plan's `sources` means "this question is
+#: about recorded calls". Exactly `live_read._LOCAL_LEGS`' call half — the two
+#: describe the same fact, so they must not drift.
+_CALL_SOURCES = frozenset({"fireflies", "zoom"})
+
+
+def _plan_named_call_source(plan: "AskPlan") -> bool:
+    """Did the planner say calls are where this answer lives?
+
+    The gate on the single-call backstop: it refines the planner's own
+    decision rather than second-guessing it, so a plan that never mentioned a
+    call source is left entirely alone."""
+    return bool(plan is not None and _CALL_SOURCES.intersection(plan.sources or []))
+
+
+def _routing_text_for_calls(question: str, history) -> str:
+    """The text the call-reference gate reads.
+
+    The bare question, never the folded thread: `is_single_call_request`
+    extracts NAMING words, so a previous turn's vocabulary would let an
+    unrelated follow-up resolve to whatever call that turn discussed. This is
+    the same reason the ladder hands it `routing_text` rather than history."""
+    return question or ""
+
+
 def _planned_live_context(
-    enterprise_id: Optional[str], plan: "AskPlan", question: str
+    enterprise_id: Optional[str], plan: "AskPlan", question: str,
+    *, local_only: bool = False,
 ) -> str:
     """Read the sources the PLANNER named, and render them for the answer.
 
@@ -1497,9 +1531,11 @@ def _planned_live_context(
             plan.sources,
             query=query,
             constraints=plan.constraints,
+            local_only=local_only,
         )
         logger.info(
-            "[planner] exec live-read company=%s %s",
+            "[planner] exec %s company=%s %s",
+            "local-read" if local_only else "live-read",
             enterprise_id, result.outcome_summary(),
         )
         block = result.render_block()
@@ -1653,17 +1689,44 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
 _CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong", "zoom"})
 
 
-def _project_scoped_ask() -> bool:
-    """True when this ask is the individual PROJECT chat (a project_id rode the
-    request, set on `ask_runner`'s request-scoped ContextVar by the worker). Read
-    by `answer()` to skip the connector-lookup interceptors so the folded,
-    authoritative project-context block is what grounds project-meta questions.
-    Best-effort — a lookup failure degrades to False (interceptors run as
-    before), never raising into the answer path."""
+def _skip_project_connectors(
+    scope: "Optional[SurfaceScope]",
+    routing_text: str,
+    history: Optional[list[dict]],
+) -> bool:
+    """True → SKIP the connector-lookup interceptors (tracker / named-source /
+    document) for THIS turn. A typed, `scope`-driven replacement for the former
+    request-scoped-ContextVar predicate — it reads the surface off the `scope`
+    `answer()` already carries, never a request-scoped global, so it fixes BOTH
+    project surfaces (group AND private) from this one site.
+
+    * Main chat (`scope is None` or `Surface.main`): ALWAYS False — byte-
+      identical to the pre-ticket guard (main was never a project surface), so
+      main routing is unchanged.
+    * A PROJECT surface (private / group): skip UNLESS the question NAMES a
+      source one of the interceptors can serve — a named tracker
+      (`named_trackers`), a named connector/provider (`is_connector_lookup`),
+      or a named document (`document_lookup_candidates`). A named-source project
+      question is ADMITTED (each branch's own predicate then decides which one
+      actually fires); an UNNAMED PM-noun question ("what tasks are open?") is
+      skipped so it falls through to `PROJECT_FACTS_AUTHORITATIVE_PREAMBLE` +
+      the project ledger instead of a "connect a connector" deflection.
+
+    Best-effort — a detector failure degrades to NOT skipping (interceptors run
+    as before), never raising into the answer path."""
+    if scope is None or scope.surface == Surface.main:
+        return False
     try:
-        return active_project_id() is not None
+        from app.connector_lookup import tracker
+
+        names_source = bool(
+            tracker.named_trackers(routing_text)
+            or is_connector_lookup(routing_text, history)
+            or document_lookup_candidates(routing_text)
+        )
     except Exception:  # noqa: BLE001 — never break the answer over a routing hint
         return False
+    return not names_source
 
 
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
@@ -2090,6 +2153,45 @@ def answer(
             return planned
         # The plan named no machinery — which is the normal outcome — so this
         # turn continues to the routed/generic path below with the ladder off.
+        #
+        # ONE BACKSTOP, for the one case where "no machinery" is measurably
+        # wrong: the question names a single call AND the plan named a call
+        # source. "give me more details on the maverik meeting" planned
+        # `pipeline_id: none` with `sources: [fireflies, slack]` and reason
+        # "best answered by reading Fireflies for a recorded transcript" — it
+        # knew, and still picked nothing, so the transcript was never fetched
+        # and the answer was assembled from distilled signals that had already
+        # lost the attendees and the objections (reported 2026-08-16).
+        #
+        # Deliberately narrow, and not a reopening of the regex ladder:
+        #   * the PLAN must already name a call source, so this only refines a
+        #     decision the planner made — it never claims a turn the planner
+        #     routed elsewhere (a named pipeline returned above);
+        #   * `is_single_call_request` is the ladder's own tested gate, which
+        #     stands itself down for plurals and windows ("our recent customer
+        #     calls" belongs to the listing/digest paths, not to one call);
+        #   * `_m_single_call_read` DECLINES to None when the reference
+        #     resolves to no indexed call, so a wrong guess costs one indexed
+        #     lookup and the turn carries on.
+        if _plan_named_call_source(plan) and call_index.is_single_call_request(
+            _routing_text_for_calls(question, history), history
+        ):
+            try:
+                single = _m_single_call_read(
+                    enterprise_id=enterprise_id, question=question,
+                    history=history, fresh=_index_fresh,
+                )
+            except Exception:  # noqa: BLE001 — a backstop must never break chat
+                logger.exception(
+                    "[planner] single-call backstop failed for %s", enterprise_id
+                )
+                single = None
+            if single is not None:
+                logger.info(
+                    "[planner] single-call backstop served %s (plan named no "
+                    "machinery)", enterprise_id,
+                )
+                return single
 
     # Sources the user NAMED in this very message, and whether any of them is
     # one we can actually open live for this company. Naming a source is the
@@ -2380,19 +2482,17 @@ def answer(
     # returns a connect message rather than falling through. A slash command
     # (handled by route()) is exempt so an explicit skill invocation that merely
     # names Jira isn't hijacked.
-    # Individual PROJECT chat: `routes/ask.py` folded an authoritative
-    # project-context block (members + task ledger + artifact manifest) into this
-    # ask's history. The connector-lookup interceptors here (tracker, named
-    # source, document lookup) fire on the raw question BEFORE the generic route
-    # reaches that block, so a project-meta question ("who's on this project?",
-    # "what tasks are open?", "how many PRDs?") is hijacked into a "connect a
-    # connector" reply that never reads the project facts. For a project-scoped
-    # ask we skip these three so the question falls through to route() ->
-    # compose_ask_answer, where the folded block is the grounding. `not
-    # _project_scoped_ask()` is True for every non-project ask, so their routing
-    # is byte-for-byte unchanged. `_regex_ladder` (not pinned_skill and plan is
-    # None) already subsumes the pinned-skill check.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
+    # PROJECT chat (private + group): a project-meta question ("who's on this
+    # project?", "what tasks are open?", "how many PRDs?") that NAMES no source
+    # must ground in the folded project-facts block, not be hijacked here into a
+    # "connect a connector" reply. `_skip_project_connectors(scope, ...)` returns
+    # True for exactly that case (a project surface + no named source) so the
+    # question falls through to route() -> compose_ask_answer; a project question
+    # that NAMES a tracker/connector/document is admitted (each branch's own
+    # predicate then decides). For main (`scope is None`) the helper is always
+    # False, so these three guards are byte-for-byte unchanged. `_regex_ladder`
+    # (not pinned_skill and plan is None) already subsumes the pinned-skill check.
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
         from app.connector_lookup import tracker
 
         # Capability gate: matching the PM-noun-plus-verb regex is not enough
@@ -2422,7 +2522,7 @@ def answer(
     # question NAMES a source none of them claimed. A source we cannot read live
     # is answered honestly here too (registry.not_supported_message), which is
     # better than the generic path guessing from the KG.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/"):
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/"):
         connector_hints = is_connector_lookup(routing_text, history)
         if connector_hints:
             from app.connector_lookup import registry
@@ -2453,7 +2553,7 @@ def answer(
     #
     # Below every other interception for the usual reason — this trigger is the
     # broadest on the path, so it must only see what nothing else claimed.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/"):
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/"):
         candidates = document_lookup_candidates(routing_text)
         if candidates:
             from app.connector_lookup import registry
@@ -2661,12 +2761,26 @@ def answer(
         live_reads_on = bool(
             getattr(_settings, "live_connector_reads_enabled", False)
         )
-        if not prd_context and live_reads_on:
+        # LOCAL LEGS ARE NOT LIVE READS, and standing them down with the live
+        # ones is what made "past calls are missing" (2026-08-15) possible.
+        # `_LOCAL_LEGS` (fireflies/zoom → the call index, github → synced PR
+        # rows) are Postgres SELECTs against tables THIS SAME connector sync
+        # fills — no third-party call, no API quota, microseconds. The flag's
+        # stated cost is "up to 8s of third-party I/O", which they do not
+        # incur, so with the flag off they now run in `local_only` mode
+        # instead of not running at all: the answer path keeps the call
+        # history the sync already indexed (522 calls back to 2023 for the
+        # tenant that reported this), and only the networked fan-out is
+        # actually stood down. A networked source the plan named is still
+        # reported as unread with its reason — see `read_sources`.
+        if not prd_context:
             if plan is not None:
                 live_context_fn = lambda: _planned_live_context(  # noqa: E731
-                    enterprise_id, plan, question
+                    enterprise_id, plan, question, local_only=not live_reads_on
                 )
-            else:
+            elif live_reads_on:
+                # The keyword sweep has no local half to preserve — it probes
+                # connectors and nothing else — so it stays fully gated.
                 live_context_fn = lambda: _sweep_context(enterprise_id, question)  # noqa: E731
         if plan is not None:
             # The library read is a Postgres SELECT, not a connector call — it
@@ -2762,6 +2876,25 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
+    # Market-intelligence routed: the report is public-web news about the
+    # CATEGORY (funding, M&A, entrants, category movement, regulation, analyst
+    # coverage), which the generic skill answer can't reach — the KG holds
+    # first-party signal, not the trade press. Run the dedicated web-search
+    # pipeline instead; it returns None only when the company profile can't be
+    # read, falling through to the generic answer.
+    if decision.skill_id == "market-intelligence-report":
+        from app import market_intel
+
+        mi = market_intel.answer(
+            enterprise_id=enterprise_id, question=question, history=history,
+            # The capture is paid web search and the synthesis is a
+            # document-scale call; the boundary between them is a cancellation
+            # checkpoint, so a Stop actually stops the second spend.
+            is_cancelled=is_cancelled,
+        )
+        if mi is not None:
+            return _maybe_verify(mi, enterprise_id)
+
     # VoC routed by ANY stage — including the haiku intent router. One path
     # answers it, and that path reads BOTH halves of the evidence: the live call
     # sources and the knowledge graph. A phrasing only the LLM router
@@ -2789,9 +2922,15 @@ def answer(
         from app import call_digest
 
         if not pinned_skill:
+            # The ROUTER picked the digest here rather than the planner, but a
+            # planned turn still reached this line with a window the planner
+            # extracted (its plan simply named no machinery). Hand it over for
+            # the same reason `_m_call_digest` does — a window read from the
+            # whole sentence beats one re-derived from its surface words.
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
+                constraints=(plan.constraints if plan is not None else None),
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).

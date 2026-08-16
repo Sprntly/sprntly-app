@@ -75,6 +75,22 @@ the same task Sprntly was just engaged on. In a clear continuation the \
 missing @Sprntly handle does not matter — the human is plainly still \
 talking to Sprntly.
 
+A PROJECT CONTEXT block (this project's memory summary, member roster, task
+ledger, and artifact list) precedes the transcript. Use it to judge whether
+the latest untagged turn is about THIS project's work. Respond true when the
+latest turn is relevant to the project context — asking about the project,
+its status, a task on the ledger, a member, an artifact, or the work itself
+(for example: "how's the onboarding task going?", "what's the status here?",
+"who owns the API doc?", "can we get a summary of where we are?") — since
+Sprntly is uniquely positioned to answer these, even with other humans
+present and no @Sprntly handle.
+
+This does NOT override the stay-out rules: ordinary human-to-human
+back-and-forth (even about the project), a turn @-addressed to a named human
+("Alexis, can you..."), and acknowledgements that expect nothing from
+Sprntly still return false. When genuinely unsure, the conservative default
+is false: stay out rather than interject uninvited.
+
 Respond false — stay out — when NOT to respond: ordinary human-to-human \
 back-and-forth (including humans replying to each OTHER after a Sprntly \
 turn), a message @-addressed to another named human, acknowledgements \
@@ -174,6 +190,8 @@ def should_respond(
     latest_content: str,
     *,
     agent_spoke_last: bool = False,
+    dataset: str | None = None,
+    company_id: str | None = None,
 ) -> bool:
     """Whether the group agent should interject on a non-mention group
     turn. Never raises (AD-P7/AD-P10) — any pre-filter, classifier, or
@@ -199,6 +217,17 @@ def should_respond(
     out. When the agent did NOT just speak (the default), the pre-filter
     is unchanged, so ambient chatter still short-circuits free with no
     classifier call.
+
+    `dataset`/`company_id` — keyword-only, default `None` (backward
+    compatible: a caller omitting them gets the plain, pre-project-aware
+    gate, `user_cacheable_prefix=None`). When BOTH are set, the compact
+    project signal (`project_group_context.assemble_group_agent_context`,
+    the SAME assembler the reply path already uses — never a second one)
+    is assembled lazily, AFTER the pre-filter, so trivial chatter pays
+    neither an LLM call nor the assembler's DB reads. The signal rides as
+    `call_json`'s `user_cacheable_prefix` — a stable block eligible for
+    `cache_control: ephemeral` — while the per-message transcript stays the
+    uncached `user`, never concatenated together.
     """
     if not agent_spoke_last and _obviously_human_chatter(latest_content):
         logger.info(
@@ -208,6 +237,12 @@ def should_respond(
         )
         return False
 
+    project_context = None
+    if dataset is not None and company_id is not None:
+        from app.project_group_context import assemble_group_agent_context
+
+        project_context = assemble_group_agent_context(project_id, dataset, company_id)
+
     start = time.monotonic()
     meta: dict = {}
     try:
@@ -215,6 +250,7 @@ def should_respond(
         out = call_json(
             system=_GATE_SYSTEM,
             user=transcript,
+            user_cacheable_prefix=project_context,
             model=DEFAULT_MODEL,
             schema=_GATE_SCHEMA,
             meta_out=meta,

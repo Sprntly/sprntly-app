@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS custom_artifacts (
     body_html       TEXT NOT NULL DEFAULT '',
     status          TEXT NOT NULL DEFAULT 'ready',
     error           TEXT,
+    error_code      TEXT,
     version         INTEGER NOT NULL DEFAULT 1,
     created_by      TEXT,
     updated_by      TEXT,
@@ -532,6 +533,118 @@ def test_generate_refuses_a_foreign_conversation(docs_env, monkeypatch):
     assert r.status_code == 404
 
 
+def test_the_generation_handler_is_async_not_a_threadpool_hog(docs_env):
+    """STRUCTURAL, because the cost is invisible in any functional test.
+
+    A sync `def` handler runs on the SAME anyio threadpool FastAPI serves every
+    sync route from — 40 tokens, one process — and `long_output=True` lets a
+    single document generation hold one for up to 600 seconds. Enough concurrent
+    documents and unrelated sync routes queue behind them, which a user
+    experiences as the whole app being slow for no visible reason.
+
+    Asserted on the function rather than on behaviour because behaviour cannot
+    see it: the sync version passes every functional test in this file.
+    """
+    import inspect
+
+    import app.routes.custom_artifacts as mod
+
+    assert inspect.iscoroutinefunction(mod.generate)
+
+
+def test_the_handlers_supabase_calls_do_not_run_on_the_event_loop(docs_env):
+    """Making a handler async without moving its blocking calls trades a
+    threadpool problem for a worse one: two Supabase round trips per request
+    would stall the WHOLE process, and a wedged client (the h2 hang) would take
+    the API down rather than one worker thread.
+
+    Asserted on the source because there is no runtime signal for it — a
+    blocking call on the loop looks identical to a fast one until the day it
+    hangs.
+    """
+    import inspect
+
+    import app.routes.custom_artifacts as mod
+
+    src = inspect.getsource(mod.generate)
+    assert "await asyncio.to_thread(\n        conversation_belongs_to_company" in src
+    assert "await asyncio.to_thread(\n        create_artifact" in src
+
+
+def test_generations_run_on_their_own_pool_not_a_shared_one(docs_env):
+    """A generation holds its thread for minutes. Both pools it might otherwise
+    borrow — anyio's (every sync route) and asyncio's default (~120 to_thread
+    sites) — carry work that has to stay responsive, so a burst of documents
+    must only ever make other documents wait."""
+    import app.routes.custom_artifacts as mod
+
+    assert mod._GENERATION_POOL._max_workers == 4
+    assert "custom-artifact-gen" in mod._GENERATION_POOL._thread_name_prefix
+
+
+def test_the_generation_actually_runs(docs_env, monkeypatch):
+    """The scheduling mechanism changed (BackgroundTasks → to_thread on a
+    tracked task), so this pins the property that must survive it: by the time
+    the row is polled, the writer has been called with the caller's arguments."""
+    import app.routes.custom_artifacts as mod
+
+    seen: dict = {}
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: seen.update(kw))
+
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "board memo", "task": "Q3", "context": "p99 fell to 210ms"},
+    )
+
+    assert r.status_code == 200
+    assert seen["kind"] == "board memo"
+    assert seen["task"] == "Q3"
+    assert seen["context"] == "p99 fell to 210ms"
+    assert seen["artifact_id"] == r.json()["id"]
+    # The RESPONSE is the row as created, on this path and in production alike —
+    # the id to poll, still generating. A test asserting a shape production
+    # never returns would be worse than no test.
+    assert r.json()["status"] == "generating"
+
+
+@pytest.mark.parametrize(
+    "field, size",
+    [("task", 8_001), ("context", 60_001), ("kind", 501)],
+)
+def test_oversized_generation_input_is_refused(docs_env, monkeypatch, field, size):
+    """Every field here is forwarded into an LLM prompt, and none was bounded.
+    Unbounded input on a prompt path is a caller able to spend the TENANT's
+    tokens by the megabyte — the cost lands on them, not on the sender."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t", **{field: "x" * size}},
+    )
+    assert r.status_code == 422
+
+
+def test_a_real_sized_request_is_comfortably_under_the_ceilings(
+    docs_env, monkeypatch
+):
+    """The bounds exist to refuse the pathological case, never a real one. The
+    client caps its thread transcript at 12k, so that must pass untouched."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "leadership update", "task": "Q3", "context": "x" * 12_000},
+    )
+    assert r.status_code == 200
+
+
 def test_a_generating_document_is_readable_while_it_writes(docs_env, monkeypatch):
     """The panel polls this row, so it has to be fetchable mid-generation."""
     import app.routes.custom_artifacts as mod
@@ -543,3 +656,70 @@ def test_a_generating_document_is_readable_while_it_writes(docs_env, monkeypatch
     ).json()["id"]
     got = ctx.client.get(f"/v1/custom-artifacts/{doc_id}")
     assert got.status_code == 200 and got.json()["status"] == "generating"
+
+
+# ─── A failed document says why (and never says how) ─────────────────────────
+
+def _fail(company_id: str, doc_id: int, error: str, code: str | None) -> None:
+    from app.db.custom_artifacts import fail_artifact
+
+    fail_artifact(company_id, doc_id, error, code=code)
+
+
+def test_a_failed_document_returns_its_reason_code(docs_env, monkeypatch):
+    """Without this the API said nothing about a failure at all, so the product
+    could only ever show one sentence for every cause — and a user could not
+    tell "ask again and it will work" from "asking again fails the same way"."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "gateway down", "llm_error")
+
+    doc = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert doc["status"] == "failed"
+    assert doc["error_code"] == "llm_error"
+
+
+def test_the_raw_error_is_never_returned(docs_env, monkeypatch):
+    """THE POINT OF THE SPLIT. `error` is `str(exc)` — provider wording, URLs,
+    whatever ended up in the message — and this library is shared with the whole
+    team. The code is returned; the text stays operator-side."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "connect failed: https://internal.host/v1?key=abc", "llm_error")
+
+    body = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert "error" not in body
+    assert "internal.host" not in ctx.client.get(
+        f"/v1/custom-artifacts/{doc_id}"
+    ).text
+
+
+def test_a_document_that_failed_before_the_column_existed_reads_as_unknown(
+    docs_env, monkeypatch
+):
+    """NULL means "we do not know why", which is exactly true of every row that
+    failed before this column existed. The web has copy for that; inventing a
+    code here would be a guess rendered as a fact."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "some old failure", None)
+
+    doc = ctx.client.get(f"/v1/custom-artifacts/{doc_id}").json()
+    assert doc["status"] == "failed" and doc["error_code"] is None
+
+
+def test_listings_omit_the_code_rather_than_reporting_a_false_null(
+    docs_env, monkeypatch
+):
+    """The listing selects a fixed column set that does not include the code, so
+    emitting the key would say `error_code: null` for a document that genuinely
+    failed with a known reason. A field that lies is worse than one that is
+    absent — the listing carries `status`, which is all it renders."""
+    ctx = company_client(monkeypatch)
+    doc_id = _create(ctx, title="Q3").json()["id"]
+    _fail(ctx.company_id, doc_id, "gateway down", "llm_error")
+
+    rows = ctx.client.get("/v1/custom-artifacts").json()["artifacts"]
+    row = next(r for r in rows if r["id"] == doc_id)
+    assert row["status"] == "failed"
+    assert "error_code" not in row

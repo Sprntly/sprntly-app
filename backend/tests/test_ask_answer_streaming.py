@@ -362,7 +362,14 @@ async def test_run_ask_job_failure_closes_channel_with_error(monkeypatch):
 
     failed: dict = {}
     monkeypatch.setattr(ajr.qa_agent, "answer", fake_answer)
-    monkeypatch.setattr(ajr, "fail_ask_job", lambda i, m: failed.setdefault(i, m))
+    # The terminal-fail write now flows through the shared `run_execution_job`
+    # primitive, which classifies and passes an `error_class` (AC4) alongside
+    # the message — so the mirror stub accepts it and the test asserts the
+    # classification (a bare RuntimeError → the generic 'app' bucket).
+    monkeypatch.setattr(
+        ajr, "fail_ask_job",
+        lambda i, m, error_class=None: failed.setdefault(i, (m, error_class)),
+    )
     monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
 
     received: list[dict] = []
@@ -379,3 +386,6 @@ async def test_run_ask_job_failure_closes_channel_with_error(monkeypatch):
 
     assert received[-1] == {"kind": "error"}, "subscriber released on failure"
     assert 9 in failed
+    msg, error_class = failed[9]
+    assert "model exploded" in msg
+    assert error_class == "app", f"a bare RuntimeError classifies as 'app', got {error_class!r}"

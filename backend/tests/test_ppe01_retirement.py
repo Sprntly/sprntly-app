@@ -94,10 +94,20 @@ def test_banner_file_and_test_deleted():
 
 
 def test_individual_chat_no_longer_imports_or_renders_banner():
-    src = (
+    # `ProjectIndividualChat.tsx` was deleted by the chat-shell refactor —
+    # its individual-chat surface now renders as `ProjectPrivateChat.tsx`
+    # through the shared chat shell. The retirement intent (no banner import)
+    # holds vacuously for a file that no longer exists, and holds concretely
+    # for its successor.
+    individual_chat = (
         WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectIndividualChat.tsx"
+    )
+    assert not individual_chat.exists()
+
+    private_chat_src = (
+        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectPrivateChat.tsx"
     ).read_text(encoding="utf-8")
-    assert "ProjectPrdPatchBanner" not in src
+    assert "ProjectPrdPatchBanner" not in private_chat_src
 
 
 def test_group_chat_unchanged_never_referenced_banner():
