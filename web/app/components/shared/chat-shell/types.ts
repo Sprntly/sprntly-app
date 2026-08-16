@@ -297,8 +297,10 @@ export interface MapMainTurnsDeps {
   clarifyPopupOpen: boolean
   pendingClarifyTurn: { id: string } | null | undefined
 
-  // callbacks
-  handleAskAgain: (turn: { id: string }) => void
+  // callbacks (the turn/result handlers use method syntax so the host's richer
+  // ThreadTurn/result-typed handlers assign without coupling this module to the
+  // main-chat screen's private types — the idiomatic bivariant-handler pattern)
+  handleAskAgain(turn: { id: string }): void
   handleStopAsk: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
   setViewerAttachment: (a: {
@@ -314,7 +316,7 @@ export interface MapMainTurnsDeps {
   handleOpenEvidence: () => void
   handleOpenPrd: () => void
   handleViewPrototype: () => void
-  handlePrototypeSettled?: (result?: unknown) => void
+  handlePrototypeSettled?(result?: unknown): void
 }
 
 // Re-export the finished per-turn prop shape the main mapping produces, so

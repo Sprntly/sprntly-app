@@ -62,6 +62,7 @@ import { prototypePath } from "../../../lib/routes"
 import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
+import { mapMainTurns } from "./mapMainTurns"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -71,7 +72,7 @@ import { AGENT_NAME } from "../../../lib/agent"
  *  memos that depend on it don't re-run on every render of a report-less chat. */
 const NO_REPORTS: ReportSummary[] = []
 
-type ThreadTurn = {
+export type ThreadTurn = {
   id: string
   /** DISPLAY text — the user's typed ask only. Attached-document content is NOT
    *  folded in here (that goes to the backend separately); the thread renders
@@ -778,7 +779,7 @@ const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
 // with `skipExistenceCheck` (the batch prototype map — chatInsightState — is the
 // existence source of truth, so no redundant per-tab getByPrd), driving Generate
 // (open the modal) vs View (navigate) from `prototypeReady`.
-function ChatArtifactActions({
+export function ChatArtifactActions({
   evidenceExists,
   prdExists,
   prdWaiting,
@@ -873,7 +874,7 @@ function ChatArtifactActions({
  *  FROM a PRD, so on this surface it is not a thing the user could enable, and
  *  a permanently-dead button reads as a bug. Same classes as the two-button
  *  row, so the two never drift visually. */
-function ChatTicketSetActions({
+export function ChatTicketSetActions({
   state,
   onClick,
 }: {
@@ -6881,142 +6882,17 @@ export function ChatScreen() {
                       // closure inside the leaf. Comments that used to sit
                       // beside the inline JSX now sit beside the prop that
                       // carries the same fact.
-                      const turns: ChatTranscriptTurn[] = thread.map((turn, idx) => {
-                        // "Last" for the purposes of in-flight state and the
-                        // artifact-action row means the last turn a REPLY could
-                        // still land on — a pending artifact-summary placeholder
-                        // is transparent to both. Without this, appending that
-                        // placeholder while an ask is in flight stole `isLast`
-                        // from the real in-flight turn, flipping it to "No
-                        // response was generated" mid-answer and yanking the
-                        // View PRD row off screen. Identical to `isLast` whenever
-                        // no summary is pending.
-                        const isLast = idx === lastLiveTurnIdx
-                        // A turn shows the "thinking" skeleton ONLY while its ask is
-                        // genuinely in flight — the active tab is busy AND this is the
-                        // last (in-flight) turn. Any other reply-less turn is terminal:
-                        // an ask that never got a response (failed / stopped / abandoned,
-                        // or a restored orphan turn from history). Basing this on live
-                        // busy state — not merely `reply === undefined` — means a
-                        // sessionStorage-cached thread renders correctly on reload too.
-                        // A PRD generation counts as in-flight too. Its command
-                        // turn's reply is the acknowledgment, and if that reply is
-                        // missing while the PRD is still being built, "No response
-                        // was generated" is the one thing that is certainly false —
-                        // the response is what the panel is rendering right now.
-                        const isGenerating =
-                          isLast &&
-                          (busy || !!activeTab?.prdGenerating || !!activeTab?.prdCommandThinking)
-                        const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
-                        if (hasFreshReply) animatedTurnIds.current.add(turn.id)
-                        // Wait-state signals for this turn. Every one is an
-                        // observable fact, not an inference: the skill only when
-                        // the question LEADS with a known trigger, the resume flag
-                        // only when resumeAskGeneration re-attached by id.
-                        const waitSkill = skillForQuery(turn.query)
-                        const waitStartedAt = askStartRef.current.get(turn.id)
-                        const waitResumed = resumedTurnsRef.current.has(turn.id)
-
-                        // Artifact-action row (Generate/View PRD + prototype) —
-                        // ONLY on a PRD-bound tab whose insight card isn't showing
-                        // yet, OR the STANDALONE-set row on a chat with no PRD —
-                        // never both, and only on the last turn once it has a
-                        // reply (the run-in-flight state shows it too).
-                        const footer =
-                          isLast && turn.reply && activeTab?.prdId == null && ticketSetActionState ? (
-                            <ChatTicketSetActions
-                              state={ticketSetActionState}
-                              onClick={() => { void handleTicketSetAction(activeTab!.id) }}
-                            />
-                          ) : isLast && turn.reply && !showInsightMsg && activeTab?.prdId != null ? (
-                            <ChatArtifactActions
-                              evidenceExists={chatEvidenceExists}
-                              prdExists={chatPrdExists}
-                              prdWaiting={chatPrdCtaWaiting}
-                              prdGenerating={!!activeTab?.prdGenerating}
-                              prdLoading={!!activeTab?.prdLoading}
-                              onViewEvidence={handleOpenEvidence}
-                              onOpenPrd={handleOpenPrd}
-                              prototypePrdId={chatProtoPrdId}
-                              prototypeReady={chatPrototypeReady}
-                              onViewPrototype={handleViewPrototype}
-                              onPrototypeSettled={handlePrototypeSettled}
-                            />
-                          ) : null
-
-                        // IN-CHAT COMMAND open: the insight/PRD card + clarifying
-                        // questions render as the reply BELOW the command turn —
-                        // `inlinePrdAnchorIdx` resolves which turn that is —
-                        // instead of being pinned above the whole conversation.
-                        // Header opens render them at the top (see `leading`
-                        // below) and skip this.
-                        const afterNode =
-                          inlinePrdCards && idx === inlinePrdAnchorIdx ? (
-                            <>
-                              {insightCardNode}
-                              {prdQuestionsNode}
-                            </>
-                          ) : null
-
-                        return {
-                          turnId: turn.id,
-                          // Only when the user actually said something. A turn
-                          // can be AGENT-ONLY — the clarify gate posts its
-                          // questions as a turn with an empty `query` — and an
-                          // unconditional header put the user's name and avatar
-                          // above a message they never sent. `ChatBubble`
-                          // applies the same query-or-attachments gate.
-                          user: {
-                            name,
-                            initials: userInitials,
-                            query: turn.query,
-                            attachments: turn.attachments?.map((a) => ({
-                              name: a.name, content: a.content, downloadable: !!a.key,
-                              key: a.key, mime: a.mime,
-                            })),
-                            onOpenAttachment: (a) =>
-                              setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime }),
-                          },
-                          agentName: AGENT_NAME,
-                          agentBadge: "Product Coworker",
-                          isLast,
-                          isGenerating,
-                          isAnimated: hasFreshReply,
-                          waitSkill: waitSkill ? { label: waitSkill.label, id: waitSkill.id } : null,
-                          waitStartedAt,
-                          waitResumed,
-                          partial: turn.partial,
-                          streamDropped: turn.streamDropped,
-                          error: turn.error,
-                          onAskAgain: () => handleAskAgain(turn),
-                          stopped: turn.stopped,
-                          timedOut: turn.timedOut,
-                          onReload: () => window.location.reload(),
-                          interrupted: turn.interrupted,
-                          summaryPending: turn.summaryPending,
-                          onStop: handleStopAsk,
-                          prdCommandThinking: !!activeTab?.prdCommandThinking,
-                          clarify: turn.clarify,
-                          clarifyResolved: turn.clarifyResolved,
-                          clarifyPopupNote: clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved,
-                          clarifyGateOpen: !!activeTab?.pendingClarify,
-                          clarifyBusy: busy || !!activeTab?.prdGenerating,
-                          onSubmitClarify: (answers) => submitClarifyAnswers(answers),
-                          onSkipClarify: () => submitClarifyAnswers([]),
-                          reply: turn.reply,
-                          // A report answer is an ARTIFACT: it reads in the
-                          // panel's Reports tab like every other artifact of
-                          // this thread, and the turn itself is just the card
-                          // that opens it — on THIS report, not on a list.
-                          onOpenReport: openReportByTitle,
-                          openCandidates: turn.openCandidates,
-                          onOpenCandidate: (candidate) => { openArtifactInPanel(candidate) },
-                          artifactList: turn.artifactList,
-                          onOpenArtifactItem: openChatArtifactItem,
-                          artifactsDisabled: busy,
-                          footer,
-                          afterNode,
-                        }
+                      const turns: ChatTranscriptTurn[] = mapMainTurns(thread, {
+                        animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
+                        busy, activeTab, name, userInitials, skillForQuery,
+                        ticketSetActionState, showInsightMsg, chatEvidenceExists,
+                        chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
+                        inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
+                        clarifyPopupOpen, pendingClarifyTurn,
+                        handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
+                        openReportByTitle, openArtifactInPanel, openChatArtifactItem,
+                        handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
+                        handleViewPrototype, handlePrototypeSettled,
                       })
                       return (
                         <ChatTranscript
