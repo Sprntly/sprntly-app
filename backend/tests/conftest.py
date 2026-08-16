@@ -1491,6 +1491,10 @@ CREATE TABLE conversation_turns (
     -- 20260813130100_conversations_project_columns.sql). NULL for
     -- assistant turns and every pre-existing single-owner-chat turn.
     author_user_id  TEXT,
+    -- Why the group agent did/did not reply to this turn (mirrors
+    -- 20260815180000_conversation_turns_trigger_kind.sql). NULL for every
+    -- pre-existing turn and every non-group-decision turn.
+    trigger_kind    TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);

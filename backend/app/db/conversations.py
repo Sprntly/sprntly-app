@@ -539,6 +539,21 @@ def post_group_turn(
     return resp.data[0] if resp.data else None
 
 
+def set_group_turn_trigger_kind(turn_id: int, trigger_kind: str) -> None:
+    """Best-effort: record WHY the group agent did/did not reply on the
+    human turn. The turn already persisted, so a failure here must never
+    500 the post — swallow and log identifiers only (AD-P22 shape)."""
+    try:
+        require_client().table("conversation_turns").update(
+            {"trigger_kind": trigger_kind}
+        ).eq("id", turn_id).execute()
+    except Exception:  # noqa: BLE001 — observability must never break the post
+        logger.warning(
+            "group_turn_trigger_kind_persist_failed turn_id=%s trigger_kind=%s",
+            turn_id, trigger_kind,
+        )
+
+
 # ── Individual project chat ("My chat with Sprntly") ─────────────────────
 #
 # ADDITIVE ONLY, mirrors the group-chat pair (`get_group_chat`/

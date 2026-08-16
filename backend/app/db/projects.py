@@ -350,6 +350,23 @@ def list_members(project_id: int) -> list[dict]:
     return out
 
 
+@retry_on_disconnect
+def count_project_members(project_id: int) -> int:
+    """Human member count for the solo check — NO `profiles` join, so a
+    profile-enrichment hiccup can never downgrade solo-ness. `list_members`'
+    join is for display; this is for the decision. Raises on read failure;
+    `_is_solo_project` owns the fail-open."""
+    client = require_client()
+    rows = (
+        client.table("project_members")
+        .select("user_id")
+        .eq("project_id", project_id)
+        .execute()
+        .data
+    ) or []
+    return len(rows)
+
+
 def _match_keys(member: dict) -> set[str]:
     """The casefolded set of strings this member matches on: full name,
     the first whitespace token of name (so "Fortune" matches "Fortune

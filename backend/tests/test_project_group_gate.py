@@ -30,10 +30,10 @@ REAL reply) — a stub masks whether the should-respond decision is actually
 connected end to end
 ([[feedback_stubbed-e2e-masks-loop-behaviour]]):
 
-  - `test_gate_live_responds_to_addressed_question` / `test_gate_live_
-    stays_out_of_human_backforth` — the real classifier's actual DECISION
-    on an agent-directed vs. human-to-human turn, against the real local
-    Supabase rig.
+  - `test_live_multi_human_project_relevant_message_interjects` / `test_
+    gate_live_stays_out_of_human_backforth` — the real, project-aware
+    classifier's actual DECISION on a project-relevant vs. human-to-human
+    turn, against the real local Supabase rig.
 
 Both are gated behind `RUN_INTERJECTION_GATE_LIVE=1` PLUS a real
 `ANTHROPIC_API_KEY`, mirroring `test_group_chat_turns_live.py`'s /
@@ -224,17 +224,107 @@ def test_is_solo_project_counts_only_humans(isolated_settings, monkeypatch):
     assert _is_solo_project(project["id"]) is False
 
 
-def test_is_solo_project_read_error_falls_back_to_false(isolated_settings, monkeypatch):
-    """A roster-read failure must never widen Sprntly's participation — it
-    fails SAFE to the normal (conservative) gate, not to auto-respond."""
-    def _boom(_project_id):
-        raise RuntimeError("simulated roster read failure")
+def test_count_project_members_no_profile_join_returns_count(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)  # one human member (the creator)
 
-    monkeypatch.setattr(projects_db, "list_members", _boom)
+    assert projects_db.count_project_members(project["id"]) == 1
+
+    projects_db.add_member(project["id"], "second-human")
+    assert projects_db.count_project_members(project["id"]) == 2
+
+
+def test_solo_opening_plain_turn_never_consults_classifier(isolated_settings, monkeypatch):
+    """The FIRST turn in a fresh solo-project group chat — no prior agent
+    turn, no `@Sprntly` — still gets exactly one reply with the classifier
+    never consulted (David's staging case, reproduced without any injected
+    failure)."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    reply_calls = _stub_reply_path(monkeypatch)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "what is this project about. give me the tldr"},
+    )
+    assert r.status_code == 200
+    assert gate_calls == [], "a solo project's opening turn must never consult the classifier"
+    assert len(reply_calls) == 1
+
+
+def test_is_solo_project_read_error_fails_open_to_solo(isolated_settings, monkeypatch, caplog):
+    """A membership-COUNT-read failure must fail OPEN toward responding —
+    a silent opener in a genuinely-solo project is the worse failure than a
+    rare over-reply. `_is_solo_project` is routed through
+    `count_project_members` (no `profiles` join), so this proves the
+    fail-open path on THAT helper's failure, not `list_members`'."""
+    def _boom(_project_id):
+        raise RuntimeError("simulated membership-count read failure")
+
+    monkeypatch.setattr(projects_db, "count_project_members", _boom)
 
     from app.routes.projects import _is_solo_project
 
-    assert _is_solo_project(1) is False
+    with caplog.at_level(logging.WARNING):
+        assert _is_solo_project(1) is True
+
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert any("solo_project_check_failed project_id=1" in line for line in lines)
+
+
+def test_solo_opening_turn_replies_when_profile_join_would_fail(isolated_settings, monkeypatch):
+    """Genuinely-solo project (membership COUNT intact — exactly one human
+    member) but the `profiles`-enriching DISPLAY path (`list_members`) is
+    made to raise. The fix routes `_is_solo_project` through
+    `count_project_members` (no `profiles` join), so a profile-enrichment
+    hiccup can never downgrade the DECISION to the conservative stay-out
+    gate — David's staging case. RED on unfixed code: the old
+    `_is_solo_project` called `list_members` directly, so this same
+    failure made it return False and fall through to the gate.
+
+    Scoped to the DECISION, not full reply delivery: `list_members` is
+    ALSO used (unguarded, pre-existing, unrelated to this ticket's Fix 1)
+    by `_respond_as_group_agent`'s own roster-block construction
+    (`routes/projects.py` ~:1610) when actually generating the reply, so a
+    forced `list_members` failure legitimately still prevents that
+    downstream step from succeeding on BOTH old and new code — this test
+    proves the FIX's own scope (the classifier is never consulted, and
+    `_is_solo_project` itself is fail-open), not that reply generation is
+    resilient to every possible roster-read failure (a separate,
+    pre-existing gap, out of this ticket's scope)."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)  # single human member (the creator)
+    _stub_reply_path(monkeypatch)
+
+    def _boom(_project_id):
+        raise RuntimeError("simulated profile-join failure")
+
+    monkeypatch.setattr(projects_db, "list_members", _boom)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "what is this project about. give me the tldr"},
+    )
+    assert r.status_code == 200
+    assert gate_calls == [], "a solo project must never consult the classifier"
+
+    from app.routes.projects import _is_solo_project
+
+    assert _is_solo_project(project["id"]) is True, (
+        "a profile-join failure must not flip the solo decision to False"
+    )
 
 
 # ── Gate decision wiring (AC2/AC3) ──────────────────────────────────────
@@ -417,6 +507,188 @@ def test_gate_emits_single_cost_line(isolated_settings, monkeypatch, caplog):
         if "mention_reply" in rec.getMessage()
     ]
     assert mention_reply_lines == []
+
+
+# ── Project-aware decision (Fix 2 — AC5/AC6/AC9) ─────────────────────────
+
+
+def _empty_group_context_deps(monkeypatch):
+    """Monkeypatch every `assemble_group_agent_context` dependency to a
+    cheap, controllable stand-in — mirrors `test_project_group_context.py`'s
+    own pattern (patch at the seam, not real DB rows)."""
+    import app.project_group_context as pgc
+
+    monkeypatch.setattr(
+        pgc.projects_db, "list_members",
+        lambda pid: [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}],  # noqa: ARG005
+    )
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "project summary text"})  # noqa: ARG005
+    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)  # noqa: ARG005
+    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])  # noqa: ARG005
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])  # noqa: ARG005
+    return pgc
+
+
+def test_gate_injects_compact_project_context_as_cacheable_prefix(isolated_settings, monkeypatch):
+    pgc = _empty_group_context_deps(monkeypatch)
+    expected_context = pgc.assemble_group_agent_context(7, "acme", "c1")
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    result = project_group_gate.should_respond(
+        7, 2, recent_turns=[], latest_content="what's the status on the onboarding task?",
+        dataset="acme", company_id="c1",
+    )
+    assert result is True
+    assert len(gate_calls) == 1
+    assert gate_calls[0]["user_cacheable_prefix"] == expected_context
+    assert expected_context not in gate_calls[0]["user"], (
+        "the project block must ride user_cacheable_prefix, never be "
+        "concatenated into the per-message transcript"
+    )
+
+
+def test_gate_project_signal_is_manifest_not_full_body(isolated_settings, monkeypatch):
+    import app.project_group_context as pgc
+
+    large_body = "SECRET_ARTIFACT_BODY_TEXT " * 500
+    monkeypatch.setattr(
+        pgc.projects_db, "list_members",
+        lambda pid: [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}],  # noqa: ARG005
+    )
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": ""})  # noqa: ARG005
+    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)  # noqa: ARG005
+    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])  # noqa: ARG005
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [  # noqa: ARG005
+            {
+                "type": "prd", "id": 42, "title": "Onboarding PRD",
+                "body": large_body, "content": large_body,
+            }
+        ],
+    )
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    result = project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="what's the status on the onboarding PRD?",
+        dataset="acme", company_id="c1",
+    )
+    assert result is True
+    prefix = gate_calls[0]["user_cacheable_prefix"]
+    assert "Onboarding PRD" in prefix
+    assert "42" in prefix  # the manifest, not a body: title + id only
+    assert large_body not in prefix
+    assert "SECRET_ARTIFACT_BODY_TEXT" not in prefix
+
+
+def test_gate_assembles_context_only_after_prefilter(isolated_settings, monkeypatch):
+    import app.project_group_context as pgc
+
+    assemble_calls: list[tuple] = []
+
+    def _track_assemble(project_id, dataset, company_id):
+        assemble_calls.append((project_id, dataset, company_id))
+        return "PROJECT CONTEXT stub"
+
+    monkeypatch.setattr(pgc, "assemble_group_agent_context", _track_assemble)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    result = project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="thanks", dataset="acme", company_id="c1",
+    )
+    assert result is False
+    assert assemble_calls == [], (
+        "a trivial ack must not pay the assembler's DB reads even with "
+        "dataset/company_id set"
+    )
+    assert gate_calls == []
+
+
+def test_prefilter_trivial_ack_multi_human_zero_call(isolated_settings, monkeypatch, caplog):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    projects_db.add_member(project["id"], "second-human")
+    reply_calls = _stub_reply_path(monkeypatch)
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
+        r = ctx.client.post(
+            f"/v1/projects/{project['id']}/group/turns", json={"content": "thanks"}
+        )
+    assert r.status_code == 200
+    assert gate_calls == [], "a trivial off-topic ack must never reach the classifier"
+    assert reply_calls == []
+
+    lines = [rec.getMessage() for rec in caplog.records]
+    assert not any("interjection_gate" in line for line in lines)
+
+
+def test_gate_prompt_uses_injected_project_context_for_relevance():
+    system = project_group_gate._GATE_SYSTEM
+    assert "PROJECT CONTEXT" in system
+    assert "precedes the transcript" in system
+    assert "Use it to judge" in system
+    assert "how's the onboarding task going?" in system
+
+    weak_prompt = "Decide whether Sprntly should reply to the latest message."
+    assert "PROJECT CONTEXT" not in weak_prompt
+
+
+def test_gate_prompt_retains_stayout_named_human_and_floor():
+    system = project_group_gate._GATE_SYSTEM.lower()
+    assert "ordinary human-to-human" in system
+    assert "@-addressed to another named human" in system
+    assert "conservative default is false" in system
+
+    weak_prompt = "respond true sometimes."
+    assert "conservative default is false" not in weak_prompt
+
+
+def test_should_respond_without_project_context_runs_plain_gate(isolated_settings, monkeypatch):
+    """Called with no `dataset`/`company_id` (every pre-existing caller):
+    `user_cacheable_prefix` is `None` — no project context assembled — the
+    plain, pre-project-aware gate contract, unchanged."""
+    import app.project_group_context as pgc
+
+    assemble_calls: list[tuple] = []
+    monkeypatch.setattr(
+        pgc, "assemble_group_agent_context",
+        lambda *a: assemble_calls.append(a) or "PROJECT CONTEXT stub",  # noqa: ARG005
+    )
+
+    gate_calls: list[dict] = []
+    monkeypatch.setattr(
+        project_group_gate, "call_json",
+        lambda **kw: gate_calls.append(kw) or {"respond": True},  # noqa: ARG005
+    )
+
+    result = project_group_gate.should_respond(
+        1, 2, recent_turns=[], latest_content="does anyone know the current status?",
+    )
+    assert result is True
+    assert len(gate_calls) == 1
+    assert gate_calls[0]["user_cacheable_prefix"] is None
+    assert assemble_calls == []
 
 
 # ── `agent_spoke_last` pre-filter bypass (continuation, Part A) ──────────
@@ -639,6 +911,170 @@ def test_gate_never_runs_on_individual_conversation(isolated_settings, monkeypat
     assert gate_calls == []
 
 
+# ── Decision persistence (observability — AC11-AC15) ─────────────────────
+
+
+def test_migration_trigger_kind_column_is_additive_nullable():
+    import pathlib
+
+    migration_path = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "supabase" / "migrations" / "20260815180000_conversation_turns_trigger_kind.sql"
+    )
+    text = migration_path.read_text()
+    lowered = text.lower()
+    assert "add column if not exists" in lowered
+    assert "trigger_kind" in lowered
+    assert "conversation_turns" in lowered
+    # Check the SQL statement itself, not the prose comments explaining it
+    # (which legitimately say "no default").
+    sql_lines = [
+        line for line in lowered.splitlines()
+        if line.strip() and not line.strip().startswith("--")
+    ]
+    assert "default" not in "\n".join(sql_lines)
+
+
+def _trigger_kind_of(turn_id: int) -> str | None:
+    from app.db.client import require_client
+
+    rows = (
+        require_client().table("conversation_turns")
+        .select("trigger_kind").eq("id", turn_id).execute().data
+    )
+    return rows[0]["trigger_kind"] if rows else None
+
+
+def test_conftest_fake_persists_and_reads_back_trigger_kind(isolated_settings, monkeypatch):
+    from app.db import conversations as conversations_db
+
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    conversation = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, "hello team")
+
+    conversations_db.set_group_turn_trigger_kind(turn["id"], "gate")
+
+    assert _trigger_kind_of(turn["id"]) == "gate"
+
+
+def test_trigger_kind_persisted_mention(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    _stub_reply_path(monkeypatch)
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "@Sprntly what's the status?"},
+    )
+    assert r.status_code == 200
+    assert _trigger_kind_of(r.json()["id"]) == "mention"
+
+
+def test_trigger_kind_persisted_solo(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    _stub_reply_path(monkeypatch)
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "what is this project about?"},
+    )
+    assert r.status_code == 200
+    assert _trigger_kind_of(r.json()["id"]) == "solo"
+
+
+def test_trigger_kind_persisted_gate_reply(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    projects_db.add_member(project["id"], "second-human")
+    reply_calls = _stub_reply_path(monkeypatch)
+    monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(True))
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "is anyone able to help — can you assign the export review to Fortune?"},
+    )
+    assert r.status_code == 200
+    assert len(reply_calls) == 1
+    assert _trigger_kind_of(r.json()["id"]) == "gate"
+
+
+def test_trigger_kind_persisted_continuation(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    projects_db.add_member(project["id"], "second-human")
+    reply_calls = _stub_reply_path(monkeypatch)
+    monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(True))
+
+    # First turn: @-mention, gets an assistant reply — so the immediately
+    # preceding turn before the SECOND human turn is Sprntly's own.
+    r1 = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "@Sprntly please delegate the export review to Fortune"},
+    )
+    assert r1.status_code == 200
+    assert len(reply_calls) == 1
+
+    r2 = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "yes — go ahead and assign the follow-up to Fortune too"},
+    )
+    assert r2.status_code == 200
+    assert len(reply_calls) == 2
+    assert _trigger_kind_of(r2.json()["id"]) == "continuation"
+
+
+def test_trigger_kind_persisted_gate_stayout(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    projects_db.add_member(project["id"], "second-human")
+    reply_calls = _stub_reply_path(monkeypatch)
+    monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(False))
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/group/turns",
+        json={"content": "sounds good, I'll circle back once QA signs off on it"},
+    )
+    assert r.status_code == 200
+    assert reply_calls == [], "the gate said stay-out — no reply is scheduled either way"
+    assert _trigger_kind_of(r.json()["id"]) == "gate_stayout"
+
+
+def test_trigger_kind_persist_failure_swallowed(isolated_settings, monkeypatch, caplog):
+    """Forcing the underlying `conversation_turns` UPDATE to raise must not
+    500 the route, must not prevent the human turn from persisting, and
+    must not prevent the scheduled reply — mutation proof of
+    `set_group_turn_trigger_kind`'s own never-raises contract: if its
+    try/except were removed, this test goes RED (500)."""
+    from tests import _fake_supabase
+
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    reply_calls = _stub_reply_path(monkeypatch)
+
+    original_update = _fake_supabase._Query.update
+
+    def _boom_update(self, patch):
+        if self.table == "conversation_turns" and "trigger_kind" in patch:
+            raise RuntimeError("simulated trigger_kind persist failure")
+        return original_update(self, patch)
+
+    monkeypatch.setattr(_fake_supabase._Query, "update", _boom_update)
+
+    secret_content = "what is this project about — SECRET_TRIGGER_KIND_CONTENT?"
+    with caplog.at_level(logging.WARNING):
+        r = ctx.client.post(
+            f"/v1/projects/{project['id']}/group/turns", json={"content": secret_content},
+        )
+    assert r.status_code == 200, "a trigger_kind persist failure must never break the post"
+    assert len(reply_calls) == 1, "the reply must still be scheduled"
+    assert r.json()["content"] == secret_content
+
+    joined = "\n".join(rec.getMessage() for rec in caplog.records)
+    assert "SECRET_TRIGGER_KIND_CONTENT" not in joined
+
+
 # ── No toggle anywhere (AC8) ─────────────────────────────────────────────
 
 
@@ -646,15 +1082,16 @@ def test_should_respond_signature_has_no_mode_param():
     """`should_respond` takes no client-controllable mode/toggle
     parameter — every input is server-derived (project/conversation id,
     the already-persisted turn list, the already-persisted latest turn's
-    content, and `agent_spoke_last` — itself derived server-side from
-    whether the prior turn's role was 'assistant', never a client field).
+    content, `agent_spoke_last` — derived server-side from whether the
+    prior turn's role was 'assistant' — and `dataset`/`company_id`, the
+    caller's own resolved workspace identifiers, never a client field).
     The decision is entirely the classifier's, not a caller setting."""
     import inspect
 
     params = list(inspect.signature(project_group_gate.should_respond).parameters)
     assert params == [
         "project_id", "conversation_id", "recent_turns", "latest_content",
-        "agent_spoke_last",
+        "agent_spoke_last", "dataset", "company_id",
     ]
 
 
@@ -773,34 +1210,67 @@ def project_ids(sb):
 @pytest.mark.integration
 @pytest.mark.real_interjection_gate  # opt OUT of conftest's autouse call_json stub
 @pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
-def test_gate_live_responds_to_addressed_question(client, fixture_ids, project_ids, sb):
-    """(a) A clearly agent-directed non-mention question → the REAL
-    classifier says respond=true → exactly one real assistant reply."""
+def test_live_multi_human_project_relevant_message_interjects(client, fixture_ids, project_ids, sb):
+    """The project-awareness proof (AC8): in a MULTI-human project with a
+    seeded task, an untagged message clearly relevant to the project's work
+    ("how's the onboarding task going?") → the REAL project-aware
+    classifier — fed the compact project signal via
+    `assemble_group_agent_context` — returns respond=true → exactly one
+    real assistant reply."""
     project = client.post(
-        "/v1/projects", json={"name": f"Live gate respond {uuid.uuid4().hex[:8]}"}
+        "/v1/projects", json={"name": f"Live gate project-aware {uuid.uuid4().hex[:8]}"}
     ).json()
     project_ids.append(project["id"])
     # A SECOND human member — see test_gate_live_stays_out_of_human_backforth;
     # otherwise the solo-project auto-respond shortcut answers this without
     # ever consulting the real classifier this test means to exercise.
+    second_human = f"live-gate-second-human-{uuid.uuid4().hex[:8]}"
     sb.table("project_members").insert(
-        {"project_id": project["id"], "user_id": f"live-gate-second-human-{uuid.uuid4().hex[:8]}"}
+        {"project_id": project["id"], "user_id": second_human}
     ).execute()
+
+    # Seed a real open delegation so the injected project signal's task
+    # ledger names "onboarding" — the project-awareness proof needs the
+    # classifier to be relying on the injected context, not general
+    # keyword coincidence in the prompt.
+    conv = sb.table("conversations").insert(
+        {
+            "company_id": fixture_ids["company_id"],
+            "user_id": fixture_ids["user_id"],
+            "project_id": project["id"],
+            "kind": "individual",
+        }
+    ).execute().data[0]
+    turn = sb.table("conversation_turns").insert(
+        {
+            "conversation_id": conv["id"],
+            "role": "assistant",
+            "content": "delivered onboarding task brief",
+            "author_user_id": fixture_ids["user_id"],
+        }
+    ).execute().data[0]
+    from app.db.project_delegations import record_delegation
+
+    record_delegation(
+        project_id=project["id"],
+        assigner_user_id=fixture_ids["user_id"],
+        assignee_user_id=second_human,
+        task_summary="finish the onboarding task",
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=conv["id"],
+        delivered_turn_id=turn["id"],
+    )
 
     r = client.post(
         f"/v1/projects/{project['id']}/group/turns",
-        json={
-            "content": (
-                "Is anyone tracking the outage from last night, or should "
-                "Sprntly go pull together the incident timeline?"
-            )
-        },
+        json={"content": "how's the onboarding task going?"},
     )
     assert r.status_code == 200, r.text
 
     turns = client.get(f"/v1/projects/{project['id']}/group/turns").json()["turns"]
     assert [t["role"] for t in turns] == ["user", "assistant"], (
-        "an agent-directed non-mention question must get exactly one real "
+        "a project-relevant untagged question must get exactly one real "
         f"assistant reply — got roles {[t['role'] for t in turns]}"
     )
     assert turns[-1]["author_user_id"] is None

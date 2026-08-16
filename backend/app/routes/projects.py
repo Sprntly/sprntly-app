@@ -1159,16 +1159,20 @@ def list_group_turns_route(
 
 def _is_solo_project(project_id: int) -> bool:
     """True when the project has exactly ONE human member — the user plus the
-    virtual Sprntly agent, no other people. `projects_db.list_members` returns
-    HUMAN members only (the AD-P6 agent member is prepended at the route layer,
-    never stored), so its length IS the human count and no agent-exclusion is
-    needed. Best-effort: any read failure returns False, falling back to the
-    normal gate (never widens Sprntly's participation on error)."""
+    virtual Sprntly agent, no other people. Uses `projects_db.count_project_
+    members` (a plain `project_members` count, NO `profiles` enrichment
+    join) so a profile-display hiccup can never reach this decision —
+    `list_members`'s join is for display, not for this check.
+
+    Fail OPEN toward responding, not silence: on a count-read failure this
+    returns True (treat as solo, respond) rather than False. A silent
+    opener in a genuinely-solo project is the worse failure than a rare
+    over-reply in a project that turns out to have more than one member."""
     try:
-        return len(projects_db.list_members(project_id)) == 1
-    except Exception:  # noqa: BLE001 — a roster read failure must not break the post
+        return projects_db.count_project_members(project_id) == 1
+    except Exception:  # noqa: BLE001 — fail-open toward responding, not silence
         logger.warning("solo_project_check_failed project_id=%s", project_id)
-        return False
+        return True
 
 
 @router.post("/{project_id}/group/turns")
@@ -1209,6 +1213,8 @@ async def post_group_turn_route(
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
     if _MENTION_RE.search(payload.content):
+        if turn:
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "mention")
         _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="mention")
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
@@ -1219,6 +1225,8 @@ async def post_group_turn_route(
         # This short-circuits the gate exactly like `mention`/`continuation`.
         # Multi-human projects fall through to the unchanged gate below, so the
         # AD-P10 conservative posture is preserved wherever it still applies.
+        if turn:
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "solo")
         _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind="solo")
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
@@ -1235,9 +1243,17 @@ async def post_group_turn_route(
         if should_respond(
             project_id, conversation["id"], recent, payload.content,
             agent_spoke_last=agent_spoke_last,
+            dataset=_dataset_for(ctx), company_id=ctx.company_id,
         ):
             trigger_kind = "continuation" if agent_spoke_last else "gate"
+            if turn:
+                conversations_db.set_group_turn_trigger_kind(turn["id"], trigger_kind)
             _schedule_group_reply(project_id, conversation["id"], ctx, trigger_kind=trigger_kind)
+        elif turn:
+            # No reply scheduled — the stay-out decision has no agent turn
+            # to carry it, so the just-posted human turn is the only place
+            # it can be recorded (Fix observability).
+            conversations_db.set_group_turn_trigger_kind(turn["id"], "gate_stayout")
     return turn
 
 
