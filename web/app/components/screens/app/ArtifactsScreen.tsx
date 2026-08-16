@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { useRouter, useSearchParams } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
@@ -511,7 +511,19 @@ export function ArtifactsView({
 
 // ── Screen ──
 
-export function ArtifactsScreen() {
+/** `?focus=<type>-<id>` — the artifact a link asked to open, or undefined.
+ *
+ *  A PROP, not a `useSearchParams()` call inside this component, and that is
+ *  deliberate. Reading the URL here made every existing suite that renders
+ *  this screen fail with "No useSearchParams export is defined on the
+ *  next/navigation mock" — fifteen tests across four files, none of them about
+ *  this feature. The route already owns the URL (and already carries the
+ *  Suspense boundary static export requires for that hook), so it reads the
+ *  param and hands it down; the screen stays a component you can render with
+ *  props alone. */
+export type ArtifactsScreenProps = { focus?: string | null }
+
+export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
   const {
     openContentPanel, openPrdTab, openReportTab, openTicketSetTab, showToast, contentPanelTab,
   } = useNavigation()
@@ -730,9 +742,7 @@ export function ArtifactsScreen() {
   // leaves the library on screen, which is the honest outcome: the reader can
   // see what they DO have rather than an error about what they don't.
   const consumedFocusRef = useRef<string | null>(null)
-  const searchParams = useSearchParams()
   useEffect(() => {
-    const focus = searchParams.get("focus")
     if (!focus) {
       consumedFocusRef.current = null
       return
@@ -746,7 +756,7 @@ export function ArtifactsScreen() {
     consumedFocusRef.current = focus
     const row = artifacts.find((a) => `${a.type}-${a.id}` === focus)
     if (row) void openArtifact(row)
-  }, [searchParams, artifacts, artifactsLoading, openArtifact])
+  }, [focus, artifacts, artifactsLoading, openArtifact])
 
   // A blank document, created and opened straight away.
   //
