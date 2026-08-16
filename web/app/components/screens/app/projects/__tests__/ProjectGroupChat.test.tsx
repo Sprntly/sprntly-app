@@ -180,9 +180,10 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     const agent = screen.getByTestId("gc-msg-agent")
     // NAMED INTENDED CHANGE (fold): the pre-fold literal `gc-msg--ai` global
     // class became the shell-owned `gcMsgAgent` module class (same agent-lane
-    // intent, same `gc-msg-agent` testid). The AGENT badge still renders.
+    // intent, same `gc-msg-agent` testid). The role badge still renders —
+    // main's "Product Coworker" label, shared via AGENT_BADGE.
     expect(agent.className).toMatch(/gcMsgAgent/)
-    expect(within(agent).getByText("AGENT")).toBeTruthy()
+    expect(within(agent).getByText("Product Coworker")).toBeTruthy()
   })
 
   it("a human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {

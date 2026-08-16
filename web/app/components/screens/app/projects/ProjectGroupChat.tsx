@@ -27,7 +27,7 @@ import { useChatComposerController, renderRunStatus } from "../../../shared/chat
 import type { ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
-import { AGENT_NAME } from "../../../../lib/agent"
+import { AGENT_BADGE, AGENT_NAME } from "../../../../lib/agent"
 import { type ChatArtifactItem, type OpenArtifactCandidate } from "../../../../lib/api"
 import { artifactItemAsCandidate } from "./artifactCandidates"
 import { personAvatarStyle } from "./avatarColor"
@@ -118,7 +118,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     },
     transcript: {
       agentName: AGENT_NAME,
-      agentBadge: "AGENT",
+      agentBadge: AGENT_BADGE,
       multiParty: true,
       timestamps: "fromTurn",
       renderUserBody: (turn: ShellTurn) => <MentionBubble content={turn.content ?? ""} />,

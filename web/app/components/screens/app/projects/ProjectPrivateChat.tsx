@@ -28,7 +28,7 @@ import { AssistantWaitState, WaitStoppedState } from "../../../shared/AssistantW
 import { ArtifactListCards } from "../../../shared/ArtifactListCards"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { artifactItemAsCandidate } from "./artifactCandidates"
-import { AGENT_NAME } from "../../../../lib/agent"
+import { AGENT_BADGE, AGENT_NAME } from "../../../../lib/agent"
 import type { AskResponse, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
 import { DelegationActions } from "./DelegationActions"
 import { useProjectPrivateThread, MORE_MARKER } from "./useProjectPrivateThread"
@@ -237,7 +237,7 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
     frame: { mode: "thread", viewportClassName: shellCss.standaloneViewport },
     transcript: {
       agentName: AGENT_NAME,
-      agentBadge: null,
+      agentBadge: AGENT_BADGE,
       timestamps: "fromTurn",
       userHead: "named",
       renderUserBody: markdownUserBody,

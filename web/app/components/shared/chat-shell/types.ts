@@ -223,7 +223,8 @@ export interface ChatSurfaceDescriptor {
   // ── Transcript ────────────────────────────────────────────────────────────
   transcript: {
     agentName: string
-    /** main "Product Coworker" · group "AGENT" · private null. */
+    /** One label everywhere: main renders "Product Coworker" and both
+     *  project surfaces pass the shared `AGENT_BADGE` constant. */
     agentBadge?: string | null
     /** project-group: speaker heads, role chips, avatars, start-aligned
      *  non-self turns (mirrors `SurfaceScope.multi_party`). */
