@@ -44,6 +44,11 @@ export type ProjectPrivateChatProps = {
    *  another member's individual chat. `source_kind` picks the copy;
    *  omitted/`null` renders a kind-neutral note. */
   insightNote?: { by: string; text: string; source_kind?: "group" | "individual" | null } | null
+  /** #9-count artifact invalidation: called after a client-driven generate
+   *  (`runGeneratePrd`/`runGenerateTickets`) settles its own `addArtifact` —
+   *  refreshes the host's artifacts list + count immediately, without
+   *  waiting on the realtime `artifact.added` echo. */
+  onArtifactsChanged?: () => void
 }
 
 /** An assistant turn's body: with `MORE_MARKER` present, renders the lead
@@ -88,8 +93,8 @@ function isHistoryTurn(turn: ShellTurn): boolean {
   return turn.id.startsWith("history-")
 }
 
-export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote }: ProjectPrivateChatProps) {
-  const engine = useProjectPrivateThread(projectId)
+export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onArtifactsChanged }: ProjectPrivateChatProps) {
+  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged })
   // The shared composer controller (un-stubs the project composer). Private
   // rides `/v1/ask`, so BOTH attachments and skills go live: the built
   // `SendCommand` (splice + extracted attachment context) hands to `engine.send`.

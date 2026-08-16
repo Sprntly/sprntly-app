@@ -16,9 +16,20 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from postgrest.exceptions import APIError
+
 from app.db.client import require_client, retry_on_disconnect, utc_now
 
 logger = logging.getLogger(__name__)
+
+_UNIQUE_VIOLATION = "23505"
+
+
+def _is_unique_violation(exc: Exception, index_name: str) -> bool:
+    """Same posture as `db/asks.py::claim_retry_attempt`'s race-loser check
+    (Postgres 23505 on the partial-unique index): a concurrent writer won
+    the race for this key, and this call just lost it."""
+    return getattr(exc, "code", None) == _UNIQUE_VIOLATION or index_name in str(exc)
 
 
 def conversation_belongs_to_company(conversation_id: int, company_id: str) -> bool:
@@ -750,9 +761,182 @@ def list_individual_turns(
     if not conv:
         return []
 
-    q = client.table("conversation_turns").select("id, role, content, created_at").eq(
-        "conversation_id", conversation_id
-    )
+    q = client.table("conversation_turns").select(
+        "id, role, content, created_at, client_message_id"
+    ).eq("conversation_id", conversation_id)
     if since is not None:
         q = q.gt("id", since)
     return q.order("id").execute().data or []
+
+
+def _owned_conversation_id(project_id: int, user_id: str) -> int:
+    """Resolve THIS caller's individual project chat server-side
+    (create-if-absent), never a client-supplied `conversation_id` — the
+    ownership spine both owned writers below share (AC6)."""
+    conversation = get_individual_project_chat(project_id, user_id)
+    if conversation is None:
+        conversation = create_individual_project_chat(project_id, user_id)
+    return conversation["id"]
+
+
+def _advance_own_cursor(conversation_id: int, user_id: str, turn_id: int) -> None:
+    """Best-effort: advance the caller's own read cursor to the turn they
+    just wrote, so writing your own turn and leaving does not flip your own
+    chat to unread (AC8). A cursor miss is benign — it just leaves a
+    stale-but-harmless unread dot; it must never break the write. Local
+    import avoids a load-order cycle (`conversation_read_cursors` already
+    imports `list_individual_turns` from this module)."""
+    try:
+        from app.db import conversation_read_cursors
+
+        conversation_read_cursors.set_cursor(conversation_id, user_id, turn_id)
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        logger.warning(
+            "failed to advance own read cursor conversation_id=%s turn_id=%s",
+            conversation_id, turn_id, exc_info=True,
+        )
+
+
+def _find_owned_turn(conversation_id: int, role: str, **key: Any) -> dict[str, Any] | None:
+    """Read-check for the idempotent writers below: the existing row for
+    this `(conversation_id, role, key)`, or None. `key` is exactly one of
+    `client_message_id=...` / `ask_job_id=...`."""
+    q = (
+        require_client()
+        .table("conversation_turns")
+        .select("id, role, content, created_at, client_message_id, ask_job_id, author_user_id")
+        .eq("conversation_id", conversation_id)
+        .eq("role", role)
+    )
+    for col, val in key.items():
+        q = q.eq(col, val)
+    rows = q.limit(1).execute().data
+    return rows[0] if rows else None
+
+
+@retry_on_disconnect
+def post_owned_individual_user_turn(
+    *, project_id: int, user_id: str, content: str, client_message_id: str,
+) -> dict[str, Any]:
+    """Write the CALLER'S OWN user turn into THEIR individual project chat —
+    the owned, idempotent counterpart of `post_individual_turn` (the
+    cross-user brief writer, left unchanged). Resolves the conversation
+    SERVER-side from `(project_id, user_id)` — never a client-supplied
+    `conversation_id` — so a caller can only ever write into their own
+    individual chat (AC6). Idempotent on `(conversation_id, role='user',
+    client_message_id)` (AC4): a retry/double-submit with the SAME key
+    returns the SAME row rather than inserting a second one. Advances the
+    author's own read cursor (AC8). Returns the row (incl. `id`)."""
+    conversation_id = _owned_conversation_id(project_id, user_id)
+
+    existing = _find_owned_turn(
+        conversation_id, "user", client_message_id=client_message_id
+    )
+    if existing is not None:
+        _advance_own_cursor(conversation_id, user_id, existing["id"])
+        return existing
+
+    client = require_client()
+    try:
+        row = (
+            client.table("conversation_turns")
+            .insert(
+                {
+                    "conversation_id": conversation_id,
+                    "role": "user",
+                    "content": content,
+                    "author_user_id": user_id,
+                    "client_message_id": client_message_id,
+                }
+            )
+            .execute()
+            .data[0]
+        )
+    except APIError as exc:
+        if not _is_unique_violation(exc, "conversation_turns_client_msg_uidx"):
+            raise
+        # A concurrent send with the SAME client_message_id won the race —
+        # the §A partial-unique backstop (AC4). Re-read the row it wrote.
+        existing = _find_owned_turn(
+            conversation_id, "user", client_message_id=client_message_id
+        )
+        if existing is None:
+            raise
+        _advance_own_cursor(conversation_id, user_id, existing["id"])
+        return existing
+
+    client.table("conversations").update({"updated_at": utc_now()}).eq(
+        "id", conversation_id
+    ).execute()
+    _advance_own_cursor(conversation_id, user_id, row["id"])
+    return row
+
+
+@retry_on_disconnect
+def post_owned_individual_assistant_turn(
+    *,
+    project_id: int,
+    user_id: str,
+    content: str,
+    client_message_id: str | None = None,
+    ask_job_id: int | None = None,
+) -> dict[str, Any]:
+    """Write the ASSISTANT'S turn into the CALLER'S individual project chat
+    (`author_user_id: None` — the agent, not the caller, said this; `user_id`
+    only resolves WHICH owned conversation to write into). Same server-side
+    ownership resolution as the user-turn writer (AC6). Idempotent (AC4/AC5):
+    keyed on `(conversation_id, role='assistant', ask_job_id)` when
+    `ask_job_id` is given (the `/v1/ask` answer — the durable run link a
+    resumed poll reuses), else on `(conversation_id, role='assistant',
+    client_message_id)`. Exactly one of the two keys must be given — a
+    caller passing neither (or both) is a bug (asserted). Advances the
+    caller's own read cursor (AC8). Returns the row (incl. `id`)."""
+    if (client_message_id is None) == (ask_job_id is None):
+        raise ValueError(
+            "post_owned_individual_assistant_turn requires exactly one of "
+            "client_message_id or ask_job_id"
+        )
+    conversation_id = _owned_conversation_id(project_id, user_id)
+
+    key_col, key_val, index_name = (
+        ("ask_job_id", ask_job_id, "conversation_turns_ask_job_uidx")
+        if ask_job_id is not None
+        else ("client_message_id", client_message_id, "conversation_turns_client_msg_uidx")
+    )
+
+    existing = _find_owned_turn(conversation_id, "assistant", **{key_col: key_val})
+    if existing is not None:
+        _advance_own_cursor(conversation_id, user_id, existing["id"])
+        return existing
+
+    client = require_client()
+    try:
+        row = (
+            client.table("conversation_turns")
+            .insert(
+                {
+                    "conversation_id": conversation_id,
+                    "role": "assistant",
+                    "content": content,
+                    "author_user_id": None,
+                    "client_message_id": client_message_id,
+                    "ask_job_id": ask_job_id,
+                }
+            )
+            .execute()
+            .data[0]
+        )
+    except APIError as exc:
+        if not _is_unique_violation(exc, index_name):
+            raise
+        existing = _find_owned_turn(conversation_id, "assistant", **{key_col: key_val})
+        if existing is None:
+            raise
+        _advance_own_cursor(conversation_id, user_id, existing["id"])
+        return existing
+
+    client.table("conversations").update({"updated_at": utc_now()}).eq(
+        "id", conversation_id
+    ).execute()
+    _advance_own_cursor(conversation_id, user_id, row["id"])
+    return row

@@ -607,7 +607,27 @@ async def run_ask_job(
         # Individual project chat (build spec §5.3): promote a durable insight
         # into project memory + ingest inbound task-status — gated on a
         # project-scoped ask, so a non-project ask is byte-for-byte unaffected.
-        if project_id is not None and conversation_id is not None:
+        if project_id is not None and conversation_id is not None and user_id is not None:
+            # Persist the assistant's OWN answer (AC1) — owned, idempotent,
+            # linked to this run via ask_job_id (a resumed poll reuses the
+            # same ask_id, so it can't duplicate this row). Best-effort: the
+            # authoritative answer already lives in `ask_jobs.response`, so a
+            # persist failure here never breaks the already-stored answer.
+            from app.db.conversations import post_owned_individual_assistant_turn
+
+            try:
+                post_owned_individual_assistant_turn(
+                    project_id=project_id,
+                    user_id=user_id,
+                    content=payload.get("answer", ""),
+                    ask_job_id=ask_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort, AD-P7
+                logger.warning(
+                    "failed to persist individual-chat assistant turn "
+                    "ask_id=%s project_id=%s", ask_id, project_id, exc_info=True,
+                )
+
             from app.project_memory import maybe_promote_turn
 
             transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"

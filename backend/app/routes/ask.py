@@ -4,6 +4,7 @@ import logging
 import random
 import sys
 import time
+import uuid
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -141,6 +142,13 @@ class AskIn(BaseModel):
     # PRD tab's context already carries its evidence and tickets.
     evidence_id: int | None = Field(default=None, ge=1)
     ticket_set_id: int | None = Field(default=None, ge=1)
+    # Individual-project-chat send identity: the idempotency key a
+    # retry/double-submit carries for the persisted `conversation_turns`
+    # user turn (project branch only — ignored on the main/PRD/artifact
+    # branches, which don't persist a turn here). Client-issued when the
+    # sender's engine mints one; the route mints a server uuid4 when absent
+    # so persistence is never skipped for an older client.
+    client_message_id: str | None = None
 
     # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
     # NUL; this one stops one ARRIVING — the client inlines attachment text it
@@ -431,6 +439,13 @@ async def ask(
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
     # `history` was already loaded above (before cache resolution).
+    #
+    # Individual-project-chat persistence identity (AC1/AC4): resolved ONLY
+    # for the project branch — main/PRD/artifact asks stay byte-unchanged
+    # (AC7), never minting or threading a client_message_id at all.
+    resolved_client_message_id = (
+        (body.client_message_id or str(uuid.uuid4())) if body.project_id is not None else None
+    )
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
@@ -438,8 +453,29 @@ async def ask(
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
         prd_id=body.prd_id,
+        client_message_id=resolved_client_message_id,
     )
     if body.project_id is not None:
+        # Persist the USER'S OWN turn at dispatch (AC1) — owned/idempotent,
+        # server-side conversation resolution (AC6), keyed on the SAME
+        # client_message_id just threaded onto the job row above so the
+        # answer (persisted after `complete_ask_job`, ask_job_id-linked) and
+        # the question land as one dialogue pair. Best-effort: a persist
+        # failure must never block the answer that's already generating.
+        from app.db.conversations import post_owned_individual_user_turn
+
+        try:
+            post_owned_individual_user_turn(
+                project_id=body.project_id,
+                user_id=company.user_id,
+                content=body.question,
+                client_message_id=resolved_client_message_id,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist individual-chat user turn ask_id=%s project_id=%s",
+                ask_id, body.project_id, exc_info=True,
+            )
         # Identifiers only — never the memory/PRD body the answer was
         # grounded on (see `assemble_project_context`'s docstring).
         logger.info(

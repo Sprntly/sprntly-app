@@ -133,9 +133,17 @@ const MEMORY: ProjectMemorySummary = {
   stale: false,
 }
 
-function lastHandlers() {
-  const call = realtimeSpy.mock.calls[realtimeSpy.mock.calls.length - 1]
+// The container now wires a SECOND channel (the group `project:{id}`
+// artifact-invalidation subscription, #9-count) alongside the per-user
+// unread one — `lastHandlers()` can no longer assume "the most recent
+// subscribe call is the per-user one". Resolve by topic explicitly.
+function handlersForTopic(topic: string) {
+  const call = [...realtimeSpy.mock.calls].reverse().find((c) => c[0] === topic)
+  if (!call) throw new Error(`no useRealtimeChannel subscription for topic ${topic}`)
   return call[1] as { onEvent: (event: string, payload: unknown) => void; onReconcile: () => void }
+}
+function lastHandlers() {
+  return handlersForTopic("project:101:user:u1")
 }
 
 async function renderReady() {
@@ -174,16 +182,52 @@ describe("ProjectDetailScreen — live subscribe (AC-1)", () => {
     await renderReady()
 
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
-    expect(topics.every((t) => t === "project:101:user:u1")).toBe(true)
-    expect(new Set(topics).size).toBe(1)
+    expect(new Set(topics.filter((t) => t === "project:101:user:u1")).size).toBe(1)
   })
 
-  it("a null current-user id yields a null topic (hook degrades, poll unaffected)", async () => {
+  it("test_also_subscribes_the_group_artifact_channel: project:{id} (#9-count), independent of the per-user topic", async () => {
+    await renderReady()
+
+    const topics = realtimeSpy.mock.calls.map((c) => c[0])
+    expect(topics).toContain("project:101")
+    expect(topics).toContain("project:101:user:u1")
+  })
+
+  it("test_artifact_added_refetches_the_list: a server-side attach broadcast refetches artifacts.length", async () => {
+    await renderReady()
+    const callsAfterMount = artifactsMock.mock.calls.length
+
+    artifactsMock.mockResolvedValueOnce([
+      { id: 9, type: "prd", title: "New PRD", updated_at: hoursAgo(0) },
+    ] as unknown as ArtifactItem[])
+    await act(async () => {
+      handlersForTopic("project:101").onEvent("artifact.added", {
+        project_id: 101, artifact_type: "prd", artifact_id: 9,
+      })
+      await Promise.resolve()
+    })
+
+    expect(artifactsMock.mock.calls.length).toBeGreaterThan(callsAfterMount)
+    await waitFor(() => expect(screen.getByTestId("topbar-artifacts").textContent).toContain("1"))
+  })
+
+  it("ignores an unrelated event on the group artifact channel", async () => {
+    await renderReady()
+    const callsAfterMount = artifactsMock.mock.calls.length
+
+    await act(async () => {
+      handlersForTopic("project:101").onEvent("brief.delivered", {})
+    })
+    expect(artifactsMock.mock.calls.length).toBe(callsAfterMount)
+  })
+
+  it("a null current-user id yields a null per-user topic (hook degrades, poll unaffected); the group artifact channel is unaffected", async () => {
     authState = { kind: "anonymous" }
     await renderReady()
 
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
-    expect(topics.every((t) => t === null)).toBe(true)
+    expect(topics).toContain(null)
+    expect(topics).toContain("project:101")
   })
 })
 

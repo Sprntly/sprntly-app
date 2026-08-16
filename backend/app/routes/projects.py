@@ -869,6 +869,11 @@ class ProjectChatEditIn(BaseModel):
     # `test_project_chat_edit_explicit_id_cross_project_denied` for the
     # mutation-proofed IDOR guard.
     prd_id: int | None = Field(default=None, ge=1)
+    # The idempotency key a retry/double-submit carries for the owned
+    # both-sides persist below — client-issued when the sender's engine
+    # mints one; the route mints a server uuid4 when absent so persistence
+    # is never skipped for an older client.
+    client_message_id: str | None = None
 
 
 @router.post("/{project_id}/prd/chat-edit")
@@ -913,6 +918,32 @@ def project_chat_edit(
             "answer": "PRD editing from chat isn't turned on for this project yet.",
         }
 
+    resolved_client_message_id = body.client_message_id or str(uuid.uuid4())
+
+    def _persist_edit_turns(answer_text: str) -> None:
+        """Owned, idempotent both-sides persist (AC2): the user's
+        instruction + the assistant's shown answer, keyed on the SAME
+        client_message_id so a double-submit dedups per side. Best-effort —
+        a persist failure never blocks the edit's already-computed result."""
+        try:
+            conversations_db.post_owned_individual_user_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=body.instruction,
+                client_message_id=resolved_client_message_id,
+            )
+            conversations_db.post_owned_individual_assistant_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=answer_text,
+                client_message_id=resolved_client_message_id,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist individual-chat edit turns project_id=%s",
+                project_id, exc_info=True,
+            )
+
     dataset = _dataset_for(ctx)
     # `body.prd_id` present (the caller picked a PRD off a prior `clarify`
     # envelope's `prd_options`) -> thread it through explicitly, same shape
@@ -922,18 +953,20 @@ def project_chat_edit(
     tool_input = {"prd_id": body.prd_id} if body.prd_id is not None else {}
     prd_id, refusal = _resolve_prd_id(tool_input, project_id, dataset, ctx.company_id)
     if prd_id is None:
-        return {"edited": False, "answer": refusal or "I couldn't work out which PRD to edit."}
+        answer = refusal or "I couldn't work out which PRD to edit."
+        _persist_edit_turns(answer)
+        return {"edited": False, "answer": answer}
 
     try:
         result = apply_chat_edit_scoped(
             prd_id, body.instruction, ctx, project_id=project_id, dataset=dataset,
         )
     except ProjectPrdWriteDenied:
-        return {
-            "edited": False,
-            "answer": "I can only edit a PRD that's attached to this project.",
-        }
+        answer = "I can only edit a PRD that's attached to this project."
+        _persist_edit_turns(answer)
+        return {"edited": False, "answer": answer}
 
+    _persist_edit_turns(result.get("summary") or "Updated the PRD.")
     return {"edited": True, **result}
 
 
@@ -1169,6 +1202,47 @@ def create_individual_chat_route(
         project_id, conversation["id"],
     )
     return conversation
+
+
+class PostIndividualTurnsRequest(BaseModel):
+    """The owned turn-pair body for the branches with no chat-route home:
+    a generate branch, a clarify settle, or a terminal outcome (error/
+    cancel/artifact-attach-failed) — each persists the question actually
+    asked and the assistant text actually shown, so a reload restores the
+    real dialogue rather than a blank."""
+    client_message_id: str = Field(..., min_length=1)
+    question: str = Field(..., min_length=1, max_length=120_000)
+    answer: str = Field(..., min_length=1, max_length=120_000)
+
+
+@router.post("/{project_id}/individual/turns")
+def persist_individual_turns_route(
+    project_id: int,
+    body: PostIndividualTurnsRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Persist the CALLER'S OWN user+assistant turn pair into THEIR
+    individual project chat (AC2/AC3) — the explicit-owner home for the
+    branches whose backend work doesn't already have a chat-route home
+    (`runGeneratePrd`/`runGenerateTickets`/clarify-settle/terminal
+    outcomes). Membership-gated; ownership is resolved SERVER-side from
+    `(project_id, ctx.user_id)` by the §B writers — the client supplies no
+    `conversation_id` (AC6). Idempotent on `client_message_id` (AC4): a
+    double-submit returns the SAME pair rather than writing a second one."""
+    _require_project_member(project_id, ctx)
+    user_turn = conversations_db.post_owned_individual_user_turn(
+        project_id=project_id,
+        user_id=ctx.user_id,
+        content=body.question,
+        client_message_id=body.client_message_id,
+    )
+    assistant_turn = conversations_db.post_owned_individual_assistant_turn(
+        project_id=project_id,
+        user_id=ctx.user_id,
+        content=body.answer,
+        client_message_id=body.client_message_id,
+    )
+    return {"user_turn_id": user_turn["id"], "assistant_turn_id": assistant_turn["id"]}
 
 
 @router.get("/{project_id}/individual/turns")

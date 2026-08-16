@@ -593,6 +593,11 @@ export const askApi = {
       project_id?: number
       evidence_id?: number
       ticket_set_id?: number
+      /** Individual-project-chat send identity (project branch only): the
+       *  idempotency key the server persists the user turn under, and links
+       *  the answer to via ask_job_id. Ignored server-side on every other
+       *  branch. */
+      client_message_id?: string
     },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
@@ -611,6 +616,7 @@ export const askApi = {
       // open ticket set instead — one primary artifact per tab.
       ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
       ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
+      ...(opts?.client_message_id != null ? { client_message_id: opts.client_message_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
@@ -5762,6 +5768,11 @@ export type IndividualTurn = {
   role: "user" | "assistant"
   content: string
   created_at: string
+  /** The idempotency key an owned write carried, `null` for every
+   *  pre-existing/cross-user brief turn. Lets the FE engine dedup a
+   *  session turn against its now-persisted history row by this key
+   *  instead of the numeric id (which the session turn never has). */
+  client_message_id?: string | null
 }
 
 /** Response from `GET /v1/projects/{id}/individual/unread` and
@@ -5916,10 +5927,28 @@ export const projectsApi = {
    *  cross-tenant gate still runs on it before any write, unconditionally.
    *  Membership-gated and `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading
    *  to `edited: false` rather than an error. */
-  prdChatEdit: (id: number | string, instruction: string, prdId?: number | null) =>
+  prdChatEdit: (id: number | string, instruction: string, prdId?: number | null, clientMessageId?: string) =>
     api.post<ProjectChatEditResult>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
-      prdId != null ? { instruction, prd_id: prdId } : { instruction },
+      {
+        instruction,
+        ...(prdId != null ? { prd_id: prdId } : {}),
+        ...(clientMessageId != null ? { client_message_id: clientMessageId } : {}),
+      },
+    ),
+  /** Persist the caller's own owned user+assistant turn pair
+   *  (`POST /v1/projects/{id}/individual/turns`) — the explicit-owner home
+   *  for the branches with no dedicated chat route (generate/clarify/
+   *  terminal outcomes). Idempotent on `clientMessageId`; membership-gated
+   *  server-side, ownership resolved from `(project_id, caller)` — never a
+   *  client-supplied `conversation_id`. */
+  persistIndividualTurns: (
+    id: number | string,
+    payload: { clientMessageId: string; question: string; answer: string },
+  ) =>
+    api.post<{ user_turn_id: number; assistant_turn_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/individual/turns`,
+      { client_message_id: payload.clientMessageId, question: payload.question, answer: payload.answer },
     ),
   /** Classify one private-chat message via the project-scoped counterpart
    *  of `chatIntentApi.resolve` (`POST /v1/projects/{id}/chat/intent`).

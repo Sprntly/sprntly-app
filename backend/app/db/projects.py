@@ -479,6 +479,31 @@ def add_artifact(project_id: int, artifact_type: str, artifact_id: int) -> dict:
         .data
     )
     client.table("projects").update({"updated_at": utc_now()}).eq("id", project_id).execute()
+
+    # Best-effort realtime nudge (AD-P21/AD-P22): every artifact attach —
+    # client-driven (this ref's own route) or server-side (`execute_task`/a
+    # report capture) — flows through this ONE chokepoint, so this is the
+    # single place a "the artifacts list changed" signal needs to fire.
+    # NEVER raises: an unconfigured/unreachable Realtime endpoint must not
+    # break the artifact write; the poll surfaces this feeds already
+    # reconcile on their own read (`ProjectDetailScreen`'s client-driven
+    # `refetchArtifacts` closes the gap for the sender's own attach even
+    # when this broadcast never lands).
+    try:
+        from app import realtime
+
+        realtime.publish_broadcast(
+            f"project:{project_id}",
+            "artifact.added",
+            {
+                "project_id": project_id,
+                "artifact_type": artifact_type,
+                "artifact_id": artifact_id,
+            },
+        )
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        pass
+
     return (
         row[0]
         if row

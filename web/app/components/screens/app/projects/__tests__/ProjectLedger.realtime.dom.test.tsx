@@ -206,6 +206,21 @@ function lastHandlers() {
   const call = realtimeSpy.mock.calls[realtimeSpy.mock.calls.length - 1]
   return call[1] as { onEvent: (event: string, payload: unknown) => void; onReconcile: () => void }
 }
+// `ProjectDetailScreen` (unlike `ProjectPrivateChat`) now subscribes a
+// SECOND channel too (the group `project:{id}` artifact-invalidation one,
+// #9-count) — `lastHandlers()` can no longer assume "the most recent
+// subscribe call is the per-user ledger-counts one" for the
+// `renderDetailReady()`-based tests below. Resolve by topic explicitly for
+// those; the `ProjectPrivateChat`-only tests further down still have
+// exactly one channel, so `lastHandlers()` stays correct for them.
+function handlersForTopic(topic: string) {
+  const call = [...realtimeSpy.mock.calls].reverse().find((c) => c[0] === topic)
+  if (!call) throw new Error(`no useRealtimeChannel subscription for topic ${topic}`)
+  return call[1] as { onEvent: (event: string, payload: unknown) => void; onReconcile: () => void }
+}
+function perUserHandlers() {
+  return handlersForTopic("project:101:user:u1")
+}
 
 async function renderDetailReady() {
   getMock.mockResolvedValue(PROJECT)
@@ -255,7 +270,7 @@ describe("rail counts — live update (AC-5)", () => {
     await renderDetailReady()
     const callsAfterMount = ledgerCountsMock.mock.calls.length
     await act(async () => {
-      lastHandlers().onEvent("brief.delivered", { assignee_user_id: "u1" })
+      perUserHandlers().onEvent("brief.delivered", { assignee_user_id: "u1" })
       await Promise.resolve()
     })
     expect(ledgerCountsMock.mock.calls.length).toBe(callsAfterMount)
@@ -269,7 +284,7 @@ describe("reconnect reconcile (AC-7)", () => {
     const callsAfterMount = ledgerCountsMock.mock.calls.length
 
     await act(async () => {
-      lastHandlers().onReconcile()
+      perUserHandlers().onReconcile()
       await Promise.resolve()
     })
 
@@ -278,13 +293,22 @@ describe("reconnect reconcile (AC-7)", () => {
 })
 
 // ── AC-8 / AC-9: degraded fallback + single own channel ──
+// `ProjectDetailScreen` now ALSO subscribes the GROUP `project:{id}`
+// channel (#9-count artifact invalidation — a separate, later addition,
+// unrelated to the ledger-counts wiring these tests cover). The invariant
+// these two guard is narrower than "never a second channel at all": the
+// caller's OWN per-user ledger-counts channel is never duplicated, and the
+// group artifact channel never feeds `ledgerCountsMock` (see the
+// `ignores unrelated events` case above, which already covers cross-topic
+// event isolation at the handler level).
 describe("degradation + channel scoping (AC-8, AC-9)", () => {
-  it("test_subscribes_only_own_per_user_channel: one channel on project:{id}:user:{uid}, never the group channel", async () => {
+  it("test_subscribes_only_own_per_user_channel: exactly one channel on project:{id}:user:{uid} (plus the separate group artifact channel)", async () => {
     await renderDetailReady()
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
-    expect(topics.every((t) => t === "project:101:user:u1")).toBe(true)
-    expect(new Set(topics).size).toBe(1)
-    expect(topics).not.toContain("project:101")
+    expect(new Set(topics.filter((t) => t === "project:101:user:u1")).size).toBe(1)
+    // The group artifact channel (#9-count) is a real, separate
+    // subscription now — asserted present, not absent.
+    expect(topics).toContain("project:101")
   })
 
   // `test_degraded_falls_back_to_l03_behaviour` originally also asserted a
@@ -292,14 +316,14 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
   // `task-ledger-counts` node — dropped for the same reason as AC-4/AC-5
   // above. The degraded-channel-scoping + no-error-surface assertions below
   // don't depend on that markup, so they're preserved rather than lost.
-  it("test_degraded_channel_scoping: degraded channel, no error, no second channel", async () => {
+  it("test_degraded_channel_scoping: degraded channel, no error, no DUPLICATE per-user channel", async () => {
     realtimeState.degraded = true
     await renderDetailReady()
 
-    // No duplicate channel, never the group channel.
+    // No duplicate PER-USER channel; the separate group artifact channel is
+    // expected (#9-count) and does not affect this scoping guarantee.
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
-    expect(new Set(topics).size).toBe(1)
-    expect(topics).not.toContain("project:101")
+    expect(new Set(topics.filter((t) => t === "project:101:user:u1")).size).toBe(1)
     // No error surfaced anywhere in the shell.
     expect(screen.queryByRole("alert")).toBeNull()
 
@@ -308,7 +332,7 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
     // rail card's own DOM, which is unmounted.
     const callsBeforeEmit = ledgerCountsMock.mock.calls.length
     await act(async () => {
-      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
+      perUserHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
       await Promise.resolve()
     })
     await waitFor(() => expect(ledgerCountsMock.mock.calls.length).toBe(callsBeforeEmit + 1))
