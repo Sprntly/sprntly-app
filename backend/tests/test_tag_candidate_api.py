@@ -412,6 +412,14 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
     ).execute()
     upsert_workspace_member(project["workspace_id"], ws_uid, "member")
 
+    # A real, non-caller project member — proves exclusion is scoped to the
+    # caller only, not every project member.
+    peer_uid = "cand-peer-1"
+    require_client().table("profiles").insert(
+        {"id": peer_uid, "email": "peer@acme.example", "full_name": "Peer Person"}
+    ).execute()
+    projects_db.add_member(project["id"], peer_uid)
+
     # A FOREIGN-company member — must NEVER appear.
     require_client().table("companies").insert(
         {"id": "other-co", "slug": "other-co", "display_name": "Other Co"}
@@ -427,7 +435,8 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
     assert r.status_code == 200, r.text
     cands = r.json()["candidates"]
     uids = {c["user_id"] for c in cands}
-    assert ctx.user_id in uids  # the creator, a project member
+    assert ctx.user_id not in uids  # the caller is self-excluded, not listed
+    assert peer_uid in uids  # a non-caller project member still appears
     assert ws_uid in uids  # in-tenant workspace non-member
     assert "foreign-1" not in uids  # cross-company never listed
     assert all(c["kind"] in ("member", "workspace", "company") for c in cands)
@@ -439,3 +448,18 @@ def test_candidate_search_tenant_scoped_capped(isolated_settings, monkeypatch):
         f"/v1/projects/{project['id']}/candidates?q=", headers=non_member_headers
     )
     assert r2.status_code == 403
+
+
+def test_candidate_search_excludes_caller(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = _new_project(ctx)
+
+    # The caller is the sole project member (the creator, added on project
+    # creation) — the picker still must not list them, even with nobody
+    # else to pick from.
+    r = ctx.client.get(f"/v1/projects/{project['id']}/candidates?q=")
+    assert r.status_code == 200, r.text
+    cands = r.json()["candidates"]
+    uids = {c["user_id"] for c in cands}
+    assert ctx.user_id not in uids
+    assert cands == []
