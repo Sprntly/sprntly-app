@@ -1,0 +1,14 @@
+/*
+ * Shell-owned classes. In this wave the shell emits main chat's existing global
+ * `bc-*`/`od-*` classes (from globals.css) for the main surface and touches no
+ * CSS, so the only class that lives here is the standalone project viewport —
+ * the scroll region a project surface uses instead of main's `od-center-scroll`
+ * (which is coupled to the tab-strip layout). No caller uses it yet; the class
+ * is shipped now so the file exists and the later project-fold ticket has a home
+ * for its frame glue. No `bc-*` redefinition, no colors or tokens here.
+ */
+.standaloneViewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
