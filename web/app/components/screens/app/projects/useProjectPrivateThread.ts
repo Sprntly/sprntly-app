@@ -25,6 +25,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { spliceSkill } from "../../../shared/chatComposerController"
+import {
+  clarifyAnswersText,
+  clarifyQuestionsText,
+  type ClarifyAnswer,
+  type ClarifyQuestion,
+  type ClarifyResolution,
+} from "../../../shared/ClarifyQuestionsCard"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
@@ -44,6 +51,7 @@ import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
   askApi,
+  prdApi,
   projectsApi,
   storiesApi,
   type AskResponse,
@@ -92,6 +100,12 @@ type SessionTurn = {
   createdAt?: number
   clarifyOptions?: { id: number; title: string }[]
   clarifyInstruction?: string
+  /** The structured generation-clarify gate (`prdApi.clarifyTask`), parked on
+   *  this turn while it holds — `task` is the ORIGINAL (pre-fold) task text,
+   *  kept so `submitClarify`/`skipClarify` can fold the user's answers onto
+   *  it without re-deriving it from the turn's own display text. Distinct
+   *  from `clarifyOptions` above (the EDIT-target disambiguation gate). */
+  clarify?: { questions: ClarifyQuestion[]; task: string; resolved?: ClarifyResolution; busy?: boolean }
   /** The idempotency key minted once at send-time (reuses this turn's own
    *  `id`) — threaded onto every server persist call for this send, and used
    *  to dedup this session turn against its own now-persisted history row
@@ -123,6 +137,13 @@ export type UseProjectPrivateThread = {
   stop: () => void
   /** Closes the clarify → pick → apply loop with the chosen PRD id. */
   pickOption: (turnId: string, option: { id: string; title: string; instruction?: string }) => void
+  /** Submits the structured generation-clarify gate's answers (§D): folds
+   *  them onto the parked turn's original task via `clarifyAnswersText` and
+   *  runs generation exactly once. */
+  submitClarify: (turnId: string, answers: ClarifyAnswer[]) => void
+  /** "Generate now" — skips the structured generation-clarify gate and
+   *  generates with the original, unfolded task. */
+  skipClarify: (turnId: string) => void
   /** True while an ask is in flight (a session turn is pending). */
   busy: boolean
   /** True while a mount-time resume is settling. */
@@ -174,6 +195,12 @@ export function useProjectPrivateThread(
   })()
 
   const [sessionTurns, setSessionTurns] = useState<SessionTurn[]>([])
+  // A live mirror of `sessionTurns`, read synchronously inside `submitClarify`/
+  // `skipClarify` — those closures need THIS turn's own parked `clarify.task`
+  // at call time (a button click, outside any render), not a snapshot frozen
+  // at the callback's own creation (mirrors `draftRef` in ChatShell.tsx).
+  const sessionTurnsRef = useRef<SessionTurn[]>([])
+  sessionTurnsRef.current = sessionTurns
   const [history, setHistory] = useState<IndividualTurn[]>([])
   const [busy, setBusy] = useState(false)
   const [delegationsByTurn, setDelegationsByTurn] = useState<Map<number, DelegationLedgerRow>>(new Map())
@@ -282,6 +309,63 @@ export function useProjectPrivateThread(
         })
     },
     [projectId],
+  )
+
+  // A generic turn patch — used by the clarify-gate branches below (§D),
+  // which settle a turn OUTSIDE the `send()` closure's own inline
+  // `setSessionTurns` calls (`submitClarify`/`skipClarify` are top-level
+  // closures, invoked later from a button click, not from `send`'s promise
+  // chain). `createdAt` is minted-at-settle, same convention as every other
+  // settle path in this file (never `Date.now()` at render).
+  const settleTurn = useCallback((turnId: string, patch: Partial<SessionTurn>) => {
+    setSessionTurns((prev) =>
+      prev.map((t) => (t.id === turnId ? { ...t, ...patch, createdAt: patch.createdAt ?? Date.now() } : t)),
+    )
+  }, [])
+
+  // The reusable "run generation, attach, settle" tail every clarify-gate
+  // branch shares (§Risk 6 reconciliation): the immediate-generate path (no
+  // questions), `submitClarify`, and `skipClarify` all funnel through this ONE
+  // function so the private turn-persist + `onArtifactsChanged` call can never
+  // be threaded into some branches and dropped from others. Byte-for-byte the
+  // same `addArtifact`/`onArtifactsChanged`/`persistTurnPair` calls
+  // `runGeneratePrd` made inline before this ticket.
+  const generatePrdIntoTurn = useCallback(
+    async (turnId: string, task: string, question: string, clientMessageId: string) => {
+      const result = await runPrdGenerationFromTask(task).catch(() => ({
+        ok: false as const,
+        message: "That PRD didn't come through. Try again.",
+      }))
+      if (stoppedRef.current) return
+      if (!result.ok) {
+        persistTurnPair(clientMessageId, question, result.message)
+        settleTurn(turnId, { pending: false, error: result.message })
+        setBusy(false)
+        return
+      }
+      // Guard the artifact-attach await (an adversarial review): an unguarded
+      // rejection here left the turn `pending` FOREVER, locking the composer.
+      try {
+        await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
+        opts?.onArtifactsChanged?.()
+      } catch {
+        if (stoppedRef.current) return
+        const message = "I generated that PRD but couldn't attach it. Try again."
+        persistTurnPair(clientMessageId, question, message)
+        settleTurn(turnId, { pending: false, error: message })
+        setBusy(false)
+        return
+      }
+      if (stoppedRef.current) return
+      const answerText = `I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`
+      persistTurnPair(clientMessageId, question, answerText)
+      settleTurn(turnId, {
+        pending: false,
+        reply: { answer: answerText, key_points: [], citations: [], confidence: 1, unanswered: "" },
+      })
+      setBusy(false)
+    },
+    [projectId, opts, persistTurnPair, settleTurn],
   )
 
   const emitDelegation = useCallback(
@@ -561,29 +645,31 @@ export function useProjectPrivateThread(
         }
       }
 
+      // Clarify-FIRST gate (§D): mirrors main's sufficiency check before
+      // generating. Insufficient → park the turn on `clarify` (durable
+      // flattened form persisted, same as the pre-existing `onClarify` pick
+      // gate below) and STOP — no `runPrdGenerationFromTask` call yet.
+      // Sufficient/fails-open → generate immediately, UNCHANGED behaviour,
+      // now funnelled through the shared `generatePrdIntoTurn` tail so the
+      // private turn-persist / `onArtifactsChanged` call rides every branch
+      // (§Risk 6) instead of living inline here alone.
       const runGeneratePrd = async (task: string) => {
-        const result = await runPrdGenerationFromTask(task).catch(() => ({
-          ok: false as const,
-          message: "That PRD didn't come through. Try again.",
-        }))
-        if (!result.ok) {
-          settleErrorPersisted(result.message)
+        const verdict = await prdApi
+          .clarifyTask(task)
+          .catch(() => ({ sufficient: true, questions: [] as ClarifyQuestion[], missing: [] as string[] }))
+        if (!verdict.sufficient && verdict.questions.length) {
+          if (stoppedRef.current) return
+          const durableText = clarifyQuestionsText(verdict.questions)
+          persistTurnPair(clientMessageId, question, durableText)
+          settleTurn(id, {
+            reply: reply(durableText),
+            pending: false,
+            clarify: { questions: verdict.questions, task },
+          })
+          setBusy(false)
           return
         }
-        // Guard the artifact-attach await (an adversarial review): an unguarded rejection
-        // here left the turn `pending` FOREVER, locking the composer. Wrap it
-        // like `runGenerateTickets` so a rejection settles the turn to an error
-        // state and frees the composer.
-        try {
-          await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
-          opts?.onArtifactsChanged?.()
-        } catch {
-          settleErrorPersisted("I generated that PRD but couldn't attach it. Try again.")
-          return
-        }
-        settleReplyPersisted(
-          `I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`,
-        )
+        await generatePrdIntoTurn(id, task, question, clientMessageId)
       }
 
       // Server persists both sides via `prdChatEdit` (§D) — NO client
@@ -715,6 +801,48 @@ export function useProjectPrivateThread(
     [projectId],
   )
 
+  // Closes the structured generation-clarify gate (§D) — the SAME turn the
+  // gate parked (`clarify.task` is the ORIGINAL, pre-fold task text; folding
+  // happens here, once, so the engine never re-derives it from display text).
+  // Reads `sessionTurnsRef` (not `sessionTurns`) because this fires from a
+  // button click outside any render pass. Folds via the shared
+  // `clarifyAnswersText` (§C) — same combining formula main's own
+  // `submitClarifyAnswers` uses — then funnels through `generatePrdIntoTurn`
+  // (§Risk 6) exactly once.
+  const submitClarify = useCallback(
+    (turnId: string, answers: ClarifyAnswer[]) => {
+      const turn = sessionTurnsRef.current.find((t) => t.id === turnId)
+      if (!turn?.clarify) return
+      const detail = clarifyAnswersText(answers)
+      const combinedTask = detail
+        ? `${turn.clarify.task}\n\nAdditional details from the user:\n${detail}`
+        : turn.clarify.task
+      const resolved: ClarifyResolution = { answers, mode: answers.length ? "card" : "skip" }
+      setSessionTurns((prev) =>
+        prev.map((t) => (t.id === turnId && t.clarify ? { ...t, clarify: { ...t.clarify, busy: true, resolved } } : t)),
+      )
+      setBusy(true)
+      void generatePrdIntoTurn(turnId, combinedTask, turn.question, turn.clientMessageId)
+    },
+    [generatePrdIntoTurn],
+  )
+
+  // "Generate now" — skips the gate and generates with the ORIGINAL,
+  // unfolded task. Mirrors `submitClarify` with an empty answer batch.
+  const skipClarify = useCallback(
+    (turnId: string) => {
+      const turn = sessionTurnsRef.current.find((t) => t.id === turnId)
+      if (!turn?.clarify) return
+      const resolved: ClarifyResolution = { answers: [], mode: "skip" }
+      setSessionTurns((prev) =>
+        prev.map((t) => (t.id === turnId && t.clarify ? { ...t, clarify: { ...t.clarify, busy: true, resolved } } : t)),
+      )
+      setBusy(true)
+      void generatePrdIntoTurn(turnId, turn.clarify.task, turn.question, turn.clientMessageId)
+    },
+    [generatePrdIntoTurn],
+  )
+
   // Stopping is deliberate: reclaims the local poll AT ONCE and asks the
   // backend to cancel so the worker aborts before its next LLM step and any
   // late answer is discarded server-side.
@@ -806,10 +934,15 @@ export function useProjectPrivateThread(
               instruction: t.clarifyInstruction ?? "",
             }))
           : undefined,
+        clarify: t.clarify
+          ? { questions: t.clarify.questions, resolved: t.clarify.resolved, busy: t.clarify.busy }
+          : undefined,
       }))
 
     return [...historyTurns, ...session]
   }, [history, sessionTurns, delegationsByTurn, callerName])
 
-  return { turns, send, stop, pickOption, busy, resuming, emitDelegation, callerName }
+  return {
+    turns, send, stop, pickOption, submitClarify, skipClarify, busy, resuming, emitDelegation, callerName,
+  }
 }

@@ -34,6 +34,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react"
 import { ChatTranscript, type ChatTranscriptTurn } from "../ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../ChatComposer"
+import { ClarifyQuestionsCard, type ClarifyAnswer } from "../ClarifyQuestionsCard"
 import type { ChatShellHandle, ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "./types"
 import shellStyles from "./ChatShell.module.css"
 
@@ -57,6 +58,15 @@ export interface ChatShellProps {
    *  (private's clarify-PRD-pick). The host wires this to the engine's pick
    *  closure; main never renders `pickOptions`, so this is never called. */
   onPickOption?: (turnId: string, option: { id: string; title: string; instruction?: string }) => void
+  /** Project surfaces only: invoked when a `ShellTurn.clarify` batch is
+   *  submitted (the structured generation-clarify gate, private's inherited
+   *  version of main's `ClarifyQuestionsCard`). The host wires this to the
+   *  engine's clarify-submit closure; main never renders `clarify`, so this
+   *  is never called. */
+  onClarifySubmit?: (turnId: string, answers: ClarifyAnswer[]) => void
+  /** Project surfaces only: invoked when a `ShellTurn.clarify` batch is
+   *  skipped ("Generate now") — mirrors `onClarifySubmit`. */
+  onClarifySkip?: (turnId: string) => void
   /** Project surfaces only, opt-in: called ONCE on mount with the shell's
    *  `ComposerDraftApi` (a method facade over the shell-owned draft/caret). The
    *  group host wires it so its mention picker can read/insert the live draft;
@@ -71,7 +81,17 @@ function formatShellTime(d: number): string {
 }
 
 function ChatShellInner(
-  { descriptor, turns, pendingSend, composerNode, attachmentViewer, onPickOption, onDraftApiReady }: ChatShellProps,
+  {
+    descriptor,
+    turns,
+    pendingSend,
+    composerNode,
+    attachmentViewer,
+    onPickOption,
+    onClarifySubmit,
+    onClarifySkip,
+    onDraftApiReady,
+  }: ChatShellProps,
   ref: React.Ref<ChatShellHandle>,
 ) {
   const { frame, transcript, dock, overlays, refs, composer, send, reply } = descriptor
@@ -287,7 +307,8 @@ function ChatShellInner(
         !!turn.pending ||
         !!turn.stopped ||
         turn.error != null ||
-        turn.partial != null
+        turn.partial != null ||
+        !!turn.clarify?.questions?.length
       const hasUser = turn.author.kind === "self" && turn.content != null
       const agentTimestamp =
         transcript.timestamps === "fromTurn" && turn.createdAt != null
@@ -310,8 +331,23 @@ function ChatShellInner(
         </div>
       ) : null
 
+      // The structured generation-clarify gate — the SAME shared card main
+      // renders, inherited by configuration. Distinct from `pickNode` above
+      // (EDIT-target disambiguation): a turn carries at most one of the two,
+      // so both may be built here but only ever one is non-null in practice.
+      const clarifyNode = turn.clarify?.questions?.length ? (
+        <ClarifyQuestionsCard
+          questions={turn.clarify.questions}
+          resolved={turn.clarify.resolved ?? undefined}
+          busy={turn.clarify.busy}
+          onSubmit={(answers) => onClarifySubmit?.(turn.id, answers)}
+          onSkip={() => onClarifySkip?.(turn.id)}
+        />
+      ) : null
+
       const agentBodyNode = hasAgent ? (
         <>
+          {clarifyNode}
           {transcript.renderAgentBody?.(turn)}
           {pickNode}
         </>

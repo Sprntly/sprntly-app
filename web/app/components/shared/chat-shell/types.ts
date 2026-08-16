@@ -21,7 +21,7 @@
 
 import type { ChangeEvent, CSSProperties, MutableRefObject, ReactNode, Ref, RefObject } from "react"
 import type { ChatTranscriptTurn } from "../ChatTranscript"
-import type { ClarifyAnswer } from "../ClarifyQuestionsCard"
+import type { ClarifyAnswer, ClarifyQuestion, ClarifyResolution } from "../ClarifyQuestionsCard"
 import type { PinnedSkill } from "../ChatComposer"
 import type {
   AskResponse,
@@ -144,6 +144,14 @@ export interface ShellTurn {
   /** Private's clarify-PRD-pick options, rendered by the shell in the agent
    *  body's footer position. */
   pickOptions?: { id: string; title: string; instruction?: string }[]
+  /** The structured generation-clarify gate (main's `prdApi.clarifyTask`
+   *  sufficiency check), rendered by the shell via the shared
+   *  `ClarifyQuestionsCard` in the agent body's footer position — a project
+   *  surface's inherited version of main's clarify-first gate. Generalizes
+   *  beyond `pickOptions` (which serves EDIT-target disambiguation, an
+   *  orthogonal gate): a turn carries at most one of the two, never both.
+   *  Project-only; absent/null → nothing renders. */
+  clarify?: { questions: ClarifyQuestion[]; resolved?: ClarifyResolution; busy?: boolean } | null
   /** NEXT-WAVE (a later queue+replies wave: reply threading). Nullable, costs
    *  nothing, and freezes the contract so reply-connectors do not reopen the
    *  shell. */
