@@ -2158,16 +2158,19 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
     assert seen["docs_question"] == "turn that into a plan"
 
 
-# ── ★ project-scoped ask gates the connector-lookup interceptors ─────────────
-# The individual PROJECT chat sends /v1/ask with a project_id; routes/ask.py
-# folds an AUTHORITATIVE project-facts block into the history, and the worker
-# sets ask_runner's request-scoped `active_project_id`. `answer()` reads it via
-# `_project_scoped_ask()` to SKIP the tracker / named-source / document-lookup
-# interceptors so a project-meta question ("who's on this project?", "what
-# tasks are open?", "how many PRDs?") falls through to route()->compose where
-# the folded block is the grounding — instead of being hijacked into a "connect
-# a connector" deflection. The default (no project_id set) is None, so EVERY
-# non-project ask routes byte-for-byte as before. Both directions are proved.
+# ── ★ typed scope-driven gate on the connector-lookup interceptors ───────────
+# A project surface (private/group) hands `qa_agent.answer(scope=...)` a
+# `SurfaceScope`. `_skip_project_connectors(scope, routing_text, history)`
+# replaces the old `active_project_id()` ContextVar predicate: it SKIPS the
+# tracker / named-source / document interceptors for a project surface UNLESS
+# the question NAMES a source one of them can serve. So a named-source project
+# question is ADMITTED (AC9); an UNNAMED PM-noun question ("what tasks are
+# open?") is skipped and grounds in the folded project block (AC10); and for a
+# MAIN ask (`scope is None`) the helper is always False, so the three guards
+# behave byte-for-byte as before (AC11). All directions are proved.
+from app.surface_scope import Surface, SurfaceScope
+
+_PROJECT_GROUP_SCOPE = SurfaceScope(surface=Surface.project_group, project_id=1)
 
 
 def _stub_answer_generation(monkeypatch):
@@ -2183,50 +2186,124 @@ def _stub_answer_generation(monkeypatch):
     )
 
 
-def test_project_scoped_ask_bypasses_tracker_interceptor_but_non_project_still_fires(monkeypatch):
-    import app.ask_runner as ask_runner
+def test_project_named_source_admits_connector_but_unnamed_skips(monkeypatch):
+    """AC9/AC10: on a PROJECT surface a NAMED tracker question is ADMITTED to
+    the tracker interceptor; an UNNAMED PM-noun question is SKIPPED and grounds
+    in the project block. AC11: a MAIN ask (scope=None) fires as before."""
     import app.connector_lookup.tracker as tracker_mod
 
     _stub_answer_generation(monkeypatch)
-    # Force the tracker interceptor's precondition to hold: the question looks
-    # like a tracker lookup AND a tracker is "connected", so on the ordinary
-    # path it claims the turn.
     monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: True)
     monkeypatch.setattr(tracker_mod, "any_connected", lambda eid: True)
-    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: ["jira"])
+    # named_trackers is empty UNLESS the question actually names a tracker.
+    monkeypatch.setattr(
+        tracker_mod, "named_trackers",
+        lambda text: ["jira"] if "jira" in text.lower() else [],
+    )
     monkeypatch.setattr(
         tracker_mod, "answer",
         lambda **k: {
-            "answer": "connect a tracker", "_skill_source": "connector-lookup",
+            "answer": "tracker result", "_skill_source": "connector-lookup",
             "_skill_action": "Tracker lookup",
         },
     )
-    q = "what is the status of the onboarding ticket?"
 
-    # NON-project ask (active_project_id() is None, the default): interceptor
-    # fires exactly as before.
-    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    assert out_np.get("_skill_source") == "connector-lookup", out_np
-    assert out_np.get("_skill_action") == "Tracker lookup", out_np
+    # MAIN (scope=None): interceptor fires exactly as before (AC11).
+    out_main = qa.answer(enterprise_id="ent", question="what tasks are open?", dataset="acme")
+    assert out_main.get("_skill_source") == "connector-lookup", out_main
 
-    # PROJECT-scoped ask: interceptor skipped, turn falls through to the
-    # folded-block-grounded compose path.
-    tok = ask_runner.set_active_project_id(123)
-    try:
-        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    finally:
-        ask_runner.reset_active_project_id(tok)
-    assert out_p.get("_skill_source") != "connector-lookup", out_p
-    assert out_p.get("answer") == "grounded-from-project-block", out_p
+    # PROJECT + NAMED source ("jira"): admitted → interceptor fires (AC9).
+    out_named = qa.answer(
+        enterprise_id="ent", question="what's the status of the jira ticket?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_named.get("_skill_source") == "connector-lookup", out_named
+
+    # PROJECT + UNNAMED PM-noun: skipped → grounds in the project block (AC10).
+    out_unnamed = qa.answer(
+        enterprise_id="ent", question="what tasks are open?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_unnamed.get("_skill_source") != "connector-lookup", out_unnamed
+    assert out_unnamed.get("answer") == "grounded-from-project-block", out_unnamed
 
 
-def test_project_scoped_ask_bypasses_named_source_interceptor_but_non_project_still_fires(monkeypatch):
-    import app.ask_runner as ask_runner
+def test_skip_connectors_forced_false_routes_pm_noun_to_tracker_is_red(monkeypatch):
+    """MUTATION (AC10, PI13): force `_skip_project_connectors` to always return
+    False (the pre-ticket blanket-off-for-project extreme) and the UNNAMED
+    PM-noun question is hijacked into the tracker interceptor → RED. Restoring
+    the real named-source decision → GREEN (proved by the test above)."""
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: True)
+    monkeypatch.setattr(tracker_mod, "any_connected", lambda eid: True)
+    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: [])
+    monkeypatch.setattr(
+        tracker_mod, "answer",
+        lambda **k: {
+            "answer": "tracker result", "_skill_source": "connector-lookup",
+            "_skill_action": "Tracker lookup",
+        },
+    )
+    # The mutation: always admit (never skip) on a project surface.
+    monkeypatch.setattr(qa, "_skip_project_connectors", lambda scope, rt, hist: False)
+
+    out = qa.answer(
+        enterprise_id="ent", question="what tasks are open?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    # With the gate defeated the unnamed PM-noun is wrongly hijacked to the
+    # tracker — this is the RED the named-source decision prevents.
+    assert out.get("_skill_source") == "connector-lookup", out
+
+
+def test_project_named_connector_and_document_admit(monkeypatch):
+    """AC9: a project ask naming a CONNECTOR reaches the named-source branch,
+    and one naming a DOCUMENT provider reaches the document-lookup branch."""
+    import app.connector_lookup.registry as registry_mod
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
+    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: [])
+    monkeypatch.setattr(
+        qa, "is_connector_lookup",
+        lambda text, history=None: {"slack"} if "slack" in text.lower() else None,
+    )
+    monkeypatch.setattr(
+        qa, "document_lookup_candidates",
+        lambda text: {"confluence"} if "runbook" in text.lower() else set(),
+    )
+    monkeypatch.setattr(registry_mod, "connected_providers", lambda eid: ["confluence"])
+    monkeypatch.setattr(
+        registry_mod, "answer_for_hints",
+        lambda **k: {
+            "answer": "read source", "_skill_source": "connector-lookup",
+            "_skill_action": "Named source lookup",
+        },
+    )
+
+    out_conn = qa.answer(
+        enterprise_id="ent", question="what did slack say about pricing?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_conn.get("_skill_source") == "connector-lookup", out_conn
+
+    out_doc = qa.answer(
+        enterprise_id="ent", question="what does our onboarding runbook say?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_doc.get("_skill_source") == "connector-lookup", out_doc
+
+
+def test_main_scope_none_connector_guards_byte_identical(monkeypatch):
+    """AC11: for a MAIN ask (scope=None) each interceptor fires exactly as the
+    pre-ticket `_project_scoped_ask()`-False path did — the helper returns
+    False for `scope is None` and for `Surface.main`."""
     import app.connector_lookup.registry as registry_mod
 
     _stub_answer_generation(monkeypatch)
-    # is_jira_lookup off so the named-source (is_connector_lookup) interceptor
-    # is the one under test.
     monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
     monkeypatch.setattr(qa, "is_connector_lookup", lambda text, history=None: {"slack"})
     monkeypatch.setattr(
@@ -2238,43 +2315,11 @@ def test_project_scoped_ask_bypasses_named_source_interceptor_but_non_project_st
     )
     q = "what did slack say about the pricing change?"
 
-    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    assert out_np.get("_skill_source") == "connector-lookup", out_np
+    # scope=None and Surface.main both behave identically (interceptor fires).
+    for scope in (None, SurfaceScope(surface=Surface.main)):
+        out = qa.answer(enterprise_id="ent", question=q, dataset="acme", scope=scope)
+        assert out.get("_skill_source") == "connector-lookup", (scope, out)
 
-    tok = ask_runner.set_active_project_id(7)
-    try:
-        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    finally:
-        ask_runner.reset_active_project_id(tok)
-    assert out_p.get("_skill_source") != "connector-lookup", out_p
-    assert out_p.get("answer") == "grounded-from-project-block", out_p
-
-
-def test_project_scoped_ask_bypasses_document_lookup_interceptor_but_non_project_still_fires(monkeypatch):
-    import app.ask_runner as ask_runner
-    import app.connector_lookup.registry as registry_mod
-
-    _stub_answer_generation(monkeypatch)
-    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
-    monkeypatch.setattr(qa, "is_connector_lookup", lambda text, history=None: None)
-    monkeypatch.setattr(qa, "document_lookup_candidates", lambda text: {"confluence"})
-    monkeypatch.setattr(registry_mod, "connected_providers", lambda eid: ["confluence"])
-    monkeypatch.setattr(
-        registry_mod, "answer_for_hints",
-        lambda **k: {
-            "answer": "read the wiki", "_skill_source": "connector-lookup",
-            "_skill_action": "Document lookup",
-        },
-    )
-    q = "what does our onboarding runbook say?"
-
-    out_np = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    assert out_np.get("_skill_source") == "connector-lookup", out_np
-
-    tok = ask_runner.set_active_project_id(9)
-    try:
-        out_p = qa.answer(enterprise_id="ent", question=q, dataset="acme")
-    finally:
-        ask_runner.reset_active_project_id(tok)
-    assert out_p.get("_skill_source") != "connector-lookup", out_p
-    assert out_p.get("answer") == "grounded-from-project-block", out_p
+    # And `_skip_project_connectors` is False for both, directly.
+    assert qa._skip_project_connectors(None, q, None) is False
+    assert qa._skip_project_connectors(SurfaceScope(surface=Surface.main), q, None) is False

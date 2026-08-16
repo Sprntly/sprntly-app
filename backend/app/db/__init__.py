@@ -63,7 +63,10 @@ from app.db.evidences import (
 
 # Asks (log + cache)
 from app.db.asks import (
+    RetryAttemptLive,
+    RetryHasSideEffects,
     cancel_ask_job,
+    claim_retry_attempt,
     complete_ask_job,
     complete_cached_ask,
     fail_ask_job,
@@ -288,7 +291,10 @@ __all__ = [
     "invalidate_stale_evidences",
     "start_evidence",
     # asks
+    "RetryAttemptLive",
+    "RetryHasSideEffects",
     "cancel_ask_job",
+    "claim_retry_attempt",
     "complete_ask_job",
     "complete_cached_ask",
     "fail_ask_job",

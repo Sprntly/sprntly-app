@@ -1096,12 +1096,19 @@ def test_should_respond_signature_has_no_mode_param():
 
 
 def test_no_interjection_toggle_request_field():
-    """`PostGroupTurnRequest` (the only client-supplied payload for this
-    route) carries no interjection-mode field — the decision is entirely
-    server-side."""
+    """`PostGroupTurnRequest` carries no interjection-mode / auto-reply toggle
+    field — the respond-or-stay-out decision is entirely server-side. The
+    payload MAY carry execution-identity / SendCommand plumbing
+    (`client_message_id`, `pinned_skill`, `attachments`), but never a knob that
+    lets the client override the gate."""
     from app.routes.projects import PostGroupTurnRequest
 
-    assert set(PostGroupTurnRequest.model_fields.keys()) == {"content"}
+    fields = set(PostGroupTurnRequest.model_fields.keys())
+    assert "content" in fields
+    # No field that would let a client toggle whether/how the agent interjects.
+    assert not (fields & {"mode", "interjection_mode", "auto_reply", "respond", "always_respond"})
+    # Only the allowlisted plumbing fields are added beyond `content`.
+    assert fields <= {"content", "client_message_id", "pinned_skill", "attachments"}
 
 
 # ── Real-LLM / real-DB live tier ─────────────────────────────────────────

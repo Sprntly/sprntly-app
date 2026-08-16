@@ -181,10 +181,16 @@ def test_group_publish_payload_is_shaped_dto(isolated_settings, monkeypatch, fak
 
     assert len(calls) == 1
     payload = calls[0]["json"]["messages"][0]["payload"]
+    # The broadcast now carries the execution-run status keys too, so the
+    # realtime shape matches the poll read (AC16) — still a hard whitelist, no
+    # raw-row-only column leaks. run_status is None here (broadcast happens
+    # before any run is scheduled for this human turn).
     assert set(payload.keys()) == {
         "id", "role", "content", "author_user_id", "author_name",
-        "author_job_role", "created_at",
+        "author_job_role", "created_at", "run_status", "error_class",
     }
+    assert payload["run_status"] is None
+    assert payload["error_class"] is None
     assert payload["author_name"] == "Ada Lovelace"
     assert payload["author_job_role"] == "Engineer"
     assert payload["role"] == "user"

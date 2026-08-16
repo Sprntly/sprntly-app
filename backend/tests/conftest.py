@@ -337,6 +337,10 @@ CREATE TABLE ask_jobs (
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 CREATE UNIQUE INDEX ask_jobs_client_message_id_uidx ON ask_jobs (client_message_id) WHERE client_message_id IS NOT NULL;
 CREATE INDEX ask_jobs_source_turn_idx ON ask_jobs (project_id, source_turn_id) WHERE source_turn_id IS NOT NULL;
+-- Mirrors 20260816130000_ask_jobs_active_attempt_unique.sql — at most one LIVE
+-- (`generating`) attempt per triggering group turn, so a concurrent retry
+-- claim is DB-refused (see db/asks.py::claim_retry_attempt).
+CREATE UNIQUE INDEX ask_jobs_active_attempt_uidx ON ask_jobs (source_turn_id) WHERE status = 'generating' AND source_turn_id IS NOT NULL;
 
 -- Fire-and-forget onboarding website-analysis job rows (mirrors
 -- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready

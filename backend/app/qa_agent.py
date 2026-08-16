@@ -57,7 +57,6 @@ from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
     active_conversation_attachment_names,
-    active_project_id,
     company_facts_block,
     compose_ask_answer,
     document_grounding,
@@ -1653,17 +1652,44 @@ def _routing_text_with_filenames(routing_text: str, enterprise_id: str) -> str:
 _CALL_SOURCE_PROVIDERS = frozenset({"fireflies", "gong", "zoom"})
 
 
-def _project_scoped_ask() -> bool:
-    """True when this ask is the individual PROJECT chat (a project_id rode the
-    request, set on `ask_runner`'s request-scoped ContextVar by the worker). Read
-    by `answer()` to skip the connector-lookup interceptors so the folded,
-    authoritative project-context block is what grounds project-meta questions.
-    Best-effort — a lookup failure degrades to False (interceptors run as
-    before), never raising into the answer path."""
+def _skip_project_connectors(
+    scope: "Optional[SurfaceScope]",
+    routing_text: str,
+    history: Optional[list[dict]],
+) -> bool:
+    """True → SKIP the connector-lookup interceptors (tracker / named-source /
+    document) for THIS turn. A typed, `scope`-driven replacement for the former
+    request-scoped-ContextVar predicate — it reads the surface off the `scope`
+    `answer()` already carries, never a request-scoped global, so it fixes BOTH
+    project surfaces (group AND private) from this one site.
+
+    * Main chat (`scope is None` or `Surface.main`): ALWAYS False — byte-
+      identical to the pre-ticket guard (main was never a project surface), so
+      main routing is unchanged.
+    * A PROJECT surface (private / group): skip UNLESS the question NAMES a
+      source one of the interceptors can serve — a named tracker
+      (`named_trackers`), a named connector/provider (`is_connector_lookup`),
+      or a named document (`document_lookup_candidates`). A named-source project
+      question is ADMITTED (each branch's own predicate then decides which one
+      actually fires); an UNNAMED PM-noun question ("what tasks are open?") is
+      skipped so it falls through to `PROJECT_FACTS_AUTHORITATIVE_PREAMBLE` +
+      the project ledger instead of a "connect a connector" deflection.
+
+    Best-effort — a detector failure degrades to NOT skipping (interceptors run
+    as before), never raising into the answer path."""
+    if scope is None or scope.surface == Surface.main:
+        return False
     try:
-        return active_project_id() is not None
+        from app.connector_lookup import tracker
+
+        names_source = bool(
+            tracker.named_trackers(routing_text)
+            or is_connector_lookup(routing_text, history)
+            or document_lookup_candidates(routing_text)
+        )
     except Exception:  # noqa: BLE001 — never break the answer over a routing hint
         return False
+    return not names_source
 
 
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
@@ -2380,19 +2406,17 @@ def answer(
     # returns a connect message rather than falling through. A slash command
     # (handled by route()) is exempt so an explicit skill invocation that merely
     # names Jira isn't hijacked.
-    # Individual PROJECT chat: `routes/ask.py` folded an authoritative
-    # project-context block (members + task ledger + artifact manifest) into this
-    # ask's history. The connector-lookup interceptors here (tracker, named
-    # source, document lookup) fire on the raw question BEFORE the generic route
-    # reaches that block, so a project-meta question ("who's on this project?",
-    # "what tasks are open?", "how many PRDs?") is hijacked into a "connect a
-    # connector" reply that never reads the project facts. For a project-scoped
-    # ask we skip these three so the question falls through to route() ->
-    # compose_ask_answer, where the folded block is the grounding. `not
-    # _project_scoped_ask()` is True for every non-project ask, so their routing
-    # is byte-for-byte unchanged. `_regex_ladder` (not pinned_skill and plan is
-    # None) already subsumes the pinned-skill check.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
+    # PROJECT chat (private + group): a project-meta question ("who's on this
+    # project?", "what tasks are open?", "how many PRDs?") that NAMES no source
+    # must ground in the folded project-facts block, not be hijacked here into a
+    # "connect a connector" reply. `_skip_project_connectors(scope, ...)` returns
+    # True for exactly that case (a project surface + no named source) so the
+    # question falls through to route() -> compose_ask_answer; a project question
+    # that NAMES a tracker/connector/document is admitted (each branch's own
+    # predicate then decides). For main (`scope is None`) the helper is always
+    # False, so these three guards are byte-for-byte unchanged. `_regex_ladder`
+    # (not pinned_skill and plan is None) already subsumes the pinned-skill check.
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/") and is_jira_lookup(routing_text, history):
         from app.connector_lookup import tracker
 
         # Capability gate: matching the PM-noun-plus-verb regex is not enough
@@ -2422,7 +2446,7 @@ def answer(
     # question NAMES a source none of them claimed. A source we cannot read live
     # is answered honestly here too (registry.not_supported_message), which is
     # better than the generic path guessing from the KG.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/"):
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/"):
         connector_hints = is_connector_lookup(routing_text, history)
         if connector_hints:
             from app.connector_lookup import registry
@@ -2453,7 +2477,7 @@ def answer(
     #
     # Below every other interception for the usual reason — this trigger is the
     # broadest on the path, so it must only see what nothing else claimed.
-    if not _project_scoped_ask() and _regex_ladder and not question.lstrip().startswith("/"):
+    if not _skip_project_connectors(scope, routing_text, history) and _regex_ladder and not question.lstrip().startswith("/"):
         candidates = document_lookup_candidates(routing_text)
         if candidates:
             from app.connector_lookup import registry

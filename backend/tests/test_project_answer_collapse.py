@@ -714,7 +714,13 @@ def test_group_transcript_not_reflattened(tenant_client, isolated_settings, monk
 
     monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer)
     ctx = _ctx(t.company_id, ensure_default_workspace(t.company_id)["id"], t.user_id)
-    projects_route._respond_as_group_agent(project_id, conv["id"], ctx, trigger_kind="mention")
+    # `_respond_as_group_agent` now runs THROUGH `run_execution_job` (async):
+    # drive it to completion with a claimed run identity.
+    asyncio.run(
+        projects_route._respond_as_group_agent(
+            project_id, conv["id"], ctx, "mention", job_id=1, run_id="r",
+        )
+    )
 
     assert captured.get("history") is None  # never re-flattened through answer()'s history param
     transcript = captured["scope"].prerendered_transcript
@@ -779,13 +785,21 @@ def test_lt8_input_shape_switch(tenant_client, isolated_settings, monkeypatch):
 
     # Default: latest-turn-as-question (conservative — build-spec §Group).
     assert projects_route._GROUP_TRANSCRIPT_AS_QUESTION is False
-    projects_route._respond_as_group_agent(project_id, conv["id"], ctx, trigger_kind="mention")
+    asyncio.run(
+        projects_route._respond_as_group_agent(
+            project_id, conv["id"], ctx, "mention", job_id=1, run_id="r",
+        )
+    )
     assert captured["question"] == "@Sprntly what's up?"
     assert captured["scope"].prerendered_transcript is not None  # full transcript still rides either way
 
     # Switch flipped: transcript-as-question.
     monkeypatch.setattr(projects_route, "_GROUP_TRANSCRIPT_AS_QUESTION", True)
-    projects_route._respond_as_group_agent(project_id, conv["id"], ctx, trigger_kind="mention")
+    asyncio.run(
+        projects_route._respond_as_group_agent(
+            project_id, conv["id"], ctx, "mention", job_id=2, run_id="r2",
+        )
+    )
     assert captured["question"] == captured["scope"].prerendered_transcript
 
 
@@ -1004,14 +1018,22 @@ def test_group_reply_broadcasts_on_completion(tenant_client, isolated_settings, 
 
 def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
     """Under `"pytest" in sys.modules` (true for this test process itself),
-    `_schedule_group_reply` runs the reply INLINE — never touching the
-    strong-ref set or `asyncio.create_task` at all."""
+    `_schedule_group_reply` runs the reply INLINE (to completion via a
+    worker-thread loop) — never touching the strong-ref set or a live
+    `asyncio.create_task`. A pre-claimed `job_id`/`run_id` is passed so no
+    `ask_jobs` row is inserted here."""
     calls = []
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", lambda *a, **kw: calls.append(a))
+
+    async def _fake_reply(*a, **kw):
+        calls.append((a, kw))
+
+    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _fake_reply)
     before = set(projects_route._group_reply_tasks)
     ctx = _ctx()
-    projects_route._schedule_group_reply(1, 2, ctx, "mention")
-    assert calls == [(1, 2, ctx)]
+    projects_route._schedule_group_reply(
+        1, 2, ctx, "mention", source_turn_id=5, job_id=99, run_id="r",
+    )
+    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r"})]
     assert projects_route._group_reply_tasks == before  # no task was ever scheduled
 
 
@@ -1028,11 +1050,17 @@ def test_group_route_async_no_running_loop_error(monkeypatch):
         modules={k: v for k, v in real_sys.modules.items() if k != "pytest"}
     )
     monkeypatch.setattr(projects_route, "sys", fake_sys)
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", lambda *a, **kw: None)
+
+    async def _noop_reply(*a, **kw):
+        return None
+
+    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _noop_reply)
 
     async def _drive():
         ctx = _ctx()
-        projects_route._schedule_group_reply(1, 2, ctx, "mention")
+        projects_route._schedule_group_reply(
+            1, 2, ctx, "mention", source_turn_id=5, job_id=99, run_id="r",
+        )
         # Scheduled via asyncio.create_task — held by the strong-ref set
         # immediately; no RuntimeError means a loop WAS running.
         assert len(projects_route._group_reply_tasks) == 1
@@ -1063,7 +1091,11 @@ def test_when_to_respond_callable_per_message(monkeypatch):
 
 def test_background_input_is_extensible_structure():
     sig = inspect.signature(projects_route._schedule_group_reply)
-    assert list(sig.parameters) == ["project_id", "conversation_id", "ctx", "trigger_kind"]
+    assert list(sig.parameters) == [
+        "project_id", "conversation_id", "ctx", "trigger_kind",
+        # execution identity — NOT the message itself
+        "source_turn_id", "client_message_id", "job_id", "run_id",
+    ]
     # None of these IS "the message" itself — the reply re-derives the live
     # transcript from the DB inside `_respond_as_group_agent`, so a future
     # queue could pass more triggers through this same shape without the

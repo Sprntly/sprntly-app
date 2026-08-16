@@ -258,6 +258,33 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
     ),
+    ("test_group_execution_lifecycle_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the GROUP send "
+        "routed through the shared run_execution_job lifecycle primitive "
+        "(LP-1..LP-6): a real group reply posts a turn AND flips the run row "
+        "ready; a forced failure writes status='error'+error_class with no "
+        "fabricated turn and no raw text broadcast; a named-source question "
+        "hits a connector while an unnamed PM-noun grounds in the project "
+        "ledger; a retry re-answers with a new run_id/attempt while a "
+        "side-effect run refuses; a reload after a failure surfaces "
+        "run_status='failed'; and main chat answer/cancel/fail is unchanged "
+        "post-extraction — a stubbed LLM proves wiring only, never the "
+        "model's actual tool engagement or router/interceptor judgement on a "
+        "multi-speaker transcript. Deterministic backstop: "
+        "test_run_execution_job.py (primitive lifecycle + terminal-once + "
+        "error_class + byte-identity), test_group_execution_lifecycle.py "
+        "(group-through-primitive success/failure, retry 409/422/202, "
+        "connector decision, run-status-on-read, active_project_id-unset, all "
+        "mutation proofs), and test_ask_jobs_active_attempt_migration.py "
+        "(migration additivity + partial-unique enforcement) cover the wiring "
+        "against fakes in the fast lane; this suite is the real-DB/real-LLM "
+        "proof, DEFERRED-TO-STAGING — run on staging when access lands."
+    ),
+    ("test_group_execution_lifecycle_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
     ("test_project_delegations.py", "RUN_PROJECT_DELEGATIONS_ROUNDTRIP"): (
         "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
         "project_delegations migration's FK cascade/set-null behaviour, its "
