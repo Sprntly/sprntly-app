@@ -565,6 +565,15 @@ export type AskStartResponse = {
 export type AskStatusResponse = AskResponse & {
   status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
+  /** The typed failure category ("provider_limit" | "provider_unavailable" |
+   *  "provider_error" | "timeout" | "local_gate" | "app"). `error` alone is a
+   *  stringified exception — fine in a log, useless on screen — so a PROVIDER
+   *  refusal is named here and paired with copy below. */
+  error_class?: string | null
+  /** A sentence to show the user, set only for the three `provider_*` classes.
+   *  Composed server-side from a fixed table, never the provider's own text
+   *  (which can carry request ids, org names and billing detail). */
+  error_message?: string | null
   /** The skill `qa_agent.route()` chose, or null when it answered directly with
    *  no skill. Backed by the `ask_jobs.routed_skill` column and returned at
    *  EVERY status — including `generating` — so it is known while the answer is
@@ -1035,6 +1044,15 @@ export type ChatIntentEnvelope = {
    *  writing in. Never send this back — it is for the user, not the executor. */
   artifact_template_name: string | null
   reason: string
+  /** Set ONLY when the intent decision failed because the LLM provider refused
+   *  the request (out of credits, rate limited, overloaded).
+   *
+   *  The endpoint's fail-open contract means the message still goes to the ask
+   *  path, which is right — but with the planner down NO action can be chosen,
+   *  so every command in the product silently becomes a chat reply. This is
+   *  what lets the surface say so instead of leaving the user to notice that
+   *  commands quietly stopped working. */
+  provider_error?: { code: string; message: string } | null
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
    *  | "no_artifact_query" | "template_not_found" | "no_target_format" —
    *  template_not_found means the user named a format we could not find, so

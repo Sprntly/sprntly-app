@@ -11,6 +11,11 @@ import { useAuth } from "../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
+import {
+  providerNoticeFromEnvelope,
+  providerNoticeTitle,
+  type ProviderNotice,
+} from "../../../lib/providerLimitNotice"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
@@ -4920,6 +4925,22 @@ export function ChatScreen() {
           )
           .catch(() => null)
         if (envelope) {
+          // THE QUIET FAILURE, and the more dangerous of the two. The endpoint
+          // fails open to `answer` when the model is unreachable — correct, a
+          // dead planner must never break a send — but with it down NO action
+          // can be recognised, so every command in the product silently turns
+          // into a chat reply. The message still gets answered, so nothing
+          // looks broken; asking for things simply stops working, and the only
+          // evidence is a line in a container log. Say it out loud instead.
+          const intentNotice = providerNoticeFromEnvelope(envelope)
+          if (intentNotice) {
+            showToast(
+              providerNoticeTitle(intentNotice),
+              `${intentNotice.message} Until then, commands like "write a PRD" or "share this on Slack" will be answered as ordinary questions.`,
+              undefined,
+              { persist: true },
+            )
+          }
           // The intent→executor SWITCH itself is lifted into the shared
           // `dispatchChatIntent` primitive — the private project chat reuses
           // the SAME switch. ChatScreen supplies today's inline flows as
@@ -5396,6 +5417,29 @@ export function ChatScreen() {
               }
             ))
             return
+          }
+          // THE AI PROVIDER REFUSED THE REQUEST — say so, loudly. The error
+          // bubble carries the sentence too, but a bubble in one tab's thread
+          // is easy to scroll past, and this is a whole-account condition:
+          // every other tab and every other surface is failing the same way
+          // for the same reason. Observed 2026-08-16 with an exhausted
+          // Anthropic balance — the product degraded correctly everywhere and
+          // announced it nowhere.
+          //
+          // `persist` so it does NOT auto-dismiss: an out-of-credits account
+          // needs an admin to act, and a toast that vanishes in four seconds
+          // is indistinguishable from never having been shown.
+          const providerNotice =
+            e && typeof e === "object" && "providerNotice" in e
+              ? (e as { providerNotice?: ProviderNotice }).providerNotice
+              : undefined
+          if (providerNotice) {
+            showToast(
+              providerNoticeTitle(providerNotice),
+              providerNotice.message,
+              undefined,
+              { persist: true },
+            )
           }
           const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
             ? (e.body as { detail: unknown }).detail

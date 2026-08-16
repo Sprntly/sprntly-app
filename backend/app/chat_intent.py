@@ -436,10 +436,33 @@ def _render_context(
     return "\n".join(lines) + "\n\n"
 
 
-def _fallback(reason: str) -> dict:
+def _fallback(reason: str, exc: BaseException | None = None) -> dict:
+    """The fail-open `answer` envelope.
+
+    When the failure was a PROVIDER REFUSAL, the envelope says so. This
+    endpoint's fail-open contract is right — a dead model must never break a
+    send — but it has a cost nobody could see: with the planner down, NO action
+    can be chosen, so every command in the product silently becomes a chat
+    reply. Observed 2026-08-16, on an exhausted Anthropic balance: commands
+    stopped working, the chat answered in prose, and the only evidence was a
+    line in the container log.
+
+    `provider_error` rides the envelope so the client can say what happened.
+    Absent on every ordinary fallback, so nothing changes for the failures that
+    are genuinely ours.
+    """
+    notice = None
+    if exc is not None:
+        try:
+            from app.llm_errors import limit_notice
+
+            notice = limit_notice(exc)
+        except Exception:  # noqa: BLE001 — the error path must not raise
+            notice = None
     return {
         "intent": "answer",
         "confidence": 0.0,
+        "provider_error": notice,
         "task": None,
         "instruction": None,
         "artifact_type": None,
@@ -861,6 +884,6 @@ def resolve_chat_intent(
                 # actually lives.
                 envelope["artifact_type"] = "prd"
         return envelope
-    except Exception:  # noqa: BLE001 — dispatch must never break the send
+    except Exception as exc:  # noqa: BLE001 — dispatch must never break the send
         logger.exception("chat intent resolve failed; falling back to answer")
-        return _fallback("resolver error")
+        return _fallback("resolver error", exc)

@@ -18,6 +18,7 @@ from app.auth import (  # noqa: F401 — require_company re-exported for tests' 
     require_workspace,
     require_workspace_from_query,
 )
+from app import llm_errors
 from app.graph import token_stream
 from app.ingest import convert
 from app.db import (
@@ -640,9 +641,23 @@ def get_ask(
         raise HTTPException(404, "Ask not found")
     status = row.get("status") or "generating"
     payload = row.get("response") or {}
+    # A provider refusal gets a NAMED code and a sentence the client can show.
+    # `error` alone is a stringified exception — useful in a log, useless on a
+    # screen, and on the out-of-credits path it is the one thing the user most
+    # needs to be told (observed 2026-08-16: every surface degraded correctly
+    # and silently, and nothing said why). Both stay null for an ordinary
+    # failure, so the existing error rendering is untouched.
+    error_class = row.get("error_class")
+    error_message = (
+        llm_errors.user_message(error_class)
+        if error_class in llm_errors.PROVIDER_CODES
+        else None
+    )
     return {
         "status": status,
         "error": row.get("error"),
+        "error_class": error_class,
+        "error_message": error_message,
         # The skill the router picked, readable from `generating` onwards — the
         # rest of this body is empty until the job is ready, so this is the only
         # thing a waiting client can learn about what is actually running.
