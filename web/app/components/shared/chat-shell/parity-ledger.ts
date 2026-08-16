@@ -43,7 +43,7 @@ export const PARITY_OPT_OUTS: ParityOptOut[] = [
     capability: "composer.plusMenu",
     surface: "project_group",
     reason:
-      "ChatComposer always renders the + menu; group's backend cannot yet carry attachments/skills, so composer.features is omitted and the + is present-but-inert. FOLLOW-UP: wire group features once the group backend can carry them (the PARITY-04 residual).",
+      "ChatComposer always renders the + menu; group's backend cannot yet carry attachments/skills, so composer.features is omitted and the + is present-but-inert. FOLLOW-UP: wire group features once the group backend can carry them (a known residual: group's composer features are omitted until the backend supports them).",
     owner: "projects-chat",
   },
   {

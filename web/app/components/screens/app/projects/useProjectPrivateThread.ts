@@ -326,8 +326,8 @@ export function useProjectPrivateThread(
   // The reusable "run generation, attach, settle" tail every clarify-gate
   // branch shares (§Risk 6 reconciliation): the immediate-generate path (no
   // questions), `submitClarify`, and `skipClarify` all funnel through this ONE
-  // function so PARITY-03's persist + `onArtifactsChanged` call can never be
-  // threaded into some branches and dropped from others. Byte-for-byte the
+  // function so the private turn-persist + `onArtifactsChanged` call can never
+  // be threaded into some branches and dropped from others. Byte-for-byte the
   // same `addArtifact`/`onArtifactsChanged`/`persistTurnPair` calls
   // `runGeneratePrd` made inline before this ticket.
   const generatePrdIntoTurn = useCallback(
@@ -650,8 +650,8 @@ export function useProjectPrivateThread(
       // flattened form persisted, same as the pre-existing `onClarify` pick
       // gate below) and STOP — no `runPrdGenerationFromTask` call yet.
       // Sufficient/fails-open → generate immediately, UNCHANGED behaviour,
-      // now funnelled through the shared `generatePrdIntoTurn` tail so
-      // PARITY-03's persist/`onArtifactsChanged` call rides every branch
+      // now funnelled through the shared `generatePrdIntoTurn` tail so the
+      // private turn-persist / `onArtifactsChanged` call rides every branch
       // (§Risk 6) instead of living inline here alone.
       const runGeneratePrd = async (task: string) => {
         const verdict = await prdApi
