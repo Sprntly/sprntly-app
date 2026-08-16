@@ -1457,6 +1457,10 @@ async def post_group_turn_route(
             # to carry it, so the just-posted human turn is the only place
             # it can be recorded (Fix observability).
             conversations_db.set_group_turn_trigger_kind(turn["id"], "gate_stayout")
+            logger.info(
+                "group_stayout_recorded project_id=%s conversation_id=%s trigger_kind=%s",
+                project_id, conversation["id"], "gate_stayout",
+            )
     return turn
 
 

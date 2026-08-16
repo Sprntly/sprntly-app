@@ -203,11 +203,13 @@ describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (
     expect(quiet.className).toMatch(/run-quiet/)
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
     expect(document.querySelector("[class*='stayedOutDot']")).toBeNull()
-    // The relocated CSS families still live in GroupChatExtras (a later cleanup
-    // deletes the now-unrendered stayed-out machinery).
+    // The still-used CSS families remain in GroupChatExtras; the retired
+    // trigger-badge rule (`.stateBadge`) was deleted along with the badge
+    // node itself.
     const extrasCss = readFileSync(join(__dirname, "../GroupChatExtras.module.css"), "utf8")
-    for (const cls of [".roster", ".rosterDot", ".stateBadge", ".typingIndicator", ".error", ".postingWait"]) {
+    for (const cls of [".roster", ".rosterDot", ".typingIndicator", ".error", ".postingWait"]) {
       expect(extrasCss).toContain(cls)
     }
+    expect(extrasCss).not.toContain(".stateBadge")
   })
 })
