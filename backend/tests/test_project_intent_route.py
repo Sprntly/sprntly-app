@@ -257,6 +257,23 @@ def test_group_classify_unchanged(tenant_client, isolated_settings, monkeypatch)
     )
     assert resp.status_code == 200, resp.text
     assert loop_calls == []  # classified straight to edit_prd, never fell through
+    # Under the confirmation gate the classify pass PROPOSES (no write yet);
+    # the edit commits only when the confirm route applies the token.
+    from app.db import conversations as conversations_db
+
+    conv = conversations_db.get_group_chat(project_id)
+    proposal_turn = [
+        tn for tn in conversations_db.list_group_turns(conv["id"])
+        if tn["role"] == "assistant"
+    ][-1]
+    token = proposal_turn["reply"]["pending_mutation"]["token"]
+    assert "Doc v2" not in _payload(prd_id)
+
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["edited"] is True
     assert "Doc v2" in _payload(prd_id)
     assert len(_versions(prd_id)) == before_versions + 1
 

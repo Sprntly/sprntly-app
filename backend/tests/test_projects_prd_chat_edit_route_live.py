@@ -171,11 +171,12 @@ def test_project_edit_route_cross_project_and_own_project_live(scene, sb, monkey
     client = _make_client(scene["user_id"], scene["workspace_id"])
 
     # (a) A1's caller has no way to name A2's PRD at all — the route resolves
-    # its OWN project's target server-side. Prove A2's PRD is genuinely
-    # untouched by A1's edit call (the ★ gate would deny it even if the
-    # target were somehow reached).
+    # its OWN project's target server-side. Under the confirmation gate the
+    # first call only PROPOSES; prove A2's PRD (and A1's) is genuinely
+    # untouched by the propose (the ★ gate would deny A2 even if reached).
     before_a2 = _payload(sb, scene["prd_a2"])
     before_a2_versions = _version_count(sb, scene["prd_a2"])
+    before_a1_versions = _version_count(sb, scene["prd_a1"])
 
     resp_a1 = client.post(
         f"/v1/projects/{scene['p_a1']}/prd/chat-edit",
@@ -183,18 +184,30 @@ def test_project_edit_route_cross_project_and_own_project_live(scene, sb, monkey
     )
     assert resp_a1.status_code == 200, resp_a1.text
     body_a1 = resp_a1.json()
-    # A1's own edit either applied (edited=true) or the live model judged the
-    # instruction a no-op (edited=true with empty sections_changed) — either
-    # way A2 must be provably untouched.
-    assert body_a1["edited"] is True, body_a1
+    # PROPOSE writes nothing: whether the live model returned a pending edit or
+    # judged the instruction a no-op, neither A1 nor A2 is written yet.
+    assert body_a1["edited"] is False, body_a1
     assert _payload(sb, scene["prd_a2"]) == before_a2
     assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
+    assert _version_count(sb, scene["prd_a1"]) == before_a1_versions
 
-    # (b) The SAME call on A1 persisted against A1's own PRD: content changed
-    # (when sections_changed is non-empty) and exactly one version snapshot
-    # was added.
-    if body_a1["sections_changed"]:
-        assert "onboarding" in body_a1["prd"]["payload_md"].lower() or body_a1["sections_changed"]
-        assert _version_count(sb, scene["prd_a1"]) == 1
+    # (b) A real edit was proposed -> CONFIRM commits it to A1's OWN PRD only:
+    # A1's content changes with exactly one version snapshot, A2 stays
+    # untouched. A no-op proposal has nothing to confirm.
+    if body_a1.get("pending"):
+        token = body_a1["mutation"]["token"]
+        confirm = client.post(
+            f"/v1/projects/{scene['p_a1']}/prd/chat-edit/confirm", json={"token": token},
+        )
+        assert confirm.status_code == 200, confirm.text
+        cbody = confirm.json()
+        assert cbody["edited"] is True, cbody
+        assert cbody["sections_changed"]
+        assert "onboarding" in cbody["prd"]["payload_md"].lower() or cbody["sections_changed"]
+        assert _version_count(sb, scene["prd_a1"]) == before_a1_versions + 1
+        # A2 is STILL provably untouched after the confirm.
+        assert _payload(sb, scene["prd_a2"]) == before_a2
+        assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
     else:
-        assert _version_count(sb, scene["prd_a1"]) == 0
+        assert "answer" in body_a1
+        assert _version_count(sb, scene["prd_a1"]) == before_a1_versions

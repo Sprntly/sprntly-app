@@ -5906,6 +5906,10 @@ export type GroupTurn = {
   reply?: (AskResponse & {
     artifact_list?: ChatArtifactItem[]
     open?: { candidates?: OpenArtifactCandidate[] } | null
+    /** Stamped on a group agent turn that PROPOSES a PRD edit (the
+     *  confirmation gate): the single-use token + preview the client uses to
+     *  offer confirm/cancel. Absent on every other assistant turn. */
+    pending_mutation?: { token: string; summary: string; prd_id: number } | null
   }) | null
 }
 
@@ -6002,14 +6006,42 @@ export type DelegationEventResult = {
   status: string
 }
 
+/** The pending-mutation handle a project PRD chat-edit hands back when it has
+ *  PROPOSED (but not yet written) an edit: the opaque single-use `token` the
+ *  caller passes to `prdChatEditConfirm`/`prdChatEditCancel`, plus a preview
+ *  (`summary`/`sections_changed`) of what the confirm would commit. */
+export type ProjectPrdEditPendingMutation = {
+  token: string
+  summary: string
+  sections_changed: string[]
+  prd_id: number
+}
+
 /** Response from `POST /v1/projects/{id}/prd/chat-edit` — a discriminated
- *  "did it actually write" shape, since the route degrades to a no-edit
- *  reply (membership passes but the flag is off, or the target PRD can't be
- *  resolved/is ambiguous) rather than erroring. `edited: false` carries a
- *  plain `answer` string a caller can render exactly like a grounded ask. */
+ *  shape over three outcomes. Under the confirmation gate a resolvable edit no
+ *  longer writes immediately: it returns `{ edited: false, pending: true,
+ *  mutation }` (nothing has touched the PRD; call confirm/cancel with the
+ *  token). `edited: false` WITHOUT `pending` is a terminal no-edit reply
+ *  (flag off, unresolved/ambiguous target, refusal, or a no-op instruction)
+ *  carrying a plain `answer`. The `edited: true` arm is retained for shape
+ *  parity but the gated route no longer returns it from this endpoint — the
+ *  actual write lands via `prdChatEditConfirm`. */
 export type ProjectChatEditResult =
   | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
+  | { edited: false; pending: true; mutation: ProjectPrdEditPendingMutation }
   | { edited: false; answer: string }
+
+/** Response from `POST /v1/projects/{id}/prd/chat-edit/confirm` — commits the
+ *  token's stored patch (applied content == proposed content). `edited: false`
+ *  is the soft-refuse shape (token unknown/expired/already-applied, a
+ *  concurrent change, or a denied target) — never a raw 403/404 to chat. */
+export type ProjectChatEditConfirmResult =
+  | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
+  | { edited: false; answer: string }
+
+/** Response from `POST /v1/projects/{id}/prd/chat-edit/cancel` — the proposal
+ *  row is dropped (its token can never apply); no PRD write. */
+export type ProjectChatEditCancelResult = { cancelled: true }
 
 /** Response from `GET`/`PUT /v1/projects/{id}/instructions` — `null` means
  *  nothing has been saved yet (or the value was cleared). */
@@ -6105,6 +6137,24 @@ export const projectsApi = {
         ...(prdId != null ? { prd_id: prdId } : {}),
         ...(clientMessageId != null ? { client_message_id: clientMessageId } : {}),
       },
+    ),
+  /** Confirm a pending project PRD chat-edit (`POST /v1/projects/{id}/prd/
+   *  chat-edit/confirm`) — commits exactly the patch the matching
+   *  `prdChatEdit` proposed, keyed by its `mutation.token`. The two IDOR gates
+   *  re-run on the caller server-side and the token is single-use; a stale/
+   *  denied token degrades to `edited: false`, never an error. */
+  prdChatEditConfirm: (id: number | string, token: string) =>
+    api.post<ProjectChatEditConfirmResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit/confirm`,
+      { token },
+    ),
+  /** Cancel a pending project PRD chat-edit (`POST /v1/projects/{id}/prd/
+   *  chat-edit/cancel`) — drops the proposal so its token can never apply. No
+   *  PRD write. */
+  prdChatEditCancel: (id: number | string, token: string) =>
+    api.post<ProjectChatEditCancelResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit/cancel`,
+      { token },
     ),
   /** Persist the caller's own owned user+assistant turn pair
    *  (`POST /v1/projects/{id}/individual/turns`) — the explicit-owner home

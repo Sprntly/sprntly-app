@@ -200,24 +200,24 @@ def test_group_casual_scope_question_routes_answer(tenant_client, isolated_setti
     assert len(loop_calls) == 1
 
 
-# ── AC2 — edit_prd persists + broadcasts ──────────────────────────────────────
+# ── AC2 — edit_prd PROPOSES + broadcasts, then confirm commits ───────────────
 def test_group_edit_prd_persists_and_broadcasts(tenant_client, isolated_settings, monkeypatch):
+    """Under the confirmation gate a group `@Sprntly` edit PROPOSES: an
+    assistant turn carrying `reply.pending_mutation` is posted and broadcast,
+    but NOTHING is written to `prds` until a confirm commits exactly the
+    proposed content."""
     t = tenant_client.make(slug="acme")
     project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
+    before = _payload(prd_id)
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     monkeypatch.setattr(
         projects_route, "resolve_chat_intent",
         lambda *a, **kw: {"intent": "edit_prd", "instruction": "do it"},
     )
-    scoped_calls = []
-
-    def _fake_scoped(pid, instruction, ctx, *, project_id, dataset):
-        scoped_calls.append(
-            {"prd_id": pid, "instruction": instruction, "project_id": project_id, "dataset": dataset}
-        )
-        return {"prd": {"id": pid}, "sections_changed": ["X"], "summary": "Updated X."}
-
-    monkeypatch.setattr(projects_route, "apply_chat_edit_scoped", _fake_scoped)
+    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+        "html": "<html><body><h1>Group v2</h1></body></html>",
+        "sections_changed": ["X"], "summary": "Updated X.",
+    })
     broadcasts = []
     monkeypatch.setattr(
         projects_route, "publish_broadcast",
@@ -233,23 +233,37 @@ def test_group_edit_prd_persists_and_broadcasts(tenant_client, isolated_settings
         f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly do it"},
     )
     assert resp.status_code == 200, resp.text
-    assert len(scoped_calls) == 1
-    assert scoped_calls[0] == {
-        "prd_id": prd_id, "instruction": "do it", "project_id": project_id, "dataset": t.slug,
-    }
     assert loop_calls == []  # never fell through to the existing loop
 
+    # PROPOSE — nothing written; the assistant turn narrates a PROPOSAL and
+    # carries the pending mutation.
+    assert _payload(prd_id) == before
     turns = _group_turns(project_id)
     assistant_turns = [row for row in turns if row["role"] == "assistant"]
     assert len(assistant_turns) == 1
-    # B2 no-fabrication: a completed edit narrates as a past-tense "Done"
-    # ONLY because `sections_changed` came back truthy — the fixture below
-    # sets it to ["X"].
-    assert assistant_turns[0]["content"] == "Done — I've updated the PRD. Updated X."
+    proposal_turn = assistant_turns[0]
+    assert proposal_turn["content"].startswith("I'd like to update the PRD:")
+    pending = proposal_turn["reply"]["pending_mutation"]
+    assert pending["prd_id"] == prd_id
+    token = pending["token"]
 
     assert broadcasts[-1][0] == f"project:{project_id}"
     assert broadcasts[-1][1] == "turn.created"
     assert broadcasts[-1][2]["role"] == "assistant"
+
+    # CONFIRM — commits applied==proposed and posts the completed 'Done' turn.
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["edited"] is True
+    assert "Group v2" in _payload(prd_id)
+    done_turns = [
+        row for row in _group_turns(project_id)
+        if row["role"] == "assistant"
+        and row["content"].startswith("Done — I've updated the PRD.")
+    ]
+    assert done_turns
 
 
 # ── AC3 — every non-edit envelope runs the EXISTING loop unchanged ───────────
@@ -389,13 +403,17 @@ def test_group_edit_cross_tenant_refused_zero_write(tenant_client, isolated_sett
     assert a.company_id != b.company_id
 
 
-# ── AC7 — own-project edit applies in place + exactly one version ────────────
+# ── AC7 — own-project edit: propose (no write) then confirm (versioned) ──────
 def test_group_edit_own_project_in_place_versioned_broadcast(
     tenant_client, isolated_settings, monkeypatch
 ):
+    """The group edit PROPOSES first (no `prds` write, no version) and only
+    commits — one version snapshot, applied==proposed — when a confirm
+    follows."""
     t = tenant_client.make(slug="acme")
     project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
     before_versions = len(_versions(prd_id))
+    before = _payload(prd_id)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     monkeypatch.setattr(
@@ -423,6 +441,24 @@ def test_group_edit_own_project_in_place_versioned_broadcast(
     assert resp.status_code == 200, resp.text
     assert loop_calls == []
 
+    # PROPOSE — nothing written, no version, a proposal turn with pending mut.
+    assert _payload(prd_id) == before
+    assert len(_versions(prd_id)) == before_versions
+    turns = _group_turns(project_id)
+    assistant_turns = [row for row in turns if row["role"] == "assistant"]
+    assert len(assistant_turns) == 1
+    proposal_turn = assistant_turns[0]
+    assert proposal_turn["content"].startswith("I'd like to update the PRD:")
+    token = proposal_turn["reply"]["pending_mutation"]["token"]
+    assert require_client().table("prd_patches").select("id").eq("prd_id", prd_id).execute().data == []
+
+    # CONFIRM — one version snapshot (pre-edit), applied==proposed, Done turn.
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["edited"] is True
+
     assert "Doc v2" in _payload(prd_id)
     versions = _versions(prd_id)
     assert len(versions) == before_versions + 1
@@ -431,11 +467,13 @@ def test_group_edit_own_project_in_place_versioned_broadcast(
     patches = require_client().table("prd_patches").select("id").eq("prd_id", prd_id).execute().data
     assert patches == []
 
-    turns = _group_turns(project_id)
-    assistant_turns = [row for row in turns if row["role"] == "assistant"]
-    assert len(assistant_turns) == 1
-    # B2 no-fabrication: same completed-edit narration guard as above.
-    assert assistant_turns[0]["content"] == "Done — I've updated the PRD. Tightened requirements."
+    done_turns = [
+        row for row in _group_turns(project_id)
+        if row["role"] == "assistant"
+        and row["content"].startswith("Done — I've updated the PRD.")
+    ]
+    assert done_turns
+    assert done_turns[-1]["content"] == "Done — I've updated the PRD. Tightened requirements."
 
 
 # ── AC8 — target resolved server-side; ambiguous/none → no write ─────────────

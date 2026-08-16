@@ -265,9 +265,14 @@ def test_group_edit_outcome_real_edit(tenant_client, isolated_settings, monkeypa
         projects_route, "resolve_project_chat_intent",
         lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
     )
+    # Under the confirmation gate the classify pass PROPOSES via
+    # `propose_chat_edit_scoped` (no immediate write); mock its result.
     monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped",
-        lambda *a, **kw: {"prd": {"id": 42}, "sections_changed": ["X"], "summary": "Updated X."},
+        projects_route, "propose_chat_edit_scoped",
+        lambda *a, **kw: {
+            "proposed": True, "token": "tok-1", "summary": "Updated X.",
+            "sections_changed": ["X"], "prd_id": 42,
+        },
     )
 
     outcome = projects_route._classify_and_maybe_edit_group_prd(
@@ -276,7 +281,13 @@ def test_group_edit_outcome_real_edit(tenant_client, isolated_settings, monkeypa
     assert outcome.applied_turn is not None
     assert outcome.was_edit_request is True
     assert outcome.refusal is None
-    assert outcome.applied_turn["content"] == "Done — I've updated the PRD. Updated X."
+    # The turn narrates a PROPOSAL (not a completed 'Done') and carries the
+    # pending mutation for the client to confirm/cancel.
+    assert outcome.applied_turn["content"].startswith("I'd like to update the PRD:")
+    assert "Confirm to apply." in outcome.applied_turn["content"]
+    assert outcome.applied_turn["reply"]["pending_mutation"] == {
+        "token": "tok-1", "summary": "Updated X.", "prd_id": 42,
+    }
 
 
 def test_group_edit_outcome_requested_not_written(tenant_client, isolated_settings, monkeypatch):
@@ -381,17 +392,22 @@ def test_narration_done_only_on_sections_changed(tenant_client, isolated_setting
         lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
     )
     monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped",
+        projects_route, "propose_chat_edit_scoped",
         lambda *a, **kw: {
-            "prd": {"id": 42}, "sections_changed": ["Requirements"], "summary": "Tightened it.",
+            "proposed": True, "token": "tok-2", "summary": "Tightened it.",
+            "sections_changed": ["Requirements"], "prd_id": 42,
         },
     )
     outcome = projects_route._classify_and_maybe_edit_group_prd(
         project_id, conv["id"], _ctx(t), "tighten it", [], t.slug,
     )
     content = outcome.applied_turn["content"]
-    assert content.startswith("Done — I've updated the PRD.")
+    # A found edit narrates a PROPOSAL that names the summary and invites
+    # confirmation — not a completed past-tense claim (B2 no-fabrication).
+    assert content.startswith("I'd like to update the PRD:")
     assert "Tightened it." in content
+    assert "Confirm to apply." in content
+    assert outcome.applied_turn["reply"]["pending_mutation"]["token"] == "tok-2"
 
 
 def test_narration_no_change_when_sections_empty(tenant_client, isolated_settings, monkeypatch):
@@ -406,9 +422,11 @@ def test_narration_no_change_when_sections_empty(tenant_client, isolated_setting
         projects_route, "resolve_project_chat_intent",
         lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
     )
+    # The editor found nothing to change: `propose_chat_edit_scoped` returns
+    # `proposed=False` — no token, nothing to confirm.
     monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped",
-        lambda *a, **kw: {"prd": {"id": 42}, "sections_changed": [], "summary": ""},
+        projects_route, "propose_chat_edit_scoped",
+        lambda *a, **kw: {"proposed": False, "summary": "", "sections_changed": []},
     )
     outcome = projects_route._classify_and_maybe_edit_group_prd(
         project_id, conv["id"], _ctx(t), "tighten it", [], t.slug,
@@ -417,6 +435,8 @@ def test_narration_no_change_when_sections_empty(tenant_client, isolated_setting
     for claim in ("Done", "updated", "changed", "added"):
         assert claim not in content
     assert content == "I didn't find anything in the PRD to change for that."
+    # A no-op proposes nothing, so the turn carries NO pending mutation.
+    assert (outcome.applied_turn.get("reply") or {}).get("pending_mutation") is None
 
 
 # ── B2 fallback edit_note + system prompt rule (AC7) ───────────────────────
@@ -456,30 +476,45 @@ def test_system_prompt_has_no_prd_tool_rule():
 
 
 def test_done_narration_is_single_sourced():
-    """The 'Done — I've updated the PRD' literal (the ternary's two
-    branches both use it — with vs. without an appended summary) appears
-    ONLY inside the `sections_changed`-guarded narration block of
-    `_classify_and_maybe_edit_group_prd` — the unified-engine fallback reply
-    (built inside `_respond_as_group_agent`, further down the file) has no
-    such literal anywhere; it only ever gets an `edit_note` steering it
-    AWAY from claiming a write."""
+    """Under the confirmation gate the completed-edit 'Done — I've updated the
+    PRD' literal moves to the CONFIRM route (where the write actually
+    commits). The classify/propose function now narrates a PROPOSAL
+    ("I'd like to update the PRD") and never the completed claim; and the
+    unified-engine fallback reply carries NEITHER literal — it only ever gets
+    an `edit_note` steering it AWAY from claiming a write.
+
+    This keeps each narration single-sourced at exactly the point the state it
+    describes is true: a proposal at propose time, a 'Done' only at confirm."""
     src = PROJECTS_ROUTE_SRC
+    confirm_start = src.index("def project_chat_edit_confirm(")
+    cancel_start = src.index("def project_chat_edit_cancel(")
     classify_start = src.index("def _classify_and_maybe_edit_group_prd(")
     respond_start = src.index("def _respond_as_group_agent(")
-    assert respond_start > classify_start
+    assert confirm_start < classify_start < respond_start
 
+    confirm_body = src[confirm_start:cancel_start]
     classify_body = src[classify_start:respond_start]
     fallback_body = src[respond_start:]
 
-    occurrences = classify_body.count("Done — I've updated the PRD")
-    assert occurrences >= 1, "expected the narration literal inside the classify/edit function"
-    assert 'result.get("sections_changed")' in classify_body
-
+    # The completed 'Done' narration lives in (and only in) the confirm route.
+    assert "Done — I've updated the PRD" in confirm_body
+    assert "Done — I've updated the PRD" not in classify_body, (
+        "the classify/propose path must not claim a completed edit — the write "
+        "hasn't happened yet at propose time"
+    )
     assert "Done — I've updated the PRD" not in fallback_body, (
         "the unified-engine fallback path must never carry the completed-"
         "edit narration literal — a second producer there would let the "
         "reply fabricate a completed edit claim"
     )
+
+    # The PROPOSAL narration is single-sourced in the classify/propose path and
+    # guarded by the `proposed` flag; the fallback never carries it either.
+    assert classify_body.count("I'd like to update the PRD") >= 1, (
+        "expected the proposal narration literal inside the classify/propose function"
+    )
+    assert 'proposal.get("proposed")' in classify_body
+    assert "I'd like to update the PRD" not in fallback_body
 
 
 # ── _ADDRESSING_NOTES (AC8) ─────────────────────────────────────────────
