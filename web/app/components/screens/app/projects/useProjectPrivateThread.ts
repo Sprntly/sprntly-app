@@ -92,6 +92,11 @@ type SessionTurn = {
   createdAt?: number
   clarifyOptions?: { id: number; title: string }[]
   clarifyInstruction?: string
+  /** The idempotency key minted once at send-time (reuses this turn's own
+   *  `id`) — threaded onto every server persist call for this send, and used
+   *  to dedup this session turn against its own now-persisted history row
+   *  once one lands (AC9). */
+  clientMessageId: string
 }
 
 /** What the private surface's insight banner needs — a note surfaced from the
@@ -128,7 +133,18 @@ export type UseProjectPrivateThread = {
   callerName: string | null
 }
 
-export function useProjectPrivateThread(projectId: number | string): UseProjectPrivateThread {
+export type UseProjectPrivateThreadOpts = {
+  /** #9-count artifact invalidation: called after a client-driven generate
+   *  (`runGeneratePrd`/`runGenerateTickets`) settles its own `addArtifact` —
+   *  the host refreshes its artifacts list + count immediately, without
+   *  waiting on the realtime `artifact.added` echo. */
+  onArtifactsChanged?: () => void
+}
+
+export function useProjectPrivateThread(
+  projectId: number | string,
+  opts?: UseProjectPrivateThreadOpts,
+): UseProjectPrivateThread {
   const { activeCompany } = useCompany()
   const { workspace, profile } = useWorkspace()
   // Same default-on classifier flag the main chat reads (unknown/loading
@@ -251,6 +267,23 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
     }
   }, [projectId])
 
+  // The owned turn-pair persist for every branch with no dedicated chat
+  // route (generate/tickets/clarify/terminal outcomes — §H). Best-effort:
+  // a persist failure leaves the optimistic session turn exactly as it
+  // rendered, never blocks or retries against the UI (the ask + edit
+  // branches persist server-side already and do NOT call this — see
+  // `runAsk`/`runEditPrd`/`pickOption`).
+  const persistTurnPair = useCallback(
+    (clientMessageId: string, question: string, answer: string) => {
+      projectsApi
+        .persistIndividualTurns(projectId, { clientMessageId, question, answer })
+        .catch(() => {
+          /* best-effort — the optimistic session turn stays as-is */
+        })
+    },
+    [projectId],
+  )
+
   const emitDelegation = useCallback(
     (delegationId: number, event: string, note?: string) => {
       projectsApi
@@ -340,6 +373,12 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
             pending: false,
             stopped: false,
             error: null,
+            // The original send already carried its own client_message_id
+            // to the server at dispatch (§C) — this resumed turn's own id
+            // is a distinct, never-persisted-under key, purely to satisfy
+            // the session-turn shape; the dedup memo below never matches it
+            // against a history row.
+            clientMessageId: `resumed-${askId}`,
             createdAt: Date.now(),
           },
         ])
@@ -374,9 +413,14 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           : ""
       const askQuestion = `${question}${attachmentCtx}`
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
+      // Minted ONCE per send and reused as this turn's `id` (the shell's
+      // React key) — the SAME value threads onto every server persist call
+      // below, so a server-side retry dedups AND the session↔history dedup
+      // (AC9) can match this turn against its own persisted row by key.
+      const clientMessageId = id
       setSessionTurns((prev) => [
         ...prev,
-        { id, question, reply: null, pending: true, stopped: false, error: null },
+        { id, question, reply: null, pending: true, stopped: false, error: null, clientMessageId },
       ])
       setBusy(true)
       stoppedRef.current = false
@@ -390,6 +434,8 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
             runAskGeneration(askQuestion, activeCompany, tabId, {
               project_id: Number(projectId),
               conversation_id: conversationId,
+              // Server persists both sides (§C); no client persist call.
+              client_message_id: clientMessageId,
               isStopped: () => stoppedRef.current,
               onPartial: (text) => {
                 setSessionTurns((prev) =>
@@ -459,6 +505,19 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
         setSessionTurns((prev) => prev.map((t) => (t.id === id ? { ...t, pending: false, error: message, createdAt: Date.now() } : t)))
         setBusy(false)
       }
+      // The generate/tickets/clarify branches have no dedicated chat route
+      // to persist through — every settle here ALSO calls the owned
+      // turn-pair route (§H), so a reload shows the same dialogue this
+      // session rendered. `runEditPrd`/`pickOption` do NOT use these — they
+      // persist server-side via `prdChatEdit` (§D) and would double-write.
+      const settleReplyPersisted = (answerText: string) => {
+        persistTurnPair(clientMessageId, question, answerText)
+        settleReply(reply(answerText))
+      }
+      const settleErrorPersisted = (message: string) => {
+        persistTurnPair(clientMessageId, question, message)
+        settleError(message)
+      }
       const reply = (answer: string): AskResponse => ({
         answer,
         key_points: [],
@@ -471,7 +530,7 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
         try {
           const start = await storiesApi.generateFromInsight(question, null)
           if (start.ticket_set_id == null) {
-            settleError("I couldn't start that ticket run. Try again.")
+            settleErrorPersisted("I couldn't start that ticket run. Try again.")
             return
           }
           const startedAt = Date.now()
@@ -479,7 +538,8 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           while (Date.now() - startedAt < 3 * 60 * 1000) {
             // A deliberate Stop short-circuits the poll loop at once — the
             // composer is already freed by `stop()`, so keep polling no longer
-            // (an adversarial review dead-Stop fix).
+            // (an adversarial review dead-Stop fix). A pure client-cancel with
+            // no shown text — nothing to persist here (§Terminal outcomes).
             if (stoppedRef.current) return
             const job = await storiesApi.getJob(start.job_id)
             status = job.status
@@ -488,15 +548,16 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           }
           if (stoppedRef.current) return
           if (status !== "ready") {
-            settleError("That ticket run didn't finish. Try again.")
+            settleErrorPersisted("That ticket run didn't finish. Try again.")
             return
           }
           await projectsApi.addArtifact(projectId, "ticket_set", start.ticket_set_id)
-          settleReply(
-            reply("I've written a ticket set for that and attached it to this project — check the Artifacts tab."),
+          opts?.onArtifactsChanged?.()
+          settleReplyPersisted(
+            "I've written a ticket set for that and attached it to this project — check the Artifacts tab.",
           )
         } catch {
-          settleError("That ticket run didn't come through. Try again.")
+          settleErrorPersisted("That ticket run didn't come through. Try again.")
         }
       }
 
@@ -506,7 +567,7 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           message: "That PRD didn't come through. Try again.",
         }))
         if (!result.ok) {
-          settleError(result.message)
+          settleErrorPersisted(result.message)
           return
         }
         // Guard the artifact-attach await (an adversarial review): an unguarded rejection
@@ -515,18 +576,21 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
         // state and frees the composer.
         try {
           await projectsApi.addArtifact(projectId, "prd", result.prd.prd_id)
+          opts?.onArtifactsChanged?.()
         } catch {
-          settleError("I generated that PRD but couldn't attach it. Try again.")
+          settleErrorPersisted("I generated that PRD but couldn't attach it. Try again.")
           return
         }
-        settleReply(
-          reply(`I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`),
+        settleReplyPersisted(
+          `I've generated "${result.prd.title}" and attached it to this project — check the Artifacts tab.`,
         )
       }
 
+      // Server persists both sides via `prdChatEdit` (§D) — NO client
+      // `persistTurnPair` call here, or the pair would double-write.
       const runEditPrd = async (instruction: string) => {
         try {
-          const res = await projectsApi.prdChatEdit(projectId, instruction)
+          const res = await projectsApi.prdChatEdit(projectId, instruction, undefined, clientMessageId)
           if (!res.edited) {
             settleReply(reply(res.answer))
             return
@@ -560,6 +624,10 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
               onAssignTickets: () => void runAsk(),
               onClarify: (clarification, prdOptions) => {
                 if (stoppedRef.current) return
+                // Persist the ASSISTANT clarification text — the
+                // `pickOptions` are ephemeral UI, not persisted
+                // (§Terminal outcomes); a reload shows the question asked.
+                persistTurnPair(clientMessageId, question, clarification)
                 setSessionTurns((prev) =>
                   prev.map((t) =>
                     t.id === id
@@ -582,7 +650,10 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
         })
         .catch(() => void runAsk())
     },
-    [busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled],
+    [
+      busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled,
+      persistTurnPair, opts?.onArtifactsChanged,
+    ],
   )
 
   // Closes the ask → pick → apply loop: re-issues the ORIGINAL edit
@@ -609,11 +680,14 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
           pending: true,
           stopped: false,
           error: null,
+          clientMessageId: pickId,
         },
       ])
       setBusy(true)
+      // Server persists both sides via `prdChatEdit` (§D) — same as
+      // `runEditPrd`, no client persist call here.
       projectsApi
-        .prdChatEdit(projectId, instruction, prdId)
+        .prdChatEdit(projectId, instruction, prdId, pickId)
         .then((res) => {
           const answer = res.edited ? res.summary || "Updated the PRD." : res.answer
           setSessionTurns((prev) =>
@@ -654,13 +728,22 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
     setSessionTurns((prev) =>
       prev.map((t) => (t.pending ? { ...t, pending: false, stopped: true, createdAt: t.createdAt ?? Date.now() } : t)),
     )
+    // A deliberate Stop is a terminal outcome (§Terminal outcomes) — persist
+    // it for every turn that WAS pending, so a reload shows the real
+    // outcome. Best-effort, same posture as every other persist call here;
+    // for an ask-turn this is a harmless second representation alongside
+    // whatever the job eventually completes to (idempotent-keyed, so it
+    // never duplicates the user side already persisted at dispatch).
+    for (const t of sessionTurns) {
+      if (t.pending) persistTurnPair(t.clientMessageId, t.question, "You stopped this response.")
+    }
     setBusy(false)
     const pending = getPendingAsk(activeCompany, tabId)
     if (pending) {
       const askId = Number(pending.id)
       if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
     }
-  }, [activeCompany, tabId])
+  }, [activeCompany, tabId, sessionTurns, persistTurnPair])
 
   // Normalize persisted history + current-session turns into one `ShellTurn[]`
   // (history first, then the session's optimistic turns). `createdAt` is
@@ -689,25 +772,41 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
       }
     })
 
-    const session: ShellTurn[] = sessionTurns.map((t) => ({
-      id: t.id,
-      author: { kind: "self", name: callerName ?? undefined },
-      content: t.question,
-      reply: t.reply,
-      pending: t.pending,
-      partial: t.partial ?? null,
-      streamDropped: t.streamDropped,
-      stopped: t.stopped,
-      error: t.error,
-      createdAt: t.createdAt,
-      pickOptions: t.clarifyOptions?.length
-        ? t.clarifyOptions.map((o) => ({
-            id: String(o.id),
-            title: o.title,
-            instruction: t.clarifyInstruction ?? "",
-          }))
-        : undefined,
-    }))
+    // Session↔history dedup (AC9): once a send's own persisted row lands in
+    // `history` (a mid-session reconnect / `appendHistoryTurns` /
+    // `brief.delivered` re-delivering it), the persisted row is the
+    // authority — drop the now-redundant session turn so it renders EXACTLY
+    // ONCE. Matched by `client_message_id`, not the numeric id (a session
+    // turn has no persisted id yet); `appendHistoryTurns`' own numeric-id
+    // dedup stays as the separate history-side guard against a duplicate
+    // history row.
+    const persistedClientMessageIds = new Set(
+      history
+        .map((h) => h.client_message_id)
+        .filter((v): v is string => v != null),
+    )
+
+    const session: ShellTurn[] = sessionTurns
+      .filter((t) => !persistedClientMessageIds.has(t.clientMessageId))
+      .map((t) => ({
+        id: t.id,
+        author: { kind: "self", name: callerName ?? undefined },
+        content: t.question,
+        reply: t.reply,
+        pending: t.pending,
+        partial: t.partial ?? null,
+        streamDropped: t.streamDropped,
+        stopped: t.stopped,
+        error: t.error,
+        createdAt: t.createdAt,
+        pickOptions: t.clarifyOptions?.length
+          ? t.clarifyOptions.map((o) => ({
+              id: String(o.id),
+              title: o.title,
+              instruction: t.clarifyInstruction ?? "",
+            }))
+          : undefined,
+      }))
 
     return [...historyTurns, ...session]
   }, [history, sessionTurns, delegationsByTurn, callerName])

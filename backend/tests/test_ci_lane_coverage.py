@@ -258,6 +258,32 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
     ),
+    ("test_individual_persistence_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the private "
+        "project chat's both-sides persistence (LP-1..LP-6): a real /v1/ask "
+        "project send survives leave->return with both the question and the "
+        "answer restored, a real partial-unique enforces one row per side on "
+        "a double submit, a crafted foreign conversation_id cannot write, "
+        "send-and-leave does not flip the author's own chat unread, and a "
+        "real artifact attach succeeds end to end — a stubbed LLM can prove "
+        "wiring only, never that a project-scoped ask actually reaches the "
+        "sixth ladder branch. Deterministic backstop: "
+        "test_individual_turn_persistence.py (owned-writer ownership + "
+        "idempotency + cursor-advance, all mutation-proofed), "
+        "test_individual_persistence_routes.py (route-level dispatch/commit "
+        "persist, main-chat non-double-write), "
+        "test_conversation_turns_idempotency_migration.py (migration "
+        "additivity + partial-unique enforcement, mutation-proofed), and "
+        "test_artifact_added_realtime.py (best-effort emit + failure "
+        "survival) cover the wiring against fakes in the fast lane; this "
+        "suite is the real-DB/real-LLM proof, DEFERRED-TO-STAGING — run on "
+        "staging when access lands."
+    ),
+    ("test_individual_persistence_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
     ("test_group_execution_lifecycle_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the GROUP send "
         "routed through the shared run_execution_job lifecycle primitive "

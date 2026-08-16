@@ -268,6 +268,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onOpenSettings: noop,
     currentUserId: "current-viewer",
     onRemoveMember: noop,
+    refetchArtifacts: noop,
     ...overrides,
   }
 }

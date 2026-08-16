@@ -34,11 +34,17 @@ export type ProjectMainThreadProps = {
    *  insight-opening card wears. No real data source feeds this yet —
    *  omitted (the default), it renders nothing. */
   insightNote?: { by: string; text: string } | null
+  /** #9-count artifact invalidation: fired after the PRIVATE thread's own
+   *  generate settles a fresh attach, so the sender's own artifacts list +
+   *  count refresh immediately without waiting on the realtime echo. Not
+   *  wired into the group side — that surface has no per-branch generate
+   *  seam this ticket touches. */
+  onArtifactsChanged?: () => void
 }
 
 /** Swaps the main pane between the group chat and the individual chat per
  *  `activeChat` — in place, no route change (AD-P14). Renders exactly one. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insightNote }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insightNote, onArtifactsChanged }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group">
@@ -48,7 +54,12 @@ export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insig
   }
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      <ProjectPrivateChat projectId={projectId} onOpenArtifact={onOpenArtifact} insightNote={insightNote} />
+      <ProjectPrivateChat
+        projectId={projectId}
+        onOpenArtifact={onOpenArtifact}
+        insightNote={insightNote}
+        onArtifactsChanged={onArtifactsChanged}
+      />
     </div>
   )
 }

@@ -314,6 +314,10 @@ export async function runAskGeneration(
      *  mutually exclusive with prd_id (the tab has one primary artifact). */
     evidence_id?: number
     ticket_set_id?: number
+    /** Individual-project-chat send identity — the idempotency key the
+     *  server persists this turn's user side under. Passed straight through
+     *  to `askApi.start`. */
+    client_message_id?: string
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial

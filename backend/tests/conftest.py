@@ -1512,9 +1512,21 @@ CREATE TABLE conversation_turns (
     -- 20260815180000_conversation_turns_trigger_kind.sql). NULL for every
     -- pre-existing turn and every non-group-decision turn.
     trigger_kind    TEXT,
+    -- Owned-write idempotency (mirrors
+    -- 20260816140000_conversation_turns_idempotency.sql). NULL for every
+    -- pre-existing turn and every cross-user brief/group turn — only the
+    -- new owned individual-chat writers set one of these.
+    client_message_id TEXT,
+    ask_job_id         INTEGER,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
+CREATE UNIQUE INDEX conversation_turns_client_msg_uidx
+    ON conversation_turns (conversation_id, role, client_message_id)
+    WHERE client_message_id IS NOT NULL;
+CREATE UNIQUE INDEX conversation_turns_ask_job_uidx
+    ON conversation_turns (conversation_id, role, ask_job_id)
+    WHERE ask_job_id IS NOT NULL;
 
 -- Unified per-call LLM usage ledger (20260725120000_llm_usage_events.sql).
 -- The `llm_usage_summary` rollup is a Postgres function with no SQLite
