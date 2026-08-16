@@ -239,7 +239,55 @@ describe("a document written from a brand-new chat", () => {
   })
 })
 
+describe("a document never lands on someone else's thread", () => {
+  it("does not open into the panel if the user has moved to another chat", async () => {
+    // The create + generate round trips leave a window for the user to move
+    // on, and the reset effect no longer covers it: a conversation coming into
+    // existence is deliberately not a switch any more, so this flow has to
+    // check for itself. Otherwise chat A's document opens in front of whoever
+    // is now reading chat B.
+    wantsADocument()
+    let releaseGenerate: (v: unknown) => void = () => {}
+    generateDoc.mockReturnValue(new Promise((r) => { releaseGenerate = r }))
+
+    await act(async () => { renderChat() })
+    await typeAndSend("Draft a leadership update")
+
+    const newChat = within(screen.getByTestId("chat-tab-bar")).getByLabelText("New chat")
+    await act(async () => { fireEvent.click(newChat) })
+    await act(async () => { releaseGenerate({ id: 99, status: "generating" }) })
+    await settle()
+
+    expect(docProbe()).toBe("none")
+  })
+})
+
 describe("a genuine thread change still retires the document", () => {
+  it("clears it when moving between two chats that have no conversation yet", async () => {
+    // PINS THE `activeTabId` DEPENDENCY. Neither chat ever gets a conversation
+    // row, so `activeConvId` stays null across the switch and a conv-id-only
+    // effect would not even run — the previous thread's document would ride
+    // along into a chat that has nothing to do with it.
+    wantsADocument()
+    // A failed create is the reachable way to hold a chat with a document and
+    // no conversation row: `ensureConversation` resolves null, the document is
+    // still written (unlinked), and the tab never gains a `dbConvId`.
+    createConversation.mockRejectedValue(new Error("offline"))
+
+    await act(async () => { renderChat() })
+    await typeAndSend("Draft a leadership update")
+    await settle()
+    expect(docProbe()).toBe("99")
+    expect(convProbe()).toBe("none")
+
+    const newChat = within(screen.getByTestId("chat-tab-bar")).getByLabelText("New chat")
+    await act(async () => { fireEvent.click(newChat) })
+    await settle()
+
+    expect(convProbe()).toBe("none")
+    expect(docProbe()).toBe("none")
+  })
+
   it("opening a new chat clears the previous thread's document", async () => {
     // The fix above must not become "never clear it". A document belongs to the
     // thread that wrote it, so moving to another chat must still retire it —

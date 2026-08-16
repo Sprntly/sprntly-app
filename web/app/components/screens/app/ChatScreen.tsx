@@ -3933,7 +3933,14 @@ export function ChatScreen() {
         // generated, still readable in the library — rather than no document.
         const attachTo = convId ?? await persistence.ensureConversation(tabId, {
           turnId,
-          title: handle,
+          // THE SAME TITLE `pushPendingConversation` WOULD HAVE USED, not the
+          // tab's `handle`. Whichever of the two calls wins the create race
+          // names the stored row, and this one now usually wins — so a
+          // different truncation here (37 chars vs 49) would silently rename
+          // the conversation in Chat history for this flow alone, leaving the
+          // in-session rail and the reloaded list disagreeing about the same
+          // thread.
+          title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
           query: seedQuery,
         })
         const created = await customArtifactsApi.generate({
@@ -3947,6 +3954,21 @@ export function ChatScreen() {
           context: threadContextFor(tabId),
           conversation_id: attachTo,
         })
+        // NEVER OPEN THIS TAB'S DOCUMENT OVER SOMEONE ELSE'S THREAD. The
+        // create + generate round trips mean the user can have moved on by
+        // now, and this pair is unconditional: it would put chat A's document
+        // in front of whoever is reading chat B.
+        //
+        // The clear-on-switch used to paper over that — B gaining its own
+        // conversation id wiped the stray id — but a conversation coming into
+        // existence is no longer treated as a switch (that is the fix above),
+        // so the guard has to be stated where the assumption actually lives.
+        // The same rule `startTicketSetRun` already follows.
+        //
+        // Nothing is lost by skipping it: the document is now attached to its
+        // conversation, so returning to this thread re-opens it through
+        // `useThreadDocumentSync`.
+        if (activeTabIdRef.current !== tabId) return
         setContent({ documentId: created.id, documentGenerating: true })
         openContentPanel("document")
       } catch {
