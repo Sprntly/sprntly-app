@@ -267,6 +267,102 @@ def start_ask_job(
     return resp.data[0]["id"]
 
 
+class RetryAttemptLive(Exception):
+    """A retry was requested while an attempt for the same source turn is
+    still `generating` — the route maps this to 409. DB-enforced by the
+    `ask_jobs_active_attempt_uidx` partial-unique (a concurrent second claim
+    violates it)."""
+
+
+class RetryHasSideEffects(Exception):
+    """A retry was requested for a run that recorded tool side effects
+    (a delegation / execute_task artifact for its source turn) — re-running
+    the body would double-delegate/double-edit, so auto-retry is refused and
+    the route maps this to 422 (resend as a new turn)."""
+
+
+def claim_retry_attempt(
+    *,
+    source_turn_id: int,
+    kind: str,
+    project_id: int,
+    company_id: str,
+    dataset: str,
+    question: str,
+    conversation_id: int,
+    run_id: str,
+    had_side_effects: bool,
+) -> dict:
+    """Atomically claim ONE new retry attempt for a group turn.
+
+    * `had_side_effects` True → raise `RetryHasSideEffects` (422): the prior
+      attempt already wrote a delegation/artifact, so re-running is unsafe.
+    * A `generating` `ask_jobs` row already exists for this `source_turn_id`
+      → raise `RetryAttemptLive` (409): an attempt is in flight.
+    * Otherwise insert a NEW `generating` row with `attempt = <prev max> + 1`
+      and the fresh `run_id`, returning `{id, run_id, attempt, source_turn_id}`.
+
+    Atomicity is DB-enforced: the `ask_jobs_active_attempt_uidx` partial-unique
+    means a second concurrent claim that slips past the read-check still
+    violates the index on insert — caught here and surfaced as
+    `RetryAttemptLive`. `client_message_id` is intentionally NOT carried onto a
+    retry (a retry is a deliberate new attempt, not a client double-submit, so
+    it must not collide on the client_message_id unique — that unique stays the
+    backstop against a genuine double-SUBMIT)."""
+    if had_side_effects:
+        raise RetryHasSideEffects(
+            "the prior attempt recorded tool side effects — resend as a new turn"
+        )
+    c = require_client()
+    live = (
+        c.table("ask_jobs")
+        .select("id")
+        .eq("source_turn_id", source_turn_id)
+        .eq("status", "generating")
+        .limit(1)
+        .execute()
+        .data
+    )
+    if live:
+        raise RetryAttemptLive(f"an attempt is already live for source_turn_id={source_turn_id}")
+    prior = (
+        c.table("ask_jobs")
+        .select("attempt")
+        .eq("source_turn_id", source_turn_id)
+        .eq("kind", kind)
+        .execute()
+        .data
+        or []
+    )
+    attempt = max((r.get("attempt") or 0 for r in prior), default=0) + 1
+    try:
+        new_id = start_ask_job(
+            company_id=company_id,
+            dataset=dataset,
+            question=question,
+            conversation_id=conversation_id,
+            kind=kind,
+            project_id=project_id,
+            source_turn_id=source_turn_id,
+            run_id=run_id,
+            attempt=attempt,
+        )
+    except APIError as exc:
+        # A concurrent claim won the race and its `generating` row now holds
+        # the partial-unique slot for this source_turn_id (Postgres 23505).
+        if getattr(exc, "code", None) == "23505" or "ask_jobs_active_attempt_uidx" in str(exc):
+            raise RetryAttemptLive(
+                f"a concurrent attempt claimed source_turn_id={source_turn_id}"
+            ) from exc
+        raise
+    return {
+        "id": new_id,
+        "run_id": run_id,
+        "attempt": attempt,
+        "source_turn_id": source_turn_id,
+    }
+
+
 def complete_ask_job(ask_id: int, payload: dict) -> None:
     """Store the citation-stripped answer payload and mark the job `ready`.
 
