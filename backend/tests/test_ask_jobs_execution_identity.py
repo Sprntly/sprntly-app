@@ -9,7 +9,7 @@ including the `status == 'generating'` guards — is untouched.
 
 The fake-Supabase tier below mirrors the migration's shape (see the
 `ask_jobs` DDL in conftest.py, updated alongside
-`20260816120000_ask_jobs_execution_identity.sql`) and proves the HELPER
+`20260816125000_ask_jobs_execution_identity.sql`) and proves the HELPER
 round-trip + guard behavior fast and DB-agnostically. The real
 Postgres-level proof (status CHECK constraint untouched, no table rewrite,
 partial-unique index build timing) is the separate real-local-Supabase
@@ -38,7 +38,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "supabase"
     / "migrations"
-    / "20260816120000_ask_jobs_execution_identity.sql"
+    / "20260816125000_ask_jobs_execution_identity.sql"
 )
 
 
