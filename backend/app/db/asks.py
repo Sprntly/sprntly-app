@@ -231,10 +231,22 @@ def start_ask_job(
     conversation_id: int | None = None,
     pinned_skill: str | None = None,
     prd_id: int | None = None,
+    kind: str | None = None,
+    project_id: int | None = None,
+    source_turn_id: int | None = None,
+    run_id: str | None = None,
+    client_message_id: str | None = None,
+    attempt: int | None = None,
 ) -> int:
     """Persist a `generating` Ask job row and return its id. The POST returns
     this id immediately; the background worker fills `response` and flips the
-    status to `ready` (or `error`)."""
+    status to `ready` (or `error`).
+
+    `kind`/`project_id`/`source_turn_id`/`run_id`/`client_message_id`/
+    `attempt` are the chat-parity execution-identity columns — optional
+    passthrough, all default `None` (the existing main/private ask shape).
+    Callers that don't pass them get byte-identical rows to before this
+    ticket."""
     c = require_client()
     resp = c.table("ask_jobs").insert({
         "company_id": company_id,
@@ -245,8 +257,130 @@ def start_ask_job(
         "prd_id": prd_id,
         "status": "generating",
         "response": {},
+        "kind": kind,
+        "project_id": project_id,
+        "source_turn_id": source_turn_id,
+        "run_id": run_id,
+        "client_message_id": client_message_id,
+        "attempt": attempt,
     }).execute()
     return resp.data[0]["id"]
+
+
+class RetryAttemptLive(Exception):
+    """A retry was requested while an attempt for the same source turn is
+    still `generating` — the route maps this to 409. DB-enforced by the
+    `ask_jobs_active_attempt_uidx` partial-unique (a concurrent second claim
+    violates it)."""
+
+
+class RetryHasSideEffects(Exception):
+    """A retry was requested for a run that recorded tool side effects
+    (a delegation / execute_task artifact for its source turn) — re-running
+    the body would double-delegate/double-edit, so auto-retry is refused and
+    the route maps this to 422 (resend as a new turn)."""
+
+
+def claim_retry_attempt(
+    *,
+    source_turn_id: int,
+    kind: str,
+    project_id: int,
+    company_id: str,
+    dataset: str,
+    question: str,
+    conversation_id: int,
+    run_id: str,
+    had_side_effects: bool,
+) -> dict:
+    """Atomically claim ONE new retry attempt for a group turn.
+
+    * `had_side_effects` True → raise `RetryHasSideEffects` (422): the prior
+      attempt already wrote a delegation/artifact, so re-running is unsafe.
+    * A `generating` `ask_jobs` row already exists for this `source_turn_id`
+      → raise `RetryAttemptLive` (409): an attempt is in flight.
+    * Otherwise insert a NEW `generating` row with `attempt = <prev max> + 1`
+      and the fresh `run_id`, returning `{id, run_id, attempt, source_turn_id}`.
+
+    Atomicity is DB-enforced: the `ask_jobs_active_attempt_uidx` partial-unique
+    means a second concurrent claim that slips past the read-check still
+    violates the index on insert — caught here and surfaced as
+    `RetryAttemptLive`. `client_message_id` is intentionally NOT carried onto a
+    retry (a retry is a deliberate new attempt, not a client double-submit, so
+    it must not collide on the client_message_id unique — that unique stays the
+    backstop against a genuine double-SUBMIT)."""
+    if had_side_effects:
+        raise RetryHasSideEffects(
+            "the prior attempt recorded tool side effects — resend as a new turn"
+        )
+    c = require_client()
+    live = (
+        c.table("ask_jobs")
+        .select("id")
+        .eq("source_turn_id", source_turn_id)
+        .eq("status", "generating")
+        .limit(1)
+        .execute()
+        .data
+    )
+    if live:
+        raise RetryAttemptLive(f"an attempt is already live for source_turn_id={source_turn_id}")
+    prior = (
+        c.table("ask_jobs")
+        .select("attempt")
+        .eq("source_turn_id", source_turn_id)
+        .eq("kind", kind)
+        .execute()
+        .data
+        or []
+    )
+    attempt = max((r.get("attempt") or 0 for r in prior), default=0) + 1
+    try:
+        new_id = start_ask_job(
+            company_id=company_id,
+            dataset=dataset,
+            question=question,
+            conversation_id=conversation_id,
+            kind=kind,
+            project_id=project_id,
+            source_turn_id=source_turn_id,
+            run_id=run_id,
+            attempt=attempt,
+        )
+    except APIError as exc:
+        # A concurrent claim won the race and its `generating` row now holds
+        # the partial-unique slot for this source_turn_id (Postgres 23505).
+        if getattr(exc, "code", None) == "23505" or "ask_jobs_active_attempt_uidx" in str(exc):
+            raise RetryAttemptLive(
+                f"a concurrent attempt claimed source_turn_id={source_turn_id}"
+            ) from exc
+        raise
+    return {
+        "id": new_id,
+        "run_id": run_id,
+        "attempt": attempt,
+        "source_turn_id": source_turn_id,
+    }
+
+
+@retry_on_disconnect
+def get_run_by_client_message_id(client_message_id: str) -> dict | None:
+    """The ask_jobs row carrying this `client_message_id`, or None. Backs the
+    send-route idempotency check: a repeat submit of the same client message
+    must resolve to the SAME run rather than mint a second one (the
+    `ask_jobs_client_message_id_uidx` partial-unique makes at most one exist)."""
+    if not client_message_id:
+        return None
+    c = require_client()
+    rows = (
+        c.table("ask_jobs")
+        .select("*")
+        .eq("client_message_id", client_message_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return rows[0] if rows else None
 
 
 def complete_ask_job(ask_id: int, payload: dict) -> None:
@@ -326,16 +460,25 @@ def touch_ask_job(ask_id: int) -> bool:
     return bool(resp.data)
 
 
-def fail_ask_job(ask_id: int, error: str) -> None:
+def fail_ask_job(
+    ask_id: int, error: str, error_class: str | None = None
+) -> None:
     """Mark the job `error` (best-effort — the worker never crashes on this).
 
     Guarded on `status == 'generating'` for the same reason as
     complete_ask_job: a cancel that landed first must not be clobbered by a
-    trailing failure from the (now-abandoned) worker."""
+    trailing failure from the (now-abandoned) worker.
+
+    `error_class` is the optional typed-error-category passthrough (e.g.
+    billing/timeout/local_gate/app) — separate from the generic user-facing
+    `status = 'error'` and `error` message, and unused by any existing
+    caller (all pass only `ask_id`/`error` today, so this defaults to
+    `None` and every existing call is unaffected)."""
     c = require_client()
     c.table("ask_jobs").update({
         "status": "error",
         "error": (error or "")[:500],
+        "error_class": error_class,
         "updated_at": _now(),
     }).eq("id", ask_id).eq("status", "generating").execute()
 

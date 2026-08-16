@@ -1,0 +1,125 @@
+/*
+ * Shell-owned classes. In this wave the shell emits main chat's existing global
+ * `bc-*`/`od-*` classes (from globals.css) for the main surface and touches no
+ * CSS, so the only class that lives here is the standalone project viewport —
+ * the scroll region a project surface uses instead of main's `od-center-scroll`
+ * (which is coupled to the tab-strip layout). No caller uses it yet; the class
+ * is shipped now so the file exists and the later project-fold ticket has a home
+ * for its frame glue. No `bc-*` redefinition, no colors or tokens here.
+ */
+.standaloneViewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* A `clarify` reply's PRD choices (2+-PRD disambiguation) — rendered by the
+   shell for project-private surfaces from `ShellTurn.pickOptions`. Lives here,
+   shell-owned, because the shell renders these options and its module graph
+   forbids importing the project-side extras module. Tokens only. */
+.clarifyOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.clarifyOption {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.clarifyOption:hover {
+  background: var(--surface-3);
+}
+
+/* ── Multi-party (group) row presentation ──
+   Shell-owned so the mapping targets classes that SURVIVE T3b's
+   ProjectGroupChat.module.css delete (the doomed module). Tokens only, from
+   globals.css :root — no new palette. The per-kind wrapper + bubble fills the
+   group rows carry, mapped from `ShellTurn.author`. */
+.gcMsg {
+  display: flex;
+  gap: 11px;
+  padding: 0;
+}
+
+.gcMsgAgent {
+  align-items: flex-start;
+}
+
+.gcMsgMe {
+  flex-direction: row-reverse;
+}
+
+.gcMsgMe :global(.bc-user-head) {
+  flex-direction: row-reverse;
+}
+
+.gcRole {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+
+.gcTime {
+  font-size: 10.5px;
+  color: var(--ink-4);
+}
+
+.gcBubbleOther,
+.gcBubbleMe {
+  font-size: 13.5px;
+  line-height: 1.5;
+  border-radius: var(--radius-lg);
+  padding: 10px 15px;
+  max-width: 620px;
+  width: fit-content;
+}
+
+.gcBubbleOther {
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+}
+
+.gcBubbleMe {
+  background: var(--nav);
+  color: var(--on-dark-alpha-95);
+  border: 1px solid var(--nav);
+}
+
+/* A link inside the own dark-green bubble inherits the light bubble text colour
+   (relocated from the pre-fold `.bubbleMe :global(a)` — a default blue link is
+   illegible on `--nav`). */
+.gcBubbleMe :global(a) {
+  color: inherit;
+}
+
+/* An own-message @-mention chip inside the dark-green own bubble. The base chip
+   (`.gc-mention-chip`, from mention-picker.module.css) is a blue-on-light-blue
+   pill (`--info` / `--info-soft`) tuned for the light peer bubble — illegible
+   and the wrong hue on the dark `--nav` own bubble. Reproduce the pre-fold
+   `.bubbleMe .mentionChip` orphan: light brand-green inline text (`--accent-2`,
+   ~7.7:1 on `--nav`, AA), no pill. The chip carries a stable GLOBAL marker class
+   (`gc-mention-chip`) so this selector reaches across the module boundary the
+   fold introduced (chip in mention-picker.module.css, bubble here). Tokens only. */
+.gcBubbleMe :global(.gc-mention-chip) {
+  color: var(--accent-2);
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  /* No pill on the dark bubble — keep a hair of trailing space so an inline
+     mention never glues to the following word. */
+  margin-right: 0.15em;
+}

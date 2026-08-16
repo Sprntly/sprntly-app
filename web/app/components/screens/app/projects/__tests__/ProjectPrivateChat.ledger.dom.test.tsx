@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// ProjectIndividualChat — the inline brief-turn delegation affordance.
+// ProjectPrivateChat — the inline brief-turn delegation affordance.
 // A delivered-brief `ic-history-agent` turn whose id matches a delegation
 // assigned to the caller (via the ledger row's `delivered_turn_id`) renders a
 // compact `<DelegationActions>`; its clicks call `emitDelegationEvent`. A turn
@@ -71,7 +71,7 @@ vi.mock("../../../../../context/CompanyContext", () => ({
 // The component now reads the classifier flag (`chatIntentEnvelopeOn`) to
 // decide whether to classify-then-dispatch at all. Explicit OFF here keeps
 // every assertion in this file byte-identical to pre-classifier behaviour —
-// same stub shape `ProjectIndividualChat.test.tsx` uses.
+// same stub shape `ProjectPrivateChat.test.tsx` uses.
 vi.mock("../../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => ({
     loading: false, profile: null,
@@ -95,7 +95,7 @@ vi.mock("../useRealtimeChannel", () => ({
   },
 }))
 
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 import type { DelegationLedgerRow, IndividualTurn } from "../../../../../lib/api"
 
 const briefTurn = (id: number): IndividualTurn => ({
@@ -136,12 +136,12 @@ beforeEach(() => {
 
 afterEach(() => cleanup())
 
-describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
+describe("ProjectPrivateChat — inline brief-turn affordance (AC7)", () => {
   it("test_inline_brief_actions_no_accept_decline — a matched brief turn renders compact DelegationActions with only in_progress/completed, no accepted/declined, and emits on click", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockResolvedValue([ledgerRow({ delegation_id: 5, delivered_turn_id: 42, status: "assigned" })])
 
-    render(React.createElement(ProjectIndividualChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
 
     await waitFor(() => expect(screen.getByTestId("ic-brief-delegation-actions")).toBeTruthy())
     const affordance = screen.getByTestId("ic-brief-delegation-actions")
@@ -166,7 +166,7 @@ describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
     individualTurnsMock.mockResolvedValue([briefTurn(99)])
     ledgerMock.mockResolvedValue([ledgerRow({ delegation_id: 5, delivered_turn_id: 42 })])
 
-    render(React.createElement(ProjectIndividualChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
 
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     // The turn renders exactly as today — no affordance.
@@ -177,13 +177,15 @@ describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
     // `brief.delivered` subscription still fired, and the composer is present.
     expect(individualTurnsMock).toHaveBeenCalledWith(1)
     expect(realtimeSpy).toHaveBeenCalledWith("project:1:user:u1", expect.anything())
-    expect(screen.getByTestId("project-individual-chat")).toBeTruthy()
+    // The thread still renders and stays usable (the composer is present) —
+    // repointed off the deleted component's root testid to the shell's composer.
+    expect(document.querySelector(".cx-input")).toBeTruthy()
   })
 
   it("renders no affordance when the ledger read is empty (best-effort, no throw)", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockResolvedValue([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     expect(screen.queryByTestId("ic-brief-delegation-actions")).toBeNull()
   })
@@ -191,9 +193,11 @@ describe("ProjectIndividualChat — inline brief-turn affordance (AC7)", () => {
   it("a failed ledger read leaves the thread working with no affordance", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockRejectedValue(new Error("ledger down"))
-    render(React.createElement(ProjectIndividualChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     expect(screen.queryByTestId("ic-brief-delegation-actions")).toBeNull()
-    expect(screen.getByTestId("project-individual-chat")).toBeTruthy()
+    // The thread still renders and stays usable (the composer is present) —
+    // repointed off the deleted component's root testid to the shell's composer.
+    expect(document.querySelector(".cx-input")).toBeTruthy()
   })
 })

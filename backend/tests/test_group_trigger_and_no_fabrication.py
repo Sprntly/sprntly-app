@@ -171,10 +171,13 @@ def test_trigger_kind_mention_continuation_gate(tenant_client, isolated_settings
     projects_db.add_member(project_id, "second-human")
 
     kinds: list[str] = []
-    monkeypatch.setattr(
-        projects_route, "_respond_as_group_agent",
-        lambda *a, trigger_kind="mention", **kw: kinds.append(trigger_kind),  # noqa: ARG005
-    )
+
+    async def _capture(*a, **kw):
+        # `_schedule_group_reply` passes trigger_kind as the 4th POSITIONAL
+        # arg (job_id/run_id ride as keywords); the reply is now async.
+        kinds.append(a[3] if len(a) > 3 else kw.get("trigger_kind", "mention"))
+
+    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _capture)
 
     # mention -> "mention" regardless of should_respond (never consulted on
     # the mention branch).

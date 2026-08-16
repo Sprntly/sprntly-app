@@ -75,6 +75,24 @@ def list_delegations_for_project(project_id: int) -> list[dict]:
 
 
 @retry_on_disconnect
+def has_delegation_for_source_turn(source_turn_id: int) -> bool:
+    """True when ANY delegation was recorded for this triggering turn — the
+    derive-at-read side-effect signal the group retry gate uses (inference
+    over stored derived state, no new column). Presence ⇒ a prior attempt
+    wrote a delegation, so auto-retry would double-delegate and is refused."""
+    client = require_client()
+    rows = (
+        client.table("project_delegations")
+        .select("id")
+        .eq("source_turn_id", source_turn_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    return bool(rows)
+
+
+@retry_on_disconnect
 def list_delegations_for_assignee(assignee_user_id: str) -> list[dict]:
     """Delegation facts handed TO this user, newest-first — hits
     `idx_project_delegations_assignee`."""

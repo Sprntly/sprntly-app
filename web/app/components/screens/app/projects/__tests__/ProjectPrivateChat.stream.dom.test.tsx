@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// ProjectIndividualChat — private-ask token streaming + Stop.
+// ProjectPrivateChat — private-ask token streaming + Stop.
 //
 // `runAskGeneration` on this surface is now called with an `onPartial`
 // handler (mirroring the main chat's own ask-path streaming block): a delta
@@ -89,7 +89,7 @@ vi.mock("../../../../../lib/auth", () => ({
   useAuth: () => ({ kind: "authed" as const, user: { id: "u1" } }),
 }))
 
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 
 const individualChatRecord = (id: number, projectId: number) => ({
   id,
@@ -124,14 +124,14 @@ async function send(question: string) {
   })
 }
 
-describe("ProjectIndividualChat — private streaming", () => {
+describe("ProjectPrivateChat — private streaming", () => {
   it("renders streamed partials into the in-flight turn before the final reply", async () => {
     let capturedOpts: AskOpts = {}
     runAskGenerationMock.mockImplementation((_q, _company, _tabId, opts: AskOpts) => {
       capturedOpts = opts
       return new Promise(() => {}) // never resolves in this test — asserting the pre-final state
     })
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await send("what's the rollout plan?")
 
     expect(typeof capturedOpts.onPartial).toBe("function")
@@ -161,7 +161,7 @@ describe("ProjectIndividualChat — private streaming", () => {
   })
 })
 
-describe("ProjectIndividualChat — Stop actively cancels the backend job", () => {
+describe("ProjectPrivateChat — Stop actively cancels the backend job", () => {
   it("flips the local isStopped signal AND calls the cancel endpoint with the resolved ask id", async () => {
     let capturedOpts: AskOpts = {}
     runAskGenerationMock.mockImplementation((_q, _company, _tabId, opts: AskOpts) => {
@@ -174,7 +174,7 @@ describe("ProjectIndividualChat — Stop actively cancels the backend job", () =
     // the job id only after the send starts (mocked wholesale here, so its
     // side effect doesn't happen — this is the equivalent client-visible
     // state at the moment the user hits Stop).
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await send("stop me mid-answer")
 
     expect(typeof capturedOpts.isStopped).toBe("function")
@@ -204,7 +204,7 @@ describe("ProjectIndividualChat — Stop actively cancels the backend job", () =
     })
     getPendingAskMock.mockReturnValue(null)
 
-    render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await send("stop me mid-answer")
 
     await act(async () => {

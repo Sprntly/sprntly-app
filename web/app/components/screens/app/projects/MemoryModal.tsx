@@ -14,6 +14,8 @@
 // `summary_md` renders whatever the cached row holds (seeded/last-good, or
 // null → "Synthesis pending"), never regenerated from here.
 import { useCallback, useEffect, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { ApiError, projectsApi, type ProjectMember, type ProjectMemorySummary } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
@@ -76,9 +78,9 @@ export function MemorySummaryBody({ summary }: { summary: ProjectMemorySummary }
           </span>
         </div>
         {summary.summary_md ? (
-          <p className={styles.synthBody} data-testid="memory-synth-body">
-            {summary.summary_md}
-          </p>
+          <div className={styles.synthBody} data-testid="memory-synth-body">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{summary.summary_md}</ReactMarkdown>
+          </div>
         ) : (
           <p className={styles.synthPending} data-testid="memory-synth-pending">
             Synthesis pending — insights will appear here as the team collaborates.

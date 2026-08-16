@@ -216,6 +216,11 @@ export type ProjectDetailViewProps = {
    *  the caller themselves — the View withholds the control on those
    *  rows entirely. */
   onRemoveMember: (member: HumanMember) => void
+  /** Re-fetches ONLY the project's artifact list (#9-count) — threaded into
+   *  `ProjectMainThread` -> `ProjectPrivateChat` so a CLIENT-driven generate
+   *  (the sender's own `runGeneratePrd`/`runGenerateTickets`) refreshes the
+   *  list + count immediately, without waiting on the realtime echo. */
+  refetchArtifacts: () => void
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -238,6 +243,7 @@ export function ProjectDetailView({
   insightNote,
   currentUserId: _currentUserId,
   onRemoveMember: _onRemoveMember,
+  refetchArtifacts,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
   // AD-HOC (live-rig): the in-place artifact drawer is a LAYOUT COLUMN, not
@@ -371,10 +377,18 @@ export function ProjectDetailView({
               imported anywhere in this swap. */}
           <div className={styles.threadHost} data-testid="project-main-thread-host">
             <ProjectMainThread
+              // Project-switch isolation (an adversarial review): a flat-route
+              // project A→B `?id=` change with no remount would carry over the
+              // shell + BOTH engines + the picker; keying the whole thread on
+              // `project.id` resets them together. Latent/defensive — no current
+              // nav path does a direct A→B without an unmount, so this makes the
+              // asserted flat-route premise hold rather than patching a live bug.
+              key={project.id}
               projectId={project.id}
               activeChat={activeChat}
               onOpenArtifact={(c) => onOpenArtifacts(c.type)}
               insightNote={insightNote}
+              onArtifactsChanged={refetchArtifacts}
             />
           </div>
         </main>
@@ -702,6 +716,25 @@ export function ProjectDetailScreen({
         // until the next real load.
       })
   }, [projectId])
+  // Artifact invalidation (#9-count): the GROUP channel `project:{id}` gets
+  // a best-effort `artifact.added` broadcast from `db/projects.py::
+  // add_artifact`'s ONE write chokepoint — a server-side attach
+  // (`execute_task`, a report capture) as well as any client-driven add.
+  // `onReconcile` re-derives the same way on every (re)subscribe (AD-P22),
+  // so a dropped broadcast during a disconnect window still self-heals on
+  // reconnect. Deliberately the GROUP channel, not the per-user one above
+  // (`unreadTopic`) — every member's artifacts list should refresh, not
+  // just the sender's.
+  const handleArtifactsEvent = useCallback(
+    (event: string) => {
+      if (event === "artifact.added") refetchArtifacts()
+    },
+    [refetchArtifacts],
+  )
+  useRealtimeChannel(`project:${projectId}`, {
+    onEvent: handleArtifactsEvent,
+    onReconcile: refetchArtifacts,
+  })
   const onCloseRailModal = useCallback(() => {
     setRailModal(null)
     // Acting on tasks inside the modal changes the open counts; refresh the
@@ -813,6 +846,7 @@ export function ProjectDetailScreen({
         onOpenSettings={onOpenSettings}
         currentUserId={currentUserId}
         onRemoveMember={onRemoveMember}
+        refetchArtifacts={refetchArtifacts}
       />
       <ConfirmDialog
         open={removeTarget != null}

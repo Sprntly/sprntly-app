@@ -16,6 +16,9 @@ holds a strong ref via routes/ask.py's `_inflight_tasks`).
 import asyncio
 import json
 import logging
+import uuid
+from dataclasses import dataclass, field
+from typing import Callable, Literal
 
 from app import ask_runner, qa_agent
 from app.ask_stream import AnswerFieldExtractor
@@ -124,6 +127,153 @@ def _build_private_scope(
     )
 
 
+@dataclass
+class ExecutionOutcome:
+    """Contract A — the one result shape every execution surface (main,
+    private, group) hands back from its `body` closure to
+    `run_execution_job`. `response` is the citation-stripped answer payload
+    that becomes the job row's stored `response`; `error`/`error_class` are
+    populated ONLY on the failure path (by the primitive, from the raised
+    exception) and `error` is an internal debug string that is NEVER
+    broadcast or exposed on any read; `side_effects` is an advisory list of
+    tool side-effects the body performed (unused by the primitive itself —
+    the retry side-effect gate derives its own truth from the delegation
+    ledger, not from this list)."""
+
+    status: Literal["ready", "error", "cancelled"]
+    response: dict
+    error: str | None = None
+    error_class: str | None = None
+    side_effects: list[str] = field(default_factory=list)
+
+
+def _classify_error(exc: BaseException) -> str:
+    """Map a raised exception to a typed, user-safe category — never the
+    message itself. Order matters only where types could overlap (they do
+    not here): an anthropic status error (the shared-key exhaustion / billing
+    case) is `billing`; a transport/asyncio/httpx timeout is `timeout`; a
+    LOCAL FastAPI gate raised before/around the model (priority/auth) is
+    `local_gate`; anything else is a generic `app` fault."""
+    import anthropic
+    from fastapi import HTTPException
+
+    if isinstance(exc, anthropic.APIStatusError):
+        return "billing"
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, anthropic.APITimeoutError)):
+        return "timeout"
+    try:
+        import httpx
+
+        if isinstance(exc, httpx.TimeoutException):
+            return "timeout"
+    except Exception:  # noqa: BLE001 — httpx always present; guard is defensive
+        pass
+    if isinstance(exc, HTTPException):
+        return "local_gate"
+    return "app"
+
+
+async def _run_heartbeat(heartbeat: Callable[[], bool]) -> None:
+    """The shared liveness loop (relocated from `run_ask_job`'s inline
+    `beat`): every ORPHAN_ASK_JOB_HEARTBEAT_SECONDS call `heartbeat()` on a
+    worker thread; it returns whether the row is still `generating`, so a
+    `False` means the row went terminal and there is nothing left to keep
+    alive — stop. A blip that raises exits the loop rather than crashing the
+    run (a lost beat can only cost the reaper's grace window, never the
+    answer). See `_heartbeat`'s docstring for the staging incident this
+    prevents."""
+    try:
+        while True:
+            await asyncio.sleep(ORPHAN_ASK_JOB_HEARTBEAT_SECONDS)
+            if not await asyncio.to_thread(heartbeat):
+                return          # no longer generating — nothing left to keep alive
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — a heartbeat failure must never fail the run
+        logger.exception("execution heartbeat loop failed")
+
+
+def _commit_body(
+    job_id: int,
+    body: Callable[[], "ExecutionOutcome"],
+    on_committed: "Callable[[ExecutionOutcome], None] | None",
+) -> "ExecutionOutcome":
+    """Run the surface `body` on THIS worker thread, then the ONE guarded
+    terminal success write (`complete_ask_job`, `.eq('status','generating')`)
+    and the post-terminal side effects (`on_committed`) — in that exact
+    order, so main/private's `complete → capture_report → promote → ingest`
+    ordering (AC2) is preserved and everything stays on the same threadpool
+    thread it ran on before the extraction. A raise from `body` propagates
+    (the caller classifies it and fails the row); `complete_ask_job` /
+    `on_committed` are reached only on the success path."""
+    outcome = body()
+    complete_ask_job(job_id, outcome.response)
+    if on_committed is not None:
+        on_committed(outcome)
+    return outcome
+
+
+async def run_execution_job(
+    *,
+    job_id: int,
+    run_id: str,
+    is_cancelled: Callable[[], bool],
+    heartbeat: Callable[[], bool],
+    body: Callable[[], "ExecutionOutcome"],
+    on_committed: "Callable[[ExecutionOutcome], None] | None" = None,
+) -> "ExecutionOutcome":
+    """The shared execution-lifecycle primitive (Contract A) that main,
+    private, AND group all run through — so group *inherits* the lifecycle by
+    using the SAME code, not a status-column wrapper. Owns exactly:
+
+    * the async heartbeat loop (so a long-but-live run is never reaped);
+    * running the surface `body` on a worker thread and, on success, the ONE
+      terminal transition (`complete_ask_job`, guarded on
+      `status='generating'`) + the post-terminal `on_committed` side effects;
+    * `AskCancelled` → leave the row `cancelled` (the /cancel endpoint already
+      wrote it) — NOT a failure;
+    * any other exception → classify `error_class` and write the ONE guarded
+      terminal fail (`fail_ask_job`, also `.eq('status','generating')`), never
+      broadcasting the raw message;
+    * cancelling the beat in `finally`.
+
+    Terminal-once is keyed to the run by REUSING the existing guarded writes:
+    a late `fail_orphan_generating_ask_jobs` reaper and this worker can never
+    both finalize, because whichever writes first flips `status` out of
+    `generating` and the other's guarded update no-ops. NO new/unguarded
+    UPDATE is introduced here.
+
+    `is_cancelled` is part of Contract A and is wired by the caller into the
+    answer call inside `body` (so the body raises `AskCancelled` at a
+    checkpoint); the primitive accepts it for surface symmetry and the group
+    opt-out ledger (group passes `lambda: False`). `run_id` is the durable
+    execution identity carried for logging/retry correlation. Returns the
+    resolved `ExecutionOutcome` so the caller can emit its own surface-specific
+    terminal signal (e.g. main/private's `token_stream.close` frame) keyed to
+    the outcome — the primitive itself emits none."""
+    beat = asyncio.create_task(_run_heartbeat(heartbeat))
+    try:
+        return await asyncio.to_thread(_commit_body, job_id, body, on_committed)
+    except AskCancelled:
+        # The row is already `cancelled` (set by the cancel endpoint); leave
+        # it. NOT a failure — must never be marked `error`.
+        logger.info("execution job cancelled job_id=%s run_id=%s", job_id, run_id)
+        return ExecutionOutcome(status="cancelled", response={})
+    except Exception as exc:  # noqa: BLE001 — best-effort; never crash the worker
+        error_class = _classify_error(exc)
+        msg = f"{type(exc).__name__}: {exc}"
+        logger.exception("execution job failed job_id=%s run_id=%s", job_id, run_id)
+        try:
+            fail_ask_job(job_id, msg, error_class)
+        except Exception:  # noqa: BLE001 — even the fail-marking is best-effort
+            logger.exception("fail_ask_job failed job_id=%s", job_id)
+        return ExecutionOutcome(
+            status="error", response={}, error=msg, error_class=error_class
+        )
+    finally:
+        beat.cancel()
+
+
 async def _heartbeat(ask_id: int) -> None:
     """Bump the job row's `updated_at` while this worker is alive.
 
@@ -140,16 +290,13 @@ async def _heartbeat(ask_id: int) -> None:
     Beating turns the age gate back into what it was meant to be — a liveness
     check. Cancelled early when the row leaves `generating`, so a finished or
     stopped job stops being touched immediately.
+
+    The loop body now lives in the shared `_run_heartbeat` primitive
+    (main/private and group both beat through it); this thin wrapper keeps the
+    ask-id-shaped `touch_ask_job` binding and the direct unit coverage in
+    `test_ask_job_heartbeat.py`.
     """
-    try:
-        while True:
-            await asyncio.sleep(ORPHAN_ASK_JOB_HEARTBEAT_SECONDS)
-            if not await asyncio.to_thread(touch_ask_job, ask_id):
-                return          # no longer generating — nothing left to keep alive
-    except asyncio.CancelledError:
-        raise
-    except Exception:  # noqa: BLE001 — a heartbeat failure must never fail the ask
-        logger.exception("ask heartbeat loop failed ask_id=%s", ask_id)
+    await _run_heartbeat(lambda: touch_ask_job(ask_id))
 
 
 def ask_channel(ask_id: int) -> str:
@@ -186,7 +333,7 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
-) -> None:
+) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
     # the `answer` field and publishes it on the ask's SSE channel (subscribed
@@ -281,11 +428,6 @@ def _run_sync(
         getattr(ask_plan, "documents", None) if ask_plan is not None else None
     )
     history_token = ask_runner.set_active_history(history)
-    # Project-scoped ask (individual project chat): let qa_agent skip the
-    # connector-lookup interceptors so the folded, authoritative project-context
-    # block answers project-meta questions instead of a "connect a connector"
-    # deflection. None for every non-project ask (interceptors unchanged there).
-    project_id_token = ask_runner.set_active_project_id(project_id)
 
     # Project-scoped individual chat (`project_id is not None`): the sixth
     # ladder branch inside `qa_agent.answer()` owns the turn via the SAME
@@ -340,7 +482,6 @@ def _run_sync(
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
         ask_runner.reset_active_planned_documents(planned_docs_token)
-        ask_runner.reset_active_project_id(project_id_token)
     # Append-only analytics log, same as the old inline path.
     try:
         from app.db import log_ask
@@ -383,52 +524,16 @@ def _run_sync(
             )
     except Exception:  # noqa: BLE001 — shadow telemetry must never fail the answer
         logger.exception("ask-planner actual line failed for ask_id=%s", ask_id)
-    complete_ask_job(ask_id, _strip_citations(payload))
-    # A report skill answers with a self-contained HTML document rather than
-    # markdown. Capture it as a durable `reports` artifact so it survives the
-    # chat turn — listable on /artifacts, downloadable, shareable. Attached to
-    # the chat room and/or PRD this ask ran in (whichever the ask carried).
-    #
-    # AFTER complete_ask_job, and self-swallowing: the reply is already the
-    # authoritative stored answer, so capture can only add a library entry and
-    # can never delay or break the turn. A no-op for every markdown answer.
-    #
-    # Only the generation path captures. The cache-hit short-circuit in
-    # routes/ask.py deliberately does not: those are pre-warmed starter-chip
-    # answers (markdown), and re-serving one per user would mint a duplicate row
-    # on every hit.
-    capture_report(
-        payload,
-        company_id=enterprise_id,
-        question=question,
-        workspace_id=workspace_id,
-        ask_id=ask_id,
-        conversation_id=conversation_id,
-        prd_id=prd_id,
-        is_cancelled=lambda: is_ask_cancelled(ask_id),
-    )
-    # Individual project chat (build spec §5.3): after the answer is the
-    # authoritative stored reply, best-effort promote a durable insight into
-    # project memory — gated on a project-scoped ask, so a non-project ask is
-    # byte-for-byte unaffected. Self-swallowing (maybe_promote_turn never
-    # raises), so it can only ADD a memory entry, never delay/break the
-    # answer. Reuses the existing group-chat promotion writer verbatim (no
-    # re-implementation) — it already schedules its own summary regen, so
-    # nothing else is added here.
-    if project_id is not None and conversation_id is not None:
-        from app.project_memory import maybe_promote_turn
-
-        transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
-        maybe_promote_turn(project_id, conversation_id, transcript)
-        # Inbound task-status ingestion on the SAME reply (task cadence
-        # spine): best-effort, never raises. Classifies the human's own
-        # message (`question`), not Sprntly's answer, against the
-        # replier's currently open delegated tasks in this conversation.
-        # Same ungated shape as the promotion call directly above — both
-        # only ever run on a project-scoped ask.
-        from app.delegation_status_ingest import maybe_ingest_status
-
-        maybe_ingest_status(project_id, conversation_id, user_id, question)
+    # The terminal SUCCESS write (`complete_ask_job`) and the post-terminal
+    # side effects (`capture_report → maybe_promote_turn → maybe_ingest_status`)
+    # have moved OUT of this body: `run_execution_job` performs the ONE guarded
+    # terminal write, then hands this outcome to `run_ask_job`'s `on_committed`
+    # closure (`_run_committed_side_effects`), which runs those three in the
+    # SAME order and under the SAME `project_id is not None` gate as before.
+    # This body now returns the citation-stripped answer payload; the observable
+    # success flow — the stored payload and the post-terminal ordering — is
+    # unchanged (AC1/AC2).
+    return ExecutionOutcome(status="ready", response=_strip_citations(payload))
 
 
 async def run_ask_job(
@@ -448,16 +553,22 @@ async def run_ask_job(
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
-    crashes the event loop."""
+    crashes the event loop.
+
+    A thin caller over the shared `run_execution_job` primitive: it mints a
+    `run_id`, builds the sync `body` (the `_run_sync` answer work) and the
+    `on_committed` post-terminal side effects (`capture_report →
+    maybe_promote_turn → maybe_ingest_status`), and lets the primitive own the
+    heartbeat + the ONE guarded terminal transition. Behaviour-identical for
+    main/private (AC1/AC2): the SSE `close` frame is still emitted here, keyed
+    to the resolved outcome (`error → 'error'`, success/cancel → 'done')."""
     logger.info("Ask job starting ask_id=%s dataset=%s", ask_id, dataset)
     loop = asyncio.get_running_loop()
     channel = ask_channel(ask_id)
-    # Keep the row's liveness fresh for as long as this worker runs, so the
-    # orphan sweep can't fail a long-but-healthy answer out from under us.
-    beat = asyncio.create_task(_heartbeat(ask_id))
-    try:
-        await asyncio.to_thread(
-            _run_sync,
+    run_id = str(uuid.uuid4())
+
+    def _body() -> ExecutionOutcome:
+        return _run_sync(
             ask_id,
             enterprise_id,
             question,
@@ -473,23 +584,76 @@ async def run_ask_job(
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
         )
+
+    def _on_committed(outcome: ExecutionOutcome) -> None:
+        # Post-terminal side effects, RELOCATED verbatim from `_run_sync`'s
+        # tail — run AFTER the guarded `complete_ask_job`, in the same order
+        # and under the same `project_id is not None` gate (AC2). Each is
+        # self-swallowing, so it can only ever ADD a durable artifact/memory
+        # entry, never delay or break the already-stored answer.
+        payload = outcome.response
+        # A report skill answers with a self-contained HTML document; capture
+        # it as a durable `reports` artifact (no-op for a markdown answer).
+        capture_report(
+            payload,
+            company_id=enterprise_id,
+            question=question,
+            workspace_id=workspace_id,
+            ask_id=ask_id,
+            conversation_id=conversation_id,
+            prd_id=prd_id,
+            is_cancelled=lambda: is_ask_cancelled(ask_id),
+        )
+        # Individual project chat (build spec §5.3): promote a durable insight
+        # into project memory + ingest inbound task-status — gated on a
+        # project-scoped ask, so a non-project ask is byte-for-byte unaffected.
+        if project_id is not None and conversation_id is not None and user_id is not None:
+            # Persist the assistant's OWN answer (AC1) — owned, idempotent,
+            # linked to this run via ask_job_id (a resumed poll reuses the
+            # same ask_id, so it can't duplicate this row). Best-effort: the
+            # authoritative answer already lives in `ask_jobs.response`, so a
+            # persist failure here never breaks the already-stored answer.
+            from app.db.conversations import post_owned_individual_assistant_turn
+
+            try:
+                post_owned_individual_assistant_turn(
+                    project_id=project_id,
+                    user_id=user_id,
+                    content=payload.get("answer", ""),
+                    ask_job_id=ask_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort, AD-P7
+                logger.warning(
+                    "failed to persist individual-chat assistant turn "
+                    "ask_id=%s project_id=%s", ask_id, project_id, exc_info=True,
+                )
+
+            from app.project_memory import maybe_promote_turn
+
+            transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
+            maybe_promote_turn(project_id, conversation_id, transcript)
+            from app.delegation_status_ingest import maybe_ingest_status
+
+            maybe_ingest_status(project_id, conversation_id, user_id, question)
+
+    outcome = await run_execution_job(
+        job_id=ask_id,
+        run_id=run_id,
+        is_cancelled=lambda: is_ask_cancelled(ask_id),
+        heartbeat=lambda: touch_ask_job(ask_id),
+        body=_body,
+        on_committed=_on_committed,
+    )
+    if outcome.status == "error":
+        logger.info("Ask job failed ask_id=%s", ask_id)
+        token_stream.close(channel, kind="error")
+    elif outcome.status == "cancelled":
+        logger.info("Ask job cancelled ask_id=%s", ask_id)
+        # NOT a failure — the row is already `cancelled`; `done` so a client
+        # woken by the frame reads the terminal row on its next poll.
+        token_stream.close(channel, kind="done")
+    else:
         logger.info("Ask job succeeded ask_id=%s", ask_id)
-        # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a
+        # Terminal SSE frame AFTER complete_ask_job (inside the primitive) so a
         # client woken by `done` reads a `ready` row on its next poll.
         token_stream.close(channel, kind="done")
-    except AskCancelled:
-        # The user stopped the ask; the row is already `cancelled` (set by the
-        # cancel endpoint). Leave it as-is — this is NOT a failure, so must not
-        # be marked `error`. The worker just abandons the answer.
-        logger.info("Ask job cancelled ask_id=%s", ask_id)
-        token_stream.close(channel, kind="done")
-    except Exception as exc:  # noqa: BLE001 — best-effort; never crash the worker
-        msg = f"{type(exc).__name__}: {exc}"
-        logger.exception("Ask job failed ask_id=%s", ask_id)
-        try:
-            fail_ask_job(ask_id, msg)
-        except Exception:  # noqa: BLE001 — even the fail-marking is best-effort
-            logger.exception("fail_ask_job failed ask_id=%s", ask_id)
-        token_stream.close(channel, kind="error")
-    finally:
-        beat.cancel()

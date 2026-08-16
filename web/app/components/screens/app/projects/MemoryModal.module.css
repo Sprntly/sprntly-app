@@ -111,7 +111,87 @@
   font-size: 12.5px;
   line-height: 1.6;
   color: var(--ink-2);
-  margin: 0;
+}
+
+.synthBody > :first-child {
+  margin-top: 0;
+}
+
+.synthBody > :last-child {
+  margin-bottom: 0;
+}
+
+.synthBody p {
+  margin: 0 0 8px;
+}
+
+.synthBody h1,
+.synthBody h2,
+.synthBody h3,
+.synthBody h4 {
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.45;
+  margin: 12px 0 4px;
+}
+
+.synthBody h1,
+.synthBody h2 {
+  font-size: 13.5px;
+}
+
+.synthBody ul,
+.synthBody ol {
+  margin: 4px 0 9px;
+  padding-left: 19px;
+}
+
+.synthBody li {
+  margin: 2px 0;
+  padding-left: 2px;
+}
+
+.synthBody li::marker {
+  color: var(--accent);
+}
+
+.synthBody strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.synthBody a {
+  color: var(--accent-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.synthBody blockquote {
+  margin: 8px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--accent-soft);
+  color: var(--ink-3);
+}
+
+.synthBody code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--surface-3);
+  font-size: 0.92em;
+}
+
+.synthBody pre {
+  margin: 8px 0;
+  padding: 9px 10px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+}
+
+.synthBody pre code {
+  padding: 0;
+  background: transparent;
 }
 
 .synthPending {
