@@ -371,6 +371,13 @@ export function ProjectDetailView({
               imported anywhere in this swap. */}
           <div className={styles.threadHost} data-testid="project-main-thread-host">
             <ProjectMainThread
+              // Project-switch isolation (an adversarial review): a flat-route
+              // project A→B `?id=` change with no remount would carry over the
+              // shell + BOTH engines + the picker; keying the whole thread on
+              // `project.id` resets them together. Latent/defensive — no current
+              // nav path does a direct A→B without an unmount, so this makes the
+              // asserted flat-route premise hold rather than patching a live bug.
+              key={project.id}
               projectId={project.id}
               activeChat={activeChat}
               onOpenArtifact={(c) => onOpenArtifacts(c.type)}
