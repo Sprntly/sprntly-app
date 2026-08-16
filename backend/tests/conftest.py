@@ -317,6 +317,17 @@ CREATE TABLE ask_jobs (
     -- 20260802120000_ask_jobs_routed_skill.sql). NULL = no skill was routed.
     routed_skill        TEXT,
     routed_skill_action TEXT,
+    -- Chat-parity execution-identity columns (mirrors 20260816120000_ask_
+    -- jobs_execution_identity.sql). All nullable; NULL = existing main/
+    -- private rows / current behavior. run_id has no default here either —
+    -- code sets it on insert for parity runs only.
+    kind            TEXT,
+    project_id      INTEGER,
+    source_turn_id  INTEGER,
+    run_id          TEXT,
+    client_message_id TEXT,
+    error_class     TEXT,
+    attempt         INTEGER,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -324,6 +335,8 @@ CREATE TABLE ask_jobs (
     updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
+CREATE UNIQUE INDEX ask_jobs_client_message_id_uidx ON ask_jobs (client_message_id) WHERE client_message_id IS NOT NULL;
+CREATE INDEX ask_jobs_source_turn_idx ON ask_jobs (project_id, source_turn_id) WHERE source_turn_id IS NOT NULL;
 
 -- Fire-and-forget onboarding website-analysis job rows (mirrors
 -- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready

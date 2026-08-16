@@ -231,10 +231,22 @@ def start_ask_job(
     conversation_id: int | None = None,
     pinned_skill: str | None = None,
     prd_id: int | None = None,
+    kind: str | None = None,
+    project_id: int | None = None,
+    source_turn_id: int | None = None,
+    run_id: str | None = None,
+    client_message_id: str | None = None,
+    attempt: int | None = None,
 ) -> int:
     """Persist a `generating` Ask job row and return its id. The POST returns
     this id immediately; the background worker fills `response` and flips the
-    status to `ready` (or `error`)."""
+    status to `ready` (or `error`).
+
+    `kind`/`project_id`/`source_turn_id`/`run_id`/`client_message_id`/
+    `attempt` are the chat-parity execution-identity columns — optional
+    passthrough, all default `None` (the existing main/private ask shape).
+    Callers that don't pass them get byte-identical rows to before this
+    ticket."""
     c = require_client()
     resp = c.table("ask_jobs").insert({
         "company_id": company_id,
@@ -245,6 +257,12 @@ def start_ask_job(
         "prd_id": prd_id,
         "status": "generating",
         "response": {},
+        "kind": kind,
+        "project_id": project_id,
+        "source_turn_id": source_turn_id,
+        "run_id": run_id,
+        "client_message_id": client_message_id,
+        "attempt": attempt,
     }).execute()
     return resp.data[0]["id"]
 
@@ -326,16 +344,25 @@ def touch_ask_job(ask_id: int) -> bool:
     return bool(resp.data)
 
 
-def fail_ask_job(ask_id: int, error: str) -> None:
+def fail_ask_job(
+    ask_id: int, error: str, error_class: str | None = None
+) -> None:
     """Mark the job `error` (best-effort — the worker never crashes on this).
 
     Guarded on `status == 'generating'` for the same reason as
     complete_ask_job: a cancel that landed first must not be clobbered by a
-    trailing failure from the (now-abandoned) worker."""
+    trailing failure from the (now-abandoned) worker.
+
+    `error_class` is the optional typed-error-category passthrough (e.g.
+    billing/timeout/local_gate/app) — separate from the generic user-facing
+    `status = 'error'` and `error` message, and unused by any existing
+    caller (all pass only `ask_id`/`error` today, so this defaults to
+    `None` and every existing call is unaffected)."""
     c = require_client()
     c.table("ask_jobs").update({
         "status": "error",
         "error": (error or "")[:500],
+        "error_class": error_class,
         "updated_at": _now(),
     }).eq("id", ask_id).eq("status", "generating").execute()
 
