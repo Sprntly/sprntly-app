@@ -249,6 +249,9 @@ function ChatShellInner(
         turnId: turn.id,
         dataTurnId: turn.id,
         dataTestId: isMe ? "gc-msg-me" : "gc-msg-other",
+        // `gcMsgOther` is a real class, defined in ChatShell.module.css
+        // alongside `gcMsgMe` (previously undefined there, which rendered a
+        // literal stray "undefined" class token on every non-self group row).
         wrapperClassName: `bc-turn ${shellStyles.gcMsg} ${isMe ? shellStyles.gcMsgMe : shellStyles.gcMsgOther}`,
         showAgent: false,
         agentName: transcript.agentName,

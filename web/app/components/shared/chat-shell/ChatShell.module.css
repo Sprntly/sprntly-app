@@ -62,6 +62,13 @@
   flex-direction: row-reverse;
 }
 
+/* A peer (non-self) row's explicit counterpart to `.gcMsgMe` — same default
+   flow `.gcMsg` already gives it, named so the wrapper always carries a real
+   self-vs-other class rather than an undefined lookup. */
+.gcMsgOther {
+  flex-direction: row;
+}
+
 .gcRole {
   font-size: 10px;
   font-weight: 600;
