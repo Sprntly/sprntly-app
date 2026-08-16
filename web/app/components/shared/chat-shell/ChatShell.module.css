@@ -58,6 +58,10 @@
   flex-direction: row-reverse;
 }
 
+.gcMsgOther {
+  flex-direction: row;
+}
+
 .gcMsgMe :global(.bc-user-head) {
   flex-direction: row-reverse;
 }

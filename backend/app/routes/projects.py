@@ -736,6 +736,11 @@ def candidate_search_route(
     def _emit(user_id: str, name: str | None, email: str | None, kind: str) -> None:
         if not user_id or user_id in seen:
             return
+        # Self-exclude: the picker is only used to find someone ELSE to
+        # delegate/mention/add — every caller of this route reads the
+        # on-project roster elsewhere, so dropping the caller loses nothing.
+        if user_id == ctx.user_id:
+            return
         if needle:
             hay = f"{(name or '')} {(email or '')}".casefold()
             if needle not in hay:
@@ -1452,6 +1457,10 @@ async def post_group_turn_route(
             # to carry it, so the just-posted human turn is the only place
             # it can be recorded (Fix observability).
             conversations_db.set_group_turn_trigger_kind(turn["id"], "gate_stayout")
+            logger.info(
+                "group_stayout_recorded project_id=%s conversation_id=%s trigger_kind=%s",
+                project_id, conversation["id"], "gate_stayout",
+            )
     return turn
 
 
