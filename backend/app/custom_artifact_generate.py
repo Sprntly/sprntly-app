@@ -214,7 +214,17 @@ def generate_into(
             long_output=True,
         )
         answered = True
-        html = sanitize_artifact_html(strip_code_fence(result.text or ""))
+        # `.output`, which is what `LLMResult` actually carries. This read used
+        # to be `.text` — an attribute that has never existed on that dataclass
+        # — so EVERY generation raised AttributeError the moment the model
+        # answered, and the feature has not worked once since it shipped.
+        #
+        # `output` is typed `Any`: a dict when the call passes a json_schema, a
+        # str otherwise. This call passes none, so it is a str; coerced anyway
+        # rather than assumed, the same way call_index.py reads its own prose
+        # result.
+        raw = result.output if isinstance(result.output, str) else str(result.output)
+        html = sanitize_artifact_html(strip_code_fence(raw))
         if not html.strip():
             # A generation that produced nothing is a failure, not an empty
             # document: an empty document looks like the user's own blank page
