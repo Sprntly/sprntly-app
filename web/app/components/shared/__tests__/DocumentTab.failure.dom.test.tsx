@@ -94,6 +94,22 @@ describe("a failed document explains itself", () => {
     expect(unseen.textContent).not.toMatch(/quota_exhausted_v2/)
   })
 
+  it("does not blame the model for a document that was written and then lost", async () => {
+    const el = await mountFailed({ error_code: "storage_error" })
+    expect(el.textContent).toMatch(/written but could not be saved/i)
+    // The opposite fact from llm_error, so it must not borrow its sentence.
+    expect(el.textContent).not.toMatch(/could not be reached/i)
+  })
+
+  it("survives a code that names something on Object.prototype", async () => {
+    // `error_code` is an arbitrary string off the wire and COPY is a plain
+    // object literal, so a bare `COPY[code]` lookup returns a FUNCTION here —
+    // truthy, type-checks as string, and renders as nothing at all. A blank
+    // notice on the one surface whose whole job is to not be blank.
+    const el = await mountFailed({ error_code: "constructor" })
+    expect(el.textContent).toMatch(/could not be written/i)
+  })
+
   it("still renders the failure when the row carries no code at all", async () => {
     // The key is absent rather than null — what a listing-shaped row looks
     // like, and what an older server returns.

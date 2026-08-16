@@ -208,6 +208,45 @@ def test_a_document_too_large_to_store_is_classified_as_such(gen_env, monkeypatc
     assert row["error_code"] == gen.FAILURE_TOO_LARGE
 
 
+def test_a_failure_AFTER_the_model_answered_is_not_blamed_on_the_model(
+    gen_env, monkeypatch
+):
+    """THE DISTINCTION THAT MATTERS. The model answers, and then the write
+    fails — a Supabase disconnect, an unparseable fragment. Reporting that as
+    "the generator could not be reached" is a confident false statement about a
+    generation that plainly succeeded, which is the exact failure mode this
+    whole change exists to remove."""
+    _stub_llm(monkeypatch, "<h1>T</h1><p>real content</p>")
+    monkeypatch.setattr(
+        gen, "finish_artifact",
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("connection reset")),
+    )
+    doc_id = _pending(gen_env)
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    assert get_artifact(gen_env, doc_id)["error_code"] == gen.FAILURE_STORAGE
+
+
+def test_the_same_exception_classifies_differently_by_phase(gen_env, monkeypatch):
+    """Same exception TYPE, opposite meaning, decided by which side of the model
+    call it was raised on — so the phase bit is doing real work rather than
+    being a second name for the exception type."""
+    boom = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("connection reset"))
+
+    monkeypatch.setattr(gen, "llm_call", boom)
+    before = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=before, kind="memo", task="t")
+
+    _stub_llm(monkeypatch, "<h1>T</h1><p>x</p>")
+    monkeypatch.setattr(gen, "finish_artifact", boom)
+    after = _pending(gen_env)
+    gen.generate_into(company_id=gen_env, artifact_id=after, kind="memo", task="t")
+
+    assert get_artifact(gen_env, before)["error_code"] == gen.FAILURE_LLM
+    assert get_artifact(gen_env, after)["error_code"] == gen.FAILURE_STORAGE
+
+
 def test_classification_is_by_type_not_by_message_text(gen_env, monkeypatch):
     """A provider that rewords its errors must not silently reclassify every
     failure. Nothing here reads the message, so an exception whose text SAYS

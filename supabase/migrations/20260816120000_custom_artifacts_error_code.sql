@@ -21,7 +21,15 @@
 -- not know why", which is exactly true of every row that failed before this
 -- column existed, and inventing a code for them would be a guess rendered as
 -- a fact. The web already has copy for the unknown case.
-alter table if exists public.custom_artifacts
+-- NO `if exists` ON THE TABLE, deliberately. It reads as caution and buys
+-- none: the COMMENT below cannot be guarded the same way, so a genuinely
+-- absent table would no-op the ALTER and then fail on the comment — the
+-- migration still dies, one statement later, with a worse error. This repo
+-- blocks every backend deploy on a failed migration, so the guard has to be
+-- consistent or absent. `custom_artifacts` is created by
+-- 20260813120000_custom_artifacts.sql, three days earlier in the same
+-- ordered sequence; if it is missing, this migration SHOULD fail loudly.
+alter table public.custom_artifacts
   add column if not exists error_code text;
 
 comment on column public.custom_artifacts.error_code is

@@ -771,17 +771,27 @@ def test_another_companys_document_never_lists(artifacts_env, monkeypatch):
     assert items == []
 
 
-def test_generating_document_lists_and_failed_one_does_not(artifacts_env, monkeypatch):
+def test_a_document_lists_in_every_state_including_failed(artifacts_env, monkeypatch):
     """A document the user just asked for should appear immediately (marked as
-    writing), the treatment building prototypes and ticket sets already get. A
-    run that produced nothing is not an artifact."""
+    writing), the treatment building prototypes and ticket sets already get.
+
+    AND SO SHOULD A FAILED ONE. This test previously asserted the opposite —
+    "a run that produced nothing is not an artifact" — which is true of the row
+    and false of the product. Someone asked for that document and came to the
+    library to find it; answering with nothing at all gave them no document, no
+    failure, and no reason to look anywhere else. That is precisely how a failed
+    generation stayed invisible on staging. The row is listed, carries its
+    status, and opens onto its own reason.
+    """
     ctx = _client(monkeypatch)
     _seed_custom_artifact(company_id=ctx.company_id, title="being written",
                           status="generating")
     _seed_custom_artifact(company_id=ctx.company_id, title="died", status="failed")
     items = ctx.client.get("/v1/artifacts", params={"dataset": "acme"}).json()["artifacts"]
-    assert [i["title"] for i in items] == ["being written"]
-    assert items[0]["status"] == "generating"
+    by_title = {i["title"]: i for i in items}
+    assert set(by_title) == {"being written", "died"}
+    assert by_title["being written"]["status"] == "generating"
+    assert by_title["died"]["status"] == "failed"
 
 
 def test_custom_artifact_sorts_by_last_edit_not_birth(artifacts_env, monkeypatch):

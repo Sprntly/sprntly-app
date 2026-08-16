@@ -135,28 +135,40 @@ FAILURE_EMPTY = "empty"
 FAILURE_LLM = "llm_error"
 FAILURE_TOO_LARGE = "too_large"
 FAILURE_INTERRUPTED = "interrupted"
+# The document was WRITTEN and then could not be kept — a Supabase disconnect
+# on the final update, an unparseable fragment, anything after the model
+# answered. Distinct from `llm_error` because the two are opposite facts about
+# the same run, and a product that tells someone "the generator could not be
+# reached" about a generation that plainly succeeded is making exactly the
+# confident false statement this whole change exists to stop.
+FAILURE_STORAGE = "storage_error"
 
 FAILURE_CODES = (
     FAILURE_EMPTY,
     FAILURE_LLM,
     FAILURE_TOO_LARGE,
     FAILURE_INTERRUPTED,
+    FAILURE_STORAGE,
 )
 
 
-def _classify(exc: BaseException) -> str:
-    """Which failure code an exception from the generation call is.
+def _classify(exc: BaseException, *, after_model_answered: bool) -> str:
+    """Which failure code an exception is.
 
-    Matched on TYPE, never on message text. Parsing a provider's wording is a
-    contract with someone else's copy: it works until they reword it, and then
-    it silently reclassifies every failure as the generic one while still
-    looking correct in review.
+    Matched on TYPE and on PHASE, never on message text. Parsing a provider's
+    wording is a contract with someone else's copy: it works until they reword
+    it, and then it silently reclassifies every failure as the generic one
+    while still looking correct in review.
+
+    `after_model_answered` is the phase bit, and it is the difference between
+    two true sentences and one false one: everything raised before the call
+    returns is a failure to GENERATE, everything after it is a failure to KEEP.
     """
     from app.db.custom_artifacts import BodyTooLarge
 
     if isinstance(exc, BodyTooLarge):
         return FAILURE_TOO_LARGE
-    return FAILURE_LLM
+    return FAILURE_STORAGE if after_model_answered else FAILURE_LLM
 
 
 def _title_from(html: str, fallback: str) -> str:
@@ -184,6 +196,10 @@ def generate_into(
     spinning on a generation that is not running. The stored error string is
     for operators; the web maps failures onto its own recovery copy.
     """
+    # Which side of the model call we are on when something raises. Set the
+    # instant the call returns, so "the generator could not be reached" is only
+    # ever said about a run where that is true.
+    answered = False
     try:
         result = llm_call(
             enterprise_id=company_id,
@@ -196,6 +212,7 @@ def generate_into(
             max_tokens=_MAX_TOKENS,
             long_output=True,
         )
+        answered = True
         html = sanitize_artifact_html(strip_code_fence(result.text or ""))
         if not html.strip():
             # A generation that produced nothing is a failure, not an empty
@@ -214,7 +231,12 @@ def generate_into(
         )
     except Exception as exc:  # noqa: BLE001 — see the docstring's total contract
         logger.exception("custom artifact %s generation failed", artifact_id)
-        fail_artifact(company_id, artifact_id, str(exc), code=_classify(exc))
+        fail_artifact(
+            company_id,
+            artifact_id,
+            str(exc),
+            code=_classify(exc, after_model_answered=answered),
+        )
 
 
 # How long a document may sit in `generating` before a sweep calls it orphaned.
