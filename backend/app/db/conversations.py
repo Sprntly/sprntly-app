@@ -487,9 +487,70 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
                 "author_name": name,
                 "author_job_role": job_role,
                 "created_at": t["created_at"],
+                # Execution-run status, filled below for the human turn that
+                # triggered a run; None for every other turn.
+                "run_status": None,
+                "error_class": None,
             }
         )
+    _attach_group_run_status(client, conversation_id, turns, out)
     return out
+
+
+# DB status vocabulary (`generating/ready/error/cancelled`) → the FE
+# AgentRunStatus vocabulary, mapped HERE at the DTO edge only. The DB column
+# is never written in the FE vocabulary (see the ask_jobs CHECK constraint).
+_RUN_STATUS_MAP = {
+    "generating": "running",
+    "ready": "done",
+    "error": "failed",
+    "cancelled": "declined",
+}
+
+
+def _attach_group_run_status(
+    client, conversation_id: int, turns: list[dict], out: list[dict]
+) -> None:
+    """Best-effort: join the LATEST (`max(attempt)`) `project_group` run per
+    `source_turn_id` in this conversation and attach `run_status`
+    (DB→FE-mapped) + `error_class` onto the turn whose id == that
+    source_turn_id — so a reload/poll AFTER a failure surfaces the run outcome
+    with no realtime event. One bounded extra query; a failure degrades to
+    `run_status=None` and never breaks the read (AD-P22)."""
+    turn_ids = [t["id"] for t in turns]
+    if not turn_ids:
+        return
+    try:
+        runs = (
+            client.table("ask_jobs")
+            .select("source_turn_id, status, error_class, attempt")
+            .eq("conversation_id", conversation_id)
+            .eq("kind", "project_group")
+            .in_("source_turn_id", turn_ids)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — run-status is additive; never break the read
+        logger.warning(
+            "group_run_status_join_failed conversation_id=%s", conversation_id,
+            exc_info=True,
+        )
+        return
+    latest: dict[int, dict] = {}
+    for r in runs:
+        stid = r.get("source_turn_id")
+        if stid is None:
+            continue
+        prev = latest.get(stid)
+        if prev is None or (r.get("attempt") or 0) >= (prev.get("attempt") or 0):
+            latest[stid] = r
+    by_id = {t["id"]: t for t in out}
+    for stid, r in latest.items():
+        turn = by_id.get(stid)
+        if turn is not None:
+            turn["run_status"] = _RUN_STATUS_MAP.get(r.get("status"))
+            turn["error_class"] = r.get("error_class")
 
 
 def post_group_turn(
