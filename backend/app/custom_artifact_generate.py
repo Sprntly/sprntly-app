@@ -214,7 +214,29 @@ def generate_into(
             long_output=True,
         )
         answered = True
-        html = sanitize_artifact_html(strip_code_fence(result.text or ""))
+        # `.output`, which is what `LLMResult` actually carries. This read used
+        # to be `.text` — an attribute that has never existed on that dataclass
+        # — so EVERY generation raised AttributeError the moment the model
+        # answered, and the feature has not worked once since it shipped.
+        #
+        # `output` is typed `Any`: a dict when the call passes a json_schema, a
+        # str otherwise. This call passes none, so it is a str.
+        #
+        # A NON-STRING IS A FAILURE, NOT SOMETHING TO COERCE. `str(output)` was
+        # the obvious defensive move and it is the wrong one here: a dict would
+        # stringify to a non-empty repr, sail past the empty-output gate, and
+        # land as a READY document whose body is `{'html': '...'}` — titled
+        # from an <h1> that does not exist, and forwardable. The concrete way
+        # to get there is someone adding `json_schema=` to the call above.
+        # This module's own rule is that a generation which produced nothing
+        # usable fails honestly; a garbage body is worse than nothing, because
+        # nothing is visible and garbage looks finished.
+        if not isinstance(result.output, str):
+            raise TypeError(
+                "custom artifact generation expects text output, got "
+                f"{type(result.output).__name__}"
+            )
+        html = sanitize_artifact_html(strip_code_fence(result.output))
         if not html.strip():
             # A generation that produced nothing is a failure, not an empty
             # document: an empty document looks like the user's own blank page

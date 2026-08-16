@@ -15,7 +15,6 @@ The properties under test are the ones whose failure a user would feel:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -55,10 +54,96 @@ def _pending(company_id: str, kind: str = "leadership update") -> int:
     return create_artifact(company_id, kind=kind, status="generating")["id"]
 
 
-def _stub_llm(monkeypatch, text: str):
-    monkeypatch.setattr(
-        gen, "llm_call", lambda **kw: SimpleNamespace(text=text)
+def _llm_result_with_output(output):
+    """The same real dataclass, with an arbitrary `output` — for the case where
+    the field is not the string this call path expects."""
+    from app.graph.gateway import LLMResult
+
+    return LLMResult(
+        output=output, model=_MODEL_FOR_TESTS, prompt_version="test",
+        input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=0,
+        stop_reason="end_turn",
     )
+
+
+def _llm_result(text: str):
+    """A REAL `LLMResult`, not a look-alike.
+
+    THIS IS THE WHOLE REASON THE FEATURE SHIPPED BROKEN. The stub used to be
+    `SimpleNamespace(text=...)`, and the generator read `result.text` — an
+    attribute `LLMResult` has never had. The fake defined the interface the code
+    was wrong about, so all 20 tests in this file passed against a generator
+    that raised AttributeError on its first real call, every time, for three
+    days.
+
+    Constructing the actual dataclass is what makes that impossible: rename or
+    remove a field and this file stops importing. A hand-rolled double can only
+    ever assert that the code agrees with the double.
+    """
+    return _llm_result_with_output(text)
+
+
+_MODEL_FOR_TESTS = "claude-sonnet-4-6"
+
+
+def _stub_llm(monkeypatch, text: str):
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result(text))
+
+
+# ─── The result contract (the bug that made this feature never work) ─────────
+
+def test_the_generator_reads_the_field_LLMResult_actually_has(gen_env, monkeypatch):
+    """THE REGRESSION, stated as a property rather than a mock expectation.
+
+    The generator read `result.text`. `LLMResult` carries `output`, and has
+    never carried `text` — so the first real call raised AttributeError AFTER
+    the model had answered and been paid for, every single time. Nothing in the
+    product said so, because the row went to `failed` with the reason in a
+    column the API did not return.
+
+    Passing the REAL dataclass is what makes this test meaningful: it fails
+    against a generator reading any attribute the gateway does not actually
+    return.
+    """
+    _stub_llm(monkeypatch, "<h1>Real</h1><p>from the output field</p>")
+    doc_id = _pending(gen_env)
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready", f"generation failed: {row.get('error')}"
+    assert "from the output field" in row["body_html"]
+
+
+def test_a_non_text_result_fails_rather_than_stringifying_into_the_document(
+    gen_env, monkeypatch
+):
+    """`str(output)` would be the obvious defensive coercion and it is the wrong
+    one: a dict stringifies to a non-empty repr, passes the empty-output gate,
+    and lands as a READY document whose body is `{'html': ...}` — titled from
+    an <h1> that does not exist, and forwardable to someone's leadership. A
+    garbage body is worse than none, because none is visible."""
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: _llm_result_with_output({"html": "<h1>T</h1><p>x</p>"}),
+    )
+    doc_id = _pending(gen_env)
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "failed"
+    assert row["body_html"] == ""
+
+
+def test_the_test_double_is_the_real_gateway_type():
+    """Belt and braces on the lesson: if a future edit swaps this file's stub
+    back to a hand-rolled object, this fails. A double that defines its own
+    interface can only prove the code agrees with the double."""
+    from app.graph.gateway import LLMResult
+
+    assert isinstance(_llm_result("x"), LLMResult)
 
 
 # ─── The happy path ──────────────────────────────────────────────────────────
@@ -289,7 +374,7 @@ def test_context_is_passed_to_the_model_and_named_as_the_only_facts(
 
     def _capture(**kw):
         captured.update(kw)
-        return SimpleNamespace(text="<h1>T</h1><p>x</p>")
+        return _llm_result("<h1>T</h1><p>x</p>")
 
     monkeypatch.setattr(gen, "llm_call", _capture)
     gen.generate_into(
@@ -309,7 +394,7 @@ def test_missing_context_is_stated_rather_than_left_blank(gen_env, monkeypatch):
     captured = {}
     monkeypatch.setattr(
         gen, "llm_call",
-        lambda **kw: (captured.update(kw), SimpleNamespace(text="<h1>T</h1><p>x</p>"))[1],
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
     )
     gen.generate_into(company_id=gen_env, artifact_id=_pending(gen_env),
                       kind="memo", task="t")
