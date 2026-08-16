@@ -216,7 +216,7 @@ describe("ProjectGroupChat — idempotency / dedup (AC-4)", () => {
     await act(async () => {
       fireEvent.click(sendBtn)
     })
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team"))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) })))
     await waitFor(() => expect(screen.getAllByTestId("gc-msg-me")).toHaveLength(1))
 
     // The broadcast of the poster's own turn arrives right after.
@@ -368,7 +368,7 @@ describe("ProjectGroupChat — non-breakage / cleanup (AC-6/AC-7)", () => {
       fireEvent.click(screen.getByLabelText("Send"))
     })
 
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "still works"))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "still works", expect.objectContaining({ client_message_id: expect.any(String) })))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(2))
     await waitFor(() => {
       expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")

@@ -36,17 +36,6 @@ export const PARITY_OPT_OUTS: ParityOptOut[] = [
     owner: "projects-chat",
   },
   {
-    // Umbrella entry covering every facade-driven composer capability
-    // (pinnedSkill, attachments, the `+` menu handlers, fileInput) group
-    // omits by passing no `composer.features` — the `+` renders present but
-    // inert rather than a live affordance.
-    capability: "composer.plusMenu",
-    surface: "project_group",
-    reason:
-      "ChatComposer always renders the + menu; group's backend cannot yet carry attachments/skills, so composer.features is omitted and the + is present-but-inert. FOLLOW-UP: wire group features once the group backend can carry them (a known residual: group's composer features are omitted until the backend supports them).",
-    owner: "projects-chat",
-  },
-  {
     capability: "tabs.multiConversation",
     surface: "project_private",
     reason: "Projects are one durable conversation per (project, caller); no tab strip / multi-conversation history.",

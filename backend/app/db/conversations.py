@@ -576,6 +576,7 @@ def post_group_turn(
     *,
     role: str = "user",
     reply: dict[str, Any] | None = None,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Insert one turn into a group chat. Human turn: pass the poster's
     `author_user_id` (role defaults to 'user'). Agent turn (on an
@@ -590,6 +591,12 @@ def post_group_turn(
     missing/failed `reply` column can degrade a turn to content-only but
     can never lose the turn itself (same posture as
     `set_group_turn_trigger_kind`).
+
+    `attachments` (human turns): the resolved attachment texts
+    ([{name, content, …}]) riding the send — persisted onto the EXISTING
+    `conversation_turns.attachments` column (no new column) so the agent's
+    reply can fold them into its question. The read DTO's whitelist still
+    strips them from every group read/broadcast.
 
     Refuses (returns None, no write) when `conversation_id` does not
     resolve to a `kind='group'` row — mirrors `list_group_turns`'
@@ -607,16 +614,17 @@ def post_group_turn(
     if not conv:
         return None
 
+    row_payload: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "role": role,
+        "content": content,
+        "author_user_id": author_user_id,
+    }
+    if attachments:
+        row_payload["attachments"] = attachments
     resp = (
         client.table("conversation_turns")
-        .insert(
-            {
-                "conversation_id": conversation_id,
-                "role": role,
-                "content": content,
-                "author_user_id": author_user_id,
-            }
-        )
+        .insert(row_payload)
         .execute()
     )
     client.table("conversations").update({"updated_at": utc_now()}).eq(
@@ -634,6 +642,30 @@ def post_group_turn(
                 "group_turn_reply_persist_failed turn_id=%s", row.get("id"),
             )
     return row
+
+
+def get_group_turn_attachments(turn_id: int) -> list[dict[str, Any]] | None:
+    """The raw attachment texts persisted on one turn, or None. A DELIBERATE
+    narrow read outside the DTO whitelist: the group agent's reply folds the
+    trigger turn's attachments into its own question (mirroring the private
+    surface's attachment ride) — the whitelist keeps them off every
+    read/broadcast, so the reply path reads them here, by id, best-effort
+    (a failure degrades the reply to the plain question, never breaks it)."""
+    try:
+        rows = (
+            require_client()
+            .table("conversation_turns")
+            .select("attachments")
+            .eq("id", turn_id)
+            .limit(1)
+            .execute()
+            .data
+        )
+        attachments = rows[0].get("attachments") if rows else None
+        return attachments if isinstance(attachments, list) and attachments else None
+    except Exception:  # noqa: BLE001 — best-effort; the reply degrades to the plain question
+        logger.warning("group_turn_attachments_read_failed turn_id=%s", turn_id)
+        return None
 
 
 def set_group_turn_trigger_kind(turn_id: int, trigger_kind: str) -> None:

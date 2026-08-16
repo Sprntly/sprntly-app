@@ -136,7 +136,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
       fireEvent.click(screen.getByLabelText("Send"))
     })
 
-    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "second message")
+    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "second message", expect.objectContaining({ client_message_id: expect.any(String) }))
     expect(postGroupTurnMock).toHaveBeenCalledTimes(2)
 
     await act(async () => {
@@ -163,7 +163,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
       fireEvent.click(screen.getByLabelText("Send"))
     })
 
-    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "@Sprntly summarize this")
+    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "@Sprntly summarize this", expect.objectContaining({ client_message_id: expect.any(String) }))
     // The POST resolves the HUMAN turn only — no agent-reply payload comes
     // back synchronously on it (the mock above resolves with the human turn,
     // matching the real route's return type); any reply is a SEPARATE turn

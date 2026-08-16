@@ -32,6 +32,7 @@ import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
 import { projectsApi, type AskResponse, type GroupTurn } from "../../../../lib/api"
 import type { ComposerDraftApi, SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
+import { spliceSkill } from "../../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { useRealtimeChannel, type PresenceIdentity } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -302,11 +303,13 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
   const post = useCallback(
     // Thin `SendCommand` adapter. A bare string (the shell fallback / the engine
     // suite) is forwarded as-is; a `SendCommand` (from the shared controller)
-    // forwards `.text` today — its pinnedSkill/attachments/clientMessageId ride
-    // the wire once `postGroupTurn` is widened to accept them (the api.ts
-    // signature is untouched here).
+    // rides its pinned-skill SPLICE onto the posted content (the same single
+    // splice rule main/private use — the engine's slash-trigger routing reads
+    // it from the turn text) and forwards attachments + the idempotency
+    // client_message_id on the wire.
     (input: string | SendCommand) => {
-      const content = (typeof input === "string" ? input : input.text).trim()
+      const cmd = typeof input === "string" ? null : input
+      const content = (cmd ? spliceSkill(cmd.pinnedSkill, cmd.text) : input as string).trim()
       if (content.length < DRAFT_MIN_CHARS) return
       // Same-content double-submit guard ONLY (a rapid double click/Enter of the
       // EXACT same draft) — deliberately weaker than main's `pendingSend` gate:
@@ -362,7 +365,16 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
 
       const gen = genRef.current
       projectsApi
-        .postGroupTurn(projectId, content)
+        .postGroupTurn(
+          projectId, content,
+          cmd
+            ? {
+                pinned_skill: cmd.pinnedSkill ?? undefined,
+                attachments: cmd.attachments?.length ? cmd.attachments : undefined,
+                client_message_id: cmd.clientMessageId,
+              }
+            : undefined,
+        )
         .then(() => {
           inFlightDraftRef.current = null
           if (gen !== genRef.current) return [] as GroupTurn[]

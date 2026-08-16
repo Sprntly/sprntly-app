@@ -56,16 +56,17 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
   const draftApiRef = useRef<ComposerDraftApi | null>(null)
   const engine = useProjectGroupThread({ projectId, draftApiRef })
   const mentions = useMentionPicker({ projectId, draftApiRef })
-  // The shared composer controller unifies the send producer: group's send now
-  // builds a `SendCommand` and hands it to `engine.post`. Group attachments/
-  // skills are gated OFF (the backend can't carry them yet), so the features
-  // bag is undefined — the composer keeps today's inert defaults and its
-  // mention picker rides the existing `slashMenu`/`onKeyDownCapture` seams.
+  // The shared composer controller unifies the send producer: group's send
+  // builds a `SendCommand` and hands it to `engine.post`. Attachments and
+  // skills are LIVE (matching the private surface): the `+` menu attaches
+  // files and browses the skill palette; the engine splices the pinned
+  // skill's trigger onto the posted content and forwards attachments +
+  // client_message_id on the wire.
   const composerCtl = useChatComposerController({
     scope: { surface: "project_group", projectId: Number(projectId) },
     onCommand: engine.post,
-    attachmentsEnabled: false,
-    skillsEnabled: false,
+    attachmentsEnabled: true,
+    skillsEnabled: true,
   })
   // A one-shot flag flipped when the shell hands the draft API back — it forces
   // exactly one post-mount re-render so the per-render `onInputCapture`
@@ -142,12 +143,22 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       // background; no Stop UI to swap in (spec §6.2). The engine's same-content
       // guard is the only in-flight protection (R6).
       busyMode: "never-block",
-      slashMenu: mentions.pickerNode,
-      // Picker keys outrank Enter-to-send: a `true` return means the picker
-      // consumed the key (arrow nav / Enter-selects / Escape-closes).
-      onKeyDownCapture: mentions.handleKeys,
+      // Two poppers share the seam, at most one open at a time: the @-mention
+      // people picker (opens on "@") and the controller's skill palette
+      // (opens from the + menu's Browse skills).
+      slashMenu: (
+        <>
+          {mentions.pickerNode}
+          {composerCtl.slashMenu}
+        </>
+      ),
+      // Picker keys outrank Enter-to-send: a `true` return means a picker
+      // consumed the key (arrow nav / Enter-selects / Escape-closes) —
+      // mention picker first, then the skill palette.
+      onKeyDownCapture: (e) => mentions.handleKeys(e) || composerCtl.onKeyDownCapture(e),
       voice: "default",
-      attachments: false,
+      attachments: true,
+      features: composerCtl.features,
     },
     reply: {
       mode: "backgrounded",

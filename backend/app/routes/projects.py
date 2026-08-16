@@ -400,10 +400,14 @@ class PostGroupTurnRequest(BaseModel):
     # is WIRED: it lands on `ask_jobs.client_message_id`, so a double-submit of
     # the same id cannot mint two runs (the client_message_id partial-unique
     # backstop).
-    # `pinned_skill` / `attachments` are ACCEPTED-BUT-INERT this ticket (wired by
-    # the FE SendCommand in a following change) — declared so the payload shape
-    # is forward-compatible and the parity guard sees a decision, not a silent
-    # no-op (recorded residual).
+    # `attachments` is WIRED: persisted on the human turn (existing
+    # `conversation_turns.attachments` column, whitelist-stripped from every
+    # group read/broadcast) and folded into the agent reply's question —
+    # mirroring the private surface's attachment ride.
+    # `pinned_skill` names the FE's pick on the wire; the skill itself rides
+    # the SPLICED trigger in `content` (the one splice rule every surface
+    # uses — the engine's slash-trigger routing reads it from the text), so
+    # this field is informational, not a second routing input.
     client_message_id: str | None = None
     pinned_skill: dict | None = None
     attachments: list | None = None
@@ -1402,7 +1406,10 @@ async def post_group_turn_route(
             prior_turn = _get_group_turn(conversation["id"], prior.get("source_turn_id"))
             if prior_turn is not None:
                 return prior_turn
-    turn = conversations_db.post_group_turn(conversation["id"], ctx.user_id, payload.content)
+    turn = conversations_db.post_group_turn(
+        conversation["id"], ctx.user_id, payload.content,
+        attachments=payload.attachments,
+    )
     logger.info(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
         project_id, conversation["id"], turn.get("id") if turn else None,
@@ -1923,6 +1930,19 @@ async def _respond_as_group_agent(
             transcript if _GROUP_TRANSCRIPT_AS_QUESTION
             else (trigger["content"] if trigger else transcript)
         )
+        # The trigger turn's attachments ride the QUESTION only (mirrors the
+        # private surface's attachment fold onto its ask) — never the
+        # transcript/DTO, so file text stays out of the visible thread and
+        # off the wire. Best-effort raw read; same clamp as the private fold.
+        if trigger is not None:
+            attach_rows = conversations_db.get_group_turn_attachments(trigger["id"])
+            if attach_rows:
+                folded = "\n\n[Attached files]\n" + "\n\n".join(
+                    f"--- {a.get('name') or 'file'} ---\n{a.get('content') or ''}"
+                    for a in attach_rows
+                    if isinstance(a, dict)
+                )
+                question = f"{question}{folded[:100_000]}"
         scope = SurfaceScope(
             surface=Surface.project_group,
             project_id=project_id,

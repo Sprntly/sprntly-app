@@ -184,10 +184,12 @@ describe("composer parity guard — real input (AC7)", () => {
     expect(auditComposerParity(input)).toEqual([])
   })
 
-  it("test_group_composer_features_absent_is_ledgered", () => {
+  it("test_both_project_surfaces_provide_composer_features", () => {
+    // Group's `+` menu went LIVE (attachments + skills, matching private) —
+    // no surface omits `composer.features` any more, so the old
+    // `composer.plusMenu` opt-out is retired from the ledger.
     const input = realInput()
-    expect(input.surfacesWithoutFeatures).toContain("project_group")
-    expect(input.surfacesWithoutFeatures).not.toContain("project_private")
+    expect(input.surfacesWithoutFeatures).toEqual([])
   })
 
   it("test_private_provides_structured_clarify_group_does_not", () => {
@@ -235,10 +237,17 @@ describe("composer parity guard — mutation self-check (AC8, fail-closed)", () 
 })
 
 describe("composer parity guard — surfacesWithoutFeatures requires a ledger entry (AC9)", () => {
-  it("test_group_without_features_requires_ledger", () => {
+  it("test_surface_without_features_requires_ledger", () => {
+    // Synthetic (both real surfaces now provide features): a surface that
+    // omits `composer.features` without a plusMenu ledger entry is RED —
+    // the fail-closed arm stays proven even with no real omitter left.
     const base = realInput()
-    const noLedger: ComposerParityInput = { ...base, ledger: base.ledger.filter((o) => o.capability !== "composer.plusMenu") }
-    const violations = auditComposerParity(noLedger)
+    const mutated: ComposerParityInput = {
+      ...base,
+      surfacesWithoutFeatures: ["project_group"],
+      ledger: base.ledger.filter((o) => o.capability !== "composer.plusMenu"),
+    }
+    const violations = auditComposerParity(mutated)
     expect(violations.some((v) => v.capability === "composer.plusMenu" && v.surface === "project_group")).toBe(true)
   })
 })

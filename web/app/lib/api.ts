@@ -6054,8 +6054,29 @@ export const projectsApi = {
    *  best-effort agent reply — the POST resolves only after that reply
    *  attempt completes (or is skipped for a non-mention), so the caller's
    *  busy state should span the whole request, not just the network hop. */
-  postGroupTurn: (id: number | string, content: string) =>
-    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, { content }),
+  postGroupTurn: (
+    id: number | string,
+    content: string,
+    opts?: {
+      /** The pinned skill riding this send (its trigger is ALREADY spliced
+       *  into `content` by the engine — the same single splice rule every
+       *  surface uses; this field additionally names the pick on the wire). */
+      pinned_skill?: { id: string; trigger: string; label?: string } | null
+      /** Resolved attachment refs ({name, content, key?, mime?, size?}) —
+       *  persisted on the turn and folded into the agent's question
+       *  server-side (mirrors the private surface's attachment ride). */
+      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+      /** The idempotency key: a retry/double-submit carrying the same id
+       *  replays the original turn instead of double-posting. */
+      client_message_id?: string
+    },
+  ) =>
+    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, {
+      content,
+      ...(opts?.pinned_skill ? { pinned_skill: opts.pinned_skill } : {}),
+      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
+      ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
+    }),
   /** Get-or-create the caller's durable individual project chat
    *  (create-if-absent, idempotent — mirrors the group chat's own
    *  `POST .../group`, one level down). Called once per chat session

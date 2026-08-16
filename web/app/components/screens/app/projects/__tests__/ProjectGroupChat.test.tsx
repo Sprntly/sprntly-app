@@ -262,7 +262,7 @@ describe("ProjectGroupChat — send + refetch", () => {
       fireEvent.click(sendBtn)
     })
 
-    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team"))
+    await waitFor(() => expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) })))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(2))
     await waitFor(() => {
       expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
@@ -291,7 +291,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
     // Cleared IMMEDIATELY — postGroupTurn has not resolved yet.
     expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("")
-    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team")
+    expect(postGroupTurnMock).toHaveBeenCalledWith(101, "hi team", expect.objectContaining({ client_message_id: expect.any(String) }))
 
     await act(async () => {
       resolvePost(turn({ id: 5, content: "hi team" }))
