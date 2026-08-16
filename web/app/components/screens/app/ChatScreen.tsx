@@ -6932,8 +6932,6 @@ export function ChatScreen() {
                     }))}
                     fallbackHeader="PRD details"
                     busy={busy || !!activeTab?.prdGenerating}
-                    skipAllLabel="Generate now"
-                    onSkipAll={() => void submitClarifyAnswers([])}
                     onDismiss={() =>
                       setClarifyPopupDismissed((p) => ({ ...p, [pendingClarifyTurn.id]: true }))
                     }
