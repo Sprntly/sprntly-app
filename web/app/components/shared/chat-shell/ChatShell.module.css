@@ -38,3 +38,63 @@
 .clarifyOption:hover {
   background: var(--surface-3);
 }
+
+/* ── Multi-party (group) row presentation ──
+   Shell-owned so the mapping targets classes that SURVIVE T3b's
+   ProjectGroupChat.module.css delete (the doomed module). Tokens only, from
+   globals.css :root — no new palette. The per-kind wrapper + bubble fills the
+   group rows carry, mapped from `ShellTurn.author`. */
+.gcMsg {
+  display: flex;
+  gap: 11px;
+  padding: 0;
+}
+
+.gcMsgAgent {
+  align-items: flex-start;
+}
+
+.gcMsgMe {
+  flex-direction: row-reverse;
+}
+
+.gcMsgMe :global(.bc-user-head) {
+  flex-direction: row-reverse;
+}
+
+.gcRole {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  padding: 2px 7px;
+  border-radius: 5px;
+}
+
+.gcTime {
+  font-size: 10.5px;
+  color: var(--ink-4);
+}
+
+.gcBubbleOther,
+.gcBubbleMe {
+  font-size: 13.5px;
+  line-height: 1.5;
+  border-radius: var(--radius-lg);
+  padding: 10px 15px;
+  max-width: 620px;
+  width: fit-content;
+}
+
+.gcBubbleOther {
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+}
+
+.gcBubbleMe {
+  background: var(--nav);
+  color: var(--on-dark-alpha-95);
+  border: 1px solid var(--nav);
+}

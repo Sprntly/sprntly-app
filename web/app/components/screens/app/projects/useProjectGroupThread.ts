@@ -1,0 +1,393 @@
+"use client"
+
+// ── useProjectGroupThread — the multi-author group-thread transport engine ──
+//
+// The project-genuine transport half of the pre-fold `ProjectGroupChat`
+// (`:177-631`), lifted into a reusable engine so the group surface can ride the
+// shared `ChatShell`. It owns where group turns come from and go — the
+// realtime/`since`-reconcile/focus-gated-poll load ladder (deduped via
+// `applyTurns`/`knownTurnIdsRef`), roster/presence/typing, the optimistic
+// negative-id send with rollback + the same-content double-submit guard, and
+// the cross-turn `invokedBy`/`invokedByMe` precompute — and exposes a
+// normalized `ShellTurn[]` the shell maps. The shell owns what the user sees
+// and touches; this engine owns the data (spec §2.6, permanent boundary).
+//
+// TWO named intended fixes over a verbatim absorb (the "verbatim" rule yields
+// to these, like T2's timestamp-drift fix):
+//  1. Gap-burning cursor (an adversarial review): `applyTurns` advances `cursorRef` ONLY on
+//     server-ordered reads (initial-load / reconcile / poll), NEVER on an
+//     at-most-once/unordered realtime broadcast. A dropped older broadcast then
+//     a newer one no longer jumps the cursor past the gap — the next reconcile
+//     (still keyed on the un-advanced cursor) re-fetches and recovers it.
+//  2. Generation safety (a review + an adversarial review): ONE generation-aware
+//     `applyTurns` path for load + realtime + reconcile so a realtime turn that
+//     lands before the initial load resolves is not clobbered by the load; the
+//     merge SORTS by clock (not append) so a message sent during load renders
+//     below its own history; and in-flight fetch/reconcile/post promises are
+//     tagged with a generation token bumped on `projectId` change + unmount,
+//     dropping stale results from a prior project.
+import { createElement, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type ReactNode } from "react"
+import { AssistantWaitState } from "../../../shared/AssistantWaitState"
+import { AGENT_NAME } from "../../../../lib/agent"
+import { useAuth } from "../../../../lib/auth"
+import { projectsApi, type GroupTurn } from "../../../../lib/api"
+import type { ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/types"
+import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
+import { useRealtimeChannel, type PresenceIdentity } from "./useRealtimeChannel"
+import { personAvatarStyle } from "./avatarColor"
+
+/** The v1 deterministic trigger (mirrors `routes/projects.py`'s `_MENTION_RE`)
+ *  — used client-side only to LABEL who invoked an agent turn. */
+const MENTION_RE = /@sprntly\b/i
+
+/** Focus-gated poll interval (fallback when the realtime channel is degraded). */
+const POLL_MS = 4000
+
+function initials(name: string | null | undefined): string {
+  if (!name) return "?"
+  return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+}
+
+/** The current viewer's display name for presence/typing — derived from the
+ *  same `user_metadata` `signUpWithPassword` writes (no new fetch). */
+function authDisplayName(user: { user_metadata?: unknown; email?: string | null } | null | undefined): string {
+  if (!user) return "You"
+  const meta = user.user_metadata as { first_name?: string; last_name?: string } | undefined
+  const full = [meta?.first_name, meta?.last_name].map((s) => s?.trim()).filter(Boolean).join(" ")
+  if (full) return full
+  if (user.email) {
+    const local = user.email.split("@")[0]
+    if (local) return local
+  }
+  return "You"
+}
+
+/** Chronological sort for the merged turn list. By `created_at` (the persisted
+ *  clock), tie-broken by id. An optimistic turn carries a `now` timestamp so it
+ *  sorts to the bottom until its real turn arrives — and a message sent DURING
+ *  the initial load renders BELOW its history rather than above it (an adversarial review). */
+function sortTurns(turns: GroupTurn[]): GroupTurn[] {
+  return [...turns].sort((a, b) => {
+    const ta = new Date(a.created_at).getTime()
+    const tb = new Date(b.created_at).getTime()
+    if (ta !== tb) return ta - tb
+    return a.id - b.id
+  })
+}
+
+export interface UseProjectGroupThreadArgs {
+  projectId: number | string
+  /** The lazily-read draft API ref (shell-populated on mount) — the engine owns
+   *  send-failure draft-restore through it (compare-and-set, a review). */
+  draftApiRef: MutableRefObject<ComposerDraftApi | null>
+}
+
+export interface UseProjectGroupThread {
+  turns: ShellTurn[]
+  post: (content: string) => void
+  loading: boolean
+  posting: boolean
+  error: string | null
+  /** Whether the newest turn is a human turn still awaiting a reply (the
+   *  informational "stayed out / no reply yet" arm — suppressed while a send's
+   *  own POST + reconcile is in flight). */
+  showStayedOut: boolean
+  errorRow: ReactNode | null
+  typingIndicator: ReactNode | null
+  postingWaitNode: ReactNode | null
+  presenceMembers: PresenceIdentity[]
+  typers: PresenceIdentity[]
+  sendTyping: () => void
+  degraded: boolean
+}
+
+export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGroupThreadArgs): UseProjectGroupThread {
+  const auth = useAuth()
+  const myUserId = auth.kind === "authed" ? auth.user.id : null
+  const myName = authDisplayName(auth.kind === "authed" ? auth.user : null)
+
+  const [turns, setTurns] = useState<GroupTurn[]>([])
+  const [loading, setLoading] = useState(true)
+  const [posting, setPosting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const cursorRef = useRef<number | undefined>(undefined)
+  const knownTurnIdsRef = useRef<Set<number>>(new Set())
+  const optimisticIdRef = useRef(-1)
+  const inFlightDraftRef = useRef<string | null>(null)
+  const myUserIdRef = useRef(myUserId)
+  useEffect(() => {
+    myUserIdRef.current = myUserId
+  }, [myUserId])
+
+  // Generation token: bumped on `projectId` change + unmount so a late promise
+  // from an old project can't corrupt `turns`/cursor after a switch. React runs
+  // the old effect's cleanup (which bumps) BEFORE the new effect captures the
+  // new generation, so any in-flight promise tagged with the old value is
+  // dropped by its `gen !== genRef.current` guard.
+  const genRef = useRef(0)
+  useEffect(() => {
+    return () => {
+      genRef.current += 1
+    }
+  }, [projectId])
+
+  /**
+   * The ONE merge path. `advanceCursor` distinguishes a server-ordered read
+   * (initial-load/reconcile/poll → advance the cursor) from an unordered
+   * realtime broadcast (do NOT advance — the gap-burning-cursor fix). Dedups by
+   * id via `knownTurnIdsRef`, reconciles optimistic negative-id placeholders,
+   * and SORTS the merged list by clock so history never lands below a
+   * concurrently-sent message.
+   */
+  const applyTurns = useCallback((incoming: GroupTurn[], advanceCursor: boolean) => {
+    if (incoming.length === 0) return
+    const fresh = incoming.filter((t) => !knownTurnIdsRef.current.has(t.id))
+    if (fresh.length > 0) {
+      for (const t of fresh) knownTurnIdsRef.current.add(t.id)
+      setTurns((prev) => {
+        let next = prev
+        for (const t of fresh) {
+          if (t.role === "user" && t.author_user_id != null && t.author_user_id === myUserIdRef.current) {
+            const idx = next.findIndex((x) => x.id < 0 && x.role === "user" && x.content === t.content)
+            if (idx !== -1) next = next.filter((_, i) => i !== idx)
+          }
+        }
+        return sortTurns([...next, ...fresh])
+      })
+    }
+    if (advanceCursor) {
+      const serverIds = incoming.map((t) => t.id).filter((id) => id > 0)
+      if (serverIds.length > 0) {
+        const maxId = Math.max(...serverIds)
+        if (cursorRef.current == null || maxId > cursorRef.current) cursorRef.current = maxId
+      }
+    }
+  }, [])
+
+  // Initial load. Resets per-project transport state, then MERGES the load
+  // through `applyTurns` (never `setTurns(all)`) so a realtime turn that landed
+  // before it resolves survives (generation-safe, a review).
+  useEffect(() => {
+    const gen = genRef.current
+    let cancelled = false
+    setLoading(true)
+    setError(null)
+    setTurns([])
+    knownTurnIdsRef.current = new Set()
+    cursorRef.current = undefined
+    projectsApi
+      .groupTurns(projectId)
+      .then((all) => {
+        if (cancelled || gen !== genRef.current) return
+        applyTurns(all, true)
+      })
+      .catch(() => {
+        if (!cancelled && gen === genRef.current) setError("Couldn't load the group chat. Try again.")
+      })
+      .finally(() => {
+        if (!cancelled && gen === genRef.current) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectId, applyTurns])
+
+  // Live transport: one channel per project; broadcast turns feed the SAME
+  // `applyTurns` (with `advanceCursor: false` — the gap-burning-cursor fix).
+  const handleRealtimeEvent = useCallback(
+    (event: string, payload: unknown) => {
+      if (event === "turn.created") applyTurns([payload as GroupTurn], false)
+    },
+    [applyTurns],
+  )
+  const handleReconcile = useCallback(() => {
+    const gen = genRef.current
+    projectsApi
+      .groupTurns(projectId, cursorRef.current)
+      .then((rows) => {
+        if (gen === genRef.current) applyTurns(rows, true)
+      })
+      .catch(() => {
+        /* best-effort — the next reconnect or poll tick retries */
+      })
+  }, [projectId, applyTurns])
+  const { degraded, presenceMembers, sendTyping: sendTypingRaw, typers } = useRealtimeChannel(`project:${projectId}`, {
+    onEvent: handleRealtimeEvent,
+    onReconcile: handleReconcile,
+    presence: myUserId ? { self: { userId: myUserId, name: myName } } : undefined,
+  })
+
+  const sendTyping = useCallback(() => {
+    if (myUserId) sendTypingRaw({ userId: myUserId, name: myName })
+  }, [myUserId, myName, sendTypingRaw])
+
+  // Focus-gated poll (fallback when the realtime channel is degraded).
+  useEffect(() => {
+    let intervalId: ReturnType<typeof setInterval> | null = null
+    const poll = () => {
+      const gen = genRef.current
+      projectsApi
+        .groupTurns(projectId, cursorRef.current)
+        .then((rows) => {
+          if (gen === genRef.current) applyTurns(rows, true)
+        })
+        .catch(() => {
+          /* best-effort — a dropped poll tick retries next tick */
+        })
+    }
+    const start = () => {
+      if (!degraded) return
+      if (intervalId != null) return
+      intervalId = setInterval(poll, POLL_MS)
+    }
+    const stop = () => {
+      if (intervalId == null) return
+      clearInterval(intervalId)
+      intervalId = null
+    }
+    if (typeof document !== "undefined" && document.hasFocus()) start()
+    const onFocus = () => start()
+    const onBlur = () => stop()
+    const onVisibility = () => {
+      if (document.hidden) stop()
+      else start()
+    }
+    window.addEventListener("focus", onFocus)
+    window.addEventListener("blur", onBlur)
+    document.addEventListener("visibilitychange", onVisibility)
+    return () => {
+      stop()
+      window.removeEventListener("focus", onFocus)
+      window.removeEventListener("blur", onBlur)
+      document.removeEventListener("visibilitychange", onVisibility)
+    }
+  }, [projectId, applyTurns, degraded])
+
+  const post = useCallback(
+    (rawContent: string) => {
+      const content = rawContent.trim()
+      if (content.length < DRAFT_MIN_CHARS) return
+      // Same-content double-submit guard ONLY (a rapid double click/Enter of the
+      // EXACT same draft) — deliberately weaker than main's `pendingSend` gate:
+      // a DIFFERENT draft during a pending reply is never blocked (§2.6, R6).
+      if (inFlightDraftRef.current === content) return
+      inFlightDraftRef.current = content
+      setPosting(true)
+      setError(null)
+
+      // Optimistic turn (negative id — never enters `knownTurnIdsRef`/cursor).
+      const tempId = optimisticIdRef.current
+      optimisticIdRef.current -= 1
+      const optimisticTurn: GroupTurn = {
+        id: tempId,
+        role: "user",
+        content,
+        author_user_id: myUserId,
+        author_name: myName,
+        author_job_role: null,
+        created_at: new Date().toISOString(),
+      }
+      setTurns((prev) => sortTurns([...prev, optimisticTurn]))
+
+      const gen = genRef.current
+      projectsApi
+        .postGroupTurn(projectId, content)
+        .then(() => {
+          inFlightDraftRef.current = null
+          if (gen !== genRef.current) return [] as GroupTurn[]
+          return projectsApi.groupTurns(projectId, cursorRef.current)
+        })
+        .then((rows) => {
+          if (gen === genRef.current) applyTurns(rows ?? [], true)
+        })
+        .catch(() => {
+          inFlightDraftRef.current = null
+          if (gen !== genRef.current) return
+          setError("Couldn't send that. Try again.")
+          // Roll back the optimistic turn so a failed POST leaves no ghost.
+          setTurns((prev) => prev.filter((t) => t.id !== tempId))
+          // Failure-restore via the draft API (the engine owns it) — compare-
+          // and-set: restore ONLY if the composer is still empty, so a message
+          // typed during the wait is never clobbered by a late failure.
+          const api = draftApiRef.current
+          if (api && api.getValue() === "") api.setValue(content)
+        })
+        .finally(() => {
+          if (gen === genRef.current) setPosting(false)
+        })
+    },
+    [projectId, applyTurns, myUserId, myName, draftApiRef],
+  )
+
+  const lastTurn = turns[turns.length - 1]
+  const showStayedOut = !!lastTurn && lastTurn.role === "user" && !posting
+
+  // Normalize GroupTurn[] → ShellTurn[]. Cross-turn facts (`invokedBy`/
+  // `invokedByMe`) are precomputed HERE from the previous turn — the shell
+  // mapping never inspects neighbours (§2.5/G5b).
+  const shellTurns = useMemo<ShellTurn[]>(
+    () =>
+      turns.map((turn, i) => {
+        const isAgent = turn.role === "assistant"
+        const isMe = turn.role === "user" && turn.author_user_id != null && turn.author_user_id === myUserId
+        const prev = i > 0 ? turns[i - 1] : null
+        const triggerIsMention = isAgent && !!prev && prev.role === "user" && MENTION_RE.test(prev.content)
+        const invokedBy = triggerIsMention ? prev!.author_name : null
+        const invokedByMe = triggerIsMention ? prev!.author_user_id === myUserId : false
+        return {
+          id: `${turn.id}`,
+          author: {
+            kind: isAgent ? "agent" : isMe ? "self" : "peer",
+            name: isAgent ? AGENT_NAME : (turn.author_name ?? undefined),
+            role: turn.author_job_role,
+            userId: turn.author_user_id,
+            initials: isAgent ? undefined : initials(turn.author_name),
+            avatarStyle: isAgent ? undefined : personAvatarStyle(turn.author_user_id, turn.author_name),
+          },
+          content: turn.content,
+          createdAt: new Date(turn.created_at).getTime(),
+          invokedBy,
+          invokedByMe,
+          // Group agent turns carry their artifact-open candidates for the
+          // host's `renderAgentBody`/`turnFooter` at fold; a plain group turn
+          // has none.
+          footerData: isAgent ? { openCandidates: turn.open_candidates ?? [] } : undefined,
+        }
+      }),
+    [turns, myUserId],
+  )
+
+  const errorRow = error ? createElement("div", { role: "alert", "data-testid": "gc-error" }, error) : null
+  const typingIndicator =
+    typers.length > 0
+      ? createElement(
+          "div",
+          { "data-testid": "gc-typing" },
+          `${typers.map((t) => t.name).join(", ")} ${typers.length === 1 ? "is" : "are"} typing…`,
+        )
+      : null
+  const postingWaitNode = posting
+    ? createElement(
+        "div",
+        { "data-testid": "gc-posting-wait" },
+        createElement(AssistantWaitState, { compact: true, phase: "Sending…" }),
+      )
+    : null
+
+  return {
+    turns: shellTurns,
+    post,
+    loading,
+    posting,
+    error,
+    showStayedOut,
+    errorRow,
+    typingIndicator,
+    postingWaitNode,
+    presenceMembers,
+    typers,
+    sendTyping,
+    degraded,
+  }
+}
