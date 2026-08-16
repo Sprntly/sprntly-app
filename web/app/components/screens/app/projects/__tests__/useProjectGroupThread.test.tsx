@@ -30,7 +30,9 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 
 const groupTurnsMock = vi.fn()
 const postGroupTurnMock = vi.fn()
-let authState: { kind: "authed"; user: { id: string } } | { kind: "anonymous" } = {
+let authState:
+  | { kind: "authed"; user: { id: string; user_metadata?: unknown; email?: string | null } }
+  | { kind: "anonymous" } = {
   kind: "authed",
   user: { id: "u1" },
 }
@@ -236,6 +238,27 @@ describe("useProjectGroupThread — transport", () => {
     act(() => latest!.sendTyping())
     // `myName` derives from user_metadata; a metadata-less mock user → "You".
     expect(realtimeState.sendTyping).toHaveBeenCalledWith({ userId: "u1", name: "You" })
+  })
+
+  it("test_display_name_prefers_full_name_over_email (AC6)", async () => {
+    authState = {
+      kind: "authed",
+      user: { id: "u1", user_metadata: { full_name: "David Mumuni" }, email: "david@x.com" },
+    }
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    act(() => latest!.sendTyping())
+    expect(realtimeState.sendTyping).toHaveBeenCalledWith({ userId: "u1", name: "David Mumuni" })
+  })
+
+  it("test_display_name_falls_back_to_email_local (AC6)", async () => {
+    authState = { kind: "authed", user: { id: "u1", email: "david@x.com" } }
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    act(() => latest!.sendTyping())
+    expect(realtimeState.sendTyping).toHaveBeenCalledWith({ userId: "u1", name: "david" })
   })
 
   it("test_group_engine_restores_draft_on_send_failure_only_if_empty (AC4)", async () => {
