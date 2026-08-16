@@ -335,6 +335,25 @@ describe("useProjectGroupThread — named intended fixes (AC8)", () => {
     expect(contents.slice(0, 2)).toEqual(["old-1", "old-2"])
   })
 
+  it("test_group_engine_optimistic_clock_clamped_above_history_on_lagging_client (AC8, Fable #11)", async () => {
+    // The client clock runs BEHIND the server: history carries `created_at`s in
+    // the (client-)future. Without the clamp, `new Date()` for the optimistic
+    // turn would be < history and it would sort ABOVE messages that predate it.
+    const future = Date.now() + 60 * 60 * 1000 // an hour ahead of this client
+    groupTurnsMock.mockResolvedValueOnce([
+      { ...gt({ id: 1, content: "server-1" }), created_at: new Date(future).toISOString() },
+      { ...gt({ id: 2, content: "server-2" }), created_at: new Date(future + 1000).toISOString() },
+    ])
+    postGroupTurnMock.mockReturnValue(deferred<void>().promise)
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    act(() => latest!.post("my just-sent message"))
+    // Clamped to ≥ the newest known clock → it sorts to the BOTTOM, never above
+    // the pre-existing (client-future) history.
+    const contents = latest!.turns.map((t) => t.content)
+    expect(contents).toEqual(["server-1", "server-2", "my just-sent message"])
+  })
+
   it("test_group_engine_stale_generation_result_dropped_on_project_switch (AC8)", async () => {
     const loadA = deferred<GroupTurn[]>()
     groupTurnsMock.mockReturnValueOnce(loadA.promise) // project 7 load (stale)

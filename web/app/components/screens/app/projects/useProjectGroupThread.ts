@@ -35,6 +35,7 @@ import type { ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/typ
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { useRealtimeChannel, type PresenceIdentity } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
+import extras from "./GroupChatExtras.module.css"
 
 /** The v1 deterministic trigger (mirrors `routes/projects.py`'s `_MENTION_RE`)
  *  — used client-side only to LABEL who invoked an agent turn. */
@@ -271,7 +272,22 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
       // Same-content double-submit guard ONLY (a rapid double click/Enter of the
       // EXACT same draft) — deliberately weaker than main's `pendingSend` gate:
       // a DIFFERENT draft during a pending reply is never blocked (§2.6, R6).
-      if (inFlightDraftRef.current === content) return
+      if (inFlightDraftRef.current === content) {
+        // Retype-identical-during-flight (Fable #10): the shell clears the draft
+        // UNCONDITIONALLY after `send.onSubmit` returns, so a rejected send would
+        // silently eat the user's re-typed text. We can't stop the shell's clear
+        // (ChatShell.tsx is frozen), so restore the draft AFTER that clear has
+        // committed (a macrotask, so it lands past React's render flush) via a
+        // compare-and-set: restore ONLY if the composer is empty, so text typed
+        // in the meantime is never clobbered.
+        if (draftApiRef.current) {
+          setTimeout(() => {
+            const api = draftApiRef.current
+            if (api && api.getValue() === "") api.setValue(content)
+          }, 0)
+        }
+        return
+      }
       inFlightDraftRef.current = content
       setPosting(true)
       setError(null)
@@ -279,16 +295,31 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
       // Optimistic turn (negative id — never enters `knownTurnIdsRef`/cursor).
       const tempId = optimisticIdRef.current
       optimisticIdRef.current -= 1
-      const optimisticTurn: GroupTurn = {
-        id: tempId,
-        role: "user",
-        content,
-        author_user_id: myUserId,
-        author_name: myName,
-        author_job_role: null,
-        created_at: new Date().toISOString(),
-      }
-      setTurns((prev) => sortTurns([...prev, optimisticTurn]))
+      // Optimistic clock-sort (Fable #11): clamp `created_at` to JUST PAST the
+      // newest known turn's clock so a client running behind can't sort your
+      // just-sent message ABOVE history. `sortTurns` ties on `created_at` then
+      // breaks by id — and an optimistic turn's NEGATIVE id would lose that
+      // tiebreak against real (positive-id) history at the same clock — so nudge
+      // one ms past `max` to guarantee a strict bottom-sort. Computed inside the
+      // updater so it reads the live list; the real turn's true clock replaces
+      // this placeholder on reconcile.
+      setTurns((prev) => {
+        const maxKnownMs = prev.reduce((m, t) => {
+          const ms = new Date(t.created_at).getTime()
+          return Number.isNaN(ms) ? m : Math.max(m, ms)
+        }, 0)
+        const clampedMs = Math.max(Date.now(), maxKnownMs + 1)
+        const optimisticTurn: GroupTurn = {
+          id: tempId,
+          role: "user",
+          content,
+          author_user_id: myUserId,
+          author_name: myName,
+          author_job_role: null,
+          created_at: new Date(clampedMs).toISOString(),
+        }
+        return sortTurns([...prev, optimisticTurn])
+      })
 
       const gen = genRef.current
       projectsApi
@@ -358,19 +389,25 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
     [turns, myUserId],
   )
 
-  const errorRow = error ? createElement("div", { role: "alert", "data-testid": "gc-error" }, error) : null
+  // These nodes carry their relocated `GroupChatExtras` classes (T3b) so the
+  // folded surface styles them once — no longer the class-less bare divs T3a
+  // stubbed. The engine (a project-side module) may import project CSS; only the
+  // shell's module graph forbids it.
+  const errorRow = error
+    ? createElement("div", { className: extras.error, role: "alert", "data-testid": "gc-error" }, error)
+    : null
   const typingIndicator =
     typers.length > 0
       ? createElement(
           "div",
-          { "data-testid": "gc-typing" },
+          { className: extras.typingIndicator, "data-testid": "gc-typing" },
           `${typers.map((t) => t.name).join(", ")} ${typers.length === 1 ? "is" : "are"} typing…`,
         )
       : null
   const postingWaitNode = posting
     ? createElement(
         "div",
-        { "data-testid": "gc-posting-wait" },
+        { className: extras.postingWait, "data-testid": "gc-posting-wait" },
         createElement(AssistantWaitState, { compact: true, phase: "Sending…" }),
       )
     : null

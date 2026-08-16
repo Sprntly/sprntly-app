@@ -10,7 +10,7 @@
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -64,8 +64,25 @@ afterEach(() => {
   vi.useRealTimers()
 })
 
-describe("ProjectGroupChat — bubble alignment lanes", () => {
-  it("own turns land in the right-aligned msgMe lane with the bubbleMe fill; others left; agent its own lane", async () => {
+describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
+  it("test_group_thread_column_is_bc_thread_868 — group rows render inside the shared 868px bc-thread column, not the old capped bubbles (NAMED INTENDED CHANGE #3/#4/#8)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
+      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
+    ])
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const me = await screen.findByTestId("gc-msg-me")
+    // The rows live inside the shell's shared `bc-thread` column (the 868px
+    // width David asked for — feedback #3/#4/#8), which the shell renders for
+    // every surface. The old component's `.scroll`/`group-chat-scroll` wrapper
+    // is gone.
+    const thread = container.querySelector(".bc-thread")
+    expect(thread).toBeTruthy()
+    expect(thread!.contains(me)).toBe(true)
+    expect(screen.queryByTestId("group-chat-scroll")).toBeNull()
+  })
+
+  it("test_group_multiparty_lanes_two_fills_agent_bubbleless_testids — self=me/other=peer carry TWO bubble fills; the agent turn is bubble-less via bc-agent-body; gc-msg-* testids + AGENT badge preserved", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
@@ -73,21 +90,28 @@ describe("ProjectGroupChat — bubble alignment lanes", () => {
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
+    // Own turn: the row-reverse `gcMsgMe` lane, bubble carries the dark `--nav`
+    // `gcBubbleMe` fill (NAMED INTENDED CHANGE: shell-owned module classes
+    // replace the pre-fold `msgMe`/`bubbleMe`).
     const me = await screen.findByTestId("gc-msg-me")
-    // The own row is the right-align (row-reverse) lane, and its bubble carries
-    // the dark `--nav` fill class — the redesign's own-message fidelity fix.
-    expect(me.className).toMatch(/msgMe/)
-    expect(within(me).getByText("my reply").closest("[class*='bubbleMe']")).toBeTruthy()
+    expect(me.className).toMatch(/gcMsgMe/)
+    expect(within(me).getByText("my reply").closest("[class*='gcBubbleMe']")).toBeTruthy()
 
+    // Peer turn: the left `gcMsgOther` lane, second fill `gcBubbleOther`.
     const other = screen.getByTestId("gc-msg-other")
-    expect(other.className).toMatch(/msgOther/)
+    expect(other.className).toMatch(/gcMsgOther/)
+    expect(within(other).getByText("hey").closest("[class*='gcBubbleOther']")).toBeTruthy()
 
+    // Agent turn: its own `gcMsgAgent` lane, bubble-LESS (renders through
+    // `bc-agent-body`, matching main — no invented green agent bubble).
     const agent = screen.getByTestId("gc-msg-agent")
-    expect(agent.className).toMatch(/msgAi/)
+    expect(agent.className).toMatch(/gcMsgAgent/)
     expect(within(agent).getByText("AGENT")).toBeTruthy()
+    expect(agent.querySelector(".bc-agent-body")).toBeTruthy()
+    expect(agent.querySelector("[class*='gcBubble']")).toBeNull()
   })
 
-  it("an @-mention inside the OWN bubble renders as a mention chip (styled green on the dark bubble, not the blue pill)", async () => {
+  it("test_group_own_message_mention_chip_has_contrast_class — an own-message @-mention chip carries the gc-mention-chip marker under .gcBubbleMe (the reproduced AA override); the CSS restores green-not-blue", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "Ping @David about the quote" }),
     ])
@@ -95,39 +119,63 @@ describe("ProjectGroupChat — bubble alignment lanes", () => {
     const me = await screen.findByTestId("gc-msg-me")
     const chip = within(me).getByTestId("gc-mention-chip")
     expect(chip.textContent).toContain("@David")
-    expect(chip.className).toMatch(/mentionChip/)
+    // The stable GLOBAL marker class the AA override selector targets.
+    expect(chip.classList.contains("gc-mention-chip")).toBe(true)
+    // The chip sits inside the own dark `gcBubbleMe` bubble.
+    expect(chip.closest("[class*='gcBubbleMe']")).toBeTruthy()
 
-    // The colour split is enforced in the component-scoped CSS: the base chip is
-    // the blue `--info` pill (light bubbles), but inside the own dark bubble the
-    // chip is overridden to the green `--accent-2` inline text — never blue.
-    const css = readFileSync(join(__dirname, "../ProjectGroupChat.module.css"), "utf8")
-    expect(css).toMatch(/\.bubbleMe\s*\{[^}]*background:\s*var\(--nav\)/)
-    const ownChipBlock = css.match(/\.bubbleMe\s+\.mentionChip\s*\{[^}]*\}/)?.[0] ?? ""
+    // The colour split is enforced across the folded modules: the own-bubble
+    // override (ChatShell.module.css) makes the chip green `--accent-2` inline
+    // text; the base chip (mention-picker.module.css) is the blue `--info` pill.
+    const shellCssSrc = readFileSync(join(__dirname, "../../../../shared/chat-shell/ChatShell.module.css"), "utf8")
+    expect(shellCssSrc).toMatch(/\.gcBubbleMe\s*\{[^}]*background:\s*var\(--nav\)/)
+    const ownChipBlock =
+      shellCssSrc.match(/\.gcBubbleMe\s+:global\(\.gc-mention-chip\)\s*\{[^}]*\}/)?.[0] ?? ""
     expect(ownChipBlock).toContain("var(--accent-2)")
     expect(ownChipBlock).not.toContain("var(--info)")
-    // The base (top-level, newline-anchored — NOT the `.bubbleMe` override)
-    // `.mentionChip` rule is the blue `--info` pill.
-    expect(css).toMatch(/\n\.mentionChip\s*\{[^}]*color:\s*var\(--info\)/)
+    const pickerCss = readFileSync(join(__dirname, "../mention-picker.module.css"), "utf8")
+    expect(pickerCss).toMatch(/\.mentionChip\s*\{[^}]*color:\s*var\(--info\)/)
+  })
+
+  it("test_group_agent_turn_renders_open_artifact_chip_and_fires_callback — an agent turn with open_candidates renders OpenArtifactChips; clicking fires onOpenArtifact with the matching candidate (1:1 with the pre-fold live feature)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({
+        id: 1,
+        role: "assistant",
+        author_user_id: null,
+        author_name: "Sprntly",
+        content: "here's the PRD",
+        open_candidates: [
+          { type: "prd", id: 9, title: "Instant-quote flow", status: "ready", prd_id: 9, brief_id: null, insight_index: null } as never,
+        ],
+      }),
+    ])
+    const onOpenArtifact = vi.fn()
+    render(React.createElement(ProjectGroupChat, { projectId: 101, onOpenArtifact }))
+    const chip = await screen.findByTestId("open-artifact-chip")
+    fireEvent.click(chip)
+    expect(onOpenArtifact).toHaveBeenCalledWith(expect.objectContaining({ id: 9, type: "prd" }))
   })
 })
 
-describe("ProjectGroupChat — viewport pins to newest turn after history load", () => {
-  it("scrolls to the bottom once the async history resolves, not on the empty first render", async () => {
+describe("ProjectGroupChat — viewport pins to newest turn after history load (shell-owned scroll)", () => {
+  it("scrolls the shell viewport to the bottom once the async history resolves, not on the empty first render", async () => {
     let resolveTurns: (v: GroupTurn[]) => void = () => {}
     groupTurnsMock.mockReturnValue(
       new Promise<GroupTurn[]>((resolve) => {
         resolveTurns = resolve
       }),
     )
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
-    const scroll = screen.getByTestId("group-chat-scroll")
+    // The scroll region is now the shell's standalone viewport (it owns project
+    // scrolling post-fold), not the old `group-chat-scroll` div.
+    const scroll = container.querySelector('[class*="standaloneViewport"]') as HTMLElement
+    expect(scroll).toBeTruthy()
     // jsdom reports 0 for layout metrics — give the viewport a content height so
     // a bottom-pin is observable.
     Object.defineProperty(scroll, "scrollHeight", { configurable: true, value: 820 })
-    // While the history is still loading the auto-scroll effect early-returns:
-    // the viewport is NOT yet pinned (this is the bug the effect's `loading`
-    // gate fixes — scrolling on the empty render would strand it at the top).
+    // Not yet pinned while the history loads (scrollHeight was 0 at mount).
     expect(scroll.scrollTop).toBe(0)
 
     await act(async () => {
@@ -136,7 +184,27 @@ describe("ProjectGroupChat — viewport pins to newest turn after history load",
     })
     await screen.findByText("the newest turn")
 
-    // After the messages paint, the effect pins the viewport to the bottom.
+    // After the messages paint, the shell's pinned-follow effect lands it at the
+    // bottom.
     expect(scroll.scrollTop).toBe(820)
+  })
+})
+
+describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (AC2)", () => {
+  it("test_group_styled_nodes_not_bare — the presence roster, stayed-out badge, and (via the engine) error/typing nodes carry their GroupChatExtras classes", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "solo aside" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    // A human-only last turn with no reply → the stayed-out badge shows, styled.
+    const badge = await screen.findByTestId("gc-stayed-out")
+    expect(badge.className).toMatch(/stayedOut/)
+    expect(badge.querySelector("[class*='stayedOutDot']")).toBeTruthy()
+    expect(badge.querySelector("[class*='stayedOutLead']")).toBeTruthy()
+    // The relocated CSS families all live in GroupChatExtras now.
+    const extrasCss = readFileSync(join(__dirname, "../GroupChatExtras.module.css"), "utf8")
+    for (const cls of [".roster", ".rosterDot", ".stayedOut", ".stateBadge", ".typingIndicator", ".error", ".postingWait"]) {
+      expect(extrasCss).toContain(cls)
+    }
   })
 })

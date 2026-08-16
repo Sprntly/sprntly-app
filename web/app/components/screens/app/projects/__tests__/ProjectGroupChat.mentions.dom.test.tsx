@@ -92,7 +92,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       { kind: "member", user_id: "u2", name: "Fortune Ade", email: "fortune@acme.com" },
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@For")
 
@@ -107,7 +107,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
   it("test_sprntly_does_not_open_picker_and_invokes_agent", async () => {
     candidateSearchMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // @sprntly is the agent token — no people picker, no candidate search.
     await typeDraft("@sprntly")
@@ -142,7 +142,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       { kind: "member", user_id: "u2", name: "Mabel", email: "mabel@acme.com" },
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Mab")
     const row = await screen.findByTestId("gc-mention-candidate")
@@ -156,13 +156,51 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     expect(screen.queryByTestId("gc-mention-picker")).toBeNull()
   })
 
+  it("test_group_mention_opens_inserts_at_token_and_key_semantics — a mouse-moved caret + Enter-select splices at the TRACKED mentionQuery token, never mid-word (Fable #4); Escape closes without sending", async () => {
+    candidateSearchMock.mockResolvedValue([
+      { kind: "member", user_id: "u2", name: "Mabel", email: "mabel@acme.com" },
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
+
+    await typeDraft("@Mab")
+    await screen.findByTestId("gc-mention-candidate")
+
+    // The user moves the caret to the START of the field (a stray mouse click)
+    // BEFORE selecting — the pre-fold code spliced at the live caret and left a
+    // stranded "@Mab". The picker's TRACKED token must win.
+    const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
+    ta.selectionStart = 0
+    ta.selectionEnd = 0
+    // Enter routes through the shell's onKeyDownCapture → the picker consumes it
+    // (selects) and the shell neither submits nor stops.
+    await act(async () => {
+      fireEvent.keyDown(ta, { key: "Enter" })
+    })
+
+    expect(ta.value).toBe("@Mabel ")
+    expect(ta.value).not.toContain("Mab ") // no stranded partial token
+    expect(tagCandidateMock).not.toHaveBeenCalled()
+    expect(postGroupTurnMock).not.toHaveBeenCalled() // Enter selected, did not send
+    expect(screen.queryByTestId("gc-mention-picker")).toBeNull()
+
+    // Escape on a fresh token closes the picker without sending.
+    await typeDraft("@Ma")
+    await screen.findByTestId("gc-mention-candidate")
+    await act(async () => {
+      fireEvent.keyDown(document.querySelector(".cx-input") as HTMLTextAreaElement, { key: "Escape" })
+    })
+    expect(screen.queryByTestId("gc-mention-picker")).toBeNull()
+    expect(postGroupTurnMock).not.toHaveBeenCalled()
+  })
+
   it("test_select_non_member_calls_tag_and_shows_added", async () => {
     candidateSearchMock.mockResolvedValue([
       { kind: "workspace", user_id: "u3", name: "Nadia", email: "nadia@acme.com" },
     ])
     tagCandidateMock.mockResolvedValue({ tier: "t_workspace", added: { user_id: "u3" } })
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Nad")
     const row = await screen.findByTestId("gc-mention-candidate")
@@ -181,7 +219,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     candidateSearchMock.mockResolvedValue([]) // no directory match
     tagCandidateMock.mockResolvedValue({ tier: "t_newuser", invited: true, email_status: "sent" })
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@jane@acme.com")
     const invite = await screen.findByTestId("gc-mention-invite")
@@ -206,7 +244,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       email_status: "failed",
     })
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@zoe@acme.com")
     const invite = await screen.findByTestId("gc-mention-invite")
@@ -231,7 +269,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       Object.assign(new Error("That person can't be added to this project"), { status: 403 }),
     )
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Person")
     const row = await screen.findByTestId("gc-mention-candidate")
@@ -252,7 +290,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     let resolveSearch: (rows: unknown[]) => void = () => {}
     candidateSearchMock.mockReturnValue(new Promise((r) => (resolveSearch = r)))
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@Load")
     expect(await screen.findByTestId("gc-mention-loading")).toBeTruthy()
     await act(async () => {
@@ -264,7 +302,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     // Empty: an empty directory yields the "No matches — invite by email" row.
     candidateSearchMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@zzz")
     const invite = await screen.findByTestId("gc-mention-invite")
     expect(invite.textContent).toContain("No matches")
@@ -273,7 +311,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     // Error: a rejected search renders the error state and never throws.
     candidateSearchMock.mockRejectedValue(new Error("boom"))
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@Err")
     expect(await screen.findByTestId("gc-mention-error")).toBeTruthy()
   })
@@ -299,7 +337,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       { kind: "member", user_id: "u2", name: "Sprocket", email: "sprocket@acme.com" },
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // "spr" is a partial prefix of BOTH "Sprntly" (the agent) and "Sprocket"
     // (a real candidate) — the agent row must lead the list.
@@ -325,7 +363,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
   it("an empty '@' query (no typed prefix yet) still leads with the Agent row", async () => {
     candidateSearchMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@")
     const picker = await screen.findByTestId("gc-mention-picker")
@@ -335,7 +373,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
   it("regression guard: does NOT regress the base @sprntly-invokes-agent-no-picker guard even with the agent row wired", async () => {
     candidateSearchMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // The COMPLETE word "@sprntly" still routes to the agent-invoke path —
     // detectMentionQuery returns null for it, so mentionItems (and the new
@@ -351,7 +389,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
   it("the sent draft, when it carries @Sprntly, is recognized by the backend's _MENTION_RE shape (word-boundary, case-insensitive)", async () => {
     candidateSearchMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    await screen.findByTestId("group-chat-scroll")
+    await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@spr")
     const agentRow = await screen.findByTestId("gc-mention-agent")
     await act(async () => {

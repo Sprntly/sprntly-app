@@ -11,7 +11,7 @@
 // button, a second, DIFFERENT draft must be sendable immediately, and a
 // double-submit of the exact SAME draft must still be blocked.
 import * as React from "react"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -171,6 +171,44 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
     // never inline on this call.
     await expect(postGroupTurnMock.mock.results[0].value).resolves.toEqual(
       expect.objectContaining({ content: "@Sprntly summarize this" }),
+    )
+  })
+
+  it("test_group_never_block_sends_during_pending_reply — an identical RETYPE while the first send is in flight is NOT silently eaten by the shell's clear (Fable #10)", async () => {
+    groupTurnsMock.mockResolvedValueOnce([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await act(async () => {})
+
+    // The first send stays in flight (never resolves) so the same-content guard
+    // is armed for the retype below.
+    postGroupTurnMock.mockReturnValue(new Promise(() => {}))
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    // Cleared optimistically after the first send.
+    expect(textarea.value).toBe("")
+
+    // The user retypes the SAME text and hits Send again — the engine's guard
+    // rejects the duplicate POST, but the draft must be RESTORED (not eaten):
+    // the shell clears unconditionally, so the engine re-seats it on a microtask.
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "hi team" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+      await Promise.resolve()
+    })
+
+    // Exactly one POST (the duplicate was guarded) …
+    expect(postGroupTurnMock).toHaveBeenCalledTimes(1)
+    // … and the retyped text survives — it was not silently swallowed.
+    await waitFor(() =>
+      expect((document.querySelector(".cx-input") as HTMLTextAreaElement).value).toBe("hi team"),
     )
   })
 
