@@ -1025,20 +1025,33 @@ def test_trigger_kind_persisted_continuation(isolated_settings, monkeypatch):
     assert _trigger_kind_of(r2.json()["id"]) == "continuation"
 
 
-def test_trigger_kind_persisted_gate_stayout(isolated_settings, monkeypatch):
+def test_trigger_kind_persisted_gate_stayout(isolated_settings, monkeypatch, caplog):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
     projects_db.add_member(project["id"], "second-human")
     reply_calls = _stub_reply_path(monkeypatch)
     monkeypatch.setattr(project_group_gate, "call_json", _fake_gate_call_json(False))
 
-    r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns",
-        json={"content": "sounds good, I'll circle back once QA signs off on it"},
-    )
+    with caplog.at_level(logging.INFO):
+        r = ctx.client.post(
+            f"/v1/projects/{project['id']}/group/turns",
+            json={"content": "sounds good, I'll circle back once QA signs off on it"},
+        )
     assert r.status_code == 200
     assert reply_calls == [], "the gate said stay-out — no reply is scheduled either way"
     assert _trigger_kind_of(r.json()["id"]) == "gate_stayout"
+
+    # The stay-out decision is greppably logged, keyed to the persisted
+    # trigger_kind, exactly once — and the existing `group_gate_decision`
+    # log (already recording the reason) is not duplicated by this line.
+    stayout_lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.getMessage().startswith("group_stayout_recorded")
+    ]
+    assert len(stayout_lines) == 1
+    assert f"project_id={project['id']}" in stayout_lines[0]
+    assert "trigger_kind=gate_stayout" in stayout_lines[0]
 
 
 def test_trigger_kind_persist_failure_swallowed(isolated_settings, monkeypatch, caplog):

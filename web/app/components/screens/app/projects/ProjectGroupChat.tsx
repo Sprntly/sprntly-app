@@ -14,9 +14,11 @@
 //   • `ChatShell` owns what the user sees and touches (the 868px `bc-thread`
 //     column, the composer, scroll).
 // This host only supplies the descriptor's host closures (the multi-party body
-// renderers, the invoked-by badge, the open-artifact footer, the roster + the
-// stayed-out badge) and WIRES the picker's `onInputCapture` into the shell's
-// draft API. The 897-line pre-fold implementation and its module CSS are gone;
+// renderers, the honest run-status node, the open-artifact footer, the roster)
+// and WIRES the picker's `onInputCapture` into the shell's draft API. The
+// invoke/gate trigger state is not surfaced in the UI (it's debug-y internal
+// gate state) — it stays durably recorded server-side via `trigger_kind` for
+// debugging. The 897-line pre-fold implementation and its module CSS are gone;
 // every visible chat surface — main, project-private, project-group — is now
 // defined once (spec §2.5, AD-P13).
 import { useRef, useState } from "react"
@@ -46,13 +48,6 @@ function toAskResponse(content: string): AskResponse {
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
-}
-
-/** First word of a display name — an agent turn labels its invoker by first
- *  name ("invoked by David"), never the full "David M. (…)" string. */
-function firstName(name: string | null | undefined): string {
-  if (!name) return "someone"
-  return name.split(" ").filter(Boolean)[0] ?? name
 }
 
 export type ProjectGroupChatProps = {
@@ -135,23 +130,10 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       timestamps: "fromTurn",
       renderUserBody: (turn: ShellTurn) => <MentionBubble content={turn.content ?? ""} />,
       renderAgentBody: (turn: ShellTurn) => <AskReplyBody reply={toAskResponse(turn.content ?? "")} />,
-      // Invoked-by / detected state badge — agent turns only.
-      turnHeadExtra: (turn: ShellTurn) => {
-        if (turn.author.kind !== "agent") return null
-        const invokedBy = turn.invokedBy
-        return (
-          <span
-            className={`${extras.stateBadge} ${invokedBy ? extras.stateInvoked : extras.stateDetected}`}
-            data-testid="gc-state-badge"
-          >
-            {invokedBy
-              ? turn.invokedByMe
-                ? "invoked by you"
-                : `invoked by ${firstName(invokedBy)}`
-              : "detected this was for it"}
-          </span>
-        )
-      },
+      // The invoked-by / detected trigger badge was removed from the UI —
+      // it's debug-y internal gate state, not user-facing. The decision is
+      // still durably recorded server-side via `trigger_kind`, so nothing is
+      // lost for debugging.
       // Open-artifact chips — a LIVE, backend-tested feature (Gate-1 #2). The
       // engine exposes `footerData.openCandidates` on agent turns for exactly
       // this. Wired through the host-supplied `turnFooter` closure so
