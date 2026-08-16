@@ -70,6 +70,7 @@ from app.project_from_prd import find_existing_prd_auto_project
 from app.project_group_gate import render_group_transcript, should_respond
 from app.delegation_status_ingest import maybe_ingest_status
 from app.project_memory import maybe_promote_turn, schedule_regen
+from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
@@ -1573,9 +1574,11 @@ def project_chat_intent(
 
     Returns the envelope in the SAME shape `/v1/chat/intent` returns, so
     the client's `dispatchChatIntent` needs no project-specific branch.
-    No `open_artifact` lookup leg here — the private thread has no
-    artifact viewer to open into; the client already falls that intent
-    through to `onAnswer`.
+    That includes the render-data legs: `enrich_chat_envelope` (shared
+    with `/v1/chat/intent`) attaches the same `open` lookup (with its
+    conversation stamps) and `artifact_list`/`artifact_counts` rows main
+    chat's envelope carries, so the private surface renders the same
+    cards from the same data.
     """
     _require_project_member(project_id, ctx)
     dataset = _dataset_for(ctx)
@@ -1599,6 +1602,10 @@ def project_chat_intent(
             envelope["prd_options"] = prd_options
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = None
+    # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
+    # conversation stamps, artifact rows/counts) — same enrichment, same
+    # data, passing the already-resolved dataset instead of a second lookup.
+    enrich_chat_envelope(envelope, ctx, dataset)
     return envelope
 
 
@@ -1706,6 +1713,11 @@ def _classify_and_maybe_edit_group_prd(
     envelope, prd_id, refusal = resolve_project_chat_intent(
         project_id, message, history, dataset, ctx
     )
+    # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
+    # conversation stamps, artifact rows/counts), stamped onto THIS turn's
+    # classify envelope in place — a no-op unless the intent is an
+    # open/list ask, so the edit path below pays nothing for it.
+    enrich_chat_envelope(envelope, ctx, dataset)
     # Content-derived clarify signal — computed from THIS turn's own classify
     # outcome, never from `refusal` truthiness (which depends only on the
     # project's PRD count, not on what was asked — see `_GroupEditOutcome`'s
