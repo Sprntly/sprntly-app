@@ -54,6 +54,19 @@ def _pending(company_id: str, kind: str = "leadership update") -> int:
     return create_artifact(company_id, kind=kind, status="generating")["id"]
 
 
+def _llm_result_with_output(output):
+    """The same real dataclass, with an arbitrary `output` — for the case where
+    the field is not the string this call path expects."""
+    from app.graph.gateway import LLMResult
+
+    return LLMResult(
+        output=output, model=_MODEL_FOR_TESTS, prompt_version="test",
+        input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=0,
+        stop_reason="end_turn",
+    )
+
+
 def _llm_result(text: str):
     """A REAL `LLMResult`, not a look-alike.
 
@@ -68,14 +81,7 @@ def _llm_result(text: str):
     remove a field and this file stops importing. A hand-rolled double can only
     ever assert that the code agrees with the double.
     """
-    from app.graph.gateway import LLMResult
-
-    return LLMResult(
-        output=text, model=_MODEL_FOR_TESTS, prompt_version="test",
-        input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
-        cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=0,
-        stop_reason="end_turn",
-    )
+    return _llm_result_with_output(text)
 
 
 _MODEL_FOR_TESTS = "claude-sonnet-4-6"
@@ -110,7 +116,28 @@ def test_the_generator_reads_the_field_LLMResult_actually_has(gen_env, monkeypat
     assert "from the output field" in row["body_html"]
 
 
-def test_the_test_double_is_the_real_gateway_type(gen_env):
+def test_a_non_text_result_fails_rather_than_stringifying_into_the_document(
+    gen_env, monkeypatch
+):
+    """`str(output)` would be the obvious defensive coercion and it is the wrong
+    one: a dict stringifies to a non-empty repr, passes the empty-output gate,
+    and lands as a READY document whose body is `{'html': ...}` — titled from
+    an <h1> that does not exist, and forwardable to someone's leadership. A
+    garbage body is worse than none, because none is visible."""
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: _llm_result_with_output({"html": "<h1>T</h1><p>x</p>"}),
+    )
+    doc_id = _pending(gen_env)
+
+    gen.generate_into(company_id=gen_env, artifact_id=doc_id, kind="memo", task="t")
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "failed"
+    assert row["body_html"] == ""
+
+
+def test_the_test_double_is_the_real_gateway_type():
     """Belt and braces on the lesson: if a future edit swaps this file's stub
     back to a hand-rolled object, this fails. A double that defines its own
     interface can only prove the code agrees with the double."""

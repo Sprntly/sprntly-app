@@ -220,11 +220,23 @@ def generate_into(
         # answered, and the feature has not worked once since it shipped.
         #
         # `output` is typed `Any`: a dict when the call passes a json_schema, a
-        # str otherwise. This call passes none, so it is a str; coerced anyway
-        # rather than assumed, the same way call_index.py reads its own prose
-        # result.
-        raw = result.output if isinstance(result.output, str) else str(result.output)
-        html = sanitize_artifact_html(strip_code_fence(raw))
+        # str otherwise. This call passes none, so it is a str.
+        #
+        # A NON-STRING IS A FAILURE, NOT SOMETHING TO COERCE. `str(output)` was
+        # the obvious defensive move and it is the wrong one here: a dict would
+        # stringify to a non-empty repr, sail past the empty-output gate, and
+        # land as a READY document whose body is `{'html': '...'}` — titled
+        # from an <h1> that does not exist, and forwardable. The concrete way
+        # to get there is someone adding `json_schema=` to the call above.
+        # This module's own rule is that a generation which produced nothing
+        # usable fails honestly; a garbage body is worse than nothing, because
+        # nothing is visible and garbage looks finished.
+        if not isinstance(result.output, str):
+            raise TypeError(
+                "custom artifact generation expects text output, got "
+                f"{type(result.output).__name__}"
+            )
+        html = sanitize_artifact_html(strip_code_fence(result.output))
         if not html.strip():
             # A generation that produced nothing is a failure, not an empty
             # document: an empty document looks like the user's own blank page
