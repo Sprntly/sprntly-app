@@ -19,9 +19,10 @@
  * structurally so this module has no dependency on the main-chat screen.
  */
 
-import type { CSSProperties, MutableRefObject, ReactNode, Ref } from "react"
+import type { ChangeEvent, CSSProperties, MutableRefObject, ReactNode, Ref, RefObject } from "react"
 import type { ChatTranscriptTurn } from "../ChatTranscript"
 import type { ClarifyAnswer } from "../ClarifyQuestionsCard"
+import type { PinnedSkill } from "../ChatComposer"
 import type {
   AskResponse,
   ChatArtifactItem,
@@ -37,6 +38,33 @@ export type ChatSurfaceKind = "main" | "project_private" | "project_group"
  *  surfaces that feed real statuses land in a later run-status wave; today only
  *  the "no reply yet" arm of `reply.runStatus` is ever driven. */
 export type AgentRunStatus = "queued" | "running" | "done" | "failed" | "declined"
+
+// ── Normalized send command (Contract B) ────────────────────────────────────
+
+/** A resolved attachment: extracted text (client-read or server-parsed
+ *  markdown) plus the best-effort storage handle from `attachmentsApi.upload`.
+ *  `key` is null when the upload failed — the text still rides, the send never
+ *  throws. */
+export interface AttachmentRef {
+  name: string
+  content: string
+  key?: string | null
+  mime?: string | null
+  size?: number | null
+}
+
+/** The one normalized send command every chat surface produces. `text` is the
+ *  raw draft (pre-splice); the ridden query a route sees is
+ *  `pinnedSkill ? `${trigger} ${text}` : text` (the single splice rule, owned by
+ *  `buildSendCommand`/`spliceSkill`). `clientMessageId` is the idempotency spine
+ *  landing in `ask_jobs.client_message_id`. */
+export interface SendCommand {
+  text: string
+  pinnedSkill?: { id: string; trigger: string; label?: string } | null
+  attachments?: AttachmentRef[]
+  clientMessageId: string
+  scope: { surface: ChatSurfaceKind; projectId?: number | null }
+}
 
 // ── Forwarded imperative handle ─────────────────────────────────────────────
 
@@ -236,6 +264,32 @@ export interface ChatSurfaceDescriptor {
     onKeyDownCapture?: (e: KeyboardEvent) => boolean
     minChars?: number
     hint?: ReactNode
+    /** ADDITIVE: the un-stubbed project-composer feature bag. When PRESENT the
+     *  shell wires the seven previously-inert `!isMain` composer callbacks to
+     *  these (attachments, pinned-skill chip, the `+` menu). When ABSENT the
+     *  shell falls back to today's inert defaults (attachments `[]`, `pinnedSkill`
+     *  null, no-op handlers) — a LEDGERED, config-driven opt-out (a later
+     *  capability guard asserts every surface either provides `features` or names
+     *  the omission), never a silent dead affordance. A gated surface omits the
+     *  attachment/skill members it can't yet carry (the group chat until its
+     *  backend can carry them). */
+    features?: {
+      pinnedSkill: PinnedSkill | null
+      onRemoveSkill: () => void
+      attachments: { name: string }[]
+      onFileSelect: (e: ChangeEvent<HTMLInputElement>) => void
+      onRemoveAttachment: (index: number) => void
+      menuOpen: boolean
+      menuActiveIndex: number
+      onToggleMenu: () => void
+      onMenuActive: (index: number) => void
+      onMenuSelect: (index: number) => void
+      onCloseMenu: () => void
+      /** The composer's hidden file input — the controller owns it so the `+`
+       *  menu's "Attach a file" can click it. Absent → the shell keeps its own
+       *  internal ref (inert). */
+      fileInputRef?: RefObject<HTMLInputElement | null>
+    }
   }
 
   // ── Reply delivery ────────────────────────────────────────────────────────

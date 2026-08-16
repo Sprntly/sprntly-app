@@ -31,7 +31,7 @@ import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
 import { projectsApi, type GroupTurn } from "../../../../lib/api"
-import type { ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/types"
+import type { ComposerDraftApi, SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
 import { useRealtimeChannel, type PresenceIdentity } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -85,7 +85,10 @@ export interface UseProjectGroupThreadArgs {
 
 export interface UseProjectGroupThread {
   turns: ShellTurn[]
-  post: (content: string) => void
+  /** A bare string (shell fallback / engine suite) or a normalized `SendCommand`
+   *  (from the shared composer controller); forwards `.text` to `postGroupTurn`
+   *  today (its extra fields ride once the group route is widened to accept them). */
+  post: (input: string | SendCommand) => void
   loading: boolean
   posting: boolean
   error: string | null
@@ -100,6 +103,9 @@ export interface UseProjectGroupThread {
   typers: PresenceIdentity[]
   sendTyping: () => void
   degraded: boolean
+  /** Backend seam: the idempotent per-turn retry entrypoint. Undefined until the
+   *  backend wires it (so the run-status render offers NO Retry — dark). */
+  retryRun?: (turn: ShellTurn | null) => void
 }
 
 export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGroupThreadArgs): UseProjectGroupThread {
@@ -266,8 +272,13 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
   }, [projectId, applyTurns, degraded])
 
   const post = useCallback(
-    (rawContent: string) => {
-      const content = rawContent.trim()
+    // Thin `SendCommand` adapter. A bare string (the shell fallback / the engine
+    // suite) is forwarded as-is; a `SendCommand` (from the shared controller)
+    // forwards `.text` today — its pinnedSkill/attachments/clientMessageId ride
+    // the wire once `postGroupTurn` is widened to accept them (the api.ts
+    // signature is untouched here).
+    (input: string | SendCommand) => {
+      const content = (typeof input === "string" ? input : input.text).trim()
       if (content.length < DRAFT_MIN_CHARS) return
       // Same-content double-submit guard ONLY (a rapid double click/Enter of the
       // EXACT same draft) — deliberately weaker than main's `pendingSend` gate:
@@ -426,5 +437,9 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
     typers,
     sendTyping,
     degraded,
+    // Backend seam: the idempotent per-turn retry entrypoint. Undefined until the
+    // backend wires it — so the run-status render shows NO Retry (dark), not a
+    // broken affordance.
+    retryRun: undefined as ((turn: ShellTurn | null) => void) | undefined,
   }
 }

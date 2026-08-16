@@ -22,8 +22,9 @@
 // `formatTime(Date.now())` at render, so a settled turn's displayed time
 // drifted on every re-render).
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { ShellTurn } from "../../../shared/chat-shell/types"
+import type { SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
+import { spliceSkill } from "../../../shared/chatComposerController"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
@@ -108,8 +109,11 @@ export type UseProjectPrivateThread = {
    *  minted-at-settle for session turns. */
   turns: ShellTurn[]
   /** The classify → dispatch → ask send pipeline. Carries `{project_id,
-   *  conversation_id}` server-side; the shell never learns either id. */
-  send: (draft: string) => void
+   *  conversation_id}` server-side; the shell never learns either id. Accepts a
+   *  bare string (shell fallback / engine suite) or a normalized `SendCommand`
+   *  (from the shared composer controller — its pre-built pinned-skill splice +
+   *  extracted attachment context ride `/v1/ask`). */
+  send: (input: string | SendCommand) => void
   /** Deliberate stop: local abort + backend cancel of the pending job. */
   stop: () => void
   /** Closes the clarify → pick → apply loop with the chosen PRD id. */
@@ -349,9 +353,26 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
   }, [])
 
   const send = useCallback(
-    (draft: string) => {
-      const question = draft.trim()
+    // Thin `SendCommand` adapter. A bare string (the shell fallback / the engine
+    // suite) behaves exactly as before; a `SendCommand` (from the shared
+    // controller) rides its pre-built pinned-skill splice + extracted attachment
+    // context onto `/v1/ask` — the splice/extract is NOT re-implemented here.
+    (input: string | SendCommand) => {
+      const cmd = typeof input === "string" ? null : input
+      // The ridden query (skill splice) — display + classify + edit-instruction
+      // all use this; attachments ride ONLY the `/v1/ask` answer path below.
+      const question = (typeof input === "string" ? input : spliceSkill(input.pinnedSkill, input.text)).trim()
       if (question.length < DRAFT_MIN_CHARS || busy) return
+      // Extracted attachment context (scope boundary: the answer path only — the
+      // edit/generate/tickets/pick classify branches ignore attachments).
+      const attachmentCtx =
+        cmd?.attachments?.length
+          ? `\n\n[Attached files]\n${cmd.attachments
+              .map((a) => `--- ${a.name} ---\n${a.content}`)
+              .join("\n\n")
+              .slice(0, 100000)}`
+          : ""
+      const askQuestion = `${question}${attachmentCtx}`
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
       setSessionTurns((prev) => [
         ...prev,
@@ -366,7 +387,7 @@ export function useProjectPrivateThread(projectId: number | string): UseProjectP
       const runAsk = () =>
         ensureConversationId()
           .then((conversationId) =>
-            runAskGeneration(question, activeCompany, tabId, {
+            runAskGeneration(askQuestion, activeCompany, tabId, {
               project_id: Number(projectId),
               conversation_id: conversationId,
               isStopped: () => stoppedRef.current,

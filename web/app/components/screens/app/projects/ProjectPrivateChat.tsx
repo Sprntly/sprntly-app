@@ -19,6 +19,7 @@ import { useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ChatShell } from "../../../shared/chat-shell/ChatShell"
+import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
 import type { ChatSurfaceDescriptor, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { AskReplyBody } from "../../../shared/AskReplyBody"
@@ -89,6 +90,15 @@ function isHistoryTurn(turn: ShellTurn): boolean {
 
 export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote }: ProjectPrivateChatProps) {
   const engine = useProjectPrivateThread(projectId)
+  // The shared composer controller (un-stubs the project composer). Private
+  // rides `/v1/ask`, so BOTH attachments and skills go live: the built
+  // `SendCommand` (splice + extracted attachment context) hands to `engine.send`.
+  const composerCtl = useChatComposerController({
+    scope: { surface: "project_private", projectId: Number(projectId) },
+    onCommand: engine.send,
+    attachmentsEnabled: true,
+    skillsEnabled: true,
+  })
 
   const markdownUserBody = (turn: ShellTurn) => (
     <div data-testid={isHistoryTurn(turn) ? "ic-history-you" : "ic-msg-you"}>
@@ -214,10 +224,19 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote }: P
       stop: { enabled: true, onStop: engine.stop },
       escToStop: true,
       voice: "default",
-      attachments: false,
+      attachments: true,
+      features: composerCtl.features,
+      slashMenu: composerCtl.slashMenu,
+      onKeyDownCapture: composerCtl.onKeyDownCapture,
     },
-    reply: { mode: "streamed" },
-    send: { onSubmit: engine.send, pendingSendBubble: true },
+    reply: {
+      mode: "streamed",
+      // The FE agent run-status consume. Dark until the backend feeds real
+      // `ShellTurn.runStatus` (undefined → nothing); private has no retry seam
+      // (it re-asks via the turn), so no Retry is offered.
+      runStatus: (status, turn) => renderRunStatus({ status, turn, prefix: "ic" }),
+    },
+    send: { onSubmit: composerCtl.submit, pendingSendBubble: true },
   }
 
   return (

@@ -219,6 +219,10 @@ function ChatShellInner(
     // (private) keeps blocking on a pending turn.
     const pendingExists = projectTurns.some((t) => t.pending)
     const blocked = composer.busyMode === "never-block" ? false : pendingExists
+    // The additive composer feature bag. ABSENT → the previously
+    // hard-stubbed inert defaults, byte-for-byte (attachments `[]`, `pinnedSkill`
+    // null, no-op handlers) — a ledgered opt-out, never a live dead button.
+    const f = composer.features
 
     // A single group row (self=me / peer=other / agent) maps onto ONE
     // ChatBubble via the descriptor: the shell owns the per-kind wrapper class
@@ -386,14 +390,14 @@ function ChatShellInner(
             <ChatComposer
               busy={blocked}
               draft={draft}
-              pinnedSkill={null}
-              attachments={[]}
+              pinnedSkill={f?.pinnedSkill ?? null}
+              attachments={f?.attachments ?? []}
               hint={composer.hint ?? null}
-              menuOpen={false}
-              menuActiveIndex={0}
+              menuOpen={f?.menuOpen ?? false}
+              menuActiveIndex={f?.menuActiveIndex ?? 0}
               slashMenu={composer.slashMenu ?? null}
               composerRef={projectComposerRef}
-              fileInputRef={projectFileInputRef}
+              fileInputRef={f?.fileInputRef ?? projectFileInputRef}
               onInput={(e) => {
                 const value = e.target.value
                 const caret = e.target.selectionStart ?? value.length
@@ -414,13 +418,13 @@ function ChatShellInner(
               }}
               onSend={submit}
               onStop={() => composer.stop?.onStop?.()}
-              onToggleMenu={() => {}}
-              onMenuActive={() => {}}
-              onMenuSelect={() => {}}
-              onCloseMenu={() => {}}
-              onRemoveAttachment={() => {}}
-              onRemoveSkill={() => {}}
-              onFileSelect={() => {}}
+              onToggleMenu={f?.onToggleMenu ?? (() => {})}
+              onMenuActive={f?.onMenuActive ?? (() => {})}
+              onMenuSelect={f?.onMenuSelect ?? (() => {})}
+              onCloseMenu={f?.onCloseMenu ?? (() => {})}
+              onRemoveAttachment={f?.onRemoveAttachment ?? (() => {})}
+              onRemoveSkill={f?.onRemoveSkill ?? (() => {})}
+              onFileSelect={f?.onFileSelect ?? (() => {})}
               placeholder={composer.placeholder}
             />
           </div>

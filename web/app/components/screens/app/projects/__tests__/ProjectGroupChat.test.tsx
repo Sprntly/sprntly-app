@@ -181,14 +181,18 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     expect(within(agent).getByText("AGENT")).toBeTruthy()
   })
 
-  it("a human-to-human aside with no agent reply shows the stayed-out marker", async () => {
+  it("a human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "no mention here" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await screen.findByTestId("gc-msg-me")
-    expect(screen.getByTestId("gc-stayed-out")).toBeTruthy()
+    // The alarming "Sprntly stayed out — no reply yet" pill is gone; the interim
+    // `showStayedOut` stay-out case now renders the QUIET declined treatment
+    // (visually distinct from a failure).
+    expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
   it("does not show the stayed-out marker right after an agent turn", async () => {
@@ -500,8 +504,9 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
     })
 
     // While posting: the optimistic turn is the last (user-role) turn, but
-    // the badge must stay hidden — a reply may still be generating.
+    // the marker must stay hidden — a reply may still be generating.
     expect(screen.getByTestId("gc-msg-me")).toBeTruthy()
+    expect(screen.queryByTestId("gc-stayed-out-quiet")).toBeNull()
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
 
     await act(async () => {
@@ -509,8 +514,10 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       await Promise.resolve()
     })
 
-    // Posting has settled and no agent reply arrived — NOW it shows.
-    await waitFor(() => expect(screen.getByTestId("gc-stayed-out")).toBeTruthy())
+    // Posting has settled and no agent reply arrived — NOW the QUIET stay-out
+    // marker shows (the old alarming pill is gone).
+    await waitFor(() => expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy())
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 })
 

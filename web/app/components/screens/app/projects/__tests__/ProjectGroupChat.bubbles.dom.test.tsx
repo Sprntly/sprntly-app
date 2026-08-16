@@ -191,19 +191,22 @@ describe("ProjectGroupChat — viewport pins to newest turn after history load (
 })
 
 describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (AC2)", () => {
-  it("test_group_styled_nodes_not_bare — the presence roster, stayed-out badge, and (via the engine) error/typing nodes carry their GroupChatExtras classes", async () => {
+  it("test_group_styled_nodes_not_bare — the presence roster and (via the engine) error/typing nodes carry their GroupChatExtras classes; the stay-out case renders the QUIET declined node", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "solo aside" }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    // A human-only last turn with no reply → the stayed-out badge shows, styled.
-    const badge = await screen.findByTestId("gc-stayed-out")
-    expect(badge.className).toMatch(/stayedOut/)
-    expect(badge.querySelector("[class*='stayedOutDot']")).toBeTruthy()
-    expect(badge.querySelector("[class*='stayedOutLead']")).toBeTruthy()
-    // The relocated CSS families all live in GroupChatExtras now.
+    // A human-only last turn with no reply → the QUIET declined node renders (the
+    // honest replacement); the OLD alarming `gc-stayed-out` pill and its
+    // `.stayedOut*` classes are gone from the DOM.
+    const quiet = await screen.findByTestId("gc-stayed-out-quiet")
+    expect(quiet.className).toMatch(/run-quiet/)
+    expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
+    expect(document.querySelector("[class*='stayedOutDot']")).toBeNull()
+    // The relocated CSS families still live in GroupChatExtras (a later cleanup
+    // deletes the now-unrendered stayed-out machinery).
     const extrasCss = readFileSync(join(__dirname, "../GroupChatExtras.module.css"), "utf8")
-    for (const cls of [".roster", ".rosterDot", ".stayedOut", ".stateBadge", ".typingIndicator", ".error", ".postingWait"]) {
+    for (const cls of [".roster", ".rosterDot", ".stateBadge", ".typingIndicator", ".error", ".postingWait"]) {
       expect(extrasCss).toContain(cls)
     }
   })
