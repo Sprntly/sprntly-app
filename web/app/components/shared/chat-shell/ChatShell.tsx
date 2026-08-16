@@ -273,6 +273,7 @@ function ChatShellInner(
         turnId: turn.id,
         dataTurnId: turn.id,
         dataTestId: isMe ? "gc-msg-me" : "gc-msg-other",
+        // `gcMsgOther` is a real class in ChatShell.module.css.
         wrapperClassName: `bc-turn ${shellStyles.gcMsg} ${isMe ? shellStyles.gcMsgMe : shellStyles.gcMsgOther}`,
         showAgent: false,
         agentName: transcript.agentName,

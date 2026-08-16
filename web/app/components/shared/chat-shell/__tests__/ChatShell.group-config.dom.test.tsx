@@ -11,6 +11,8 @@
 // `scrollToTurn` `data-turn-id` anchors, the frozen contract-only seams, and the
 // main no-op re-proof.
 import * as React from "react"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -94,6 +96,18 @@ describe("ChatShell group config", () => {
 
     // Every mapped turn carries a stable data-turn-id.
     expect(container.querySelectorAll("[data-turn-id]").length).toBe(3)
+  })
+
+  it("test_group_other_row_no_undefined_class (AC7)", () => {
+    render(<ChatShell descriptor={groupDescriptor()} turns={[selfTurn, peerTurn, agentTurn]} />)
+    // Vite's CSS-module test transform hashes ANY property access (even an
+    // undefined export), so a jsdom className check alone can't catch a
+    // missing rule — assert directly against the CSS source, the same shape
+    // production bundling actually enforces.
+    const other = screen.getByTestId("gc-msg-other")
+    expect(other.className.split(/\s+/)).not.toContain("undefined")
+    const shellCssSrc = readFileSync(join(__dirname, "../ChatShell.module.css"), "utf8")
+    expect(shellCssSrc).toMatch(/\.gcMsgOther\s*\{/)
   })
 
   it("test_shell_never_block_sends_with_pending_turn_via_enter_and_click (AC3)", () => {
