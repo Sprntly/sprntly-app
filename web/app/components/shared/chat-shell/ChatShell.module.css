@@ -12,3 +12,29 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+/* A `clarify` reply's PRD choices (2+-PRD disambiguation) — rendered by the
+   shell for project-private surfaces from `ShellTurn.pickOptions`. Lives here,
+   shell-owned, because the shell renders these options and its module graph
+   forbids importing the project-side extras module. Tokens only. */
+.clarifyOptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.clarifyOption {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.clarifyOption:hover {
+  background: var(--surface-3);
+}

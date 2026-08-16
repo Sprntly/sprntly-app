@@ -83,7 +83,7 @@ vi.mock("../../../../../context/CompanyContext", () => ({
 // The component now reads the classifier flag (`chatIntentEnvelopeOn`) to
 // decide whether to classify-then-dispatch at all. Explicit OFF here keeps
 // every assertion in this file byte-identical to pre-classifier behaviour —
-// same stub shape `ProjectIndividualChat.test.tsx` uses.
+// same stub shape `ProjectPrivateChat.test.tsx` uses.
 vi.mock("../../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => ({
     loading: false, profile: null,
@@ -139,7 +139,7 @@ vi.mock("../useRealtimeChannel", () => ({
 }))
 
 import { ProjectDetailScreen } from "../ProjectDetailScreen"
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 import type {
   ProjectDetail,
   ArtifactItem,
@@ -322,7 +322,7 @@ describe("brief-turn affordance — live update (AC-6)", () => {
     // Completed → the assignee has no actions yet (terminal, per LEGAL_ACTIONS).
     assignedRows = [row({ delegation_id: 5, delivered_turn_id: 7, status: "completed", bucket: "done" })]
 
-    render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     await waitFor(() => expect(ledgerMock).toHaveBeenCalled())
     expect(screen.queryByTestId("delegation-action-in_progress")).toBeNull()
@@ -343,7 +343,7 @@ describe("brief-turn affordance — live update (AC-6)", () => {
     individualTurnsMock.mockResolvedValue([iturn({ id: 7 })])
     assignedRows = [row({ delegation_id: 5, delivered_turn_id: 7, status: "assigned", bucket: "open" })]
 
-    render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     await waitFor(() => expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy())
 
@@ -362,7 +362,7 @@ describe("brief-turn affordance — live update (AC-6)", () => {
 describe("non-breakage (AC-10)", () => {
   it("test_send_path_and_brief_delivered_unchanged: brief.delivered still appends and send still runs", async () => {
     individualTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(101))
 
     // R1-05 brief.delivered still appends a live turn.
@@ -387,8 +387,8 @@ describe("non-breakage (AC-10)", () => {
     )
   })
 
-  it("ProjectIndividualChat subscribes only its own per-user channel (AC-9)", async () => {
-    render(React.createElement(ProjectIndividualChat, { projectId: 101 }))
+  it("ProjectPrivateChat subscribes only its own per-user channel (AC-9)", async () => {
+    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(101))
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
     expect(topics.every((t) => t === "project:101:user:u1")).toBe(true)

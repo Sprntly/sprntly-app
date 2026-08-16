@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// ProjectIndividualChat — private classify→dispatch (AD-P13a / AC14). With
+// ProjectPrivateChat — private classify→dispatch (AD-P13a / AC14). With
 // the classifier flag ON, a send classifies via the project-scoped
 // `projectsApi.resolveIntent` (server-resolves the edit target over this
 // project's own PRDs — NOT `chatIntentApi.resolve(question, {})`, which
@@ -9,7 +9,7 @@
 // `edit_prd` hits the project chat-edit route, `generate_prd`/
 // `generate_tickets` hit the generate routes THEN auto-attach, `answer`
 // (and any classify failure) falls open to the prior `/v1/ask`-only send —
-// see `ProjectIndividualChat.test.tsx` for the flag-OFF / byte-identical-
+// see `ProjectPrivateChat.test.tsx` for the flag-OFF / byte-identical-
 // send suite.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
@@ -101,7 +101,7 @@ vi.mock("../../../../../lib/auth", () => ({
   useAuth: () => ({ kind: "authed" as const, user: { id: "u1" } }),
 }))
 // Pre-existing, out-of-scope gap this ticket does NOT fix (verified against
-// unmodified origin/release/projects@ca2f6f92 — `ProjectIndividualChat.test.
+// unmodified origin/release/projects@ca2f6f92 — `ProjectPrivateChat.test.
 // tsx`'s own component-rendering tests are ALREADY red there): the always-
 // mounted `ProjectPrdPatchBanner` (the retired propose/review PRD-edit
 // banner, left in place for a later ticket to delete) calls `useNavigation()`
@@ -112,7 +112,7 @@ vi.mock("../../../../../context/NavigationContext", () => ({
   useNavigation: () => ({ showToast: vi.fn() }),
 }))
 
-import { ProjectIndividualChat } from "../ProjectIndividualChat"
+import { ProjectPrivateChat } from "../ProjectPrivateChat"
 
 beforeEach(() => {
   runAskGenerationMock.mockReset()
@@ -129,7 +129,7 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 async function sendMessage(text: string) {
-  render(React.createElement(ProjectIndividualChat, { projectId: 202 }))
+  render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
   const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   await act(async () => {
     fireEvent.change(textarea, { target: { value: text } })
@@ -139,7 +139,7 @@ async function sendMessage(text: string) {
   })
 }
 
-describe("ProjectIndividualChat — classify→dispatch (flag on)", () => {
+describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
   it("edit_prd calls the project route, not /v1/ask", async () => {
     resolveIntentMock.mockResolvedValue({
       intent: "edit_prd", confidence: 0.9, task: null,
