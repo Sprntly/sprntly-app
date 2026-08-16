@@ -63,6 +63,7 @@ import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { mapMainTurns } from "./mapMainTurns"
+import { ChatShell } from "../../shared/chat-shell/ChatShell"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -6818,13 +6819,25 @@ export function ChatScreen() {
             // header + finding cards + composer + content-panel wiring).
             <BriefChat />
           ) : (
-          <main className={`od-center ${showThreadView ? "od-center--thread" : "od-center--landing"}`}>
-            <div
-              className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}
-              ref={threadScrollRef}
-              onScroll={handleThreadScroll}
-            >
-              {!showThreadView ? (
+          (() => {
+            const mainTurns = mapMainTurns(thread, {
+              animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
+              busy, activeTab, name, userInitials, skillForQuery,
+              ticketSetActionState, showInsightMsg, chatEvidenceExists,
+              chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
+              inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
+              clarifyPopupOpen, pendingClarifyTurn,
+              handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
+              openReportByTitle, openArtifactInPanel, openChatArtifactItem,
+              handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
+              handleViewPrototype, handlePrototypeSettled,
+            })
+            // The main-chat shell region, rendered through the shared <ChatShell>
+            // in controlled mode: turns are pre-mapped here, refs and scroll
+            // behaviour stay host-side, and the composer, pending-send bubble, and
+            // dock extras are host-rendered and passed as slots. A surface:"main"
+            // descriptor is a structural no-op — no project seam is reachable.
+            const landingNode = (
                 <div className="home-landing-eyeline">
                   <div className="od-center-inner od-center-inner--home">
                     <div className="chat-greeting">
@@ -6871,33 +6884,8 @@ export function ChatScreen() {
                     ) : null}
                   </div>
                 </div>
-              ) : (
-                <div className="bc-scroll">
-                  <div className="bc-thread" ref={setThreadContentEl}>
-                    {(() => {
-                      // The turn-render region, extracted onto the shared
-                      // `<ChatTranscript>`/`<ChatBubble>` leaves: every
-                      // in-flight signal below is computed HERE (the shell)
-                      // and handed down as a prop, never read back out of a
-                      // closure inside the leaf. Comments that used to sit
-                      // beside the inline JSX now sit beside the prop that
-                      // carries the same fact.
-                      const turns: ChatTranscriptTurn[] = mapMainTurns(thread, {
-                        animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
-                        busy, activeTab, name, userInitials, skillForQuery,
-                        ticketSetActionState, showInsightMsg, chatEvidenceExists,
-                        chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
-                        inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
-                        clarifyPopupOpen, pendingClarifyTurn,
-                        handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
-                        openReportByTitle, openArtifactInPanel, openChatArtifactItem,
-                        handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
-                        handleViewPrototype, handlePrototypeSettled,
-                      })
-                      return (
-                        <ChatTranscript
-                          turns={turns}
-                          leading={
+            )
+            const leadingNode = (
                             <>
                               {/* Insight message — for a HEADER open, the chat opens with its
                                   insight as the agent's first message (a pinned heading at the
@@ -6925,18 +6913,8 @@ export function ChatScreen() {
                                 />
                               ) : null}
                             </>
-                          }
-                        />
-                      )
-                    })()}
-                    {/* PENDING SEND — the user's message plus a thinking
-                        skeleton, rendered from the send's own commit while the
-                        dispatch decision (POST /v1/chat/intent) is still in
-                        flight. Not a thread turn: whichever branch wins seeds
-                        its own real turn and clears this in the same commit.
-                        Attachment chips are name-only and inert here, exactly
-                        as the optimistic turn renders them before extraction. */}
-                    {pendingSendHere && pendingSend ? (
+            )
+            const pendingSendNode = pendingSendHere && pendingSend ? (
                       <ChatBubble
                         turnId="pending-send"
                         dataTestId="pending-send"
@@ -6966,26 +6944,9 @@ export function ChatScreen() {
                           />
                         }
                       />
-                    ) : null}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* The composer renders whenever the thread view is shown — including
-                an insight-bound tab whose thread is still empty (opened from the
-                brief/ideation): the user must be able to talk to Sprntly about that
-                PRD right away. `hasThread` alone hid it there; `showThreadView`
-                (hasThread || an insight message) restores it. A plain empty chat
-                still uses the landing composer (showThreadView is false), so
-                there's never a double composer. */}
-            {showThreadView ? (
-              <div className="bc-dock">
-                {/* The clarify gate's questions as a stepper popup over the
-                    bottom of the chat — one question at a time, click through,
-                    the batch submits on the last answer. Same landing point as
-                    the inline card and the composer (submitClarifyAnswers), so
-                    all three answering surfaces stay interchangeable. */}
+                    ) : null
+            const dockExtras = (
+              <>
                 {clarifyPopupOpen && pendingClarifyTurn?.clarify ? (
                   <QuestionPopup
                     questions={pendingClarifyTurn.clarify.map((cq) => ({
@@ -7056,10 +7017,43 @@ export function ChatScreen() {
                   disabled={busy}
                   onPick={(prompt) => { void submitAsk(prompt) }}
                 />
-                {renderComposer(false)}
-              </div>
-            ) : null}
-          </main>
+              </>
+            )
+            return (
+              <ChatShell
+                descriptor={{
+                  surface: "main",
+                  frame: {
+                    mode: showThreadView ? "thread" : "landing",
+                    landing: landingNode,
+                    viewportClassName: "od-center-scroll",
+                  },
+                  refs: {
+                    viewportRef: threadScrollRef,
+                    onViewportScroll: handleThreadScroll,
+                    contentColumnRef: setThreadContentEl,
+                  },
+                  transcript: {
+                    agentName: AGENT_NAME,
+                    agentBadge: "Product Coworker",
+                    timestamps: "none",
+                    leading: leadingNode,
+                  },
+                  composer: {
+                    busyMode: "block-while-asking",
+                    stop: { enabled: true, onStop: handleStopAsk },
+                    attachments: true,
+                  },
+                  reply: { mode: "streamed" },
+                  send: { onSubmit: handleComposerSubmit, pendingSendBubble: true },
+                  dock: { aboveComposer: dockExtras },
+                }}
+                turns={mainTurns}
+                pendingSend={pendingSendNode}
+                composerNode={renderComposer(false)}
+              />
+            )
+          })()
           )}
         </div>
       </div>
