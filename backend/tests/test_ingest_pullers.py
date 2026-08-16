@@ -1,6 +1,7 @@
 """Tests for the Phase-1 ingestion pipeline: pullers → RawRecord → runner → KG."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -305,6 +306,118 @@ def test_fireflies_graphql_error_raises(monkeypatch):
     with patch.object(fireflies.requests, "post", return_value=FakeResp()):
         with pytest.raises(RuntimeError, match="GraphQL error"):
             list(fireflies.pull("key"))
+
+
+def _fireflies_pages(monkeypatch, pages):
+    """Stand in for `_post`, returning one page per call and recording the
+    variables each was asked for."""
+    from app.kg_ingest.pullers import fireflies
+
+    seen: list[dict] = []
+
+    def _post(api_key, query, variables):
+        seen.append(variables)
+        return pages[len(seen) - 1] if len(seen) <= len(pages) else []
+
+    monkeypatch.setattr(fireflies, "_post", _post)
+    return seen
+
+
+def _fireflies_cursor(monkeypatch, cursor):
+    """Pin the stored KG cursor and capture what the pull stamps back."""
+    from app.kg_ingest.pullers import fireflies
+
+    stamped: dict = {}
+    monkeypatch.setattr(fireflies, "_kg_cursor", lambda eid: cursor)
+    monkeypatch.setattr(
+        fireflies, "_stamp_kg_cursor",
+        lambda eid, when: stamped.update(eid=eid, when=when),
+    )
+    return stamped
+
+
+def test_fireflies_first_kg_sync_pages_through_history(monkeypatch):
+    """The 2026-08-15 report: a workspace with years of transcripts answered
+    "no signals in synced data" for every week older than ~3 days. This path
+    took the newest 25 with no `skip`, so one page was all it could EVER see.
+    A first sync now walks pages until the window is exhausted."""
+    from app.kg_ingest.pullers import fireflies
+
+    page1 = [{"id": f"m{i}", "title": f"Call {i}", "date": 1780000000,
+              "summary": {"overview": "o"}} for i in range(50)]
+    page2 = [{"id": "m50", "title": "Oldest", "date": 1770000000,
+              "summary": {"overview": "o"}}]
+    seen = _fireflies_pages(monkeypatch, [page1, page2])
+    stamped = _fireflies_cursor(monkeypatch, None)
+
+    recs = list(fireflies.pull("key", enterprise_id="co-1"))
+
+    assert len(recs) == 51
+    assert recs[-1].external_id == "m50"
+    # It paged: second request skipped the first full page.
+    assert [v["skip"] for v in seen] == [0, 50]
+    # ...and reached back over the history window, not just the newest days.
+    assert seen[0]["fromDate"] is not None
+    # The cursor is stamped so the NEXT sync is incremental.
+    assert stamped["eid"] == "co-1"
+
+
+def test_fireflies_later_kg_syncs_only_ask_for_what_is_new(monkeypatch):
+    """Asking for a year on every 20-minute cycle is what exhausted the
+    Fireflies daily quota through `call_index` the day before (429 until the
+    next UTC midnight). With a cursor stored, the pull asks only for the new
+    window — one page, one request."""
+    from app.kg_ingest.pullers import fireflies
+
+    last = datetime(2026, 8, 15, 12, 0, tzinfo=timezone.utc)
+    seen = _fireflies_pages(monkeypatch, [[{
+        "id": "m1", "title": "New call", "date": 1780000000,
+        "summary": {"overview": "o"},
+    }]])
+    _fireflies_cursor(monkeypatch, last)
+
+    recs = list(fireflies.pull("key", enterprise_id="co-1"))
+
+    assert len(recs) == 1 and len(seen) == 1
+    asked_from = datetime.fromisoformat(seen[0]["fromDate"])
+    # The last success minus the deliberate late-arrival overlap.
+    assert asked_from == last - timedelta(days=fireflies._INCREMENTAL_OVERLAP_DAYS)
+
+
+def test_fireflies_a_failed_page_leaves_the_cursor_alone(monkeypatch):
+    """A cursor advanced past a window that failed would skip those meetings
+    permanently — nothing ever comes back for them."""
+    from app.kg_ingest.pullers import fireflies
+
+    def _boom(api_key, query, variables):
+        raise RuntimeError("Fireflies GraphQL error: rate limited")
+
+    monkeypatch.setattr(fireflies, "_post", _boom)
+    stamped = _fireflies_cursor(monkeypatch, None)
+
+    with pytest.raises(RuntimeError):
+        list(fireflies.pull("key", enterprise_id="co-1"))
+
+    assert stamped == {}
+
+
+def test_fireflies_an_explicit_window_does_not_touch_the_cursor(monkeypatch):
+    """A backfill script asking for its own window must not move the
+    incremental watermark the scheduled sync depends on."""
+    from app.kg_ingest.pullers import fireflies
+
+    seen = _fireflies_pages(monkeypatch, [[{
+        "id": "m1", "title": "Old call", "date": 1770000000,
+        "summary": {"overview": "o"},
+    }]])
+    stamped = _fireflies_cursor(monkeypatch, datetime(2026, 8, 15, tzinfo=timezone.utc))
+
+    since = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    recs = list(fireflies.pull("key", enterprise_id="co-1", since=since))
+
+    assert len(recs) == 1
+    assert datetime.fromisoformat(seen[0]["fromDate"]) == since
+    assert stamped == {}
 
 
 # ---------- confluence puller ----------

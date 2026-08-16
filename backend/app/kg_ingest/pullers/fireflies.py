@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Iterator, Optional
 
 import requests
@@ -36,8 +36,28 @@ logger = logging.getLogger(__name__)
 
 URL = "https://api.fireflies.ai/graphql"
 _TIMEOUT = 30
-_LIMIT = 25            # KG-ingest cap — most recent meetings, pilot-scale
+# THE FIRST SYNC's history ceiling. Was 25 with no pagination — "pilot-scale",
+# and the reason a workspace with years of Fireflies history answered "no
+# signals in synced data" for every week older than about three days: at ~10
+# meetings a day the newest 25 transcripts ARE three days, the ledger deduped
+# all of them on every later cycle, and nothing older ever entered the graph
+# (reported 2026-08-15). 500 matches `call_index._SYNC_LIMIT`, so the two
+# Fireflies surfaces cover the same history rather than disagreeing about how
+# much of it exists.
+_LIMIT = 500
+# How far back the FIRST sync reaches. A ceiling on cost, not on interest: each
+# fresh record costs one extraction call, so this bounds what a new connection
+# can spend at once. Later syncs are incremental and ignore it.
+_HISTORY_DAYS = 365
 _PAGE_SIZE = 50        # Fireflies API max per transcripts query — paginate past it
+# Re-fetch overlap on an incremental sync, matching `call_index`'s: a meeting
+# whose transcript lands late must not fall in the gap between two cursors.
+# Costs nothing — the ledger dedups by content hash.
+_INCREMENTAL_OVERLAP_DAYS = 1
+#: Connection-config key holding the instant the last KG pull completed. Read
+#: and advanced exactly like Zoom's `CONFIG_LAST_SYNCED_UNTIL`; absent means
+#: "never synced", which is what triggers the one-time history backfill.
+CONFIG_KG_SYNCED_UNTIL = "kg_last_synced_until"
 # On-demand digest cap — the safety ceiling across ALL pages, not a page size.
 # A busy quarter is ~150 calls; 300 leaves headroom while bounding a runaway
 # window. The digest runner discloses when a window hits this cap.
@@ -47,10 +67,12 @@ _DIGEST_LIMIT = 300
 # pick 2–3 strong quotes per theme, not the whole transcript.
 _QUOTES_PER_CALL = 60
 
-# Distilled-only query (KG-ingest path) — no `sentences`, per §6.
+# Distilled-only query (KG-ingest path) — no `sentences`, per §6. `skip` is
+# what lets a first sync walk past the API's 50-per-query ceiling; without it
+# this path could never see more than one page however high the cap was set.
 _QUERY = """
-query Transcripts($limit: Int, $fromDate: DateTime, $toDate: DateTime) {
-  transcripts(limit: $limit, fromDate: $fromDate, toDate: $toDate) {
+query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
+  transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
     id
     title
     date
@@ -186,38 +208,143 @@ def _post(api_key: str, query: str, variables: dict) -> list[dict]:
     return (body.get("data") or {}).get("transcripts", []) or []
 
 
+def _record_from(t: dict) -> RawRecord:
+    """One transcript's distilled layer as a RawRecord. No sentences, per §6."""
+    s = t.get("summary") or {}
+    text_parts = []
+    if s.get("overview"):
+        text_parts.append(f"summary: {s['overview']}")
+    if s.get("action_items"):
+        text_parts.append(f"action items: {s['action_items']}")
+    return RawRecord(
+        provider="fireflies",
+        kind="meeting",
+        external_id=str(t["id"]),
+        title=t.get("title", ""),
+        text="\n".join(text_parts)[:3000],
+        properties={
+            "participants": t.get("participants") or [],
+            "keywords": s.get("keywords") or [],
+        },
+        timestamp=_normalize_date(t.get("date")),
+    )
+
+
+def _kg_cursor(enterprise_id: Optional[str]) -> Optional[datetime]:
+    """When this company's KG pull last completed, or None if it never has.
+
+    Best-effort: an unreadable connection row reads as "never synced", which
+    costs one wide backfill rather than silently skipping history."""
+    if not enterprise_id:
+        return None
+    try:
+        from app import db
+
+        row = db.get_connection(enterprise_id, PROVIDER) or {}
+        raw = (row.get("config") or {}).get(CONFIG_KG_SYNCED_UNTIL)
+        if not raw:
+            return None
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001 — unknown cursor → full backfill, never a skip
+        logger.warning("fireflies: could not read KG cursor for %s",
+                       enterprise_id, exc_info=True)
+        return None
+
+
+def _stamp_kg_cursor(enterprise_id: Optional[str], when: datetime) -> None:
+    """Advance the cursor after a completed pull. A MERGE via
+    `patch_connection_config`, never a wholesale write — the same config holds
+    the api key payload's neighbours, and replacing it would take them with it.
+
+    Best-effort: a pull that yielded records must not be reported as failed
+    because the bookkeeping did not land."""
+    if not enterprise_id:
+        return
+    try:
+        from app import db
+
+        db.patch_connection_config(
+            enterprise_id, PROVIDER, {CONFIG_KG_SYNCED_UNTIL: _iso(when)}
+        )
+    except Exception:  # noqa: BLE001 — bookkeeping must not fail a good sync
+        logger.warning("fireflies: could not stamp KG cursor for %s",
+                       enterprise_id, exc_info=True)
+
+
 def pull(
     api_key: str,
     *,
+    enterprise_id: Optional[str] = None,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     limit: int = _LIMIT,
 ) -> Iterator[RawRecord]:
     """KG-ingest pull: distilled summaries → RawRecords (no raw sentences, §6).
 
-    `since`/`until` scope the window (omit for "most recent `limit`"); the
-    weekly sync passes none and gets the historical default behaviour."""
-    for t in _post(api_key, _QUERY, {
-        "limit": limit, "fromDate": _iso(since), "toDate": _iso(until),
-    }):
-        s = t.get("summary") or {}
-        text_parts = []
-        if s.get("overview"):
-            text_parts.append(f"summary: {s['overview']}")
-        if s.get("action_items"):
-            text_parts.append(f"action items: {s['action_items']}")
-        yield RawRecord(
-            provider="fireflies",
-            kind="meeting",
-            external_id=str(t["id"]),
-            title=t.get("title", ""),
-            text="\n".join(text_parts)[:3000],
-            properties={
-                "participants": t.get("participants") or [],
-                "keywords": s.get("keywords") or [],
-            },
-            timestamp=_normalize_date(t.get("date")),
+    PAGINATED, and BOUNDED BY A CURSOR — both new on 2026-08-16, and the two
+    halves of the same fix:
+
+      * Paginated, because the API caps a transcripts query at 50 and this
+        path never passed `skip`. However high `limit` went, one page was all
+        it could ever see, so a year of history was unreachable by
+        construction.
+      * Cursor-bounded, because the naive way to reach that history — ask for
+        a year on every sync — is what exhausted a tenant's daily Fireflies
+        quota through `call_index` the day before (429 `too_many_requests`
+        until the next UTC midnight, taking every other Fireflies read down
+        with it). The FIRST sync for a connection walks up to `limit`
+        transcripts back `_HISTORY_DAYS`; every later sync asks only for what
+        landed since the last one, which is one page and one request.
+
+    `since`/`until` still override explicitly, for a caller that wants a
+    specific window (and a backfill script that wants a wider one).
+    """
+    explicit_window = since is not None or until is not None
+    cursor = None if explicit_window else _kg_cursor(enterprise_id)
+    started = datetime.now(timezone.utc)
+
+    if not explicit_window:
+        if cursor is not None:
+            since = cursor - timedelta(days=_INCREMENTAL_OVERLAP_DAYS)
+        else:
+            # First sync for this connection: the one-time history backfill.
+            since = started - timedelta(days=_HISTORY_DAYS)
+            logger.info(
+                "fireflies: first KG sync for %s — backfilling up to %d "
+                "transcripts over the last %d days",
+                enterprise_id, limit, _HISTORY_DAYS,
+            )
+
+    fetched = 0
+    skip = 0
+    while fetched < limit:
+        page_size = min(_PAGE_SIZE, limit - fetched)
+        page = _post(api_key, _QUERY, {
+            "limit": page_size, "skip": skip,
+            "fromDate": _iso(since), "toDate": _iso(until),
+        })
+        for t in page:
+            yield _record_from(t)
+        fetched += len(page)
+        if len(page) < page_size:   # short page → window exhausted
+            break
+        skip += len(page)
+
+    if fetched >= limit:
+        # Say so rather than implying the window is covered — the next sync
+        # resumes from the cursor, so the OLDEST tail is what stays unread.
+        logger.info(
+            "fireflies: KG pull for %s hit the %d-transcript cap; older "
+            "history in this window was not fetched",
+            enterprise_id, limit,
         )
+
+    # Only after a clean walk. An exception above propagates and leaves the
+    # cursor where it was, so the next run retries the same window instead of
+    # stepping over meetings nothing would ever come back for.
+    if not explicit_window:
+        _stamp_kg_cursor(enterprise_id, started)
 
 
 def fetch_calls(
