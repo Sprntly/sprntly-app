@@ -240,6 +240,67 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     expect(persistIndividualTurnsMock).not.toHaveBeenCalled()
   })
 
+  it("a list_artifacts envelope renders the clickable artifact cards from the envelope's rows, no /v1/ask", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "list_artifacts", confidence: 0.9, task: null, instruction: null,
+      reason: "listing", source: "llm", prd_id: null, prd_title: null,
+      list_kind: "prd", list_mode: "items",
+      artifact_list: [
+        {
+          type: "prd", id: 501, title: "Dark mode", status: "ready",
+          created_at: "2026-08-15T00:00:00Z", brief_anchored: false,
+          source: {}, open: { prd_id: 501 },
+        },
+        {
+          type: "prd", id: 502, title: "Checkout", status: "ready",
+          created_at: "2026-08-14T00:00:00Z", brief_anchored: false,
+          source: {}, open: { prd_id: 502 },
+        },
+      ],
+    })
+
+    await sendMessage("what are my PRDs?")
+
+    await waitFor(() => expect(screen.getByTestId("artifact-list-cards")).toBeTruthy())
+    expect(screen.getAllByTestId("artifact-list-card")).toHaveLength(2)
+    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("2 newest PRDs")
+    expect(runAskGenerationMock).not.toHaveBeenCalled()
+    // Prose persists via the owned turn-pair route; the cards are a live
+    // affordance riding the session turn (main's persist-the-prose contract).
+    await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
+  })
+
+  it("an ambiguous open_artifact envelope renders the candidate chips, no /v1/ask", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "open_artifact", confidence: 0.9, task: null, instruction: null,
+      reason: "open", source: "llm", prd_id: null, prd_title: null,
+      artifact_type: "prd", artifact_query: "checkout",
+      open: {
+        status: "ambiguous", artifact_type: "prd", query: "checkout", artifact: null,
+        candidates: [
+          {
+            type: "prd", id: 501, title: "Checkout v1", status: "ready",
+            prd_id: 501, brief_id: null, insight_index: null,
+            brief_anchored: false, week_label: null,
+          },
+          {
+            type: "prd", id: 502, title: "Checkout v2", status: "ready",
+            prd_id: 502, brief_id: null, insight_index: null,
+            brief_anchored: false, week_label: null,
+          },
+        ],
+      },
+    })
+
+    await sendMessage("open the checkout PRD")
+
+    await waitFor(() => expect(screen.getByTestId("open-artifact-chips")).toBeTruthy())
+    expect(screen.getAllByTestId("open-artifact-chip")).toHaveLength(2)
+    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("more than one PRD")
+    expect(runAskGenerationMock).not.toHaveBeenCalled()
+    await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
+  })
+
   it("a classify failure falls open to the prior /v1/ask-only send", async () => {
     resolveIntentMock.mockRejectedValue(new Error("network down"))
     runAskGenerationMock.mockResolvedValue({

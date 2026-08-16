@@ -26,24 +26,16 @@ import { ChatShell } from "../../../shared/chat-shell/ChatShell"
 import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
 import type { ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
-import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
-import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { AGENT_NAME } from "../../../../lib/agent"
-import { type AskResponse, type OpenArtifactCandidate } from "../../../../lib/api"
+import { type ChatArtifactItem, type OpenArtifactCandidate } from "../../../../lib/api"
+import { artifactItemAsCandidate } from "./artifactCandidates"
 import { personAvatarStyle } from "./avatarColor"
 import { useProjectGroupThread } from "./useProjectGroupThread"
 import { useMentionPicker, MentionBubble } from "./useMentionPicker"
 import extras from "./GroupChatExtras.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message the team, or @Sprntly to hand it a task…"
-
-/** A group turn's plain `content` shaped into the minimal `AskResponse`
- *  `AskReplyBody` needs — group turns carry no citations/key-points/skill
- *  metadata (that belongs to `/v1/ask`), so those are the honest empty values. */
-function toAskResponse(content: string): AskResponse {
-  return { answer: content, key_points: [], citations: [], confidence: 1, unanswered: "" }
-}
 
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
@@ -129,20 +121,17 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       multiParty: true,
       timestamps: "fromTurn",
       renderUserBody: (turn: ShellTurn) => <MentionBubble content={turn.content ?? ""} />,
-      renderAgentBody: (turn: ShellTurn) => <AskReplyBody reply={toAskResponse(turn.content ?? "")} />,
+      // NO `renderAgentBody` override: agent turns render through
+      // `ChatBubble`'s native reply ladder (the engine feeds `ShellTurn.reply`
+      // — the persisted full reply, or the plain content shaped into one) so
+      // the same open-candidate chips / artifact-list cards main chat renders
+      // appear here, fed by the same envelope-shaped data.
       // The invoked-by / detected trigger badge was removed from the UI —
       // it's debug-y internal gate state, not user-facing. The decision is
       // still durably recorded server-side via `trigger_kind`, so nothing is
       // lost for debugging.
-      // Open-artifact chips — a LIVE, backend-tested feature (Gate-1 #2). The
-      // engine exposes `footerData.openCandidates` on agent turns for exactly
-      // this. Wired through the host-supplied `turnFooter` closure so
-      // `ChatShell.tsx` stays untouched.
-      turnFooter: (turn: ShellTurn) => {
-        if (turn.author.kind !== "agent") return null
-        const fd = turn.footerData as { openCandidates?: OpenArtifactCandidate[] } | undefined
-        return <OpenArtifactChips candidates={fd?.openCandidates ?? []} onOpen={(c) => onOpenArtifact?.(c)} />
-      },
+      onOpenCandidate: (c: OpenArtifactCandidate) => onOpenArtifact?.(c),
+      onOpenArtifactItem: (item: ChatArtifactItem) => onOpenArtifact?.(artifactItemAsCandidate(item)),
       // The posting-wait node rides the transcript trailing slot (engine-fed,
       // styled by GroupChatExtras).
       trailing: engine.postingWaitNode,

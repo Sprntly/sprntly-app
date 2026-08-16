@@ -254,6 +254,11 @@ function ChatShellInner(
     const mapMultiParty = (turn: ShellTurn): ChatTranscriptTurn => {
       const time = turn.createdAt != null ? formatShellTime(turn.createdAt) : null
       if (turn.author.kind === "agent") {
+        // A host-supplied body still overrides (the escape hatch); WITHOUT
+        // one, the turn's own data feeds ChatBubble's NATIVE reply ladder —
+        // answer body plus the same open-candidate chips / artifact-list
+        // cards main renders, from the same envelope-shaped data.
+        const hostBody = transcript.renderAgentBody?.(turn)
         return {
           turnId: turn.id,
           dataTurnId: turn.id,
@@ -264,7 +269,15 @@ function ChatShellInner(
           agentTimestamp: time,
           agentHeadExtra: transcript.turnHeadExtra?.(turn) ?? undefined,
           showAgent: true,
-          agentBodyNode: transcript.renderAgentBody?.(turn),
+          ...(hostBody != null
+            ? { agentBodyNode: hostBody }
+            : {
+                reply: turn.reply ?? null,
+                openCandidates: turn.openCandidates ?? null,
+                artifactList: turn.artifactList ?? null,
+                onOpenCandidate: transcript.onOpenCandidate,
+                onOpenArtifactItem: transcript.onOpenArtifactItem,
+              }),
           footer: transcript.turnFooter?.(turn) ?? undefined,
         }
       }

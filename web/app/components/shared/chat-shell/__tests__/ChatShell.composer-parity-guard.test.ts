@@ -125,10 +125,15 @@ function providesStructuredClarify(hostFile: string): boolean {
   return /onClarifySubmit\s*=/.test(src) && /onClarifySkip\s*=/.test(src)
 }
 
-/** Group renders LIVE open-artifact chips off real turn data; private always
- *  passes a literal empty array (the ledgered residual). */
+/** A host provides live open-artifact chips through EITHER route: rendering
+ *  `<OpenArtifactChips>` itself with real (non-`[]`-literal) candidates
+ *  (private's reply body), or wiring the shell's native-ladder
+ *  open-candidate callback (`transcript.onOpenCandidate`) so `ChatBubble`'s
+ *  own chips render from `ShellTurn.openCandidates` (group, post-ladder-
+ *  convergence). */
 function providesOpenArtifactChips(hostFile: string): boolean {
   const src = read(projectsDir, hostFile)
+  if (/\bonOpenCandidate\s*:/.test(src)) return true
   const idx = src.indexOf("<OpenArtifactChips")
   if (idx === -1) return false
   const candidatesMatch = /candidates=\{([^}]*)\}/.exec(src.slice(idx, idx + 400))
@@ -266,7 +271,9 @@ describe("composer parity guard — opt-out ledger completeness (AC10)", () => {
       { capability: "tabs.multiConversation", surface: "project_group" },
       { capability: "overlays.artifactPanel", surface: "project_private" },
       { capability: "overlays.artifactPanel", surface: "project_group" },
-      { capability: "reply.openArtifactChips", surface: "project_private" },
+      // reply.openArtifactChips is no longer ledgered anywhere: private now
+      // renders real candidates in its reply body and group renders them via
+      // the native ladder — both PROVIDE the capability.
       { capability: "composer.draftPersistence", surface: "project_private" },
       { capability: "composer.draftPersistence", surface: "project_group" },
     ]

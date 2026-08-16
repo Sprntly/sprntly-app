@@ -25,7 +25,9 @@ import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState, WaitStoppedState } from "../../../shared/AssistantWaitState"
+import { ArtifactListCards } from "../../../shared/ArtifactListCards"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
+import { artifactItemAsCandidate } from "./artifactCandidates"
 import { AGENT_NAME } from "../../../../lib/agent"
 import type { AskResponse, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
 import { DelegationActions } from "./DelegationActions"
@@ -167,10 +169,20 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       )
     }
     if (turn.reply) {
+      // The SAME shared card primitives the main chat's reply ladder renders
+      // (`OpenArtifactChips` / `ArtifactListCards`), fed from the classify
+      // envelope's card data riding the turn — click routes to the project's
+      // artifacts modal (this surface's open destination).
       return (
         <div data-testid="ic-msg-agent">
           <AskReplyBody reply={turn.reply} />
-          <OpenArtifactChips candidates={[]} onOpen={(c) => onOpenArtifact?.(c)} />
+          <OpenArtifactChips candidates={turn.openCandidates ?? []} onOpen={(c) => onOpenArtifact?.(c)} />
+          {turn.artifactList?.length ? (
+            <ArtifactListCards
+              items={turn.artifactList}
+              onOpen={(item) => onOpenArtifact?.(artifactItemAsCandidate(item))}
+            />
+          ) : null}
         </div>
       )
     }

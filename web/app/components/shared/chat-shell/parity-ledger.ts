@@ -71,12 +71,6 @@ export const PARITY_OPT_OUTS: ParityOptOut[] = [
     owner: "projects-chat",
   },
   {
-    capability: "reply.openArtifactChips",
-    surface: "project_private",
-    reason: "Open-artifact chips not yet wired on private (currently always []). FOLLOW-UP.",
-    owner: "projects-chat",
-  },
-  {
     capability: "composer.draftPersistence",
     surface: "project_private",
     reason: "Shell-owned useState draft, lost on unmount (minor); not persisted across mount.",

@@ -85,9 +85,13 @@ describe("ProjectGroupChat — thin host delegates to ChatShell + the T3a engine
     expect(src).toContain('from "../../../shared/chat-shell/ChatShell"')
     expect(src).toContain('from "./useProjectGroupThread"')
     expect(src).toContain('from "./useMentionPicker"')
-    // The shared render primitives it still uses are imported, never reimplemented.
-    expect(src).toContain('from "../../../shared/AskReplyBody"')
-    expect(src).toContain('from "../../../shared/OpenArtifactChips"')
+    // Agent replies render through ChatBubble's NATIVE ladder (the shell
+    // feeds `ShellTurn.reply`/`openCandidates`/`artifactList`) — the host
+    // overrides no agent body and imports no reply primitive of its own; it
+    // only wires the open-destination callbacks.
+    expect(src).not.toContain("renderAgentBody:")
+    expect(src).toContain("onOpenCandidate")
+    expect(src).toContain("onOpenArtifactItem")
     expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
     // No bespoke primitives, and — post-fold — no transport/dedup/mention logic
     // (all in the engines): the host imports neither react-markdown nor the

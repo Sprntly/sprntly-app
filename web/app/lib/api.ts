@@ -5752,6 +5752,16 @@ export type GroupTurn = {
    *  `OpenArtifactChips` primitive rather than a bespoke one the day the
    *  backend starts sending this. */
   open_candidates?: OpenArtifactCandidate[]
+  /** The FULL structured reply persisted on an assistant turn
+   *  (`conversation_turns.reply` jsonb): the engine's `AskResponse`
+   *  (answer/key_points/citations), optionally merged with the classify
+   *  envelope's card data (`artifact_list`, nested `open.candidates`).
+   *  Null/absent for human turns and for assistant turns persisted before
+   *  the column existed — those render from `content` alone. */
+  reply?: (AskResponse & {
+    artifact_list?: ChatArtifactItem[]
+    open?: { candidates?: OpenArtifactCandidate[] } | null
+  }) | null
 }
 
 /** Response from `POST /v1/projects/{id}/individual` — the caller's durable
