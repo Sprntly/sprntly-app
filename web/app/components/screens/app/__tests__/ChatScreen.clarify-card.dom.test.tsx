@@ -334,13 +334,16 @@ describe("ChatScreen — clarifying questions as the dock's popup stepper", () =
     expect(generateFromTask.mock.calls[0][0]).toContain("Who are the target users?\nAdmins")
   })
 
-  it("'Generate now' leaves a record of the assumptions it proceeded on", async () => {
+  it("skipping every question leaves a record of the assumptions it proceeded on", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
     await waitForPopup()
 
-    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip-all")) })
+    // No skip-them-all shortcut any more — the batch is skipped one question
+    // at a time, which is the point: each stated assumption is seen first.
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
 
     await waitFor(() => expect(screen.getByTestId("clarify-questions-resolved")).toBeTruthy())
     const record = screen.getByTestId("clarify-questions-resolved")
@@ -368,13 +371,14 @@ describe("ChatScreen — clarifying questions as the dock's popup stepper", () =
     expect(record.textContent).not.toContain("assumed:")
   })
 
-  it("'Generate now' on the popup generates from the ORIGINAL task", async () => {
+  it("skipping every question on the popup generates from the ORIGINAL task", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
     await waitForPopup()
 
-    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip-all")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
+    await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")

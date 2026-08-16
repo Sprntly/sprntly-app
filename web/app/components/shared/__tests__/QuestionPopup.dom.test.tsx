@@ -82,20 +82,21 @@ describe("QuestionPopup — batch mode", () => {
     expect(onComplete.mock.calls[0][0][0].answer).toBe("End users")
   })
 
-  it("skip-all and dismiss are the host's affordances, rendered only when given", () => {
-    const onSkipAll = vi.fn()
+  it("dismiss is the host's affordance, rendered only when given", () => {
     const onDismiss = vi.fn()
     const { rerender } = render(
-      <QuestionPopup questions={TWO} onComplete={vi.fn()} onSkipAll={onSkipAll} skipAllLabel="Generate now" onDismiss={onDismiss} />,
+      <QuestionPopup questions={TWO} onComplete={vi.fn()} onDismiss={onDismiss} />,
     )
-    expect(screen.getByTestId("question-popup-skip-all").textContent).toBe("Generate now")
-    fireEvent.click(screen.getByTestId("question-popup-skip-all"))
-    expect(onSkipAll).toHaveBeenCalled()
     fireEvent.click(screen.getByTestId("question-popup-dismiss"))
     expect(onDismiss).toHaveBeenCalled()
     rerender(<QuestionPopup questions={TWO} onComplete={vi.fn()} />)
-    expect(screen.queryByTestId("question-popup-skip-all")).toBeNull()
     expect(screen.queryByTestId("question-popup-dismiss")).toBeNull()
+  })
+
+  it("offers no skip-them-all shortcut — Skip in the head is the only way past a question", () => {
+    render(<QuestionPopup questions={TWO} onComplete={vi.fn()} onDismiss={vi.fn()} />)
+    expect(screen.queryByTestId("question-popup-skip-all")).toBeNull()
+    expect(screen.getByTestId("question-popup-skip")).toBeTruthy()
   })
 })
 

@@ -8430,9 +8430,13 @@
     color: var(--ink-3);
   }
 
+  /* Regular weight, deliberately. The question above IS the title of this
+     card; when the options carried the same 600 as the prompt the whole popup
+     read as one bold block with no hierarchy in it (reported from a live
+     session: "everything is bolded"). Emphasis belongs to the prompt only. */
   .qpu-option-label {
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 400;
     line-height: 1.4;
   }
 
@@ -8472,26 +8476,10 @@
     color: var(--ink-4);
   }
 
-  .qpu-foot {
-    display: flex;
-    justify-content: flex-end;
-  }
-
-  .qpu-skip-all {
-    border: none;
-    background: none;
-    padding: 2px 4px;
-    font: inherit;
-    font-size: 12px;
-    color: var(--ink-3);
-    cursor: pointer;
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-
-  .qpu-skip-all:hover:not(:disabled) {
-    color: var(--ink);
-  }
+  /* No skip-the-whole-batch footer here by owner directive (2026-08-16): the
+     popup asks one question at a time and Skip in the head is the only way
+     past one, so a batch is skipped by deciding on each question rather than
+     by one click that silently defaults all of them. */
 
   /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
      Reuses the .bc-* agent chrome + .bc-action-btn buttons; these add the
