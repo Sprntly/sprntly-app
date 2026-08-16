@@ -699,6 +699,58 @@ def _fit_corpus(
     return selected, "\n\n".join(c.render(max_quotes=0) for c in selected), 0
 
 
+def _store_covers(
+    company_id: str, provider: str, window: Window, rows: list | None
+) -> bool:
+    """Does the transcript store hold THIS PROVIDER'S WHOLE WINDOW?
+
+    The stored-first path (owner decision 2026-08-12) asked only whether the
+    store had ANY row for the window, which silently treats a partial store as
+    a complete one. That is not hypothetical: a workspace whose earlier digests
+    ran over a 7-day window had exactly those days stored, and the first
+    correct 10-week question then found 37 rows, skipped the live fetch, and
+    reported the other 175 calls as weeks where "absence of records is not
+    evidence of no activity" — a confident account of a gap that only existed
+    in our own cache (2026-08-16).
+
+    `call_index` is the cheap authority on how many calls the window really
+    holds: it is one indexed COUNT, it is filled by the same connector sync,
+    and it needs no third-party call. More calls indexed than stored means the
+    store is short and the live fetch runs (and writes through, so the next
+    ask over that window is warm).
+
+    FAILS TOWARD THE STORE, deliberately. An unreadable or empty index count is
+    "we cannot tell", and in that state the old behaviour — trust the store —
+    is right: forcing a minutes-long live fetch on every question because a
+    count query blipped is a worse failure than a possibly-short corpus, and
+    the corpus reports what it contains either way.
+    """
+    if not rows:
+        return False
+    try:
+        from app import call_index
+
+        indexed = call_index.count_calls(
+            company_id, since=window.since, until=window.until, provider=provider,
+        )
+    except Exception:  # noqa: BLE001 — cannot tell → trust the store
+        logger.warning(
+            "call-digest: could not check %s store coverage for %s",
+            provider, company_id, exc_info=True,
+        )
+        return True
+    if not indexed:
+        return True
+    if indexed > len(rows):
+        logger.info(
+            "call-digest: %s store holds %d of %d indexed calls for %s in %s — "
+            "fetching the window live",
+            provider, len(rows), indexed, company_id, window.label,
+        )
+        return False
+    return True
+
+
 def build_corpus(company_id: str, window: Window) -> DigestCorpus:
     """Assemble the voice corpus for the window: every call from every connected
     LIVE source — Fireflies and/or Zoom — MERGED with documents uploaded into the
@@ -760,7 +812,7 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
 
     if api_key:
         sources.append(_SOURCE_LABELS["fireflies"])
-        if stored.get("fireflies"):
+        if _store_covers(company_id, "fireflies", window, stored.get("fireflies")):
             fireflies_calls = _revive(stored["fireflies"])
         else:
             try:
@@ -777,7 +829,9 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
 
     if zoom_ctx is not None:
         sources.append(_SOURCE_LABELS[_ZOOM_PROVIDER])
-        if stored.get(_ZOOM_PROVIDER):
+        if _store_covers(
+            company_id, _ZOOM_PROVIDER, window, stored.get(_ZOOM_PROVIDER)
+        ):
             zoom_calls = _revive(stored[_ZOOM_PROVIDER])
         else:
             try:

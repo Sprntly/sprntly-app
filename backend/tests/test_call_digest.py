@@ -236,6 +236,73 @@ def test_no_constraints_parses_the_question_exactly_as_before(monkeypatch):
     assert "14 day" in seen["label"]
 
 
+# ── the store must cover the window, not merely touch it ─────────────────────
+#
+# The stored-first path asked only whether ANY row existed for the window. A
+# workspace whose earlier digests ran over 7 days had exactly those days
+# stored, so the first correct 10-week question found 37 rows, skipped the live
+# fetch, and described the missing 175 calls as weeks where "absence of records
+# is not evidence of no activity" — a gap that existed only in our own cache.
+
+
+def _window(days=70):
+    now = cd._utc_now()
+    return cd.Window(now - timedelta(days=days), now, f"the last {days} days",
+                     explicit=True)
+
+
+def test_a_short_store_does_not_pass_as_a_covered_window(monkeypatch):
+    import app.call_index as ci
+
+    monkeypatch.setattr(
+        ci, "count_calls",
+        lambda cid, since=None, until=None, provider=None: 212,
+    )
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 37) is False
+
+
+def test_a_complete_store_is_used_without_a_live_fetch(monkeypatch):
+    import app.call_index as ci
+
+    monkeypatch.setattr(
+        ci, "count_calls",
+        lambda cid, since=None, until=None, provider=None: 37,
+    )
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 37) is True
+
+
+def test_coverage_is_checked_per_provider(monkeypatch):
+    """A mixed-source total would answer a single-provider question wrong."""
+    import app.call_index as ci
+
+    seen: dict = {}
+
+    def _count(cid, since=None, until=None, provider=None):
+        seen["provider"] = provider
+        return 5
+
+    monkeypatch.setattr(ci, "count_calls", _count)
+    cd._store_covers("co-1", "zoom", _window(), [{}] * 5)
+    assert seen["provider"] == "zoom"
+
+
+def test_an_unreadable_index_trusts_the_store(monkeypatch):
+    """Cannot tell → keep the old behaviour. Forcing a minutes-long live fetch
+    on every question because a count query blipped is the worse failure."""
+    import app.call_index as ci
+
+    def _boom(*a, **k):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(ci, "count_calls", _boom)
+    assert cd._store_covers("co-1", "fireflies", _window(), [{}] * 3) is True
+
+
+def test_an_empty_store_always_fetches(monkeypatch):
+    assert cd._store_covers("co-1", "fireflies", _window(), []) is False
+    assert cd._store_covers("co-1", "fireflies", _window(), None) is False
+
+
 # ── corpus assembly ──────────────────────────────────────────────────────────
 
 def _call(i):
