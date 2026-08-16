@@ -299,6 +299,42 @@ describe("ProjectPrivateChat — send + poll + render", () => {
     expect(screen.queryByTestId("ic-msg-error")).toBeNull()
   })
 
+  it("a stopped turn renders the SHARED stopped state with an enabled 'Ask again', and clicking it re-sends the original question", async () => {
+    let rejectAsk: (e: unknown) => void = () => {}
+    runAskGenerationMock.mockImplementationOnce(
+      () => new Promise((_resolve, reject) => { rejectAsk = reject }),
+    )
+    runAskGenerationMock.mockResolvedValueOnce(reply("the resend answered"))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "a question worth stopping" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Stop generating"))
+    })
+    await act(async () => {
+      rejectAsk(new AskStoppedError("stopped"))
+    })
+    await waitFor(() => expect(screen.getByTestId("ic-msg-stopped")).toBeTruthy())
+
+    // Renders the SAME `WaitStoppedState` component main's `ChatBubble`
+    // reply ladder uses (`cw-btn`), not a bespoke dead-end div.
+    const askAgainBtn = screen.getByRole("button", { name: "Ask again" }) as HTMLButtonElement
+    expect(askAgainBtn.disabled).toBe(false)
+
+    await act(async () => {
+      fireEvent.click(askAgainBtn)
+    })
+
+    await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(2))
+    expect(runAskGenerationMock.mock.calls[1][0]).toBe("a question worth stopping")
+    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+  })
+
   it("a timeout renders the honest 'still running' message, not a generic failure", async () => {
     let rejectAsk: (e: unknown) => void = () => {}
     runAskGenerationMock.mockReturnValue(

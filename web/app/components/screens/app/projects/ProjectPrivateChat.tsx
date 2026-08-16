@@ -24,7 +24,7 @@ import type { ChatSurfaceDescriptor, ShellTurn } from "../../../shared/chat-shel
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
-import { AssistantWaitState } from "../../../shared/AssistantWaitState"
+import { AssistantWaitState, WaitStoppedState } from "../../../shared/AssistantWaitState"
 import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { AGENT_NAME } from "../../../../lib/agent"
 import type { AskResponse, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
@@ -146,7 +146,18 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       )
     }
     if (turn.stopped) {
-      return <div data-testid="ic-msg-stopped">You stopped this response.</div>
+      // Reuses the SAME shared stopped-state/"Ask again" component main
+      // renders (`ChatBubble`'s built-in ladder) instead of a bespoke plain
+      // div with no retry. A session (current-turn) `ShellTurn`'s `content`
+      // IS the original question (the turns mapping sets `content: t.question`
+      // for private's combined-Q&A session turns above) — resending it
+      // mirrors main's own `handleAskAgain`, which resubmits `turn.query`.
+      const question = turn.content?.trim()
+      return (
+        <div data-testid="ic-msg-stopped">
+          <WaitStoppedState onAskAgain={question ? () => engine.send(question) : undefined} />
+        </div>
+      )
     }
     if (turn.error) {
       return (
