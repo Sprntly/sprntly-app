@@ -682,6 +682,32 @@ def test_get_signals_single_query(facade, monkeypatch):
     assert calls["n"] == 1   # exactly one kg_signal table access for the batch
 
 
+def test_get_signals_chunks_a_large_id_list(facade, monkeypatch):
+    """A big batch must CHUNK, not build one enormous `.in_()`.
+
+    `.in_()` renders every id into the request URL and a UUID costs ~40 bytes
+    there, so a few hundred ids is all a server's URL limit allows. This was a
+    single unchunked query, which was safe only because every caller happened to
+    be capped small upstream — the voice-of-customer retrieval preset lifts
+    exactly those caps, so a widened feedback answer would have been the first
+    thing to hit the ceiling. Same width and same reasoning as `edges_to_many`.
+
+    Uses ids that resolve to nothing: the assertion is about how many reads are
+    issued, and seeding 300 rows to observe that would only slow the suite.
+    """
+    calls = {"n": 0}
+    orig_table = facade._client.table
+
+    def _counting_table(name):
+        if name == "kg_signal":
+            calls["n"] += 1
+        return orig_table(name)
+
+    monkeypatch.setattr(facade._client, "table", _counting_table)
+    facade.get_signals("ent-A", [f"missing-{i}" for i in range(300)])
+    assert calls["n"] == 2, "300 ids at a 150 chunk width is two reads"
+
+
 # ---------- batched get_entities / edges_to_many (Ask N+1 kill) ----------
 
 def test_get_entities_batched_returns_dict(facade):

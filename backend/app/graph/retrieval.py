@@ -54,6 +54,55 @@ _RECENT_SIGNALS = 8
 #: read eight. See the call site for why 250 is the safe width.
 _RECENT_SIGNALS_FETCH = 250
 
+# ── The voice-of-customer preset ────────────────────────────────────────────
+#
+# "When someone asks for feedback, show ALL of it." The defaults above are
+# sized for the general Ask, where the KG bundle is one ingredient beside a
+# document corpus and every token it takes is a token the rest of the prompt
+# loses. A feedback question is the opposite shape: the stored signal IS the
+# answer, and a cap on it is a cap on how much of their own customers' voice
+# the user is allowed to see.
+#
+# Under the defaults that cap was severe and, worse, INVISIBLE. At most
+# `_DEFAULT_THEME_K * _SIGNALS_PER_THEME + _RECENT_SIGNALS` = 80 signals were
+# ever candidates, and the token budget then cut that to ~2,200 tokens with a
+# bare `break` — no count of what it dropped, nothing downstream that could say
+# "there was more". A tenant with a year of support tickets and Slack feedback
+# got an answer built from a couple of dozen signals and no indication that was
+# a sample. That is the bug this preset fixes; `signals_dropped` (returned by
+# `retrieve_context`) is the other half, so the cut is never silent again.
+#
+# THE NUMBERS ARE DERIVED, NOT GUESSED. `call_digest` reserves
+# `_KG_CHAR_BUDGET` for the rendered bundle and trims to it on a line boundary
+# WITH a marker the coverage line reports. Making the token budget larger than
+# that char budget can hold is deliberate: it moves the binding constraint off
+# the silent cut and onto the honest one. The pool is then sized so the budget
+# can actually be filled — a budget nothing reaches is the same starvation with
+# a bigger number on it.
+#
+# Cost is bounded by the same arithmetic: the answer model has a 1M-token
+# window, and calls + Slack + a fully-spent KG budget still land around a fifth
+# of it. The fan-out is bounded too — themes and their edges resolve through
+# ONE chunked `edges_to_many`, and the signals behind them through ONE chunked
+# `get_signals` (chunked *because* of this preset; see that method).
+VOC_TOKEN_BUDGET = 120_000
+VOC_THEME_K = 40
+VOC_SIGNALS_PER_THEME = 100
+VOC_RECENT_SIGNALS = 400
+
+#: The preset as one `retrieve_context(**VOC_SCALE)` kwargs bundle. Exported as
+#: a unit rather than four constants because the knobs only work together:
+#: raising the budget while leaving the pool at 80 candidates, or the pool while
+#: leaving the budget at 2,200 tokens, both look like a fix and change nothing.
+#: One name means a caller cannot half-apply it, and the two VoC paths cannot
+#: drift apart in what "all of it" means.
+VOC_SCALE: dict[str, int] = {
+    "k": VOC_THEME_K,
+    "token_budget": VOC_TOKEN_BUDGET,
+    "signals_per_theme": VOC_SIGNALS_PER_THEME,
+    "recent_signals": VOC_RECENT_SIGNALS,
+}
+
 #: Cosine similarity below which a theme match is indistinguishable from
 #: noise. `kg_find_candidates` is a pure kNN (ORDER BY <=> ... LIMIT k) — it
 #: returns the NEAREST themes, never the RELEVANT ones, so on a KG with >= k
@@ -327,11 +376,21 @@ def retrieve_context(
     *,
     k: int = _DEFAULT_THEME_K,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
+    signals_per_theme: int = _SIGNALS_PER_THEME,
+    recent_signals: int = _RECENT_SIGNALS,
     question_embedding: Optional[list[float]] = None,
     skip_semantic: bool = False,
     min_theme_score: float = _MIN_THEME_SCORE,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
+
+    `k`, `signals_per_theme` and `recent_signals` size the CANDIDATE POOL;
+    `token_budget` then caps what survives into the bundle. They are separate
+    knobs because raising one without the other does nothing: a caller that
+    lifts only the budget is still bounded by the pool it was allowed to gather
+    (`k * signals_per_theme + recent_signals`), and a caller that lifts only the
+    pool still gets cut back to the budget. The voice-of-customer path raises
+    all four together — see the `VOC_*` preset above.
 
     `question_embedding=None` (the default) means "compute one for me" —
     self-embeds unless `skip_semantic=True`, which means "there is no usable
@@ -375,8 +434,15 @@ def retrieve_context(
         #   outcome:    {validates_hypothesis?}
         "kg_refs":   [ ...signal+entity ids used... ],     # for the decision log
         "token_estimate": <int>,
+        "signals_dropped": <int>,   # ranked candidates the budget cut
         "empty": <bool>,
       }
+
+    `signals_dropped` is what makes the cap honest. `token_estimate` reports
+    what was SPENT, which reads identically whether the budget was generous or
+    the bundle was clipped in half — so nothing downstream could tell a user
+    their answer was built from a sample. Callers that present retrieved signal
+    to a user should say so when this is non-zero.
 
     Pure retrieval: tenant-scoped (everything reads through `enterprise_id`),
     no writes, no LLM. Never raises on a partial-KG read — degrades to an
@@ -566,7 +632,7 @@ def retrieve_context(
             if prev is None or rank > prev[0]:
                 by_id[sig.id] = (rank, payload)
             kept += 1
-            if kept >= _SIGNALS_PER_THEME:
+            if kept >= signals_per_theme:
                 break
 
     # 4) Recent non-stale signals (no theme boost). Covers fresh connector
@@ -586,12 +652,25 @@ def retrieve_context(
         # differ from the old width — and if a tenant ever did have that many
         # consecutive stale recent signals, the effect is a slightly shorter
         # recent list, not a wrong one.
-        recent = facade.active_signals(enterprise_id, limit=_RECENT_SIGNALS_FETCH)
+        #
+        # DERIVED, not fixed, since `recent_signals` became a caller knob: a
+        # caller asking for 400 recent signals out of a 250-row fetch would be
+        # silently held to 250 — the starvation this width exists to prevent,
+        # reintroduced through the parameter. Widening ADDS the same headroom on
+        # top rather than scaling it, so the default (any slice at or under
+        # `_RECENT_SIGNALS`) still fetches exactly 250 and the reasoning above
+        # still holds verbatim.
+        fetch_width = (
+            _RECENT_SIGNALS_FETCH
+            if recent_signals <= _RECENT_SIGNALS
+            else recent_signals + _RECENT_SIGNALS_FETCH
+        )
+        recent = facade.active_signals(enterprise_id, limit=fetch_width)
     except Exception as exc:  # noqa: BLE001
         logger.info("Ask KG retrieval: active_signals failed (%s)", exc)
         recent = []
     recent.sort(key=lambda s: s.transaction_at, reverse=True)
-    for sig in recent[:_RECENT_SIGNALS]:
+    for sig in recent[:recent_signals]:
         if signal_is_retired(sig.properties):
             continue
         if sig.id in by_id:
@@ -600,12 +679,27 @@ def retrieve_context(
         by_id[sig.id] = (rank, _signal_payload(sig, theme_label=None, rank=rank))
 
     # 5) Rank globally + apply the token budget cap.
+    #
+    # The cut is COUNTED, not just taken. This loop used to `break` and leave no
+    # trace: the bundle reported `token_estimate` (what it spent) and nothing at
+    # all about what it discarded, so an answer built from a third of a tenant's
+    # feedback was indistinguishable from one built from all of it — by the
+    # caller, and therefore by the user. `signals_dropped` is that missing
+    # number; callers that show retrieved signal to a person are expected to
+    # surface it when it is non-zero.
     ranked = sorted(by_id.values(), key=lambda t: -t[0])
     signals_out: list[dict] = []
     used_tokens = 0
+    signals_dropped = 0
     for _, payload in ranked:
         cost = _approx_tokens(payload["content"])
         if signals_out and used_tokens + cost > token_budget:
+            # Every remaining candidate is dropped, not just this one, because
+            # this is a `break` and not a `continue` — the bundle keeps the
+            # highest-ranked CONTIGUOUS prefix rather than skipping past an
+            # oversized signal to pack smaller, lower-ranked ones behind it.
+            # That choice is unchanged here; the count simply has to match it.
+            signals_dropped = len(ranked) - len(signals_out)
             break
         signals_out.append(payload)
         used_tokens += cost
@@ -650,6 +744,7 @@ def retrieve_context(
         "outcomes": outcomes_out,
         "kg_refs": kg_refs,
         "token_estimate": used_tokens,
+        "signals_dropped": signals_dropped,
         "empty": empty,
     }
 

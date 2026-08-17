@@ -357,6 +357,118 @@ def test_retrieve_context_token_budget_caps_signals(facade):
     assert bundle["token_estimate"] <= 2500 + 1000  # last one may straddle the cap
 
 
+def test_retrieve_context_reports_the_signals_the_budget_dropped(facade):
+    """The cut has to be countable, not just taken.
+
+    This loop used to `break` and leave no trace: the bundle reported
+    `token_estimate` (what it spent) and nothing about what it discarded, so a
+    caller could not tell a clipped bundle from a complete one — and neither
+    could the user reading the answer built from it. `signals_dropped` is that
+    missing number, and kept + dropped must account for the whole pool.
+    """
+    from app.graph.retrieval import retrieve_context
+
+    big = "x" * 4000  # ~1000 tokens each at 4 chars/token
+    theme, _ = _seed_theme_with_signals(
+        facade,
+        "ent-A",
+        "Theme",
+        [("revenue", "deal_blocker", f"{big}-{i}", {}, i) for i in range(10)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        bundle = retrieve_context(
+            facade, "ent-A", "q", token_budget=2500, signals_per_theme=10,
+        )
+
+    kept = len(bundle["signals"])
+    assert bundle["signals_dropped"] > 0, "a clipped bundle must say it clipped"
+    assert kept + bundle["signals_dropped"] == 10
+
+
+def test_retrieve_context_reports_no_drop_when_everything_fits(facade):
+    """The count must be a shortfall signal, not a constant. If it were
+    non-zero on a complete bundle every feedback answer would carry a
+    truncation caveat it hadn't earned."""
+    from app.graph.retrieval import retrieve_context
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Theme",
+        [("revenue", "deal_blocker", f"short-{i}", {}, i) for i in range(3)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        bundle = retrieve_context(facade, "ent-A", "q", token_budget=100_000)
+
+    assert len(bundle["signals"]) == 3
+    assert bundle["signals_dropped"] == 0
+
+
+def test_retrieve_context_pool_widens_with_signals_per_theme(facade):
+    """Budget and pool are separate knobs, and the pool is the one that used to
+    bind first. Raising only the token budget would have changed nothing here:
+    `_SIGNALS_PER_THEME` capped a theme's evidence at 6 long before any budget
+    was consulted, so this is the half of the fix that a budget-only change
+    would have silently missed."""
+    from app.graph.retrieval import (
+        _RECENT_SIGNALS, _SIGNALS_PER_THEME, retrieve_context,
+    )
+
+    theme, _ = _seed_theme_with_signals(
+        facade, "ent-A", "Theme",
+        [("revenue", "deal_blocker", f"s-{i}", {}, i) for i in range(20)],
+    )
+    with _patch_embed(), _patch_candidates([(theme, 0.9)]):
+        narrow = retrieve_context(facade, "ent-A", "q", token_budget=100_000)
+        wide = retrieve_context(
+            facade, "ent-A", "q", token_budget=100_000, signals_per_theme=20,
+        )
+
+    # Two paths feed the pool and both are capped: the theme walk keeps
+    # `_SIGNALS_PER_THEME` of the 20, and the recent-signals fold-in then adds
+    # `_RECENT_SIGNALS` more that the walk had left behind. 14 of 20 reachable
+    # signals, on a budget with room for every one of them — the pool, not the
+    # budget, is what a feedback answer was losing evidence to.
+    assert len(narrow["signals"]) == _SIGNALS_PER_THEME + _RECENT_SIGNALS
+    # Widened, the theme walk alone covers all 20 and the recent fold-in has
+    # nothing left to contribute (same signals, deduped by id).
+    assert len(wide["signals"]) == 20
+
+
+def test_voc_scale_outruns_the_char_budget_that_reports_truncation(facade):
+    """The invariant the whole fix rests on.
+
+    Two ceilings can cut a feedback answer: retrieval's token budget, which used
+    to cut SILENTLY, and `call_digest._KG_CHAR_BUDGET`, which trims on a line
+    boundary and sets a flag the coverage line reports. The fix is to make the
+    honest one bind first — so the VoC token budget must be able to carry more
+    than the char budget can hold. If someone later lowers `VOC_TOKEN_BUDGET` or
+    raises `_KG_CHAR_BUDGET` past it, the silent cut comes back and this fails.
+    """
+    from app.call_digest import _KG_CHAR_BUDGET
+    from app.graph.retrieval import _CHARS_PER_TOKEN, VOC_SCALE
+
+    voc_capacity_chars = VOC_SCALE["token_budget"] * _CHARS_PER_TOKEN
+    assert voc_capacity_chars > _KG_CHAR_BUDGET, (
+        "retrieval must be able to overshoot the char budget, or the cut that "
+        "reaches the user is the one that cannot announce itself"
+    )
+
+
+def test_voc_scale_raises_every_knob_together(facade):
+    """`VOC_SCALE` is exported as one bundle precisely so it cannot be
+    half-applied. Each entry must actually exceed the default it replaces —
+    a preset that widened the budget but left the pool at its default would
+    look like a fix and change nothing."""
+    from app.graph.retrieval import (
+        DEFAULT_TOKEN_BUDGET, VOC_SCALE, _DEFAULT_THEME_K, _RECENT_SIGNALS,
+        _SIGNALS_PER_THEME,
+    )
+
+    assert VOC_SCALE["token_budget"] > DEFAULT_TOKEN_BUDGET
+    assert VOC_SCALE["k"] > _DEFAULT_THEME_K
+    assert VOC_SCALE["signals_per_theme"] > _SIGNALS_PER_THEME
+    assert VOC_SCALE["recent_signals"] > _RECENT_SIGNALS
+
+
 def test_retrieve_context_empty_kg_returns_empty_bundle(facade):
     from app.graph.retrieval import retrieve_context
 

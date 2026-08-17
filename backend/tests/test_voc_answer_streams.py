@@ -235,7 +235,11 @@ def _stub_live_calls(monkeypatch):
 def _stub_kg(monkeypatch):
     """A populated knowledge graph, so the pinned VoC path runs its generation
     instead of declining before it (returning None with nothing generated)."""
-    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    # `**kw` absorbs the `scale=VOC_SCALE` the pinned path now passes.
+    monkeypatch.setattr(
+        qa, "_retrieve_kg_bundle",
+        lambda eid, q, **kw: {"signals": [1], "themes": []},
+    )
     import app.graph.retrieval as retrieval
     monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
 

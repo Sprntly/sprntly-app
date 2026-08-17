@@ -525,7 +525,14 @@ def test_pinned_voc_still_answers_from_the_kg_alone(monkeypatch):
         raise AssertionError("a pinned VoC must not run the live digest")
 
     monkeypatch.setattr(cd, "answer", _no_digest)
-    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    # `**kw` absorbs the `scale=VOC_SCALE` the pinned path now passes — it
+    # retrieves at the same width as the merged path so an explicit
+    # `/voice-of-customer-report` can't return less feedback than the plain
+    # question would.
+    monkeypatch.setattr(
+        qa, "_retrieve_kg_bundle",
+        lambda eid, q, **kw: {"signals": [1], "themes": []},
+    )
     import app.graph.retrieval as retrieval
     monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
     captured = {}
