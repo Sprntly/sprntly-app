@@ -101,9 +101,14 @@ describe("highlighting a passage offers to take it to the chat", () => {
 
     expect(nav.onQuote).toHaveBeenCalledTimes(1)
     expect(nav.onQuote).toHaveBeenCalledWith("the pilot-partner scoping track")
-    // The offer is retired with the selection it belonged to.
-    await waitFor(() =>
-      expect(container.querySelector("[data-document-quote-cta]")).toBeNull())
+
+    // THE OFFER SURVIVES THE PRESS, because the highlight does. Retiring it
+    // while the passage stayed visibly selected put the two out of step: a
+    // user who quotes, clears the composer and wants to quote again saw a
+    // highlighted passage with no button and had to re-select it.
+    expect(container.querySelector("[data-document-quote-cta]")).not.toBeNull()
+    fireEvent.mouseDown(container.querySelector("[data-document-quote-cta]")!)
+    expect(nav.onQuote).toHaveBeenCalledTimes(2)
   })
 
   it("ignores a selection made OUTSIDE this document", async () => {
@@ -116,6 +121,30 @@ describe("highlighting a passage offers to take it to the chat", () => {
     document.body.appendChild(outside)
 
     selectInside(outside, "a sentence in the thread")
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(container.querySelector("[data-document-quote-cta]")).toBeNull()
+    outside.remove()
+  })
+
+  it("refuses a selection that STARTS here and ends outside", async () => {
+    // The asymmetry review caught: `anchorNode` alone accepted a drag that
+    // began in the document and finished in the chat beside it, while
+    // `toString()` serialized both — so the thread's own text would have been
+    // quoted as if it came from the document.
+    const { container } = await mountTab()
+    const outside = document.createElement("p")
+    outside.textContent = "a sentence in the thread"
+    document.body.appendChild(outside)
+
+    const sel = window.getSelection()!
+    sel.removeAllRanges()
+    const range = document.createRange()
+    range.setStart(container.querySelector("[data-document-body]")!, 0)
+    range.setEnd(outside, 0)
+    sel.addRange(range)
+    vi.spyOn(sel, "toString").mockReturnValue("document text plus thread text")
+    document.dispatchEvent(new Event("selectionchange"))
 
     await new Promise((r) => setTimeout(r, 20))
     expect(container.querySelector("[data-document-quote-cta]")).toBeNull()

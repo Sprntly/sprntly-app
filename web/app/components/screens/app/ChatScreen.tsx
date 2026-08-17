@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -1212,6 +1212,9 @@ export function ChatScreen() {
     setContent({ prd })
   }, [activeTabId, setContent])
   const [draft, setDraft] = useState("")
+  /** Set when a highlighted passage was just quoted in, so the layout effect
+   *  that sizes and focuses the composer knows to run — see that effect. */
+  const quoteJustInsertedRef = useRef(false)
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
@@ -2668,25 +2671,43 @@ export function ChatScreen() {
   // discard it.
   useEffect(() => {
     if (pendingDocumentQuote == null) return
-    const { excerpt } = pendingDocumentQuote
+    const { documentId: from, excerpt } = pendingDocumentQuote
     setPendingDocumentQuote(null)
     if (!excerpt.trim()) return
+    // The quote names the document it was lifted from, and this is where that
+    // is checked. Without a check the id is dead weight; with one, a passage
+    // can never be quoted into a thread whose panel has since moved to a
+    // different document — the panel and the composer are updated by separate
+    // paths, so "the open document" is not automatically the one the user
+    // highlighted.
+    if (content.documentId != null && from !== content.documentId) return
     setDraft((prev) => {
       const quoted = `> ${excerpt}\n\n`
       const next = prev.trim() ? `${prev.replace(/\s+$/, "")}\n\n${quoted}` : quoted
       return next.slice(0, DRAFT_MAX_CHARS)
     })
-    requestAnimationFrame(() => {
-      const ta = composerRef.current
-      if (!ta) return
-      ta.style.height = "auto"
-      ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-      ta.focus()
-      // Caret at the END, so the next keystroke starts the question rather
-      // than landing inside the quotation.
-      ta.setSelectionRange(ta.value.length, ta.value.length)
-    })
-  }, [pendingDocumentQuote, setPendingDocumentQuote])
+    // Resize AFTER the draft is committed, not on the next animation frame.
+    // `setDraft` from a passive effect goes through React's scheduler, so a
+    // rAF can win the race, measure `scrollHeight` against the OLD value and
+    // then PIN that height inline — leaving a 600-character quote in a
+    // one-row composer until the next keystroke re-runs the auto-grow. The
+    // flag is read by the layout effect below, which runs after the commit.
+    quoteJustInsertedRef.current = true
+  }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId])
+
+  // Runs after the draft above is committed, so it measures the real text.
+  useLayoutEffect(() => {
+    if (!quoteJustInsertedRef.current) return
+    quoteJustInsertedRef.current = false
+    const ta = composerRef.current
+    if (!ta) return
+    ta.style.height = "auto"
+    ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+    ta.focus()
+    // Caret at the END, so the next keystroke starts the question rather than
+    // landing inside the quotation.
+    ta.setSelectionRange(ta.value.length, ta.value.length)
+  }, [draft])
 
   useEffect(() => {
     if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return

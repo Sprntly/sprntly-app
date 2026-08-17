@@ -96,28 +96,46 @@ export function DocumentTab({
     // listener at all — the button would simply never appear.
     const onSelect = () => {
       const container = bodyRef.current
-      if (!container) return
+      // No consumer, no button, no work — the page surface passes no handler.
+      if (!container || !onQuote) return
       const sel = typeof window !== "undefined" ? window.getSelection() : null
       const text = sel?.toString() ?? ""
-      // Anchored to THIS document: a selection elsewhere on the page (the
-      // thread, another panel) must not raise a button that would quote it as
-      // if it came from here.
-      if (!text.trim() || !sel || sel.rangeCount === 0 ||
-          !container.contains(sel.anchorNode)) {
+      // Anchored to THIS document, WHOLE range. `anchorNode` alone was
+      // asymmetric: a drag that STARTED in the document and ended in the chat
+      // beside it passed the check, while `toString()` serialized both — so the
+      // thread's own text would have been quoted as if it came from the
+      // document. `commonAncestorContainer` is inside the container only when
+      // BOTH ends are. Most reachable while the document is `generating`, where
+      // the body is a plain div and the browser does not confine the selection
+      // to an editor host.
+      const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null
+      if (!text.trim() || !range ||
+          !container.contains(range.commonAncestorContainer)) {
         setQuoteAt(null)
         return
       }
-      const rect = sel.getRangeAt(0).getBoundingClientRect()
+      const rect = range.getBoundingClientRect()
       const base = container.getBoundingClientRect()
+      // CLAMPED ON BOTH AXES. Unclamped, a selection on the first line placed
+      // the button at a negative offset — over the title row — and a phrase
+      // near the right edge pushed a `nowrap` button past the container, which
+      // the panel renders as a horizontal scrollbar (`.cpanel-body` sets
+      // `overflow-y: auto`, so `overflow-x` computes to auto).
+      const CTA_W = 96
       setQuoteAt({
-        top: rect.top - base.top - 34,
-        left: Math.max(0, rect.left - base.left),
-        text: quoteForComposer(text),
+        top: Math.max(0, rect.top - base.top - 34),
+        left: Math.min(Math.max(0, rect.left - base.left),
+                       Math.max(0, base.width - CTA_W)),
+        // RAW text, shaped only when the button is pressed: this runs on every
+        // `selectionchange` — per mouse-move while dragging — and collapsing
+        // whitespace across an ever-growing string on each one is work nobody
+        // asked for.
+        text,
       })
     }
     document.addEventListener("selectionchange", onSelect)
     return () => document.removeEventListener("selectionchange", onSelect)
-  }, [])
+  }, [onQuote])
 
   const load = useCallback(async () => {
     try {
@@ -274,9 +292,15 @@ export function DocumentTab({
           // click handler would fire with nothing left to quote. Preventing
           // the default keeps the highlight visible while the composer fills.
           onMouseDown={(e) => {
+            // MOUSEDOWN, not click: pressing a button clears the selection, so
+            // a click handler would fire with nothing left to quote.
+            // `preventDefault` keeps the highlight — and so this button —
+            // alive, which also means the same passage can be quoted AGAIN
+            // (clear the composer, press again) rather than having to be
+            // re-selected. Clearing the offer here while the highlight stayed
+            // put those two out of step.
             e.preventDefault()
-            onQuote?.(quoteAt.text)
-            setQuoteAt(null)
+            onQuote(quoteForComposer(quoteAt.text))
           }}
         >
           Ask in chat
