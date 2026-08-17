@@ -63,12 +63,11 @@ import {
   type OpenArtifactResult,
 } from "../../../../lib/api"
 
-/** The on-join greeting's short/expandable-body split marker — mirrors
- *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an HTML
- *  comment, inert if ever rendered raw). Consumed by the host's show-more
- *  agent-body closure; kept here so the marker constant travels with the
- *  engine that produces the turns. */
-export const MORE_MARKER = "<!--more-->"
+/** Re-exported from the shared chat-shell contract, where the single copy of
+ *  the marker lives (mirrors `backend/app/project_join_greeting.py`). Kept as a
+ *  named re-export so existing importers of the engine's `MORE_MARKER` keep
+ *  working while the string itself is defined exactly once. */
+export { MORE_MARKER } from "../../../shared/chat-shell/types"
 
 /** Merge two persisted-turn lists, dedup by id, and re-sort by the persisted
  *  clock (tie-broken by id) — `loaded` is the authority; any turn present only
@@ -98,6 +97,11 @@ type SessionTurn = {
   pending: boolean
   stopped: boolean
   error: string | null
+  /** The 12-minute client budget ran out — a distinct, non-failure state (the
+   *  job may still finish server-side). Kept separate from `error` so the
+   *  shared reply ladder renders its own timed-out copy ("still running…")
+   *  rather than the generic failure copy. */
+  timedOut?: boolean
   partial?: string
   streamDropped?: boolean
   createdAt?: number
@@ -584,12 +588,22 @@ export function useProjectPrivateThread(
             if (err instanceof AskCancelledError) {
               return
             }
-            const message =
-              err instanceof AskTimeoutError
-                ? "This is taking longer than expected. It's still running on our side."
-                : "That answer didn't come through. Try again."
+            // A timeout is NOT a failure (the server job may still finish) —
+            // settle it as the distinct `timedOut` state so the shared ladder
+            // renders its own "still running…" copy, matching main's ladder;
+            // only a genuine failure carries `error`.
+            if (err instanceof AskTimeoutError) {
+              setSessionTurns((prev) =>
+                prev.map((t) => (t.id === id ? { ...t, pending: false, timedOut: true, createdAt: Date.now() } : t)),
+              )
+              return
+            }
             setSessionTurns((prev) =>
-              prev.map((t) => (t.id === id ? { ...t, pending: false, error: message, createdAt: Date.now() } : t)),
+              prev.map((t) =>
+                t.id === id
+                  ? { ...t, pending: false, error: "That answer didn't come through. Try again.", createdAt: Date.now() }
+                  : t,
+              ),
             )
           })
           .finally(() => setBusy(false))
@@ -1130,6 +1144,7 @@ export function useProjectPrivateThread(
         streamDropped: t.streamDropped,
         stopped: t.stopped,
         error: t.error,
+        timedOut: t.timedOut,
         createdAt: t.createdAt,
         pickOptions: t.clarifyOptions?.length
           ? t.clarifyOptions.map((o) => ({

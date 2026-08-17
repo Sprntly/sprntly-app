@@ -17,9 +17,11 @@ import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   auditComposerParity,
+  auditRenderInheritance,
   PROJECT_CAPABILITY_MANIFEST,
   type ComposerParityInput,
   type ComposerPropWiring,
+  type RenderInheritanceInput,
 } from "../parity-guard"
 import { PARITY_OPT_OUTS } from "../parity-ledger"
 import type { ChatSurfaceKind } from "../types"
@@ -299,6 +301,124 @@ describe("composer parity guard — opt-out ledger completeness (AC10)", () => {
       expect(entry.owner).toBe("projects-chat")
       expect(entry.reason.length).toBeGreaterThan(0)
     }
+  })
+})
+
+// ── Render-inheritance guard ─────────────────────────────────────────────────
+
+/** Does a project host's descriptor set `renderAgentBody:` for the agent reply?
+ *  Naive key probe (mirrors `hasComposerFeatures` above) — a comment that
+ *  merely NAMES the field ("NO `renderAgentBody` override") never matches the
+ *  key form `renderAgentBody:`. */
+function hasAgentReplyFork(hostFile: string): boolean {
+  const src = read(projectsDir, hostFile)
+  return /\brenderAgentBody\s*:/.test(src)
+}
+
+/** The sanctioned project↔main render/context divergences the guard tracks —
+ *  each MUST be present in `PARITY_OPT_OUTS`. Kept OUT of the pure audit
+ *  (mirrors `surfacesWithoutFeatures`), enumerated from the source-of-truth
+ *  opt-out ledger. */
+const RENDER_DIVERGENCES: { capability: string; surface: ChatSurfaceKind }[] = [
+  { capability: "render.landing", surface: "project_private" },
+  { capability: "render.landing", surface: "project_group" },
+  { capability: "open.destination", surface: "project_private" },
+  { capability: "open.destination", surface: "project_group" },
+  { capability: "respond.gate", surface: "project_group" },
+  { capability: "context.multiParty", surface: "project_group" },
+  { capability: "membership.roster", surface: "project_private" },
+  { capability: "membership.roster", surface: "project_group" },
+  { capability: "mutation.confirmGate", surface: "project_private" },
+  { capability: "mutation.confirmGate", surface: "project_group" },
+]
+
+function realRenderInput(): RenderInheritanceInput {
+  const agentReplyForks: ChatSurfaceKind[] = []
+  if (hasAgentReplyFork("ProjectPrivateChat.tsx")) agentReplyForks.push("project_private")
+  if (hasAgentReplyFork("ProjectGroupChat.tsx")) agentReplyForks.push("project_group")
+  return {
+    agentReplyForks,
+    renderDivergences: RENDER_DIVERGENCES,
+    ledger: PARITY_OPT_OUTS,
+  }
+}
+
+describe("render-inheritance guard — real input (AC9)", () => {
+  it("test_render_inheritance_clean_on_real_code", () => {
+    const input = realRenderInput()
+    // Sanity: today's real code forks NEITHER surface's agent reply — both
+    // consume ChatBubble's native ladder (an empty forks list is the whole
+    // point of the inheritance rule, not a vacuous pass, so we assert it
+    // explicitly).
+    expect(input.agentReplyForks).toEqual([])
+    expect(auditRenderInheritance(input)).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — fail-closed (AC9)", () => {
+  it("test_red_on_agentbodynode_fork", () => {
+    const base = realRenderInput()
+    const forked: RenderInheritanceInput = { ...base, agentReplyForks: ["project_private"] }
+    const violations = auditRenderInheritance(forked)
+    expect(
+      violations.some((v) => v.capability === "render.agentReplyLadder" && v.surface === "project_private"),
+    ).toBe(true)
+    // GREEN again once the fork is removed.
+    expect(auditRenderInheritance({ ...forked, agentReplyForks: [] })).toEqual([])
+  })
+
+  it("test_red_on_unledgered_render_divergence", () => {
+    const base = realRenderInput()
+    const withUnledgered: RenderInheritanceInput = {
+      ...base,
+      renderDivergences: [
+        ...base.renderDivergences,
+        { capability: "render.syntheticUnledgered", surface: "project_group" },
+      ],
+    }
+    const violations = auditRenderInheritance(withUnledgered)
+    expect(
+      violations.some(
+        (v) => v.capability === "render.syntheticUnledgered" && v.surface === "project_group",
+      ),
+    ).toBe(true)
+    // GREEN once that divergence is ledgered.
+    const ledgered: RenderInheritanceInput = {
+      ...withUnledgered,
+      ledger: [
+        ...base.ledger,
+        {
+          capability: "render.syntheticUnledgered",
+          surface: "project_group",
+          reason: "test-only synthetic render divergence proving the ledger silences a matched violation.",
+          owner: "projects-chat",
+        },
+      ],
+    }
+    expect(auditRenderInheritance(ledgered)).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — net-new ledger entries (AC9)", () => {
+  it("test_net_new_ledger_entries_have_reason_and_owner", () => {
+    for (const e of RENDER_DIVERGENCES) {
+      const entry = PARITY_OPT_OUTS.find((o) => o.capability === e.capability && o.surface === e.surface)
+      expect(entry, `missing ledger entry for ${e.capability}/${e.surface}`).toBeTruthy()
+      expect(entry!.reason.length).toBeGreaterThan(10)
+      expect(entry!.owner).toBe("projects-chat")
+    }
+  })
+
+  it("test_no_duplicate_reply_streaming_or_multitab", () => {
+    // The plan's `reply.streaming` reconciles onto the existing `composer.stop`
+    // entry and `render.multiTab` onto `tabs.multiConversation` — NEITHER new
+    // capability is added to the ledger (no re-fork of an already-tracked
+    // divergence).
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "reply.streaming")).toBe(false)
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "render.multiTab")).toBe(false)
+    // The reconciliation targets DO exist.
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "composer.stop")).toBe(true)
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "tabs.multiConversation")).toBe(true)
   })
 })
 

@@ -166,6 +166,7 @@ def _schedule_group_reply(
     client_message_id: str | None = None,
     job_id: int | None = None,
     run_id: str | None = None,
+    pinned_skill: str | None = None,
 ) -> None:
     """Mint the run's execution identity + persist a `generating` `ask_jobs`
     row SYNCHRONOUSLY (so a crash before the background thread starts leaves a
@@ -213,8 +214,18 @@ def _schedule_group_reply(
                 )
                 return
             raise
+    # Resolve the FINAL pinned-skill id HERE — this function has `source_turn_id`
+    # in scope on ALL paths (fresh mention/solo/gate/continuation AND retry), so
+    # the pin is keyed to the ORIGINATING turn. The FE-sent id wins; absent (a
+    # retry sends none), fall back to re-parsing that exact turn's spliced
+    # trigger. Threaded to the reply below so the engine skips routing on a
+    # deterministic pin, exactly like main/private.
+    resolved_pinned_skill = pinned_skill or _pin_from_source_turn(
+        conversation_id, source_turn_id, ctx.company_id
+    )
     coro = _respond_as_group_agent(
         project_id, conversation_id, ctx, trigger_kind, job_id=job_id, run_id=run_id,
+        pinned_skill=resolved_pinned_skill,
     )
     if "pytest" in sys.modules:
         _run_group_reply_blocking(coro)
@@ -222,6 +233,29 @@ def _schedule_group_reply(
     task = asyncio.create_task(coro)
     _group_reply_tasks.add(task)
     task.add_done_callback(_group_reply_tasks.discard)
+
+
+def _pin_from_source_turn(
+    conversation_id: int, source_turn_id: int | None, enterprise_id: str | None
+) -> str | None:
+    """Recover the pinned-skill id from a source turn's OWN spliced trigger.
+
+    The FE only sends `pinned_skill` on the original post, not on a retry — so
+    when the wire id is absent, re-derive it from the source turn's content by
+    the engine's own slash parse (`qa_agent`'s `/trigger` fast-path idiom),
+    keyed to THIS turn (`source_turn_id`), never the latest turn in the thread.
+    A retry with intervening messages therefore still fires the skill the
+    original turn named. Returns None when the turn has no routable slash
+    trigger."""
+    if source_turn_id is None:
+        return None
+    turn = _get_group_turn(conversation_id, source_turn_id)
+    content = (turn or {}).get("content") or ""
+    if content.startswith("/"):
+        token = content[1:].split(None, 1)[0].lower()
+        if qa_agent._routable(token, enterprise_id):
+            return token
+    return None
 
 
 def _get_group_turn(conversation_id: int, turn_id: int | None) -> dict | None:
@@ -409,10 +443,12 @@ class PostGroupTurnRequest(BaseModel):
     # `conversation_turns.attachments` column, whitelist-stripped from every
     # group read/broadcast) and folded into the agent reply's question —
     # mirroring the private surface's attachment ride.
-    # `pinned_skill` names the FE's pick on the wire; the skill itself rides
-    # the SPLICED trigger in `content` (the one splice rule every surface
-    # uses — the engine's slash-trigger routing reads it from the text), so
-    # this field is informational, not a second routing input.
+    # `pinned_skill` names the FE's pick on the wire as `{id, trigger, label}`.
+    # Its `id` is now threaded through the group reply chain as an EXPLICIT
+    # routing input to `qa_agent.answer(pinned_skill=…)` — a deterministic pin
+    # that skips routing, exactly like main/private. (The skill also still rides
+    # the spliced trigger in `content`; on a retry, where the FE resends no id,
+    # the pin is recovered from that source turn's own trigger text.)
     client_message_id: str | None = None
     pinned_skill: dict | None = None
     attachments: list | None = None
@@ -1559,6 +1595,10 @@ async def post_group_turn_route(
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
+    # The FE names its skill pick on the wire as `{id, trigger, label}`; the id
+    # is the explicit routing input threaded to the reply (the skill also rides
+    # the spliced trigger in `content`, but an explicit id skips routing).
+    pinned_skill_id = (payload.pinned_skill or {}).get("id")
     if _MENTION_RE.search(payload.content):
         if turn:
             conversations_db.set_group_turn_trigger_kind(turn["id"], "mention")
@@ -1566,6 +1606,7 @@ async def post_group_turn_route(
             project_id, conversation["id"], ctx, trigger_kind="mention",
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
+            pinned_skill=pinned_skill_id,
         )
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
@@ -1582,6 +1623,7 @@ async def post_group_turn_route(
             project_id, conversation["id"], ctx, trigger_kind="solo",
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
+            pinned_skill=pinned_skill_id,
         )
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
@@ -1607,6 +1649,7 @@ async def post_group_turn_route(
                 project_id, conversation["id"], ctx, trigger_kind=trigger_kind,
                 source_turn_id=turn["id"] if turn else None,
                 client_message_id=payload.client_message_id,
+                pinned_skill=pinned_skill_id,
             )
         elif turn:
             # No reply scheduled — the stay-out decision has no agent turn
@@ -1986,6 +2029,7 @@ _ADDRESSING_NOTES = {
 async def _respond_as_group_agent(
     project_id: int, conversation_id: int, ctx: WorkspaceContext,
     trigger_kind: str = "mention", *, job_id: int, run_id: str,
+    pinned_skill: str | None = None,
 ) -> None:
     """Produce the group agent's reply THROUGH the shared execution
     lifecycle primitive (`run_execution_job`), so the group surface *inherits*
@@ -2137,7 +2181,7 @@ async def _respond_as_group_agent(
         )
         result = qa_agent.answer(
             enterprise_id=ctx.company_id, question=question, dataset=dataset,
-            scope=scope,
+            scope=scope, pinned_skill=pinned_skill,
         )
         reply = (result or {}).get("answer", "")
         # Persist the FULL structured reply, not just the answer string:

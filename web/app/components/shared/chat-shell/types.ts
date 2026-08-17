@@ -35,6 +35,16 @@ import type {
 
 export type ChatSurfaceKind = "main" | "project_private" | "project_group"
 
+/** The on-join greeting's short/expandable-body split marker — mirrors
+ *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an inert
+ *  HTML comment). It rides persisted greeting `content`; the shell's
+ *  single-party mapper strips it when wrapping history content into a reply so
+ *  it never renders as literal text (`AskReplyBody` runs react-markdown WITHOUT
+ *  rehype-raw, so a raw comment would leak). Lives here — the shared contract
+ *  module both the private engine and the shell already depend on — so exactly
+ *  ONE copy of the string exists on the front end. */
+export const MORE_MARKER = "<!--more-->"
+
 /** The agent run-status vocabulary. Contract-only in the current wave — the
  *  surfaces that feed real statuses land in a later run-status wave; today only
  *  the "no reply yet" arm of `reply.runStatus` is ever driven. */

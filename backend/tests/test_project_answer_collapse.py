@@ -1033,7 +1033,9 @@ def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
     projects_route._schedule_group_reply(
         1, 2, ctx, "mention", source_turn_id=5, job_id=99, run_id="r",
     )
-    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r"})]
+    # The resolved `pinned_skill` is threaded through (None here — no explicit
+    # pick and the source turn carries no routable slash trigger).
+    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r", "pinned_skill": None})]
     assert projects_route._group_reply_tasks == before  # no task was ever scheduled
 
 
@@ -1093,8 +1095,10 @@ def test_background_input_is_extensible_structure():
     sig = inspect.signature(projects_route._schedule_group_reply)
     assert list(sig.parameters) == [
         "project_id", "conversation_id", "ctx", "trigger_kind",
-        # execution identity — NOT the message itself
-        "source_turn_id", "client_message_id", "job_id", "run_id",
+        # execution identity — NOT the message itself. `pinned_skill` is a
+        # deterministic routing input (the FE's skill pick, or the source
+        # turn's own trigger on a retry), also not the message.
+        "source_turn_id", "client_message_id", "job_id", "run_id", "pinned_skill",
     ]
     # None of these IS "the message" itself — the reply re-derives the live
     # transcript from the DB inside `_respond_as_group_agent`, so a future

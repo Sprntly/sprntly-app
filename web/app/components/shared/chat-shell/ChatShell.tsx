@@ -34,8 +34,9 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react"
 import { ChatTranscript, type ChatTranscriptTurn } from "../ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../ChatComposer"
-import { ClarifyQuestionsCard, type ClarifyAnswer } from "../ClarifyQuestionsCard"
+import { type ClarifyAnswer } from "../ClarifyQuestionsCard"
 import type { ChatShellHandle, ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "./types"
+import { MORE_MARKER } from "./types"
 import shellStyles from "./ChatShell.module.css"
 
 export interface ChatShellProps {
@@ -78,6 +79,16 @@ export interface ChatShellProps {
 /** Data-driven turn timestamp (project surfaces, `timestamps: "fromTurn"`). */
 function formatShellTime(d: number): string {
   return new Date(d).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+}
+
+/** Replace the on-join greeting's `MORE_MARKER` with a paragraph break when
+ *  wrapping persisted history `content` into a `reply` for the native ladder.
+ *  `AskReplyBody` runs react-markdown WITHOUT rehype-raw, so an unstripped
+ *  marker would render as literal text; the removed `AgentTurnBody` used to be
+ *  the sole consumer that split on it. Uses the ONE shared `MORE_MARKER`
+ *  constant — never a second hardcoded copy. */
+function stripMoreMarker(content: string): string {
+  return content.split(MORE_MARKER).join("\n\n")
 }
 
 function ChatShellInner(
@@ -341,6 +352,7 @@ function ChatShellInner(
         !!turn.pending ||
         !!turn.stopped ||
         turn.error != null ||
+        !!turn.timedOut ||
         turn.partial != null ||
         !!turn.clarify?.questions?.length
       const hasUser = turn.author.kind === "self" && turn.content != null
@@ -349,46 +361,29 @@ function ChatShellInner(
           ? formatShellTime(turn.createdAt)
           : null
 
-      const pickNode = turn.pickOptions?.length ? (
-        <div className={shellStyles.clarifyOptions} data-testid={`${prefix}-clarify-options`}>
-          {turn.pickOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              className={shellStyles.clarifyOption}
-              data-testid={`${prefix}-clarify-option-${opt.id}`}
-              onClick={() => onPickOption?.(turn.id, opt)}
-            >
-              {opt.title}
-            </button>
-          ))}
-        </div>
-      ) : null
-
-      // The structured generation-clarify gate — the SAME shared card main
-      // renders, inherited by configuration. Distinct from `pickNode` above
-      // (EDIT-target disambiguation): a turn carries at most one of the two,
-      // so both may be built here but only ever one is non-null in practice.
-      const clarifyNode = turn.clarify?.questions?.length ? (
-        <ClarifyQuestionsCard
-          questions={turn.clarify.questions}
-          resolved={turn.clarify.resolved ?? undefined}
-          busy={turn.clarify.busy}
-          onSubmit={(answers) => onClarifySubmit?.(turn.id, answers)}
-          onSkip={() => onClarifySkip?.(turn.id)}
-        />
-      ) : null
-
-      const agentBodyNode = hasAgent ? (
-        <>
-          {clarifyNode}
-          {transcript.renderAgentBody?.(turn)}
-          {pickNode}
-        </>
-      ) : undefined
-
       const wrapperTestId =
         turn.author.kind === "agent" && prefix ? `${prefix}-history-agent` : undefined
+
+      // A host-supplied body still overrides (the escape hatch retained for a
+      // genuine host body node); WITHOUT one — the new default after private
+      // stopped forking `renderAgentBody` — the turn's own data feeds
+      // `ChatBubble`'s NATIVE reply ladder, MIRRORING `mapMultiParty` above.
+      const hostBody = hasAgent ? transcript.renderAgentBody?.(turn) : undefined
+      // History agent turns carry `content`, not `reply`; wrap so they render
+      // through `AskReplyBody`'s markdown in the ladder, replacing the
+      // on-join greeting's `MORE_MARKER` so it never leaks as literal text
+      // (`AskReplyBody` runs react-markdown without rehype-raw).
+      const wrappedReply =
+        turn.reply ??
+        (turn.content != null && turn.author.kind === "agent"
+          ? {
+              answer: stripMoreMarker(turn.content),
+              key_points: [],
+              citations: [],
+              confidence: 1,
+              unanswered: "",
+            }
+          : null)
 
       return {
         turnId: turn.id,
@@ -405,11 +400,40 @@ function ChatShellInner(
               name: turn.author.name ?? null,
             }
           : undefined,
-        agentBodyNode,
+        // The edit-target pick + the structured clarify gate — UNCONDITIONAL
+        // native `ChatBubble` props, NOT nodes inside a resurrected
+        // `agentBodyNode`. `pickOptions` renders as a sibling card (like
+        // `pendingMutation`); `clarify` renders in the native ladder (taken
+        // whenever no host body node is supplied — the default now).
+        pickOptions: turn.pickOptions ?? null,
+        onPickOption: (opt) => onPickOption?.(turn.id, opt),
+        clarify: turn.clarify?.questions?.length ? turn.clarify.questions : null,
+        clarifyResolved: turn.clarify?.resolved ?? undefined,
+        clarifyGateOpen: !!turn.clarify?.questions?.length,
+        clarifyBusy: turn.clarify?.busy,
+        onSubmitClarify: (answers) => onClarifySubmit?.(turn.id, answers),
+        onSkipClarify: () => onClarifySkip?.(turn.id),
+        ...(hostBody != null
+          ? { agentBodyNode: hostBody }
+          : {
+              reply: wrappedReply,
+              openCandidates: turn.openCandidates ?? null,
+              artifactList: turn.artifactList ?? null,
+              onOpenCandidate: transcript.onOpenCandidate,
+              onOpenArtifactItem: transcript.onOpenArtifactItem,
+              partial: turn.partial ?? null,
+              stopped: turn.stopped,
+              error: turn.error,
+              timedOut: turn.timedOut,
+              isGenerating: turn.pending,
+              streamDropped: turn.streamDropped,
+              // Private re-sends the turn's own question through the shared
+              // send pipeline (the ladder's stopped/error "Ask again").
+              onAskAgain: turn.content ? () => send.onSubmit(turn.content!) : undefined,
+            }),
         // The confirmation gate's parked proposal — same additive mapping as
         // the multi-party path; the card renders INDEPENDENT of the
-        // `agentBodyNode` escape hatch above (private turns use
-        // `renderAgentBody` and still need it).
+        // native-ladder-vs-escape-hatch branch above.
         pendingMutation: turn.pendingMutation
           ? { summary: turn.pendingMutation.summary, sectionsChanged: turn.pendingMutation.sectionsChanged }
           : null,

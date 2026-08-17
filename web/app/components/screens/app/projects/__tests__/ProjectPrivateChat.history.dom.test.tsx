@@ -179,7 +179,7 @@ describe("ProjectPrivateChat — send flow preserved (AC7)", () => {
       expect.objectContaining({ project_id: 202, conversation_id: 9001 }),
     )
     expect(screen.getByTestId("ic-msg-you").textContent).toContain("a brand new question")
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
     // The loaded history turn is still there, unreplaced by the new send.
     expect(screen.getByTestId("ic-history-agent").textContent).toContain("earlier brief")
   })
@@ -203,7 +203,7 @@ describe("ProjectPrivateChat — history fetch failure degrades (AC8)", () => {
     await act(async () => {
       fireEvent.click(screen.getByLabelText("Send"))
     })
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
   })
 })
 
@@ -215,38 +215,33 @@ describe("ProjectPrivateChat — empty state (AC9)", () => {
   })
 })
 
-describe("ProjectPrivateChat — on-join greeting <!--more--> split (AC-6)", () => {
-  it("test_more_marker_renders_lead_and_toggle — a <!--more--> turn renders the lead inline plus a working Show more/less toggle", async () => {
+describe("ProjectPrivateChat — on-join greeting <!--more--> marker (AC6)", () => {
+  it("test_private_join_greeting_more_marker_stripped — a <!--more--> turn renders the FULL content through the shared ladder with the marker stripped and no literal comment leaking", async () => {
     individualTurnsMock.mockResolvedValue([
       {
         id: 9,
         role: "assistant",
-        content: "Hey — you're on Dark Mode Launch now. Here's what I know so far:\n\nThe lead gist.<!--more-->\n\nThe rest of the summary, hidden until expanded.",
+        content: "Hey — you're on Dark Mode Launch now. Here's what I know so far:\n\nThe lead gist.<!--more-->\n\nThe rest of the summary.",
         created_at: "2026-08-13T00:00:00Z",
       },
     ])
 
     render(React.createElement(ProjectPrivateChat, { projectId: 505 }))
     const agent = await screen.findByTestId("ic-history-agent")
+    // The greeting renders through the native ladder's AskReplyBody. With
+    // `AgentTurnBody` gone, the whole content shows (no show-more toggle) and —
+    // the guaranteed-regression fix — the `<!--more-->` marker is replaced by a
+    // paragraph break, so the literal HTML comment NEVER leaks as text
+    // (AskReplyBody runs react-markdown without rehype-raw).
     expect(agent.textContent).toContain("The lead gist.")
-    expect(agent.textContent).not.toContain("The rest of the summary")
-
-    const toggle = screen.getByTestId("ic-agent-show-more")
-    expect(toggle.textContent).toBe("Show more")
-    await act(async () => {
-      fireEvent.click(toggle)
-    })
-    expect(screen.getByTestId("ic-history-agent").textContent).toContain("The rest of the summary")
-    expect(screen.getByTestId("ic-agent-show-more").textContent).toBe("Show less")
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId("ic-agent-show-more"))
-    })
-    expect(screen.getByTestId("ic-history-agent").textContent).not.toContain("The rest of the summary")
-    expect(screen.getByTestId("ic-agent-show-more").textContent).toBe("Show more")
+    expect(agent.textContent).toContain("The rest of the summary.")
+    expect(agent.textContent).not.toContain("<!--more-->")
+    expect(agent.innerHTML).not.toContain("<!--more-->")
+    // The show-more toggle is retired — main has no history show-more.
+    expect(screen.queryByTestId("ic-agent-show-more")).toBeNull()
   })
 
-  it("test_no_marker_renders_unchanged — a plain assistant turn (no marker) renders byte-identically to before, no toggle", async () => {
+  it("test_no_marker_renders_unchanged — a plain assistant turn (no marker) renders through the shared ladder, no toggle", async () => {
     individualTurnsMock.mockResolvedValue([
       { id: 2, role: "assistant", content: "Flat $49/mo, decided last week.", created_at: "2026-08-10T10:01:00Z" },
     ])

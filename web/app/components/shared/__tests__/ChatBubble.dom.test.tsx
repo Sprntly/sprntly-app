@@ -172,6 +172,50 @@ describe("ChatBubble pendingMutation — the native confirm card", () => {
   })
 })
 
+describe("ChatBubble pickOptions — the native edit-target pick card", () => {
+  it("test_native_pickOptions_renders_and_fires", () => {
+    const onPickOption = vi.fn()
+    const { getByTestId } = render(
+      <ChatBubble
+        turnId="p1"
+        agentName="Sprntly"
+        reply={REPLY}
+        pickOptions={[
+          { id: "501", title: "Onboarding", instruction: "tighten it" },
+          { id: "502", title: "Billing", instruction: "tighten it" },
+        ]}
+        onPickOption={onPickOption}
+      />,
+    )
+    expect(getByTestId("mutation-pick-options")).toBeTruthy()
+    expect(getByTestId("mutation-pick-option-501").textContent).toBe("Onboarding")
+    fireEvent.click(getByTestId("mutation-pick-option-502"))
+    expect(onPickOption).toHaveBeenCalledTimes(1)
+    expect(onPickOption).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "502", title: "Billing", instruction: "tighten it" }),
+    )
+  })
+
+  it("test_no_pickOptions_dom_unchanged", () => {
+    // Unset, null, and empty-array all render byte-identical DOM to a bubble
+    // that never heard of the prop — the main chat passes none, so its golden
+    // DOM stays byte-identical (AC1).
+    const withoutProp = render(<ChatBubble turnId="p2" agentName="Sprntly" reply={REPLY} />)
+    const withoutHtml = withoutProp.container.innerHTML
+    cleanup()
+    const withNull = render(
+      <ChatBubble turnId="p2" agentName="Sprntly" reply={REPLY} pickOptions={null} />,
+    )
+    expect(withNull.container.innerHTML).toBe(withoutHtml)
+    cleanup()
+    const withEmpty = render(
+      <ChatBubble turnId="p2" agentName="Sprntly" reply={REPLY} pickOptions={[]} />,
+    )
+    expect(withEmpty.container.innerHTML).toBe(withoutHtml)
+    expect(withEmpty.container.querySelector('[data-testid="mutation-pick-options"]')).toBeNull()
+  })
+})
+
 describe("ChatBubble humanAlign — third-party turns in a multi-party thread", () => {
   it("a teammate's turn (humanAlign=start) renders left/avatar-flanked, never the right-aligned lane", () => {
     const { container } = render(

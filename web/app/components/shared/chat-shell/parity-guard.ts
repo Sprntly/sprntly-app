@@ -151,3 +151,64 @@ export function auditComposerParity(input: ComposerParityInput): ParityViolation
 
   return violations
 }
+
+/**
+ * The render-inheritance audit arm — the SECOND guard installed alongside
+ * `auditComposerParity`, enforcing the inheritance rule: project chat surfaces
+ * CONSUME main's shared render/context logic (the `ChatBubble` reply ladder),
+ * they never re-implement it. Same pure source-parse posture as the composer
+ * arm — the test parses the REAL project descriptors + the sanctioned
+ * divergence set and feeds them here.
+ *
+ * Two checks are live today:
+ *   (a) no agent-reply `renderAgentBody` fork — neither project descriptor sets
+ *       `renderAgentBody:` for the agent reply (it re-implemented the ladder);
+ *   (b) ledger-completeness — every project↔main render/context divergence is
+ *       named in `PARITY_OPT_OUTS`, or it fails closed.
+ *
+ * The "no local reimplementation of a shared host service" checks (executors,
+ * action rows, next-prompts, inline cards, open-destination) are STUBBED here
+ * and activated per service as later sub-phases land; a final pass points at
+ * this same `parity-guard.ts` — the guard is EXTENDED, never forked into a
+ * second file.
+ */
+export type RenderInheritanceInput = {
+  /** Project surfaces whose descriptor sets `renderAgentBody:` for the agent
+   *  reply — a fork of the shared ladder. Source-parsed by the test; empty on
+   *  today's code (both surfaces consume the native ladder). */
+  agentReplyForks: ChatSurfaceKind[]
+  /** Known project↔main render/context divergences that must EACH be ledgered
+   *  (source-derived by the test, kept OUT of this pure function). */
+  renderDivergences: { capability: string; surface: ChatSurfaceKind }[]
+  /** The real, checked-in opt-out ledger. */
+  ledger: ParityOptOut[]
+}
+
+export function auditRenderInheritance(input: RenderInheritanceInput): ParityViolation[] {
+  const { agentReplyForks, renderDivergences, ledger } = input
+  const violations: ParityViolation[] = []
+
+  // (a) A project surface that re-implements the agent-reply ladder via
+  // `renderAgentBody` instead of consuming `ChatBubble`'s native one.
+  for (const surface of agentReplyForks) {
+    violations.push({
+      capability: "render.agentReplyLadder",
+      surface,
+      reason: `Surface "${surface}" sets renderAgentBody for the agent reply — it must consume ChatBubble's native reply ladder, not re-implement it.`,
+    })
+  }
+
+  // (b) A render/context divergence between a project surface and main that is
+  // not named in the opt-out ledger — fail closed.
+  for (const d of renderDivergences) {
+    if (!isLedgered(ledger, d.capability, d.surface)) {
+      violations.push({
+        capability: d.capability,
+        surface: d.surface,
+        reason: `Render/context divergence "${d.capability}" for surface "${d.surface}" is not in PARITY_OPT_OUTS.`,
+      })
+    }
+  }
+
+  return violations
+}

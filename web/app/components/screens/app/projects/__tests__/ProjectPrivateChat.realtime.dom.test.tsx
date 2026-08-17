@@ -318,7 +318,7 @@ describe("ProjectPrivateChat — non-breakage / cleanup (AC-6/AC-7)", () => {
       "project-individual-202",
       expect.objectContaining({ project_id: 202, conversation_id: 9001 }),
     )
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("still works")
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("still works")
   })
 })

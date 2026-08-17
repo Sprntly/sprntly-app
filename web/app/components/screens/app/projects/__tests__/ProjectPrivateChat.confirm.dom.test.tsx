@@ -143,7 +143,7 @@ describe("ProjectPrivateChat — the PRD-edit confirmation gate", () => {
     expect(screen.getByTestId("mutation-summary").textContent).toBe(
       "Proposed: tighten the problem statement.",
     )
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain(
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
       "Proposed: tighten the problem statement.",
     )
     expect(screen.queryByText(/Updated the PRD/)).toBeNull()
@@ -164,7 +164,7 @@ describe("ProjectPrivateChat — the PRD-edit confirmation gate", () => {
     await waitFor(() => expect(prdChatEditConfirmMock).toHaveBeenCalledWith(202, "tok-1"))
     // The card clears and the turn settles with the APPLIED summary.
     await waitFor(() => expect(screen.queryByTestId("mutation-confirm-card")).toBeNull())
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain(
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
       "Tightened the problem statement.",
     )
   })
@@ -181,7 +181,7 @@ describe("ProjectPrivateChat — the PRD-edit confirmation gate", () => {
     // The card clears; the proposal-summary reply stays as the record and no
     // write ever happened.
     await waitFor(() => expect(screen.queryByTestId("mutation-confirm-card")).toBeNull())
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain(
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
       "Proposed: tighten the problem statement.",
     )
     expect(prdChatEditConfirmMock).not.toHaveBeenCalled()

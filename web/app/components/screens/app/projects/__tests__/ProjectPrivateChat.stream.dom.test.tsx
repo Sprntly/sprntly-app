@@ -135,15 +135,16 @@ describe("ProjectPrivateChat — private streaming", () => {
     await send("what's the rollout plan?")
 
     expect(typeof capturedOpts.onPartial).toBe("function")
-    // Nothing streamed yet — the plain wait state, no streaming testid.
-    expect(screen.getByTestId("ic-msg-pending")).toBeTruthy()
-    expect(screen.queryByTestId("ic-msg-streaming")).toBeNull()
+    // Nothing streamed yet — the shared ladder's plain busy state (aria-busy),
+    // no streaming partial node yet.
+    expect(document.querySelector("[aria-busy]")).toBeTruthy()
+    expect(screen.queryByTestId("ask-streaming-partial")).toBeNull()
 
     await act(async () => {
       capturedOpts.onPartial!("The rollout starts")
     })
-    expect(screen.queryByTestId("ic-msg-pending")).toBeNull()
-    const streaming = screen.getByTestId("ic-msg-streaming")
+    // The shared ladder's streaming node now renders the partial.
+    const streaming = screen.getByTestId("ask-streaming-partial")
     expect(streaming.textContent).toContain("The rollout starts")
 
     // A second delta REPLACES the rendered text (assigned, not appended) —
@@ -151,7 +152,7 @@ describe("ProjectPrivateChat — private streaming", () => {
     await act(async () => {
       capturedOpts.onPartial!("The rollout starts next Monday.")
     })
-    expect(screen.getByTestId("ic-msg-streaming").textContent).toContain("The rollout starts next Monday.")
+    expect(screen.getByTestId("ask-streaming-partial").textContent).toContain("The rollout starts next Monday.")
   })
 
   it("does not add group token streaming — ProjectGroupChat's send path takes no onPartial/onStreamDrop", () => {
