@@ -369,6 +369,27 @@ def test_intent_stopwords_do_not_strip_words_that_are_part_of_a_NAME():
     assert "Read" in ci._query_terms("what did Read AI say")
 
 
+def test_the_single_call_prompt_answers_the_question_that_was_asked():
+    """Found live, after the routing fix landed: "find me the transcript of
+    David Mumuni's Zoom meeting" reached the right call and fetched the right
+    transcript — then answered with a paragraph about the transcript carrying no
+    timestamp. Fetching the right call and then declining to show it is, from
+    the user's side, the same failure as not finding it.
+
+    Asserted on the PROMPT because that is where the behaviour lives: the model
+    is handed the transcript either way, and what it does with it is what this
+    string decides."""
+    system = ci._SINGLE_CALL_SYSTEM
+    assert "ANSWER THE QUESTION THAT WAS ASKED" in system
+    # The transcript branch, and the explicit refusal to substitute a summary.
+    assert "reproduce the conversation itself" in system
+    assert "Do not replace it with a summary" in system
+    # Summarizing stays a first-class branch, not a casualty of the fix.
+    assert "what a PM would act on" in system
+    # And the caveat that consumed the live answer is bounded.
+    assert "never let it displace the answer" in system
+
+
 def test_transcript_asks_still_obey_every_other_gate():
     """The new nouns buy no exemption. A window still means the digest, and a
     plural ask that names no call still belongs to the listing — otherwise this
