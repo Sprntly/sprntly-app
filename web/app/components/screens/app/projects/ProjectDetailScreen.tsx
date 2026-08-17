@@ -743,10 +743,50 @@ export function ProjectDetailScreen({
     },
     [refetchArtifacts],
   )
-  useRealtimeChannel(`project:${projectId}`, {
+  const { degraded: artifactsDegraded } = useRealtimeChannel(`project:${projectId}`, {
     onEvent: handleArtifactsEvent,
     onReconcile: refetchArtifacts,
   })
+
+  // Artifacts count fallback poll — same focus-gated posture as the unread
+  // badge poll above (AD-P22): while the group channel above is live, the
+  // `artifact.added` broadcast + reconnect reconcile keep the count fresh
+  // and this interval does not arm. When that channel degrades (e.g. a
+  // group/agent-driven creation whose broadcast is dropped), this re-arms
+  // and re-fetches the artifact list on the same cadence, gated on the tab
+  // having focus. Best-effort: a dropped tick just leaves the count as-is
+  // until the next successful tick or a manual panel-reopen.
+  useEffect(() => {
+    let cancelled = false
+    let intervalId: ReturnType<typeof setInterval> | null = null
+    const tick = () => {
+      if (!cancelled) refetchArtifacts()
+    }
+    const start = () => {
+      if (!artifactsDegraded) return
+      if (intervalId != null) return
+      intervalId = setInterval(tick, UNREAD_POLL_MS)
+    }
+    const stop = () => {
+      if (intervalId == null) return
+      clearInterval(intervalId)
+      intervalId = null
+    }
+
+    if (typeof document !== "undefined" && document.hasFocus()) start()
+    const onFocus = () => start()
+    const onBlur = () => stop()
+    window.addEventListener("focus", onFocus)
+    window.addEventListener("blur", onBlur)
+
+    return () => {
+      cancelled = true
+      stop()
+      window.removeEventListener("focus", onFocus)
+      window.removeEventListener("blur", onBlur)
+    }
+  }, [artifactsDegraded, refetchArtifacts])
+
   const onCloseRailModal = useCallback(() => {
     setRailModal(null)
     // Acting on tasks inside the modal changes the open counts; refresh the
