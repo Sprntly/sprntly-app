@@ -71,7 +71,7 @@ import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError
 // The ONE owner of a standalone ticket-set run and of `content.ticketSet`.
 // Nothing in this file may call `storiesApi.generateFromInsight` directly —
 // see the module header for why a second caller is a second LLM bill.
-import { loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
+import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "../../../types/content"
@@ -3418,12 +3418,13 @@ export function ChatScreen() {
 
   // ── Change the TICKETS' format from chat ────────────────────────────────────
   // "Change the ticket template to Acme". The tickets counterpart of
-  // prdChangeTemplateFlow, but synchronous end to end: the backend re-LAYS the
-  // existing tickets (identity, edits and tracker links preserved — never a
-  // regeneration) and answers with the re-laid set, so there is no generating
-  // state to drive and no poll. `target` is the thread's standalone set when it
-  // has one, else the tab PRD's persisted tickets — resolved by the caller,
-  // because the backend cannot see a set from a prd_id-shaped envelope.
+  // prdChangeTemplateFlow: the backend re-LAYS the existing tickets (identity,
+  // edits and tracker links preserved — never a regeneration) in the
+  // BACKGROUND, so the POST returns as soon as the switch is scheduled and the
+  // reply says it is under way rather than done. `target` is the thread's
+  // standalone set when it has one, else the tab PRD's persisted tickets —
+  // resolved by the caller, because the backend cannot see a set from a
+  // prd_id-shaped envelope.
   const ticketsChangeTemplateFlow = useCallback(async (
     query: string, targetTabId: string,
     target: { ticketSetId: number } | { prdId: number },
@@ -3454,27 +3455,44 @@ export function ChatScreen() {
         return
       }
       finalize(asReply(
-        `Done — the tickets now use ${label}. Every ticket kept its content, edits and tracker links; only the description layout changed. They're in the panel on the right.`,
+        `Re-laying the tickets into ${label} now — every ticket keeps its content, edits and tracker links; only the description layout changes. It carries on in the background, so you can keep working; they'll update in the panel on the right when it lands.`,
       ))
-      // Re-render the panel from the persisted truth. A standalone set is
-      // re-read through its one owner (loadTicketSet republishes the slice);
-      // a PRD's tickets re-read via the tab's cache-first effect on the nonce.
+      // Follow the switch so the panel lands on the new format by itself. A
+      // standalone set is followed through its one owner, which marks the
+      // slice `relaying` in place — never `loadTicketSet`, which would blank
+      // tickets that are still perfectly readable. A PRD's tickets need no
+      // call at all: the Tickets tab's own poll is watching the row and owns
+      // both the re-read and the completion toast.
       if (targetTabId === activeTabIdRef.current) {
         if ("ticketSetId" in target) {
-          void loadTicketSet(target.ticketSetId, setContent)
-        } else {
-          setContent({ ticketsRefreshNonce: Date.now() })
+          const slice = content.ticketSet
+          if (slice && slice.id === target.ticketSetId) {
+            void followTicketSetSwitch(
+              target.ticketSetId, setContent, slice, templateName,
+            ).then((landed) => {
+              if (landed) {
+                showToast("Format switched",
+                  `These tickets now use ${templateName || "the new format"}.`)
+              }
+            })
+          } else {
+            void loadTicketSet(target.ticketSetId, setContent)
+          }
         }
         openContentPanel("tickets")
       }
-      showToast("Format switched", `These tickets now use ${templateName || "the new format"}.`)
+      showToast(
+        "Switching format",
+        `Re-laying these tickets into ${templateName || "the new format"}.`,
+      )
     } catch (e) {
       const msg = e instanceof Error ? e.message : "something went wrong"
       finalize(asReply(`I couldn't switch the ticket format — ${msg}. The tickets are unchanged.`))
     } finally {
       setBusyTabs((prev) => removeFromSet(prev, targetTabId))
     }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel,
+      showToast, content.ticketSet])
 
   // ── Assign tickets from chat ────────────────────────────────────────────────
   // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".

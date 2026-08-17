@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from app.db.client import require_client, retry_on_disconnect
 from app.db.prds import get_prd_rendered
+from app.stories.relayout_state import relaying_marker as _relaying_marker
 
 logger = logging.getLogger(__name__)
 
@@ -148,13 +149,57 @@ def set_tickets_template(
     Deliberately does NOT touch `content_hash`: the tickets still describe the
     same PRD content, and rewriting the hash here would either fake freshness
     (for a stale set) or break it (for a fresh one). Layout is orthogonal to
-    the staleness contract."""
+    the staleness contract.
+
+    Clears `relayout` in the SAME update as the stories it landed. This writer
+    exists only for the switch, and one statement is what keeps a poller from
+    ever seeing the re-laid tickets while the marker still claims a switch is
+    running (which would read as "still going" over a finished job)."""
     c = require_client()
     (
         c.table("prd_tickets")
         .update(
-            {"stories": stories, "artifact_template_id": artifact_template_id}
+            {
+                "stories": stories,
+                "artifact_template_id": artifact_template_id,
+                "relayout": None,
+            }
         )
+        .eq("company_id", company_id)
+        .eq("prd_id", prd_id)
+        .execute()
+    )
+
+
+@retry_on_disconnect
+def mark_tickets_relaying(
+    company_id: str, prd_id: int, artifact_template_id: str | None,
+) -> None:
+    """Record that a format switch into `artifact_template_id` is in flight.
+
+    Written by the route BEFORE the background task is scheduled, so the
+    in-flight state is durable from the first moment — a client that navigates
+    away and comes back reads it rather than seeing the old format sitting
+    there as if nothing had been asked for. `status` is deliberately untouched:
+    see 20260817120000_ticket_relayout_marker.sql for why a re-lay must not
+    look like a generation."""
+    (
+        require_client().table("prd_tickets")
+        .update({"relayout": _relaying_marker(artifact_template_id)})
+        .eq("company_id", company_id)
+        .eq("prd_id", prd_id)
+        .execute()
+    )
+
+
+@retry_on_disconnect
+def clear_tickets_relaying(company_id: str, prd_id: int) -> None:
+    """Drop the in-flight marker without touching the tickets — the failure
+    path. The set keeps the format it already had, which is the truth: a failed
+    re-lay writes nothing."""
+    (
+        require_client().table("prd_tickets")
+        .update({"relayout": None})
         .eq("company_id", company_id)
         .eq("prd_id", prd_id)
         .execute()

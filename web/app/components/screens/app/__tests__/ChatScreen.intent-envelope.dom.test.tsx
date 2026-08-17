@@ -302,10 +302,15 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     await waitFor(() =>
       expect(ticketsChangeTemplate).toHaveBeenCalledWith({ prdId: 501 }, "tpl-tick"),
     )
-    // Synchronous flow: the completed switch is confirmed in the thread.
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("the tickets now use “Acme Tickets”"),
-    )
+    // Background flow: the reply says the re-lay is UNDER WAY, not done — the
+    // route returns on scheduling, and claiming a finished switch over tickets
+    // that have not been re-laid yet would be a lie the panel then contradicts.
+    // Both phrases in one wait: the reply renders progressively, so asserting
+    // the tail separately would read a half-written message.
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Re-laying the tickets into “Acme Tickets”")
+      expect(document.body.textContent).toContain("carries on in the background")
+    })
     expect(runAskGeneration).toHaveBeenCalledTimes(1)
     expect(changeTemplate).not.toHaveBeenCalled() // never the PRD switch
     expect(generateFromTask).not.toHaveBeenCalled()

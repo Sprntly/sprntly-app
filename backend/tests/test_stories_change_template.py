@@ -227,16 +227,45 @@ def test_builtin_to_builtin_is_the_same_noop(tenant_client, isolated_settings):
     assert resp.json()["unchanged"] is True
 
 
-# ─── the switch ──────────────────────────────────────────────────────────────
+# ─── scheduling: what the click itself does ──────────────────────────────────
 
 
-def test_the_switch_relays_stamps_and_keeps_identity(
-    tenant_client, isolated_settings
+@pytest.fixture
+def no_relay(monkeypatch):
+    """Capture the background switch instead of running it.
+
+    Patched on `app.stories.relayout`, which the route imports from inside the
+    function body — so the name resolves here at call time.
+
+    Stubbing it is not squeamishness about the LLM (the fill fails open
+    anyway): under `TestClient` an `asyncio.create_task(asyncio.to_thread(…))`
+    runs to completion BEFORE the response is handed back, so a test that let
+    the real job run could never observe the in-flight state at all, and every
+    assertion about "while the switch is running" would silently be an
+    assertion about a finished one. The runner is exercised directly further
+    down instead — the same split test_prd_change_template.py uses.
+    """
+    calls: list[dict] = []
+
+    def _capture(company_id, **kw):
+        calls.append({"company_id": company_id, **kw})
+
+    import app.stories.relayout as relayout_mod
+
+    monkeypatch.setattr(relayout_mod, "run_switch", _capture)
+    return calls
+
+
+def test_the_click_returns_the_moment_the_switch_is_scheduled(
+    tenant_client, isolated_settings, no_relay
 ):
-    """The happy path on a PRD's tickets: every story re-stamped with the new
-    layout, ids untouched, content untouched, hash untouched, stamp updated —
-    and the response carries the re-laid stories so the client re-renders
-    without another read."""
+    """The response is the ACKNOWLEDGEMENT, not the result.
+
+    This is the whole point of the change: the re-lay used to run inside the
+    request, so the confirm dialog sat on "Switching…" for its full duration
+    and navigating away killed it. The click now returns as soon as the work is
+    durable and scheduled.
+    """
     t = tenant_client.make(slug="acme")
     template_id = _add_ticket_format(t.company_id)
     before = _stories()
@@ -248,26 +277,91 @@ def test_the_switch_relays_stamps_and_keeps_identity(
 
     assert resp.status_code == 200
     body = resp.json()
-    assert body["status"] == "ready"
+    assert body["status"] == "relaying"
     assert body["artifact_template_id"] == template_id
     assert body["artifact_template_name"] == "Acme Tickets"
+    # No stories: they do not exist yet, and a client rendering from this body
+    # would render nothing.
+    assert "stories" not in body
 
-    # Identity + content preserved; layout swapped.
-    assert [s["id"] for s in body["stories"]] == [s["id"] for s in before]
-    assert [s["title"] for s in body["stories"]] == ["Login retry", "Audit log"]
-    for s in body["stories"]:
-        assert s["description_layout"] == _ACME_LAYOUT
+    # Scheduled with the resolved layout, so the worker cannot fail for a
+    # reason the caller should have been told about.
+    assert len(no_relay) == 1
+    assert no_relay[0]["prd_id"] == prd_id
+    assert no_relay[0]["artifact_template_id"] == template_id
+    assert no_relay[0]["layout"] == _ACME_LAYOUT
+    assert [s["id"] for s in no_relay[0]["stories"]] == [s["id"] for s in before]
 
-    # Persisted the same way, with the hash NOT touched.
+
+def test_the_switch_never_moves_the_row_off_ready(
+    tenant_client, isolated_settings, no_relay
+):
+    """The in-flight state is the `relayout` marker, NEVER `status`.
+
+    A ticket row sitting at `generating` makes GET /for-prd report
+    `fresh: false`, and the Tickets tab answers that by kicking off a real
+    generation — which mints new ticket ids and orphans every issue already
+    synced to the customer's tracker. Preserving identity is the whole reason a
+    switch is a re-layout, so this is the invariant that protects it.
+    """
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+
+    assert t.client.post(
+        _URL, json={"prd_id": prd_id, "artifact_template_id": template_id}
+    ).status_code == 200
+
     row = _get_prd_tickets_row(t.company_id, prd_id)
-    assert row["artifact_template_id"] == template_id
-    assert row["content_hash"] == "hash-original"
-    assert all(s["description_layout"] == _ACME_LAYOUT for s in row["stories"])
+    assert row["status"] == "ready"
+    assert row["relayout"]["status"] == "running"
+    assert row["relayout"]["template_id"] == template_id
+    # Still the OLD format on disk — the switch has not landed yet.
+    assert row["artifact_template_id"] is None
 
 
-def test_the_switch_works_on_a_standalone_set(tenant_client, isolated_settings):
-    from app.db.ticket_sets import get_set
+def test_the_read_route_reports_the_switch_beside_readable_tickets(
+    tenant_client, isolated_settings, no_relay
+):
+    """What a user who left the page and came back is told. The tickets under
+    it are the previous format's and still entirely theirs to read, which is
+    why `relaying` sits BESIDE a ready, fresh set rather than replacing it.
 
+    `fresh` staying TRUE through a switch is the load-bearing half: the Tickets
+    tab answers a non-fresh read by kicking off a real generation, so a marker
+    that disturbed freshness would turn every format switch into a regeneration
+    that orphans the customer's synced issues.
+    """
+    from app.db.prd_tickets import prd_content_hash
+
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+    # The real hash of the seeded PRD, so `fresh` means what it means in
+    # production rather than being false for a fixture's reasons.
+    from app.db.client import require_client
+
+    require_client().table("prd_tickets").update(
+        {"content_hash": prd_content_hash(prd_id)}
+    ).eq("company_id", t.company_id).eq("prd_id", prd_id).execute()
+
+    assert t.client.post(
+        _URL, json={"prd_id": prd_id, "artifact_template_id": template_id}
+    ).status_code == 200
+
+    read = t.client.get(f"/v1/stories/for-prd/{prd_id}").json()
+    assert read["status"] == "ready"
+    assert read["fresh"] is True
+    assert len(read["stories"]) == 2
+    assert read["relaying"] is True
+    assert read["relaying_into_name"] == "Acme Tickets"
+
+
+def test_a_standalone_set_reports_its_switch_while_it_runs(
+    tenant_client, isolated_settings, no_relay
+):
+    """GET /v1/ticket-sets/{id} is the read `loadTicketSet` polls — the same
+    contract on the standalone path."""
     t = tenant_client.make(slug="acme")
     template_id = _add_ticket_format(t.company_id)
     set_id = _seed_set(t.company_id)
@@ -275,40 +369,179 @@ def test_the_switch_works_on_a_standalone_set(tenant_client, isolated_settings):
     resp = t.client.post(
         _URL, json={"ticket_set_id": set_id, "artifact_template_id": template_id}
     )
-
     assert resp.status_code == 200
-    assert resp.json()["artifact_template_id"] == template_id
-    row = get_set(t.company_id, set_id)
-    assert row["artifact_template_id"] == template_id
-    assert all(s["description_layout"] == _ACME_LAYOUT for s in row["stories"])
+    assert resp.json()["status"] == "relaying"
+    assert no_relay[0]["ticket_set_id"] == set_id
+
+    mid = t.client.get(f"/v1/ticket-sets/{set_id}").json()
+    assert mid["status"] == "ready"      # the tickets are still theirs to read
+    assert mid["relaying"] is True
+    assert mid["relaying_into_name"] == "Acme Tickets"
 
 
-def test_switching_back_to_the_builtin_clears_the_layout(
+def test_a_set_with_no_switch_running_says_so(
     tenant_client, isolated_settings
+):
+    """The resting state, pinned so `relaying` can never read as "maybe"."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+    set_id = _seed_set(t.company_id)
+
+    for body in (t.client.get(f"/v1/stories/for-prd/{prd_id}").json(),
+                 t.client.get(f"/v1/ticket-sets/{set_id}").json()):
+        assert body["relaying"] is False
+        assert body["relaying_into_name"] is None
+
+
+def test_a_second_switch_while_one_runs_is_a_409(
+    tenant_client, isolated_settings, no_relay
+):
+    """Two overlapping re-lays each read the CURRENT stories and each write the
+    whole array back, so the loser's format would win the label and the
+    winner's the content — a set that names one format and renders another."""
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    other_id = _add_ticket_format(t.company_id, name="Beta Tickets")
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+
+    assert t.client.post(
+        _URL, json={"prd_id": prd_id, "artifact_template_id": template_id}
+    ).status_code == 200
+
+    second = t.client.post(
+        _URL, json={"prd_id": prd_id, "artifact_template_id": other_id}
+    )
+    assert second.status_code == 409
+    assert "re-formatted" in second.json()["detail"]
+    # Only the first was ever scheduled, and the marker still names it.
+    assert len(no_relay) == 1
+    assert _get_prd_tickets_row(t.company_id, prd_id)["relayout"]["template_id"] == template_id
+
+
+def test_a_stranded_marker_stops_blocking_once_it_ages_out(
+    tenant_client, isolated_settings, no_relay
+):
+    """The task lives in the API process, so a deploy mid-switch leaves a
+    marker nothing will ever clear. Past RELAYOUT_STALE_AFTER_S it must read as
+    "not running" — otherwise one unlucky restart wedges a ticket set's Format
+    control forever."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.db.client import require_client
+
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+
+    stale = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    require_client().table("prd_tickets").update({
+        "relayout": {"status": "running", "template_id": None,
+                     "started_at": stale},
+    }).eq("company_id", t.company_id).eq("prd_id", prd_id).execute()
+
+    assert t.client.get(f"/v1/stories/for-prd/{prd_id}").json()["relaying"] is False
+    assert t.client.post(
+        _URL, json={"prd_id": prd_id, "artifact_template_id": template_id}
+    ).status_code == 200
+    assert len(no_relay) == 1
+
+
+def test_a_marker_with_no_timestamp_is_not_believed():
+    """Unit: an un-ageable marker is the one shape that could wedge a client
+    forever, so it is refused rather than trusted."""
+    from app.stories.relayout_state import relayout_in_flight
+
+    assert relayout_in_flight({"relayout": None}) is None
+    assert relayout_in_flight({}) is None
+    assert relayout_in_flight({"relayout": {"status": "running"}}) is None
+    assert relayout_in_flight({"relayout": {"status": "running",
+                                            "started_at": "not a date"}}) is None
+    assert relayout_in_flight({"relayout": "running"}) is None
+
+
+def test_null_is_scheduled_as_the_builtin_never_the_active_format(
+    tenant_client, isolated_settings, no_relay
 ):
     """null on THIS route is a real choice ("back to Sprntly's layout") and
     must NOT resolve to the company's active format — the resolve_ticket_layout
-    trap layout_for_template exists to avoid. An ACTIVE format is seeded
+    trap `layout_for_template` exists to avoid. An ACTIVE format is seeded
     precisely so this test fails if that trap is ever reintroduced."""
     from app.db.artifact_templates import activate_template
 
     t = tenant_client.make(slug="acme")
     template_id = _add_ticket_format(t.company_id)
     activate_template(t.company_id, "tickets", template_id)
-    stamped = [
-        {**s, "description_layout": _ACME_LAYOUT} for s in _stories()
-    ]
+    stamped = [{**s, "description_layout": _ACME_LAYOUT} for s in _stories()]
     prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id, stories=stamped,
                                template_id=template_id)
 
     resp = t.client.post(_URL, json={"prd_id": prd_id, "artifact_template_id": None})
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["artifact_template_id"] is None
-    assert all("description_layout" not in s for s in body["stories"])
+    assert resp.json()["artifact_template_id"] is None
+    assert no_relay[0]["layout"] is None
+    assert no_relay[0]["artifact_template_id"] is None
+
+
+# ─── the runner: what actually lands ─────────────────────────────────────────
+
+
+def _run_switch(company_id, **kw):
+    """Run the background half the way the worker thread does."""
+    from app.stories.relayout import run_switch
+
+    run_switch(company_id, **kw)
+
+
+def test_the_runner_relays_stamps_and_keeps_identity(
+    tenant_client, isolated_settings
+):
+    """Every story re-stamped with the new layout, ids untouched, content
+    untouched, hash untouched, stamp updated — and the marker cleared in the
+    same write that lands the stories, so a poller never sees the finished set
+    while the marker still claims a switch is running."""
+    from app.db.prd_tickets import mark_tickets_relaying
+
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    before = _stories()
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id, stories=before)
+    mark_tickets_relaying(t.company_id, prd_id, template_id)
+
+    _run_switch(t.company_id, prd_id=prd_id, stories=before, layout=_ACME_LAYOUT,
+                artifact_template_id=template_id)
+
     row = _get_prd_tickets_row(t.company_id, prd_id)
+    assert [s["id"] for s in row["stories"]] == [s["id"] for s in before]
+    assert [s["title"] for s in row["stories"]] == ["Login retry", "Audit log"]
+    assert all(s["description_layout"] == _ACME_LAYOUT for s in row["stories"])
+    assert row["artifact_template_id"] == template_id
+    assert row["content_hash"] == "hash-original"
+    assert row["status"] == "ready"
+    assert row["relayout"] is None
+
+
+def test_the_runner_switches_a_standalone_set_back_to_the_builtin(
+    tenant_client, isolated_settings
+):
+    """The standalone path, and the null target end to end: a bare None layout
+    strips the stamp, leaving the built-in five sections."""
+    from app.db.ticket_sets import get_set, mark_set_relaying
+
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    stamped = [{**s, "description_layout": _ACME_LAYOUT} for s in _stories()]
+    set_id = _seed_set(t.company_id, stories=stamped, template_id=template_id)
+    mark_set_relaying(t.company_id, set_id, None)
+
+    _run_switch(t.company_id, ticket_set_id=set_id, stories=stamped, layout=None,
+                artifact_template_id=None)
+
+    row = get_set(t.company_id, set_id)
     assert row["artifact_template_id"] is None
+    assert all(not s.get("description_layout") for s in row["stories"])
+    assert row["status"] == "ready"
+    assert row["relayout"] is None
 
 
 def test_the_fill_failing_still_lands_the_switch(
@@ -319,6 +552,8 @@ def test_the_fill_failing_still_lands_the_switch(
     switch still persists."""
     import app.stories.relayout as relayout_mod
 
+    from app.db.prd_tickets import mark_tickets_relaying
+
     def _boom(**kw):
         raise RuntimeError("gateway down")
 
@@ -327,17 +562,48 @@ def test_the_fill_failing_still_lands_the_switch(
     t = tenant_client.make(slug="acme")
     template_id = _add_ticket_format(t.company_id)
     prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+    mark_tickets_relaying(t.company_id, prd_id, template_id)
 
-    resp = t.client.post(
-        _URL, json={"prd_id": prd_id, "artifact_template_id": template_id}
-    )
+    _run_switch(t.company_id, prd_id=prd_id, stories=_stories(),
+                layout=_ACME_LAYOUT, artifact_template_id=template_id)
 
-    assert resp.status_code == 200
     row = _get_prd_tickets_row(t.company_id, prd_id)
     assert row["artifact_template_id"] == template_id
+    assert row["relayout"] is None
     for s in row["stories"]:
         assert s["description_layout"] == _ACME_LAYOUT
         assert not s.get("custom_sections")
+
+
+def test_a_failed_switch_clears_the_marker_and_changes_nothing(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The obligation the runner owns: a marker must not outlive the job. A
+    switch that dies leaves the tickets in the format they already had — the
+    client learns of it by the marker clearing with the format unchanged."""
+    import app.db.prd_tickets as prd_tickets_mod
+
+    from app.db.prd_tickets import mark_tickets_relaying
+
+    t = tenant_client.make(slug="acme")
+    template_id = _add_ticket_format(t.company_id)
+    prd_id = _seed_prd_tickets(isolated_settings["db"], t.company_id)
+    mark_tickets_relaying(t.company_id, prd_id, template_id)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(prd_tickets_mod, "set_tickets_template", _boom)
+
+    # Never raises — a background job that died loudly would take the worker
+    # thread's error to nobody.
+    _run_switch(t.company_id, prd_id=prd_id, stories=_stories(),
+                layout=_ACME_LAYOUT, artifact_template_id=template_id)
+
+    row = _get_prd_tickets_row(t.company_id, prd_id)
+    assert row["relayout"] is None
+    assert row["artifact_template_id"] is None
+    assert all(not s.get("description_layout") for s in row["stories"])
 
 
 def test_the_fill_grounds_only_missing_keys_and_clamps(monkeypatch):

@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.db.ticket_sets import get_set, list_sets_for_conversation
+from app.stories.relayout_state import relayout_in_flight
 from app.stories.scope import set_scope
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,14 @@ def get_ticket_set(
     Tickets are returned with DELETED ones dropped and EXCLUDED ones tagged,
     exactly as GET /v1/stories/for-prd/{prd_id} does, so the panel renders the
     same lifecycle semantics on both paths.
+
+    `relaying` reports a background format switch (POST /v1/stories/change-
+    template) still running over this set. The `status` beside it stays
+    `ready`, because it is: the tickets returned here are the previous format's
+    and every one of them is still readable, pushable and editable. It is the
+    poll's completion signal — this is the read `loadTicketSet` follows — and
+    the reason a user can leave mid-switch and be told, on their return, that
+    the switch is still going.
     """
     row = _require_owned_set(set_id, company.company_id)
     out = _public_set(row)
@@ -124,6 +133,11 @@ def get_ticket_set(
     out["artifact_template_name"] = _template_display_name(
         company.company_id, out["artifact_template_id"]
     )
+    relaying = relayout_in_flight(row)
+    out["relaying"] = relaying is not None
+    out["relaying_into_name"] = _template_display_name(
+        company.company_id, relaying.get("template_id")
+    ) if relaying else None
     return out
 
 

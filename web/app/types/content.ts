@@ -857,6 +857,15 @@ export interface AppContentState {
      *  slices written mid-run (the stamp lands with the terminal read). */
     artifactTemplateId?: string | null
     artifactTemplateName?: string | null
+    /** A background format switch is running over this set. Distinct from
+     *  `status`, which stays `ready` throughout — the tickets on screen are
+     *  the previous format's and remain readable, pushable and editable while
+     *  the re-lay runs. The panel shows a working strip over them and the
+     *  Format control withholds a second switch until it clears. */
+    relaying?: boolean
+    /** The format being switched INTO, for the strip's copy. Null when the
+     *  target is Sprntly's built-in layout. */
+    relayingIntoName?: string | null
   } | null
   /** True from kick-off until the run reaches a terminal state. Distinct from
    *  `ticketSet.status`: the slice may not exist at all yet (the create call is

@@ -4290,19 +4290,27 @@ export type StoryCache = {
    *  `prdApi.get`) so the footer's "Format: {name}" label needs no second
    *  fetch. Null for the built-in and for a since-deleted format. */
   artifact_template_name?: string | null
+  /** A background format switch is still running over these tickets. The
+   *  `stories` beside it are the PREVIOUS format's and entirely readable —
+   *  this reports the switch, it does not withhold the set. Poll until false. */
+  relaying?: boolean
+  /** The format being switched INTO, for the in-flight copy. Null while
+   *  switching to the built-in (and whenever `relaying` is false). */
+  relaying_into_name?: string | null
 }
 
-/** What POST /v1/stories/change-template returns. `unchanged` (no `stories`)
- *  means the set was already in that format — a satisfied request, skip the
- *  re-render. Otherwise `stories` IS the re-laid set, already persisted:
- *  identities, edits and tracker mappings preserved (it is a re-LAYOUT, not a
- *  regeneration — see the backend route's docstring). */
+/** What POST /v1/stories/change-template returns — an ACKNOWLEDGEMENT, not the
+ *  result. `unchanged` means the set was already in that format (a satisfied
+ *  request; nothing was scheduled). Otherwise `status` is `"relaying"`: the
+ *  re-lay was scheduled server-side and now runs to completion whatever the
+ *  client does next, including navigating away or closing the tab. There are
+ *  deliberately no `stories` here — they do not exist yet. Watch `relaying` on
+ *  `getForPrd` / `ticketSetsApi.get` for the finished set. */
 export type TicketTemplateSwitch = {
-  status: "ready"
+  status: "relaying" | "ready"
   unchanged?: boolean
   artifact_template_id: string | null
   artifact_template_name: string | null
-  stories?: GeneratedStory[]
 }
 
 /** What POST /v1/stories/generate hands back on both paths.
@@ -4327,8 +4335,12 @@ export const storiesApi = {
    *  a PRD's persisted tickets (`{prdId}`) or a standalone chat-born set
    *  (`{ticketSetId}`). `templateId` null = back to Sprntly's built-in layout
    *  (a real choice here, unlike the generate route's "no preference").
-   *  Synchronous: the response carries the re-laid stories, already persisted —
-   *  no job to poll. */
+   *
+   *  Fire-and-forget: this resolves as soon as the switch is scheduled, and the
+   *  re-lay then runs server-side whatever the client does — so the caller
+   *  should dismiss its confirm UI on the response, not wait out the work. The
+   *  re-laid tickets arrive via the `relaying` flag on `getForPrd` /
+   *  `ticketSetsApi.get` going false. */
   changeTemplate: (
     target: { prdId: number } | { ticketSetId: number },
     templateId: string | null,
@@ -4462,6 +4474,11 @@ export type TicketSetRecord = {
    *  `storiesApi.getForPrd` carries, for the same footer label. */
   artifact_template_id?: string | null
   artifact_template_name?: string | null
+  /** A background format switch is still running over this set — the same pair
+   *  `getForPrd` carries. `status` stays "ready" throughout, because the
+   *  tickets below are the previous format's and still entirely usable. */
+  relaying?: boolean
+  relaying_into_name?: string | null
 }
 
 /** One row of a thread's ticket-set list (GET /v1/ticket-sets/by-conversation/

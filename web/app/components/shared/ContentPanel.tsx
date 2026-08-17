@@ -35,7 +35,7 @@ import {
 } from "../../lib/api"
 import { ConfirmDialog } from "./ConfirmDialog"
 import { builtinFormatName } from "../../lib/compileNotes"
-import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
+import { followTicketSetSwitch, runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
 import { PrdPanelContent, type PrdPanelContentProps } from "./PrdPanelContent"
 import { ProjectPanelSection } from "../screens/app/projects/ProjectPanelSection"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
@@ -845,7 +845,42 @@ function TicketsBottomBar() {
   const [formatsError, setFormatsError] = useState(false)
   const [confirmTarget, setConfirmTarget] = useState<{ id: string | null; name: string } | null>(null)
   const [switching, setSwitching] = useState(false)
+  // A background format switch running over a PRD's tickets, as the poll below
+  // reads it off the row. The standalone path keeps the same state on its own
+  // slice (`ticketSet.relaying`) because that slice IS what the tab renders.
+  const [relayingInto, setRelayingInto] = useState<{ name: string | null } | null>(null)
+  // Bumped when this panel schedules a switch, to restart the poll below — it
+  // stops itself once there is nothing to watch, so without this a switch
+  // started from here would not be followed until something else re-ran it.
+  const [switchNonce, setSwitchNonce] = useState(0)
+  // True between scheduling a switch and announcing that it landed. A ref, so
+  // the knowledge survives the poll effect being torn down and rebuilt by that
+  // very bump — and so a re-lay quick enough to finish before the first probe
+  // still gets its re-read and its toast.
+  const pendingSwitchRef = useRef(false)
   const formatToggleRef = useRef<HTMLButtonElement>(null)
+  // What to do when a switch lands, read through a ref by the poll below.
+  //
+  // NOT a dependency of that effect, deliberately: `setContent`/`showToast`
+  // come from providers, and any provider handing back a fresh callback
+  // identity per render turns an effect that depends on them into one that
+  // re-subscribes on every render — and this effect sets state, so that is an
+  // infinite render loop, not a slow one.
+  const onSwitchLanded = useRef<(name: string | null) => void>(() => {})
+  onSwitchLanded.current = (name: string | null) => {
+    // Re-read the tab's stories: the re-laid set is persisted and
+    // `content_hash` is untouched, so this serves the fresh cache with no LLM
+    // call and never a regeneration.
+    setContent({ ticketsRefreshNonce: Date.now() })
+    showToast(
+      "Format switched",
+      `These tickets now use ${name || builtinFormatName("tickets")}.`,
+    )
+  }
+  const relaying = standaloneSet ? !!ticketSet?.relaying : relayingInto !== null
+  const relayingName = standaloneSet
+    ? (ticketSet?.relayingIntoName ?? null)
+    : (relayingInto?.name ?? null)
 
   useEffect(() => {
     // Hydrate the label + readiness. A standalone set carries its own stamp on
@@ -865,10 +900,14 @@ function TicketsBottomBar() {
     if (prdId == null) {
       setCurrentFormat(null)
       setTicketsReady(false)
+      setRelayingInto(null)
       return
     }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    // Whether a switch is outstanding, so the landing is announced exactly
+    // once. Seeded from the ref: this panel may have just scheduled one.
+    let sawSwitch = pendingSwitchRef.current
     const probe = async () => {
       try {
         const cache = await storiesApi.getForPrd(prdId)
@@ -879,11 +918,24 @@ function TicketsBottomBar() {
         })
         const ready = cache.status === "ready" && cache.stories.length > 0
         setTicketsReady(ready)
-        // Not ready = the tab beside us is (re)generating this very set — keep
-        // probing on the tab's own poll cadence so the Format control appears
-        // the moment the run lands, instead of only after a close/reopen. The
-        // loop stops itself on ready and on unmount; it never generates.
-        if (!ready) timer = setTimeout(() => { void probe() }, 2500)
+
+        // A background format switch (this client's or another's — the row is
+        // the truth, so a switch started in one tab is reported in every one).
+        const isRelaying = !!cache.relaying
+        setRelayingInto(isRelaying ? { name: cache.relaying_into_name ?? null } : null)
+        if (sawSwitch && !isRelaying) {
+          sawSwitch = false
+          pendingSwitchRef.current = false
+          onSwitchLanded.current(cache.artifact_template_name ?? null)
+        }
+        if (isRelaying) sawSwitch = true
+
+        // Keep probing while the tab beside us is (re)generating this set, or
+        // while a switch is re-laying it — so the Format control and the strip
+        // both track the row instead of a snapshot taken at mount. The loop
+        // stops itself when there is nothing left to watch, and on unmount; it
+        // never generates.
+        if (!ready || isRelaying) timer = setTimeout(() => { void probe() }, 2500)
       } catch { /* label stays hidden — the tab itself reports the real error */ }
     }
     void probe()
@@ -891,7 +943,7 @@ function TicketsBottomBar() {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [standaloneSet, ticketSet, prdId, content.ticketsRefreshNonce])
+  }, [standaloneSet, ticketSet, prdId, content.ticketsRefreshNonce, switchNonce])
 
   // Escape closes the picker and hands focus back to the toggle (the confirm
   // dialog handles its own) — same keyboard contract as the PRD picker.
@@ -933,33 +985,40 @@ function TicketsBottomBar() {
     if (!apiTarget) return
     setSwitching(true)
     try {
+      // Resolves as soon as the switch is SCHEDULED, not when it lands. The
+      // dialog closes on that — the re-lay is the server's job now, and it
+      // finishes whether this panel is open, on another tab, or closed.
       const res = await storiesApi.changeTemplate(apiTarget, target.id)
       setSwitching(false)
       setConfirmTarget(null)
       setShowFormats(false)
       if (res.unchanged) return
-      setCurrentFormat({
-        id: res.artifact_template_id,
-        name: res.artifact_template_name ?? target.name,
-      })
+
+      // The label deliberately does NOT move yet: the tickets on screen are
+      // still the old format's, and naming the new one over them would be a
+      // lie for as long as the re-lay takes. The strip says what is happening;
+      // the label follows the row when it lands.
       if (standaloneSet && ticketSet) {
-        // The slice IS what the tab renders — republish it with the re-laid
-        // stories the route returned (already persisted server-side).
-        setContent({
-          ticketSet: {
-            ...ticketSet,
-            stories: res.stories ?? ticketSet.stories,
-            artifactTemplateId: res.artifact_template_id,
-            artifactTemplateName: res.artifact_template_name,
-          },
-        })
+        void followTicketSetSwitch(ticketSet.id, setContent, ticketSet, target.name)
+          .then((landed) => {
+            if (landed) {
+              showToast("Format switched", `These tickets now use ${target.name}.`)
+            }
+          })
       } else {
-        // The tab's cache-first effect re-reads on the nonce and serves the
-        // persisted re-laid set — a re-read, never a regeneration (the switch
-        // leaves content_hash untouched).
-        setContent({ ticketsRefreshNonce: Date.now() })
+        // The PRD path is followed by the poll above, which owns the re-read
+        // and the completion toast — that is also what makes a switch started
+        // in ANOTHER tab announce itself here. Show the strip immediately
+        // rather than a poll interval later, and restart that poll, which has
+        // nothing left to watch by now and has stopped.
+        pendingSwitchRef.current = true
+        setRelayingInto({ name: target.name })
+        setSwitchNonce((n) => n + 1)
       }
-      showToast("Format switched", `These tickets now use ${target.name}.`)
+      showToast(
+        "Switching format",
+        `Re-laying these tickets into ${target.name}. You can carry on — this finishes on its own.`,
+      )
     } catch {
       setSwitching(false)
       setConfirmTarget(null)
@@ -969,6 +1028,29 @@ function TicketsBottomBar() {
 
   return (
     <>
+      {/* A format switch running in the background. Sits ABOVE the tickets
+          rather than over them: the set on screen is the previous format's and
+          stays readable, pushable and editable for the whole re-lay — this
+          reports work, it does not block the surface. Says so explicitly,
+          because the whole point of moving the switch off the request is that
+          the user can leave. */}
+      {relaying && (
+        <div
+          data-testid="tickets-relaying-strip"
+          role="status"
+          style={{ margin: "0 24px 12px", padding: "10px 14px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface-2)", display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "var(--ink-2)", flexShrink: 0 }}
+        >
+          <span className="tickets-relaying-spinner" aria-hidden="true" />
+          <span>
+            Re-laying these tickets into{" "}
+            <strong style={{ color: "var(--ink)" }}>
+              {relayingName || builtinFormatName("tickets")}
+            </strong>
+            . You can close this or carry on — it finishes on its own.
+          </span>
+        </div>
+      )}
+
       {/* Format picker — expands ABOVE the pinned bar, like the PRD panel's. */}
       {showFormats && (
         <div id="tickets-format-picker" style={{ margin: "0 24px 12px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden", flexShrink: 0 }}>
@@ -1003,7 +1085,13 @@ function TicketsBottomBar() {
                       </div>
                       {isCurrent
                         ? <span style={{ fontSize: 11, color: "var(--ink-4)", fontWeight: 600, flexShrink: 0 }}>Current</span>
-                        : (
+                        : relaying
+                          // Replaced by the reason, never left as a dead
+                          // button: the backend 409s a second switch (the two
+                          // would race each other's write), so offering one
+                          // would be offering a refusal.
+                          ? <span style={{ fontSize: 11, color: "var(--ink-4)", flexShrink: 0 }}>Switch in progress</span>
+                          : (
                           <button
                             type="button"
                             id={`tickets-format-use-${row.id ?? "builtin"}`}
@@ -1048,13 +1136,16 @@ function TicketsBottomBar() {
             title={currentFormat?.id != null && currentFormat.name ? `Format: ${currentFormat.name}` : undefined}
           >
             {(() => {
+              // Names the format the tickets are ACTUALLY in. During a switch
+              // that is still the old one — the label follows the row, not the
+              // request, so it can never name a format nothing on screen uses.
               const name = currentFormat === null
                 ? "…"
                 : currentFormat.id === null
                   ? "Sprntly built-in"
                   : (currentFormat.name || "Custom format")
               const clamped = name.length > 24 ? `${name.slice(0, 24).trimEnd()}…` : name
-              return `Format: ${clamped}`
+              return relaying ? `Format: ${clamped} — switching…` : `Format: ${clamped}`
             })()}
             <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showFormats ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
               <path d="M5 7L1 3h8z" />

@@ -271,6 +271,13 @@ export async function runTicketSetGeneration(
  * there is exactly the stale "Writing tickets…" over a run that finished an
  * hour ago that this feature must never show.
  *
+ * A set mid-FORMAT-SWITCH (`relaying`) is followed the same way, and this is
+ * the path that makes leaving the page safe: the switch runs server-side, so
+ * coming back — in this tab, another tab, or tomorrow — has to either show the
+ * new format or say the switch is still going. The difference from a
+ * generation is that the tickets stay on screen throughout: they are the
+ * previous format's, and every one of them is still readable.
+ *
  * Never throws. A 404 — an unknown id, or another tenant's, deliberately
  * indistinguishable — lands the classified `notfound` kind, the same way a run
  * does, so the panel prints its own words and nothing off the wire.
@@ -298,6 +305,8 @@ export async function loadTicketSet(
     source_text: string
     artifact_template_id?: string | null
     artifact_template_name?: string | null
+    relaying?: boolean
+    relaying_into_name?: string | null
   }): TicketSetSlice => ({
     id: rec.id,
     title: rec.title,
@@ -310,6 +319,8 @@ export async function loadTicketSet(
     error: null,
     artifactTemplateId: rec.artifact_template_id ?? null,
     artifactTemplateName: rec.artifact_template_name ?? null,
+    relaying: !!rec.relaying,
+    relayingIntoName: rec.relaying_into_name ?? null,
   })
 
   const fail = (kind: TicketSetFailureKind, known: TicketSetSlice | null): TicketSetGenResult => {
@@ -329,15 +340,23 @@ export async function loadTicketSet(
   }
 
   let slice = publish(rec)
-  if (rec.status !== "generating") {
+  const settled = (r: { status: string; relaying?: boolean }) =>
+    r.status !== "generating" && !r.relaying
+  if (settled(rec)) {
     if (rec.status === "failed") return fail("failed", slice)
     setContent({ ticketSet: slice, ticketSetGenerating: false })
     return { ok: true, set: slice }
   }
 
-  // Still being written. Show what already exists (a resumed run may be
-  // half-way through its fan-out) and follow the row to its terminal state.
-  setContent({ ticketSet: slice, ticketSetGenerating: true })
+  // Still being written, or mid-format-switch. Show what already exists (a
+  // resumed run may be half-way through its fan-out; a switch has the whole
+  // previous set) and follow the row to its terminal state.
+  //
+  // `ticketSetGenerating` stays FALSE for a switch: it is the panel's "there
+  // is nothing to look at yet" flag, and during a re-lay there very much is —
+  // the tickets are on screen and usable. The slice's own `relaying` drives
+  // the working strip instead.
+  setContent({ ticketSet: slice, ticketSetGenerating: rec.status === "generating" })
 
   const startedAt = Date.now()
   let transportFailures = 0
@@ -348,14 +367,15 @@ export async function loadTicketSet(
       transportFailures = 0
       slice = publish(next)
       if (next.status === "failed") return fail("failed", slice)
-      if (next.status === "ready") {
+      if (settled(next)) {
         setContent({ ticketSet: slice, ticketSetGenerating: false })
         return { ok: true, set: slice }
       }
-      // Partial fan-out: republish so tickets appear as they are written.
+      // Partial fan-out, or a switch still re-laying: republish so tickets
+      // appear as they are written and the strip tracks the live state.
       setContent({
-        ticketSet: { ...slice, status: "generating" },
-        ticketSetGenerating: true,
+        ticketSet: slice,
+        ticketSetGenerating: next.status === "generating",
       })
     } catch (e) {
       // The row is durable — a 404 here means it is genuinely gone, not that an
@@ -367,4 +387,65 @@ export async function loadTicketSet(
     }
   }
   return fail("timeout", slice)
+}
+
+/**
+ * Follow a standalone set's in-flight FORMAT SWITCH to completion, without
+ * blanking what is on screen.
+ *
+ * `loadTicketSet` clears the slice first, which is right when opening a set
+ * (whatever was there belongs to another artifact) and wrong here: the tickets
+ * being re-laid are already rendered, they stay valid the whole time, and
+ * flashing them away would make a background job look like a reload. So this
+ * marks the slice `relaying` in place, polls the durable row, and republishes
+ * when it lands.
+ *
+ * Resolves true when the switch finished, false when it was lost (transport,
+ * timeout, a deleted set). The caller owns the words either way — nothing off
+ * the wire is returned.
+ */
+export async function followTicketSetSwitch(
+  setId: number,
+  setContent: SetContent,
+  current: TicketSetSlice,
+  intoName: string | null,
+): Promise<boolean> {
+  // Optimistic, and deliberately not conditional on a read: the POST has
+  // already returned, so the switch IS running, and waiting a poll interval to
+  // say so would leave the click looking ignored.
+  setContent({
+    ticketSet: { ...current, relaying: true, relayingIntoName: intoName },
+  })
+
+  const startedAt = Date.now()
+  let transportFailures = 0
+  while (Date.now() - startedAt < MAX_MS) {
+    await sleepUntilNextPoll(POLL_MS)
+    try {
+      const next = await ticketSetsApi.get(setId)
+      transportFailures = 0
+      if (next.relaying) continue
+      setContent({
+        ticketSet: {
+          ...current,
+          stories: next.stories ?? current.stories,
+          status: next.status || current.status,
+          artifactTemplateId: next.artifact_template_id ?? null,
+          artifactTemplateName: next.artifact_template_name ?? null,
+          relaying: false,
+          relayingIntoName: null,
+        },
+      })
+      return true
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) break
+      if (!isTransportFailure(e)) break
+      transportFailures += 1
+      if (transportFailures >= MAX_TRANSPORT_FAILURES) break
+    }
+  }
+  // Give up watching, but never leave the strip spinning over a switch nobody
+  // is following any more — the row is the truth and the next open re-reads it.
+  setContent({ ticketSet: { ...current, relaying: false, relayingIntoName: null } })
+  return false
 }
