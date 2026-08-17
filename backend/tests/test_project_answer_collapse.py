@@ -148,6 +148,86 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
     assert out["answer"] == "sent"
 
 
+def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
+    """A bare "send to <roster member>" — NO pronoun object — must reach the
+    sixth branch too. `is_project_tool_request` alone declines this shape
+    (`_PROJECT_TOOL_DELEGATE_VERB` requires an object: "send THIS to X");
+    the roster-aware `_is_bare_send_to_roster_member` OR-clause is what
+    admits it — proven here against the REAL private scope, not a hand-
+    built one."""
+    from app.db import projects as projects_db
+
+    roster = [{"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"}]
+    monkeypatch.setattr(projects_db, "list_members", lambda project_id: roster)
+
+    dispatched = []
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatched.append(dispatch("delegate_task", {"assignee": "Jay", "task_summary": "Prioritize the roadmap"}))
+        return "sent"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task", lambda **kw: "Sent the brief to Jay's chat.",
+    )
+    deltas = []
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="send to Jay to prioritize the roadmap", dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == []
+    assert dispatched == ["Sent the brief to Jay's chat."]
+    assert out["answer"] == "sent"
+
+
+def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
+    """The same bare "send ... to X" SHAPE, but X is not on the project's
+    roster — must NOT fire the gate (the one thing a pure-regex widen of
+    `_PROJECT_TOOL_DELEGATE_VERB` could not have guaranteed). Falls through
+    to the ordinary composer path and streams, same as any other declined
+    plain turn."""
+    from app.db import projects as projects_db
+
+    roster = [{"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"}]
+    monkeypatch.setattr(projects_db, "list_members", lambda project_id: roster)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    deltas = []
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("partial-text")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    loop_calls = {"n": 0}
+
+    def _tripwire(**kw):
+        loop_calls["n"] += 1
+        return "loop ran — must not happen for a non-member destination"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="send the report to accounting", dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert loop_calls["n"] == 0
+    assert deltas == ["partial-text"]
+    assert out["answer"] == "ok"
+
+
+def test_main_scope_bare_send_never_fires_gate(monkeypatch):
+    """AC7-shaped guard: `scope=None` (main chat) never even consults the
+    roster gate, so a bare "send to X" phrasing in main chat behaves
+    exactly as it always has — `_is_bare_send_to_roster_member` is a no-op
+    for `scope is None`."""
+    assert qa._is_bare_send_to_roster_member("send to Jay to prioritize this", None) is False
+    assert qa._is_bare_send_to_roster_member(
+        "send to Jay to prioritize this", SurfaceScope(surface=Surface.main),
+    ) is False
+
+
 def test_gate_removed_plainqa_routes_to_loop_is_red(monkeypatch):
     """AC5a MUTATION: reverting the sixth-branch guard to the un-gated build
     (`scope.extra_tools` alone, `is_project_tool_request` short-circuited to
@@ -483,6 +563,61 @@ def test_group_delegate_identity_threaded(monkeypatch):
     assert captured["source_turn_id"] == 42
 
 
+def test_private_delegate_source_content_threaded(monkeypatch):
+    """The transcript `_try_scoped_tool_answer` builds for the model (the
+    SAME text the private surface's own question is rendered into) reaches
+    `handle_delegate_task` as `source_content` — the requester's actual
+    words, not left for the brief call to reconstruct from project memory
+    alone (root cause #3)."""
+    captured = {}
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
+    )
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task",
+        lambda **kw: captured.update(kw) or "sent",
+    )
+    scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    qa.answer(
+        enterprise_id="c1",
+        question="Here's the feedback: users want dark mode. Send this to Fortune to prioritize.",
+        dataset="d", scope=scope,
+    )
+    assert "users want dark mode" in captured["source_content"]
+
+
+def test_group_delegate_source_content_uses_prerendered_transcript(monkeypatch):
+    """Group's `source_content` comes from the full attributed transcript
+    (`prerendered_transcript`) — the model's own preceding turn (e.g. the
+    themes it just produced) rides into the brief, not only the latest
+    trigger message."""
+    captured = {}
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
+    )
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task",
+        lambda **kw: captured.update(kw) or "sent",
+    )
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+        assigner_identity={"assigner_user_id": "u-asker", "source_turn_id": 42},
+        prerendered_transcript=(
+            "Alex (PM): here's the feedback\n"
+            "Sprntly: THEMES: users want dark mode; onboarding is too slow.\n"
+            "Alex (PM): send this to Fortune to prioritize"
+        ),
+    )
+    qa.answer(
+        enterprise_id="c1", question="send this to Fortune to prioritize",
+        dataset="d", scope=scope,
+    )
+    assert "users want dark mode" in captured["source_content"]
+
+
 def test_delegate_identity_blanked_is_red(monkeypatch):
     """MUTATION: blank the threaded identity -> the attribution assertion
     goes RED; restore it -> GREEN (PI13)."""
@@ -789,7 +924,9 @@ def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_set
     # unaffected.
     from app.db import conversations as conversations_db
 
-    project_join_greeting.post_join_greeting(project_id, "greeted-user")
+    project_join_greeting.post_join_greeting(
+        project_id, "greeted-user", dataset=t.slug, company_id=t.company_id
+    )
     conv = conversations_db.get_individual_project_chat(project_id, "greeted-user")
     assert conv is not None
     turns = conversations_db.list_individual_turns(conv["id"], "greeted-user")
@@ -1077,7 +1214,10 @@ def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
     )
     # The resolved `pinned_skill` is threaded through (None here — no explicit
     # pick and the source turn carries no routable slash trigger).
-    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r", "pinned_skill": None})]
+    assert calls == [(
+        (1, 2, ctx, "mention"),
+        {"job_id": 99, "run_id": "r", "pinned_skill": None, "edit_target_prd_id": None},
+    )]
     assert projects_route._group_reply_tasks == before  # no task was ever scheduled
 
 
@@ -1141,6 +1281,11 @@ def test_background_input_is_extensible_structure():
         # deterministic routing input (the FE's skill pick, or the source
         # turn's own trigger on a retry), also not the message.
         "source_turn_id", "client_message_id", "job_id", "run_id", "pinned_skill",
+        # `edit_target_prd_id` joined them when project chat learned to edit a
+        # PRD in place: also a routing input (WHICH document a confirmed edit
+        # applies to), never the message itself. Extending this list is the
+        # point of the test's name; what it forbids is message CONTENT.
+        "edit_target_prd_id",
     ]
     # None of these IS "the message" itself — the reply re-derives the live
     # transcript from the DB inside `_respond_as_group_agent`, so a future
@@ -1282,3 +1427,142 @@ def test_main_scope_none_gate_unchanged(monkeypatch):
     )
     assert deltas == ["streamed"]  # main streams via the untouched composer
     assert out["answer"] == "ok"
+
+
+# ── Group edit-narration grounding — the "narrates Done, never writes" fix ──
+#
+# Root cause: `run_tool_loop`'s returned text is the MODEL's own free-form
+# final turn, composed AFTER it sees the `edit_prd` tool_result — it is not
+# guaranteed to equal, or even agree with, what the tool actually returned.
+# Two failure shapes:
+#   (a) the model calls `edit_prd`, gets back a refusal/no-op narration, but
+#       composes its own "Done — it's live" final answer anyway;
+#   (b) the model never calls `edit_prd` at all, and just narrates success.
+# `_try_scoped_tool_answer` now grounds the final answer in the tool's real
+# outcome for (a) (an unconditional override whenever edit_prd was called at
+# all) and detects+corrects the free-text fabrication for (b).
+
+
+def test_group_edit_prd_grounds_narration_on_refusal_not_model_claim(monkeypatch):
+    """(a) — the model calls edit_prd, the handler refuses (no PRD open),
+    but the model's OWN final text still claims success. The final answer
+    must be the handler's real refusal, never the model's fabricated
+    "Done"."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("edit_prd", {"instruction": "tighten the scope"})
+        # The model's own free-text turn, composed AFTER seeing the
+        # refusal tool_result — fabricates success anyway.
+        return "Done — it's live! Everyone can see the updated PRD now."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    def _refusing_handler(tool_input):  # noqa: ARG001
+        return ("Open a PRD beside this chat and I'll edit it.", None)
+
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        edit_prd_handler=_refusing_handler,
+    )
+    out = qa.answer(
+        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        dataset="d", scope=scope,
+    )
+    assert out["answer"] == "Open a PRD beside this chat and I'll edit it."
+    assert "Done" not in out["answer"]
+    assert "live" not in out["answer"]
+
+
+def test_group_edit_prd_grounds_narration_on_success(monkeypatch):
+    """(a), success arm — the handler applied the edit; the grounded
+    narration IS the handler's own "Done — ..." text (never a DIFFERENT
+    model paraphrase of it)."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("edit_prd", {"instruction": "tighten the scope"})
+        return "Sure thing, I made that change for you!"  # model paraphrase
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    def _applying_handler(tool_input):  # noqa: ARG001
+        return ("Done — I've updated the PRD. Tightened the Scope section.", None)
+
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        edit_prd_handler=_applying_handler,
+    )
+    out = qa.answer(
+        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        dataset="d", scope=scope,
+    )
+    assert out["answer"] == "Done — I've updated the PRD. Tightened the Scope section."
+
+
+def test_group_edit_prd_corrects_fabricated_success_without_tool_call(monkeypatch):
+    """(b) — the model never calls edit_prd at all, yet its own final text
+    claims the PRD was updated. There is no tool result to ground on; the
+    only honest answer is the corrective clarify, never the model's unearned
+    claim."""
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda **kw: "Done — I've updated the PRD, it's live now.",
+    )
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        edit_prd_handler=lambda tool_input: ("unused", None),  # noqa: ARG005
+    )
+    out = qa.answer(
+        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        dataset="d", scope=scope,
+    )
+    assert out["answer"] != "Done — I've updated the PRD, it's live now."
+    assert "didn't actually make that change" in out["answer"]
+
+
+def test_group_fabrication_guard_does_not_fire_on_unrelated_done_reply(monkeypatch):
+    """The (b) guard is scoped to PRD-edit-claim language — an unrelated
+    "Done" (e.g. a delegate_task confirmation) must pass through unchanged,
+    never gets corrected, even on a turn that DID reach the tool loop (via
+    the edit-intent gate) but ended up narrating something else entirely."""
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda **kw: "Done — I've asked Ada to help with that.",
+    )
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        edit_prd_handler=lambda tool_input: ("unused", None),  # noqa: ARG005
+    )
+    out = qa.answer(
+        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        dataset="d", scope=scope,
+    )
+    assert out["answer"] == "Done — I've asked Ada to help with that."
+
+
+def test_private_scope_unaffected_by_edit_prd_grounding(monkeypatch):
+    """Private/main never register an `edit_prd_handler` — the grounding
+    override and the fabrication guard are BOTH no-ops there, so a private
+    turn's free text (even one that happens to mention "PRD" + "done")
+    passes through completely unchanged."""
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda **kw: "Done — I've updated the PRD summary in my notes.",
+    )
+    private_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="what's the PRD status", dataset="d",
+        scope=private_scope,
+    )
+    assert out["answer"] == "Done — I've updated the PRD summary in my notes."
+
+
+def qa_project_group_context_edit_prd_tool() -> dict:
+    """The real `edit_prd` tool schema — imported lazily so this file's
+    module-level imports stay unchanged; every test above registers it on
+    `extra_tools` so the tool-loop branch is actually reached (an empty
+    `extra_tools` never routes here)."""
+    from app.project_group_context import EDIT_PRD_TOOL
+
+    return EDIT_PRD_TOOL

@@ -72,45 +72,18 @@ def test_propose_tool_and_handler_no_longer_exist(tool_env):
     assert not hasattr(tool_mod, "handle_propose_prd_patch")
 
 
-# ── _resolve_prd_id — explicit / zero / one / many, DIRECT (migrated from the
-# retired propose handler's AC24 coverage — both surviving surfaces
-# (routes/projects.py's private route + `_classify_and_maybe_edit_group_prd`)
-# call this exact function for their write target) ───────────────────────────
-def test_resolve_prd_id_explicit_zero_one_many(tool_env, monkeypatch):
+# ── _resolve_prd_id: RETIRED, not merely untested ────────────────────────────
+# This file used to exercise `_resolve_prd_id` directly (migrated here from the
+# retired propose handler's AC24 coverage). `e05577dc` ("edit PRDs from chat via
+# the shared editor, remove the bespoke confirm gate") deleted the function: both
+# project-chat surfaces resolve their write target through the shared
+# `apply_chat_edit_scoped` now, so there is no second resolver to keep honest.
+#
+# The coverage is not silently dropped — it is inverted into the retirement
+# guard below, so the symbol cannot come back without someone saying why.
+def test_resolve_prd_id_is_retired(tool_env):
     tool_mod, _ = tool_env
-
-    # Explicit id → returned as-is, no manifest read needed (the §C gate
-    # still validates it downstream — this function only resolves).
-    prd_id, refusal = tool_mod._resolve_prd_id(
-        {"prd_id": 42}, project_id=1, dataset="d", company_id="c1"
-    )
-    assert prd_id == 42 and refusal is None
-
-    # Invalid explicit id → refusal, no resolution.
-    prd_id, refusal = tool_mod._resolve_prd_id(
-        {"prd_id": "not-an-int"}, project_id=1, dataset="d", company_id="c1"
-    )
-    assert prd_id is None and "valid" in refusal
-
-    # ZERO PRDs on the project → refusal.
-    _set_manifest(monkeypatch, tool_mod, [{"type": "report", "id": 1}])
-    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
-    assert prd_id is None
-    assert "no PRD" in refusal
-
-    # EXACTLY ONE PRD → auto-resolved.
-    _set_manifest(monkeypatch, tool_mod, [{"type": "prd", "id": 42, "title": "Solo"}])
-    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
-    assert prd_id == 42 and refusal is None
-
-    # MANY PRDs, no explicit id → disambiguation listing both ids.
-    _set_manifest(monkeypatch, tool_mod, [
-        {"type": "prd", "id": 7, "title": "Alpha"},
-        {"type": "prd", "id": 8, "title": "Beta"},
-    ])
-    prd_id, refusal = tool_mod._resolve_prd_id({}, project_id=1, dataset="d", company_id="c1")
-    assert prd_id is None
-    assert "id 7" in refusal and "id 8" in refusal
+    assert not hasattr(tool_mod, "_resolve_prd_id")
 
 
 # ── flag reader default-off ───────────────────────────────────────────

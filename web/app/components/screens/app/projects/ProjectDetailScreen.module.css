@@ -268,13 +268,22 @@
   color: var(--ink-2);
 }
 
+/* `align-items`/`justify-content: center` here were centering styles for the
+ * now-deleted `.threadPlaceholder` dashed box that stood in for the chat
+ * before `ProjectMainThread` mounted the real, internally-scrolling
+ * `ChatShell`. They never got revisited once the real host landed: a
+ * non-stretch cross-axis on this flex row leaves the mounted host's
+ * bounded-viewport sizing resting on `height: 100%` alone to fill this box,
+ * instead of the ordinary flex-stretch every other scroll region in this app
+ * relies on (`.od-center`, `.main-column`, ...). Reverted to the default
+ * stretch so the host fills `.threadHost` the same way regardless of
+ * content — the group surface's taller multi-party rows are what actually
+ * exercise this, not private's shorter single-party ones. */
 .threadHost {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: flex;
-  align-items: center;
-  justify-content: center;
   padding: 24px;
 }
 

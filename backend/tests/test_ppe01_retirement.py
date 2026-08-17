@@ -6,8 +6,9 @@ the shared `apply_chat_edit_scoped` (PCU-01 private, this ticket's group
 wiring) supersedes it on both project-chat surfaces.
 
 KEEP (untouched): `project_prd_gate.py` (`assert_prd_on_project`), the
-surviving `_resolve_prd_id`/`project_prd_edit_enabled` in
-`project_prd_patch_tool.py`, the `prd_patches` table + its DB helpers, and
+surviving `project_prd_edit_enabled` in `project_prd_patch_tool.py`
+(`_resolve_prd_id` was retired later — see the note above `test_keep_set_intact`),
+the `prd_patches` table + its DB helpers, and
 Design-Agent's own main-chat `prd_patches` propose/accept/reject flow
 (`routes/design_agent.py`'s `/prd-patches*` endpoints + the frontend
 `designAgentApi.listPendingPatches/acceptPatch/rejectPatch`) — the SAME
@@ -77,8 +78,9 @@ def test_group_route_no_longer_imports_propose_symbols():
     src = (BACKEND / "app" / "routes" / "projects.py").read_text(encoding="utf-8")
     assert "PROPOSE_PROJECT_PRD_PATCH_TOOL" not in src
     assert "handle_propose_prd_patch" not in src
-    # The survivors ARE still imported (both surfaces need them).
-    assert "_resolve_prd_id" in src
+    # The survivor IS still imported. `_resolve_prd_id` was dropped from this
+    # list when the shared editor replaced the bespoke resolver (e05577dc) —
+    # the route resolves its write target through `apply_chat_edit_scoped` now.
     assert "project_prd_edit_enabled" in src
 
 
@@ -118,15 +120,23 @@ def test_group_chat_unchanged_never_referenced_banner():
 
 
 # ── AC12 — the KEEP set is intact ─────────────────────────────────────────────
+# The bespoke project PRD-patch tool was retired FURTHER after this guard was
+# written: `e05577dc` ("edit PRDs from chat via the shared editor, remove the
+# bespoke confirm gate") deleted `_resolve_prd_id` and the group live-test that
+# exercised it, leaving `project_prd_edit_enabled()` as the module's only
+# surviving export. The KEEP set below is updated to that reality rather than
+# deleted: what this file guards — that the retirement took exactly the
+# intended surface and nothing more — is unchanged, and `project_prd_gate`,
+# the `prd_patches` table and Design-Agent's own main-chat flow are all still
+# asserted intact.
 def test_keep_set_intact():
-    # Backend: the project-scope gate, the surviving resolver + flag.
+    # Backend: the project-scope gate, and the surviving flag.
     from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project, prd_on_project
-    from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
+    from app.project_prd_patch_tool import project_prd_edit_enabled
 
     assert callable(assert_prd_on_project)
     assert callable(prd_on_project)
     assert issubclass(ProjectPrdWriteDenied, Exception)
-    assert callable(_resolve_prd_id)
     assert callable(project_prd_edit_enabled)
 
     # Backend: the shared scoped-edit callable (PCU-01/this ticket's shared writer).
@@ -167,13 +177,16 @@ def test_ci_registry_no_stale_or_missing():
     keys = set(ci_mod._KNOWN_UNRUNNABLE)
     assert ("test_project_individual_prd_edit_live.py", "RUN_PROJECT_PRD_EDIT_LIVE") not in keys
     assert ("test_project_individual_prd_edit_live.py", "ANTHROPIC_API_KEY") not in keys
-    assert ("test_group_chat_prd_edit_live.py", "RUN_GROUP_CHAT_PRD_EDIT_LIVE") in keys
-    assert ("test_group_chat_prd_edit_live.py", "ANTHROPIC_API_KEY") in keys
+    # `test_group_chat_prd_edit_live.py` was deleted alongside the bespoke tool
+    # it drove (e05577dc), so its keys must now be ABSENT from the registry too
+    # — a stale entry is exactly what this test's name forbids.
+    assert ("test_group_chat_prd_edit_live.py", "RUN_GROUP_CHAT_PRD_EDIT_LIVE") not in keys
+    assert ("test_group_chat_prd_edit_live.py", "ANTHROPIC_API_KEY") not in keys
 
     live_file = BACKEND / "tests" / "test_project_individual_prd_edit_live.py"
     assert not live_file.exists()
-    new_live_file = BACKEND / "tests" / "test_group_chat_prd_edit_live.py"
-    assert new_live_file.exists()
+    group_live_file = BACKEND / "tests" / "test_group_chat_prd_edit_live.py"
+    assert not group_live_file.exists()
 
     # The registry's own ratchet test still passes (re-run here so THIS
     # ticket's registry surgery is proven, not just asserted statically).

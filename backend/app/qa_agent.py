@@ -41,6 +41,7 @@ from __future__ import annotations
 from app.timing import timed_def
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
@@ -1719,6 +1720,21 @@ def _skip_project_connectors(
       skipped so it falls through to `PROJECT_FACTS_AUTHORITATIVE_PREAMBLE` +
       the project ledger instead of a "connect a connector" deflection.
 
+    An explicit project-content ask ("give me the context") beats a STALE
+    connector mention: `is_connector_lookup` also fires on a sticky-thread
+    follow-up (`_CONNECTOR_FOLLOWUP_DETAIL`, e.g. bare "context") whenever
+    `history` names a connector a few turns back, even though the CURRENT
+    message names nothing at all. Left alone, that stale hit vetoed the
+    sixth-branch project loop for the exact phrasing
+    `is_project_content_request` exists to admit, and sent it to a
+    company-wide/connector search instead of the project's own content. Fixed
+    by re-running `is_connector_lookup` history-free (in-message-only, same
+    shape as the `:2256` named_sources read below): a connector named IN THIS
+    message still wins outright (the two calls agree, `names_source` stays
+    True); a connector that only shows up once `history` is added is stale —
+    if this is also an explicit content ask, the veto is lifted so the
+    project branch can claim the turn.
+
     Best-effort — a detector failure degrades to NOT skipping (interceptors run
     as before), never raising into the answer path."""
     if scope is None or scope.surface == Surface.main:
@@ -1726,11 +1742,22 @@ def _skip_project_connectors(
     try:
         from app.connector_lookup import tracker
 
+        named_tracker = tracker.named_trackers(routing_text)
+        named_document = document_lookup_candidates(routing_text)
+        connector_in_message = bool(is_connector_lookup(routing_text))
+        connector_with_history = bool(is_connector_lookup(routing_text, history))
         names_source = bool(
-            tracker.named_trackers(routing_text)
-            or is_connector_lookup(routing_text, history)
-            or document_lookup_candidates(routing_text)
+            named_tracker or connector_with_history or named_document
         )
+        stale_connector_only = connector_with_history and not connector_in_message
+        if (
+            names_source
+            and stale_connector_only
+            and not named_tracker
+            and not named_document
+            and is_project_content_request(routing_text)
+        ):
+            names_source = False
     except Exception:  # noqa: BLE001 — never break the answer over a routing hint
         return False
     return not names_source
@@ -1752,6 +1779,48 @@ def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> s
         lines.append(f"{speaker}: {content}")
     lines.append(f"User: {question}")
     return "\n".join(lines)
+
+
+def _is_bare_send_to_roster_member(
+    routing_text: str, scope: "Optional[SurfaceScope]",
+) -> bool:
+    """True when `routing_text` is a bare send/assign/hand/route directed at
+    a named PROJECT ROSTER member with no pronoun object — "send to Jay to
+    prioritize the roadmap" — closing the gap where
+    `is_project_tool_request`'s `_PROJECT_TOOL_DELEGATE_VERB` requires an
+    object between the verb and "to" ("send THIS to X") and a bare "send to
+    X" never entered the sixth branch at all. See
+    `app.project_delegation.is_bare_send_to_member` for the roster-matching
+    contract; this is only the call-site wrapper, matching
+    `_skip_project_connectors`'s best-effort-degrade shape so a detector
+    failure here can never break an otherwise-answerable turn.
+
+    A no-op for `scope is None`/main or an empty roster — same guard shape
+    as every other sixth-branch predicate above it."""
+    if scope is None or scope.surface == Surface.main or not scope.roster:
+        return False
+    try:
+        from app.project_delegation import is_bare_send_to_member
+
+        return is_bare_send_to_member(routing_text, scope.roster)
+    except Exception:  # noqa: BLE001 — never break the answer over a routing hint
+        return False
+
+
+#: Catches the OTHER `edit_prd` failure mode — the model never calls the
+#: tool at all (skips it entirely) but still composes a free-text final
+#: answer that claims the PRD was changed ("Done — it's live", "I've
+#: updated the PRD"). Scoped narrowly to an edit-claim ("done"/"updated"/
+#: "edited"/"changed"/"applied"/"saved"/"live") co-occurring with "prd"
+#: within a short span, so it does not fire on unrelated group-chat "Done"
+#: replies (e.g. a delegate_task confirmation) that never mention the PRD.
+_PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE = re.compile(
+    r"\b(done|updated?|edited?|changed?|applied?|saved?|(?:is|now)\s+live)\b"
+    r"[^.!?\n]{0,40}\bprd\b"
+    r"|\bprd\b[^.!?\n]{0,40}"
+    r"\b(done|updated?|edited?|changed?|applied?|saved?|(?:is|now)\s+live)\b",
+    re.IGNORECASE,
+)
 
 
 def _try_scoped_tool_answer(
@@ -1786,6 +1855,17 @@ def _try_scoped_tool_answer(
     identity = scope.assigner_identity or {}
     assigner_user_id = identity.get("assigner_user_id")
     roster = list(scope.roster)
+    # Captures every `edit_prd` dispatch's narration, in call order. The
+    # model's own FINAL text (returned by `run_tool_loop` below) is free-form
+    # and is NOT guaranteed to match what the tool actually did — a model
+    # can call `edit_prd`, receive a no-PRD-open refusal or a no-op result,
+    # and still compose a "Done — it's live" final answer on its own. When
+    # `edit_prd` was called at all, the LAST captured narration (already
+    # authored by the handler to reflect the real outcome: applied,
+    # refused, or no-op) overrides the model's free text below — the
+    # narration the user sees is grounded in the tool's actual return, never
+    # in the model's own claim.
+    edit_prd_narrations: list[str] = []
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1803,6 +1883,7 @@ def _try_scoped_tool_answer(
             # always returns `(narration, None)` — the edit is already
             # applied by the time the narration is produced.
             narration, _pending = scope.edit_prd_handler(tool_input)
+            edit_prd_narrations.append(narration)
             return narration
         if name == "delegate_task":
             from app import project_delegation
@@ -1816,6 +1897,12 @@ def _try_scoped_tool_answer(
                 dataset=dataset,
                 company_id=enterprise_id,
                 tool_input=tool_input,
+                # The SERVER-rendered transcript (never a model argument) —
+                # carries the requester's actual content (the feedback, the
+                # themes) into the assignee's brief. Same value the model's
+                # own user turn below is built from, so the brief and what
+                # the agent was looking at can never drift.
+                source_content=user,
             )
         if name == "execute_task":
             from app import project_task_execution
@@ -1858,6 +1945,30 @@ def _try_scoped_tool_answer(
         if scope.surface == Surface.project_private:
             return None
         raise
+
+    if edit_prd_narrations:
+        # Ground the final answer in the tool's real outcome (the critical
+        # fix): never let the model's own free-text final turn override an
+        # `edit_prd` call's actual result. Last call wins — mirrors "the
+        # PRD is now in whatever state the last edit call left it in".
+        text = edit_prd_narrations[-1]
+    elif (
+        scope.edit_prd_handler is not None
+        and _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE.search(text or "")
+    ):
+        # The OTHER mechanism: `edit_prd` was never invoked this turn at
+        # all, yet the model's own final text claims the PRD was changed.
+        # There is no tool result to ground on here (the tool never ran) —
+        # the only honest answer is to say so, never to relay the model's
+        # unearned success claim.
+        logger.warning(
+            "group_edit_prd_claim_without_tool_call project_id=%s",
+            scope.project_id,
+        )
+        text = (
+            "I didn't actually make that change — open the PRD beside this "
+            "chat and ask me again so I can apply it."
+        )
 
     # Exactly one structured cost line per scoped reply — identifiers only,
     # never the body/question (Rule #24). Relocated from the two duplicate
@@ -2042,6 +2153,13 @@ def answer(
         and (
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
+            # A bare "send/assign/hand/route to <roster member>" — no
+            # pronoun object — is a delegation signal `is_project_tool_
+            # request` alone declines (its `_PROJECT_TOOL_DELEGATE_VERB`
+            # requires an object: "send THIS to X"). Roster-scoped so it
+            # never fires on a non-member destination — see
+            # `_is_bare_send_to_roster_member`'s docstring.
+            or _is_bare_send_to_roster_member(routing_text, scope)
             # An edit-intent turn must REACH the tool loop so the model can call
             # the in-band `edit_prd` tool. GUARDED on `edit_prd_handler` — only
             # the GROUP surface registers one, so this disjunct is always False

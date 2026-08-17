@@ -208,6 +208,8 @@ def resolve_open_artifact(
     artifact_type: str,
     query: str,
     dataset: str,
+    project_id: Optional[int] = None,
+    company_id: Optional[str] = None,
 ) -> dict:
     """Resolve an open request to {status, artifact_type, query, artifact,
     candidates}.
@@ -215,6 +217,15 @@ def resolve_open_artifact(
     `dataset` IS the tenant scope and must ALREADY be gated by the caller (the
     route resolves it from the authenticated workspace); this function does no
     auth of its own and simply reads the documents that scoping produces.
+
+    `project_id` (with `company_id`), when both are set, narrows the SOURCE to
+    that project's own artifacts (`db.artifacts.list_artifacts_for_project`)
+    instead of the workspace-wide `list_document_artifacts` — so a project
+    chat's "open the PRD" can only ever resolve against that project's own
+    documents, matching the `list_artifacts` envelope leg's identical scoping.
+    `company_id` is required alongside `project_id` (the project listing is
+    keyed by both); a `project_id` with no `company_id` is treated as absent
+    rather than guessed at.
 
     Never raises: a lookup failure degrades to `not_found`, which the client
     renders as "I couldn't find that" — the same thing the user sees when the
@@ -238,17 +249,33 @@ def resolve_open_artifact(
         return out
 
     try:
-        from app.db.artifacts import list_document_artifacts
+        if project_id is not None and company_id is not None:
+            # Project-scoped open: source from the project's OWN artifacts
+            # (the same listing `enrich_chat_envelope`'s `list_artifacts` leg
+            # already scopes project surfaces to), narrowed to the openable
+            # kinds — a project chat's "open the PRD" must resolve against
+            # that project's documents only, never the whole workspace's.
+            from app.db.artifacts import list_artifacts_for_project
 
-        # `openable_only` drops failed/invalidated rows BEFORE the regeneration
-        # family collapses to its newest row. Without it, one deploy restart —
-        # which flips every in-flight PRD to `invalidated` (db/prds.py's
-        # invalidate_orphan_generating_prds) — makes the whole family
-        # unreachable from chat, because the newest row is the dead one and the
-        # ready generation behind it never surfaces. That restart is a
-        # documented recurring event, not a hypothetical, and the resulting
-        # "I couldn't find it" points at an Artifacts tab where it IS listed.
-        items = list_document_artifacts(dataset=dataset, openable_only=True)
+            items = [
+                i for i in list_artifacts_for_project(
+                    project_id=project_id, dataset=dataset, company_id=company_id,
+                )
+                if i.get("type") in OPENABLE_TYPES
+            ]
+        else:
+            from app.db.artifacts import list_document_artifacts
+
+            # `openable_only` drops failed/invalidated rows BEFORE the
+            # regeneration family collapses to its newest row. Without it, one
+            # deploy restart — which flips every in-flight PRD to
+            # `invalidated` (db/prds.py's invalidate_orphan_generating_prds) —
+            # makes the whole family unreachable from chat, because the
+            # newest row is the dead one and the ready generation behind it
+            # never surfaces. That restart is a documented recurring event,
+            # not a hypothetical, and the resulting "I couldn't find it"
+            # points at an Artifacts tab where it IS listed.
+            items = list_document_artifacts(dataset=dataset, openable_only=True)
     except Exception:  # noqa: BLE001 — an open must never break the send
         logger.exception("artifact open lookup failed; reporting not_found")
         return out

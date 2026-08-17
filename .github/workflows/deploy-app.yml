@@ -92,10 +92,10 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_DESIGN_AGENT_ENABLED: "1"
-          # Projects feature: ON for staging (main), OFF for prod (production) — stays dark
-          # in production until deliberately launched. The backend PROJECTS_ENABLED gate is
-          # the real boundary; this only shows/hides the nav + route in the static bundle.
-          NEXT_PUBLIC_PROJECTS_ENABLED: ${{ github.ref == 'refs/heads/production' && '0' || '1' }}
+          # Projects feature: launched to production 2026-08-17 — ON for both staging (main)
+          # and production. The backend PROJECTS_ENABLED gate is the real boundary; this only
+          # shows/hides the nav + route in the static bundle.
+          NEXT_PUBLIC_PROJECTS_ENABLED: "1"
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPA_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPA_ANON }}
           NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST: ${{ secrets.NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST }}

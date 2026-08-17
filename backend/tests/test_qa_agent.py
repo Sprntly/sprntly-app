@@ -2388,3 +2388,75 @@ def test_main_scope_none_connector_guards_byte_identical(monkeypatch):
     # And `_skip_project_connectors` is False for both, directly.
     assert qa._skip_project_connectors(None, q, None) is False
     assert qa._skip_project_connectors(SurfaceScope(surface=Surface.main), q, None) is False
+
+
+# ── ★ an explicit project-content ask beats a STALE connector mention ────────
+# `is_connector_lookup` also fires on a sticky-thread follow-up (e.g. a bare
+# "context") whenever `history` names a connector a few turns back, even
+# though the CURRENT message names nothing. Left alone that stale hit vetoed
+# the sixth-branch project loop for exactly the phrasing
+# `is_project_content_request` exists to admit. `_skip_project_connectors`
+# now re-checks `is_connector_lookup` history-free: a connector named in THIS
+# message still wins outright; a connector that only shows up once history is
+# added is stale, and an explicit content ask lifts the veto.
+_PRIOR_SLACK_MENTION_HISTORY = [
+    {"role": "user", "content": "check slack for the pricing decision"},
+    {"role": "assistant", "content": "Here is what I found in Slack about pricing."},
+]
+
+
+def test_stale_connector_history_does_not_veto_explicit_context_ask():
+    """A bare 'give me the context' names no connector itself; the sticky
+    Slack mention lives only in `history`. The project branch must NOT be
+    vetoed — `_skip_project_connectors` returns True (skip the connector
+    interceptors, let the sixth branch claim the turn)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", _PRIOR_SLACK_MENTION_HISTORY,
+    ) is True
+
+
+def test_in_message_connector_still_wins_over_project_branch():
+    """When the CURRENT message itself names a connector ('...from slack'),
+    the connector must still win: `_skip_project_connectors` returns False
+    (do NOT skip the connector interceptors — the project branch does not
+    steal this turn)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE,
+        "give me the full context from slack",
+        _PRIOR_SLACK_MENTION_HISTORY,
+    ) is False
+
+
+def test_context_ask_with_no_connector_anywhere_is_unchanged():
+    """Control: no connector named in the message OR history — the project
+    branch fires exactly as it did before this fix (unrelated history, or
+    none at all, never triggers the stale-connector carve-out)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", [],
+    ) is True
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", None,
+    ) is True
+
+
+def test_stale_connector_ask_reaches_project_branch_end_to_end(monkeypatch):
+    """End-to-end through `qa.answer()`: a project-surface turn with a prior
+    Slack mention in history, asking a bare 'give me the context', reaches
+    the sixth-branch project tool loop rather than falling through to the
+    connector/company-wide path."""
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=1,
+        extra_tools=({"name": "get_project_memory"},),
+    )
+
+    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset):
+        return {"answer": "project-scoped-context", "_skill_source": "project-tools"}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _fake_scoped_tool_answer)
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me the context",
+        dataset="acme", scope=scope, history=_PRIOR_SLACK_MENTION_HISTORY,
+    )
+    assert out.get("_skill_source") == "project-tools", out
+    assert out.get("answer") == "project-scoped-context", out

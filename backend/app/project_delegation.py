@@ -26,6 +26,7 @@ turn behind it.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -38,7 +39,7 @@ from app.db.conversations import (
 from app.db.delegation_events import record_event, status_dto
 from app.db.delegation_followups import upsert_followup
 from app.db.project_delegations import record_delegation
-from app.db.projects import is_project_member, resolve_member
+from app.db.projects import _match_keys, is_project_member, resolve_member
 from app.delegation_cadence import MIN_INTERVAL
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
@@ -46,6 +47,83 @@ from app.project_context import assemble_project_context
 from app.realtime import publish_broadcast
 
 logger = logging.getLogger(__name__)
+
+# Bare SEND/ASSIGN/HAND/ROUTE-shaped phrasing with NO pronoun object —
+# "send to Jay", "assign to the designer", "route this task to Ada" — the
+# entry-gate gap this closes: `skill_router._PROJECT_TOOL_DELEGATE_VERB`
+# requires an object between the verb and "to" ("send THIS to X") and never
+# fires on a bare "send to X" that names no object at all, which is David's
+# habitual phrasing. Captures a generous (up to 4-word) window following
+# "to" — `is_bare_send_to_member` below trims it down to the actual
+# recipient token(s) and requires the result to resolve against the
+# project's OWN roster before this counts as a delegation signal; this
+# regex alone is NOT a decision, it only proposes a candidate window.
+_BARE_SEND_TO = re.compile(
+    r"\b(?:send|assign|hand(?:\s+off)?|route)\b[^.?!]{0,60}?\bto\s+"
+    r"(?P<recipient>@?[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,3})",
+    re.I,
+)
+
+#: Words that never belong to a person's name/role — "send to Jay to
+#: prioritize the roadmap" must not let "Jay to prioritize" reach the
+#: roster match as one phrase. A bare "to" ends the recipient window
+#: outright (the task clause starts there); the others just should not
+#: extend a multi-word candidate.
+_RECIPIENT_STOPWORDS = frozenset({"to"})
+
+
+def is_bare_send_to_member(question: str, roster: "list[dict] | tuple[dict, ...]") -> bool:
+    """True when `question` is a bare send/assign/hand/route directed at a
+    NAMED PROJECT MEMBER, with no pronoun object required — "send to Jay to
+    prioritize the roadmap" enters the delegation path the same way "send
+    THIS to Jay" already does.
+
+    Roster-scoped by construction, not a text-only regex widening: every
+    word-prefix of the captured recipient window (1..3 words, article
+    dropped) must resolve to an actual member of THIS project's roster via
+    the same casefolded exact/prefix match tiers `resolve_member`
+    (`app.db.projects`) uses downstream — reusing its private
+    `_match_keys` helper directly rather than duplicating the match-tier
+    logic. A destination that is not a roster member — "send the email to
+    the printer", a stranger's name, an unrelated noun — never matches, so
+    this stays a precise per-project signal rather than a company-wide or
+    grammar-only widening.
+
+    `resolve_member` itself is deliberately NOT called here: it re-queries
+    `list_members` on every call, and this is a cheap per-turn text gate
+    that must not pay for an extra live read when the caller (the sixth
+    ladder branch in `qa_agent.answer`) already has the turn's `roster`
+    loaded once via `SurfaceScope`. The actual resolution — including the
+    ambiguous/no_match decline strings — still happens exactly once,
+    downstream, inside `handle_delegate_task`; this function only decides
+    whether the turn is WORTH entering the tool loop for."""
+    q = question or ""
+    if not roster:
+        return False
+    m = _BARE_SEND_TO.search(q)
+    if not m:
+        return False
+    words = m.group("recipient").strip().split()
+    if words and words[0].startswith("@"):
+        words[0] = words[0][1:]
+    # A name/role never legitimately contains a bare "to" — truncate the
+    # window there so "Jay to prioritize" only ever tries "Jay".
+    for i, w in enumerate(words):
+        if w.casefold() in _RECIPIENT_STOPWORDS:
+            words = words[:i]
+            break
+    if words and words[0].casefold() in ("the", "a", "an"):
+        words = words[1:]
+    if not words:
+        return False
+    for length in range(1, min(3, len(words)) + 1):
+        candidate = " ".join(words[:length]).casefold()
+        if any(candidate in _match_keys(member) for member in roster):
+            return True
+    first = words[0].casefold()
+    if len(first) < 2:
+        return False
+    return any(any(k.startswith(first) for k in _match_keys(member)) for member in roster)
 
 # The exact `list_individual_turns` read-DTO key set — a hard whitelist
 # applied before every `brief.delivered` broadcast (AD-P21 no-schema-
@@ -190,6 +268,19 @@ def _publish_mention_signal(
 # can't grow the brief prompt unboundedly.
 _ARTIFACT_LIMIT = 5
 
+# The tail of the triggering conversation (the requester's own words — the
+# feedback, the themes, whatever content the ask was actually ABOUT) folded
+# into the brief prompt, bounded the same way every other user-derived block
+# in this codebase is (e.g. `ask_planner._TASK_CHARS`). This is what makes
+# the brief carry the REAL content instead of only `assemble_project_context`'s
+# general project memory + an unrelated artifact fan-out: `task_summary` is a
+# short label the model wrote, not the source material, so without this the
+# assignee's brief could describe a task with none of the substance behind
+# it. Kept to the TAIL (most recent turns), because the content a delegation
+# refers to ("send this to Fortune to prioritize") is almost always what was
+# just said, not the start of a long thread.
+_SOURCE_CONTENT_CHARS = 6000
+
 DELEGATE_TASK_TOOL = {
     "name": "delegate_task",
     "description": (
@@ -201,7 +292,11 @@ DELEGATE_TASK_TOOL = {
         "Do NOT call this for a plain question to answer, an FYI to the room, "
         "brainstorming, or when two members are talking to each other and not "
         "asking you to route work. If you are unsure who is meant, do NOT guess "
-        "— reply asking who they mean instead of calling this tool."
+        "— reply asking who they mean instead of calling this tool. This tool "
+        "only starts the handoff — it does not run the task and returns "
+        "immediately with confirmation text, never the assignee's answer. "
+        "After calling it, do not do the task yourself and do not say the "
+        "assignee has replied or finished — they have not yet."
     ),
     "input_schema": {
         "type": "object",
@@ -238,9 +333,19 @@ heading dump). State, in this order:
   - the task itself, clearly and concretely
   - who assigned it — name AND role — so the assignee knows who to ask
     for more context
+  - the actual content the task is ABOUT, when given below (the feedback,
+    the themes, the specifics the requester supplied) — quote or closely
+    paraphrase it, never a vaguer restatement that drops the substance
   - the relevant project context and any linked artifacts given below,
     ONLY what is actually provided — never invent a fact, a name, a
     deadline, or an artifact that is not in the material given to you
+
+You are handing off a task, not doing it. Never perform the task yourself
+and never write the deliverable the assignee is being asked to produce —
+if the task is "prioritize this feedback", do not prioritize it here; that
+is the assignee's job. Never state or imply that the assignee has already
+done, replied to, or completed anything — this brief is what starts their
+work, not a record of it finishing.
 
 End the brief on a plain statement. Never end on a question, and never
 end with an offer ("let me know if you need anything", "want me to dig
@@ -286,6 +391,7 @@ def _render_brief_user(
     assignee: dict,
     context_block: str,
     artifacts: list[dict],
+    source_content: str | None = None,
 ) -> str:
     assigner_name = (assigner or {}).get("name") or "a teammate"
     assigner_role = (assigner or {}).get("job_role") or "no role set"
@@ -296,6 +402,11 @@ def _render_brief_user(
         f"Assigned by: {assigner_name} ({assigner_role})",
         f"Assigned to: {assignee_name}",
     ]
+    if source_content:
+        lines.append(
+            "\nWhat this is actually about (the requester's own words — use "
+            f"this, not a guess, for the substance):\n{source_content}"
+        )
     if context_block:
         lines.append(f"\nProject context:\n{context_block}")
     if artifacts:
@@ -315,13 +426,18 @@ def _build_brief(
     roster: list[dict],
     dataset: str,
     company_id: str,
+    source_content: str | None = None,
 ) -> str | None:
     """ONE bounded, best-effort `call_md` (AD-P19). Reuses
     `assemble_project_context` with the **assigner's** user_id (R-D7 —
     the folded role line reads as context about who is asking) and the
-    project's own artifact fan-out. Context/artifact folding degrades
-    silently to "none" on a read failure — only the LLM call itself can
-    fail the brief outright (returns None, never raises)."""
+    project's own artifact fan-out — PLUS, when the caller has it,
+    `source_content`: the tail of the actual triggering conversation, so the
+    brief carries the requester's real material (the feedback, the themes)
+    rather than only general project memory and an unrelated artifact
+    fan-out. Context/artifact folding degrades silently to "none" on a read
+    failure — only the LLM call itself can fail the brief outright (returns
+    None, never raises)."""
     start = time.monotonic()
     meta: dict = {}
     assignee_user_id = assignee.get("user_id")
@@ -340,7 +456,11 @@ def _build_brief(
     except Exception:  # noqa: BLE001 — best-effort artifact fold
         artifacts = []
 
-    user = _render_brief_user(task_summary, assigner, assignee, context_block, artifacts)
+    trimmed_source = (source_content or "").strip()[-_SOURCE_CONTENT_CHARS:] or None
+
+    user = _render_brief_user(
+        task_summary, assigner, assignee, context_block, artifacts, trimmed_source
+    )
 
     try:
         brief = call_md(system=_BRIEF_SYSTEM, user=user, model=DEFAULT_MODEL, meta_out=meta)
@@ -368,12 +488,20 @@ def handle_delegate_task(
     dataset: str,
     company_id: str,
     tool_input: dict,
+    source_content: str | None = None,
 ) -> str:
     """Best-effort dispatch handler for the `delegate_task` tool — never
     raises (AD-P7); on ANY failure it returns a safe decline string and
     delivers nothing. Delivery-then-record ordering (AD-P19): the
     individual-chat turn is written FIRST, the `project_delegations` fact
-    SECOND — a failure writing the turn means the fact is never reached."""
+    SECOND — a failure writing the turn means the fact is never reached.
+
+    `source_content` (new, optional — every existing caller/test that omits
+    it gets byte-identical behavior) is the SERVER-rendered tail of the
+    triggering conversation — never a model-supplied argument — folded into
+    `_build_brief` so the assignee's brief carries the requester's actual
+    material instead of only `assemble_project_context`'s general project
+    memory."""
     try:
         needle = (tool_input.get("assignee") or "").strip()
         task = (tool_input.get("task_summary") or "").strip()
@@ -404,7 +532,8 @@ def handle_delegate_task(
             return "I can only hand tasks between members of this project."
 
         brief = _build_brief(
-            project_id, assigner_user_id, assignee, task, roster, dataset, company_id
+            project_id, assigner_user_id, assignee, task, roster, dataset, company_id,
+            source_content=source_content,
         )
         if not brief:
             return f"I couldn't build the brief for {assignee.get('name') or 'them'} — nothing was sent."

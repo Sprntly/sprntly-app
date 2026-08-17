@@ -167,6 +167,137 @@ def test_brief_prompt_forbids_trailing_question_and_requires_fields():
     assert "never invent" not in weak.lower()
 
 
+def test_delegate_tool_description_forbids_self_performing_and_fake_completion():
+    """A model that calls `delegate_task` and then keeps going in the same
+    turn — writing the assignee's deliverable itself, or claiming they have
+    already replied/finished — is the fire-and-fabricate failure this tool's
+    description must foreclose at the point of tool-use, not only in the
+    brief prompt below."""
+    desc = project_delegation.DELEGATE_TASK_TOOL["description"].lower()
+    assert "returns immediately" in desc or "starts the handoff" in desc
+    assert "not" in desc and ("do the task" in desc or "assignee's answer" in desc)
+    assert "replied" in desc or "finished" in desc
+
+    weak = "Call this tool to delegate work to a teammate."
+    assert "returns immediately" not in weak.lower()
+    assert "replied" not in weak.lower()
+
+
+def test_brief_prompt_forbids_self_performing_task_and_fake_completion():
+    """AC (root cause #2): the brief-writer must never DO the task it is
+    briefing, and must never claim the assignee has already done, replied
+    to, or completed anything — the exact fabrication a staging repro
+    surfaced ("<X> completed the prioritization" while X had done nothing)."""
+    system = project_delegation._BRIEF_SYSTEM.lower()
+    assert "never perform the task" in system or "not doing it" in system
+    assert "already done" in system or "already replied" in system or "completed anything" in system
+
+    weak = "Write a brief for the assignee about the task."
+    assert "never perform the task" not in weak.lower()
+    assert "completed anything" not in weak.lower()
+
+
+# ── Real source content reaches the brief (root cause #3) ────────────────
+# `task_summary` is a short label the model wrote; without the requester's
+# actual words (the feedback, the themes) folded in, the brief LLM call had
+# only `assemble_project_context`'s general project memory + an unrelated
+# artifact fan-out to work with, and a staging repro showed exactly that:
+# the delivered brief carried the wrong PRD's context, not the feedback the
+# thread was actually about.
+
+
+def test_build_brief_folds_source_content_into_brief_prompt(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    calls = _stub_brief_llm(monkeypatch)
+
+    roster = projects_db.list_members(project["id"])
+    result = project_delegation.handle_delegate_task(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        source_conversation_id=1,
+        source_turn_id=1,
+        roster=roster,
+        dataset="",
+        company_id="unused-in-fake-db",
+        tool_input={"assignee": "Fortune", "task_summary": "Prioritize the feedback"},
+        source_content="THEMES_FROM_THE_THREAD: users want dark mode; onboarding is too slow.",
+    )
+    assert "Sent the brief" in result
+    assert len(calls) == 1
+    assert "THEMES_FROM_THE_THREAD" in calls[0]["user"], (
+        "the brief prompt must carry the requester's actual content, not "
+        "only the task_summary label and general project memory"
+    )
+
+
+def test_build_brief_without_source_content_is_backward_compatible(isolated_settings, monkeypatch):
+    """Every existing caller/test that omits `source_content` (the default,
+    None) must see byte-identical brief-prompt behavior — no
+    'What this is actually about' section rides the prompt when there is
+    nothing to fold in."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    calls = _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result
+    assert len(calls) == 1
+    assert "actually about" not in calls[0]["user"].lower()
+
+
+# ── Bare "send to <roster member>" entry-gate detector ───────────────────
+
+
+_DETECTOR_ROSTER = [
+    {"user_id": "u1", "name": "Fortune Adeyemi", "job_role": "Designer"},
+    {"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"},
+]
+
+
+def test_bare_send_to_roster_member_matches_without_pronoun():
+    # The gap this closes: no "this/that/it" object between the verb and
+    # "to" — David's habitual phrasing.
+    for q in (
+        "send to Jay to prioritize the roadmap",
+        "send to Jay",
+        "assign to the designer",
+        "hand off to Fortune",
+        "route this task to Jay",
+        "send to jay",
+        "assign to @Jay",
+        "please send to Fortune Adeyemi asap",
+    ):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is True, q
+
+
+def test_bare_send_still_matches_pronoun_object_phrasing():
+    # Must not regress the existing "send this to X" shape — same detector,
+    # additive OR at the call site (see qa_agent._is_bare_send_to_roster_member).
+    for q in ("send it to Jay", "send this to Jay to review"):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is True, q
+
+
+def test_bare_send_does_not_misfire_on_non_member_destination():
+    # A destination that isn't a project member/role must never trip this —
+    # the ONE thing a pure-regex widen could not guarantee.
+    for q in (
+        "send the email to the printer",
+        "send the report to accounting",
+        "can you send this quarter to marketing",
+        "send to Ada to prioritize the roadmap",  # Ada is not on this roster
+        "send this to Ada",  # named person, but not a project member
+    ):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is False, q
+
+
+def test_bare_send_empty_roster_and_empty_question_decline():
+    assert project_delegation.is_bare_send_to_member("send to Jay", []) is False
+    assert project_delegation.is_bare_send_to_member("send to Jay", ()) is False
+    assert project_delegation.is_bare_send_to_member("", _DETECTOR_ROSTER) is False
+    assert project_delegation.is_bare_send_to_member(None, _DETECTOR_ROSTER) is False
+
+
 # ── Authorization / IDOR (mutation-proofed — AC3) ────────────────────────
 
 
