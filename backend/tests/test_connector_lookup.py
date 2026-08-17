@@ -388,15 +388,25 @@ def _jira_session():
                        site_url="https://acme.atlassian.net")
 
 
-def test_jira_not_connected_copy_is_verbatim(monkeypatch):
+def test_jira_not_connected_reads_the_knowledge_graph(monkeypatch):
+    """Jira not connected no longer dead-ends on the verbatim connect copy — its
+    tasks are synced into the graph, so the KG-only loop runs instead. The connect
+    copy is still passed as `not_connected_text` for the flag-off contract, but
+    jira_lookup now passes include_knowledge_graph=True."""
     from app import jira_lookup
+    from app.connector_lookup import knowledge_graph as kg
     from app.connectors import jira_fetch
 
     monkeypatch.setattr(jira_fetch, "open_session", lambda cid: None)
+    monkeypatch.setattr(kg, "search", lambda eid, q: "KG: PROJ-1 is In Review.")
+    monkeypatch.setattr(
+        jira_lookup, "run_tool_loop",
+        lambda **k: k["dispatch"](kg.TOOL_NAME, {"query": "PROJ-1"}),
+    )
+    monkeypatch.setattr(jira_lookup, "_log", lambda *a, **k: None)
     out = jira_lookup.answer(enterprise_id="co", question="status of PROJ-1")
-    assert out["answer"] == _JIRA_NOT_CONNECTED
-    # …and it does NOT pick up the framework's "connected right now" suffix.
-    assert "Connected right now" not in out["answer"]
+    assert "In Review" in out["answer"]
+    assert out["answer"] != _JIRA_NOT_CONNECTED
     assert out["_skill_source"] == "jira-lookup"
     assert out["_skill_action"] == "Jira lookup"
 
@@ -438,8 +448,14 @@ def test_jira_uses_its_own_system_prompt_not_the_framework_head(monkeypatch):
                         lambda **k: captured.update(k) or "answered")
     monkeypatch.setattr(jira_lookup, "_log", lambda *a, **k: None)
     jira_lookup.answer(enterprise_id="co", question="status of PROJ-1")
-    assert captured["system"] == jira_lookup._SYSTEM
+    # Jira's verbatim prompt still LEADS the system block, unchanged, and the
+    # framework head is still NOT injected...
+    assert captured["system"].startswith(jira_lookup._SYSTEM)
     assert "Rules that hold for every source" not in captured["system"]
+    # ...but the knowledge-graph block is now appended, so the tuned prompt is
+    # told the KG tool it is offered exists (Jira's tasks are synced to the graph).
+    assert "## Sprntly knowledge graph" in captured["system"]
+    assert "accumulated knowledge" in captured["system"]
 
 
 def test_generic_adapters_still_get_the_framework_copy():
@@ -1606,3 +1622,127 @@ def test_asana_read_helpers_accept_a_clamped_timeout():
         sig = inspect.signature(fn)
         assert "timeout" in sig.parameters, fn.__name__
         assert sig.parameters["timeout"].default is None, fn.__name__
+
+
+# ── KG-only fallback + KG-under-verbatim-system enablers ─────────────────────
+# When `include_knowledge_graph=True`, a caller with nothing live to read no
+# longer dead-ends on the connect copy — it degrades to a KG-only tool loop —
+# and a caller passing a verbatim `system_text` (Jira) still gets the KG tool,
+# with the KG system block appended so the tuned prompt knows it exists. Every
+# assertion here is enforced in answer.py, gated on the flag; flag-off callers
+# are byte-identical to before (see test_not_connected_with_flag_off_is_unchanged).
+
+
+def test_kg_only_fallback_runs_when_nothing_connected_and_flag_on(monkeypatch):
+    from app.connector_lookup import knowledge_graph as kg
+
+    monkeypatch.setattr(
+        kg, "search",
+        lambda eid, q: "SEEDED KG SIGNAL: the checkout task is In Review.",
+    )
+    captured = {}
+
+    def loop(**k):
+        captured.update(k)
+        return k["dispatch"](kg.TOOL_NAME, {"query": "checkout"})
+
+    out = ca.answer(
+        enterprise_id="co-a", question="what's the status of the checkout task?",
+        providers=[FakeProvider("clickup", connected=False)],
+        include_knowledge_graph=True, run_loop=loop, log=lambda *a: None,
+    )
+    # The loop WAS entered (not the deterministic connect copy)...
+    assert captured, "the KG-only loop was never entered"
+    # ...with ONLY the knowledge-graph tool offered (nothing is connected)...
+    assert {t["name"] for t in captured["tools"]} == {kg.TOOL_NAME}
+    # ...and the answer is drawn from the KG, not a false-deny.
+    assert "checkout task is In Review" in out["answer"]
+    assert "isn't connected" not in out["answer"]
+
+
+def test_not_connected_with_flag_off_is_unchanged():
+    called = []
+    out = ca.answer(
+        enterprise_id="co-a", question="check clickup for the checkout task",
+        providers=[FakeProvider("clickup", connected=False)],
+        run_loop=lambda **k: called.append(k), log=lambda *a: None,
+    )
+    assert called == []
+    assert "Clickup isn't connected yet" in out["answer"]
+
+
+def test_kg_tool_offered_alongside_verbatim_system_text():
+    from app.connector_lookup import knowledge_graph as kg
+
+    captured = {}
+    ca.answer(
+        enterprise_id="co-a", question="status of PROJ-1",
+        providers=[FakeProvider("jira")],
+        system_text="JIRA RULES", include_knowledge_graph=True,
+        run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None,
+    )
+    assert kg.TOOL_NAME in {t["name"] for t in captured["tools"]}
+    # The verbatim prompt is preserved AND the KG block is appended.
+    assert "JIRA RULES" in captured["system"]
+    assert "## Sprntly knowledge graph" in captured["system"]
+    assert "accumulated knowledge" in captured["system"]  # a fragment of kg.SYSTEM
+
+
+def test_verbatim_system_text_without_flag_still_excludes_kg():
+    from app.connector_lookup import knowledge_graph as kg
+
+    captured = {}
+    ca.answer(
+        enterprise_id="co-a", question="status of PROJ-1",
+        providers=[FakeProvider("jira")], system_text="JIRA RULES",
+        run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None,
+    )
+    assert kg.TOOL_NAME not in {t["name"] for t in captured["tools"]}
+    assert captured["system"] == "JIRA RULES"
+
+
+def test_kg_only_fallback_is_tenant_scoped(monkeypatch):
+    from app.connector_lookup import knowledge_graph as kg
+
+    seen = {}
+    monkeypatch.setattr(
+        kg, "search",
+        lambda eid, q: kg.EMPTY if not eid
+        else (seen.__setitem__("eid", eid) or f"kg for {eid}"),
+    )
+    ca.answer(
+        enterprise_id="tenant-xyz", question="q",
+        providers=[FakeProvider("clickup", connected=False)],
+        include_knowledge_graph=True,
+        run_loop=lambda **k: k["dispatch"](kg.TOOL_NAME, {"query": "x"}),
+        log=lambda *a: None,
+    )
+    # The tenant reaching the KG dispatch is exactly the caller's tenant.
+    assert seen["eid"] == "tenant-xyz"
+    # A blank tenant yields the empty-KG note, never a cross-tenant read.
+    out = ca.answer(
+        enterprise_id="", question="q",
+        providers=[FakeProvider("clickup", connected=False)],
+        include_knowledge_graph=True,
+        run_loop=lambda **k: k["dispatch"](kg.TOOL_NAME, {"query": "x"}),
+        log=lambda *a: None,
+    )
+    assert kg.EMPTY in out["answer"]
+
+
+def test_kg_retrieval_failure_degrades_readably(monkeypatch):
+    from app.connector_lookup import knowledge_graph as kg
+
+    def boom(eid, q):
+        raise RuntimeError("pgvector down")
+
+    monkeypatch.setattr(kg, "search", boom)
+    out = ca.answer(
+        enterprise_id="co-a", question="q",
+        providers=[FakeProvider("clickup", connected=False)],
+        include_knowledge_graph=True,
+        run_loop=lambda **k: k["dispatch"](kg.TOOL_NAME, {"query": "x"}),
+        log=lambda *a: None,
+    )
+    assert "could not be read just now" in out["answer"]
+    assert "pgvector down" not in out["answer"]  # no internals leak

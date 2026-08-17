@@ -70,9 +70,11 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     """Run the on-demand Jira lookup and return an Ask-shaped payload.
 
     Opens a live Jira session for the tenant and lets the model fetch the issues
-    the question refers to via the tool loop. When Jira isn't connected, returns
-    a helpful connect message instead. Never raises — the chat answer degrades
-    gracefully on any failure.
+    the question refers to via the tool loop, with Sprntly's knowledge graph
+    offered alongside the live tools. When Jira isn't connected, the model reads
+    the graph (where the 20-minute sync keeps Jira's tasks) rather than dead-ending
+    on a connect message. Never raises — the chat answer degrades gracefully on
+    any failure.
 
     Everything Jira-specific (prompt, tools, connect copy, decision-log row) is
     passed explicitly, so the framework's generic behaviour never silently
@@ -93,6 +95,14 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         empty_text=jira_adapter.EMPTY_RESULT,
         exception_text=jira_adapter.UNREACHABLE,
         system_text=_SYSTEM,
+        # Jira's tasks are synced into the knowledge graph too (skill_id
+        # 'jira-extraction'), so offer the graph reader alongside the live tools —
+        # and, when Jira is not connected, degrade to a KG-only read rather than
+        # the connect copy. The framework appends the KG system block onto this
+        # verbatim `_SYSTEM` so the tuned prompt still tells the model the tool
+        # exists; `_SYSTEM`, the connect copy and the propose→confirm card are
+        # otherwise unchanged.
+        include_knowledge_graph=True,
         # Resolved from THIS module's globals at call time — the seams tests and
         # future callers already patch.
         run_loop=run_tool_loop,

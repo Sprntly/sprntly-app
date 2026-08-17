@@ -958,10 +958,27 @@ def test_dispatch_missing_issue_message(monkeypatch):
     assert "no Jira issue found with key NOPE-1" in out
 
 
-def test_answer_not_connected(monkeypatch):
+def test_answer_not_connected_now_reads_the_knowledge_graph(monkeypatch):
+    """Jira not connected no longer dead-ends on the connect copy: its tasks are
+    synced into the graph (skill_id 'jira-extraction'), so the model reads the
+    graph instead. The KG tool is the only reader offered, and Jira's verbatim
+    prompt still leads the system block with the KG block appended."""
+    from app.connector_lookup import knowledge_graph as kg
+
     monkeypatch.setattr(jl.jira_fetch, "open_session", lambda cid: None)
+    monkeypatch.setattr(kg, "search", lambda eid, q: "KG: PROJ-1 is In Review.")
+    captured = {}
+    monkeypatch.setattr(
+        jl, "run_tool_loop",
+        lambda **k: captured.update(k) or k["dispatch"](kg.TOOL_NAME, {"query": "PROJ-1"}),
+    )
+    monkeypatch.setattr(jl, "_log", lambda *a, **k: None)
     p = jl.answer(enterprise_id="co", question="status of PROJ-1")
-    assert "Jira isn't connected" in p["answer"]
+    assert "isn't connected" not in p["answer"]
+    assert "In Review" in p["answer"]
+    assert {t["name"] for t in captured["tools"]} == {kg.TOOL_NAME}
+    assert captured["system"].startswith(jl._SYSTEM)
+    assert "## Sprntly knowledge graph" in captured["system"]
     assert p["_skill_source"] == "jira-lookup"
 
 
@@ -981,10 +998,14 @@ def test_answer_runs_tool_loop_and_wraps(monkeypatch):
     assert p["key_points"] == [] and p["citations"] == []
     # Every tool was offered; the question rode in the user turn. None of them
     # can mutate Jira: the three reads read, and jira_propose_change only
-    # validates and describes a change for the user to confirm.
+    # validates and describes a change for the user to confirm. The knowledge
+    # graph is now offered alongside them (Jira's tasks are synced to the graph),
+    # so a live read can be enriched by — or fall back to — the extracted signals.
+    from app.connector_lookup import knowledge_graph as kg
+
     names = {t["name"] for t in captured["tools"]}
     assert names == {"jira_search", "jira_get_issue", "jira_editmeta",
-                     "jira_propose_change"}
+                     "jira_propose_change", kg.TOOL_NAME}
     assert "PROJ-142" in captured["user"]
 
 

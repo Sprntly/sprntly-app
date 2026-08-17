@@ -516,20 +516,25 @@ def test_tracker_thread_ignores_a_tracker_that_is_not_connected(monkeypatch):
     assert tracker.pick("co", "more details", thread) == "jira"
 
 
-def test_naming_an_unconnected_tracker_is_answered_honestly(monkeypatch):
+def test_naming_an_unconnected_tracker_reads_the_graph_not_the_other_tracker(monkeypatch):
     """Serving Jira for a question about ClickUp would answer confidently out of
-    the wrong tracker — the exact failure mode this whole path exists to fix."""
+    the wrong tracker — the failure mode this path exists to fix. We no longer
+    dead-end on the connect copy either: the tenant-scoped knowledge graph (where
+    the sync keeps ClickUp's tasks) is read via ClickUp's own adapter, NOT Jira's
+    live session."""
     _connections(monkeypatch, {"jira"})
     from app import jira_lookup
 
-    called = []
-    monkeypatch.setattr(jira_lookup, "answer", lambda **k: called.append(k))
+    jira_called = []
+    monkeypatch.setattr(jira_lookup, "answer", lambda **k: jira_called.append(k))
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "kg"})
     out = tracker.answer(enterprise_id="co", question="show me my open tickets in clickup")
-    assert called == []
-    assert "ClickUp isn't connected" in out["answer"]
-    assert "than answer about a different tracker" in out["answer"]
-    assert "Connected right now: Jira." in out["answer"]
-    assert out["_skill_action"] == "Tracker lookup"
+    assert jira_called == []  # never answered out of the wrong tracker
+    assert out == {"answer": "kg"}
+    assert seen["include_knowledge_graph"] is True
+    assert [p.provider for p in seen["providers"]] == ["clickup"]
+    assert seen["skill_action"] == "Tracker lookup"
 
 
 def test_naming_a_connected_tracker_still_serves_it(monkeypatch):
@@ -575,15 +580,21 @@ def test_tracker_answer_runs_the_clickup_loop(monkeypatch):
     assert seen["skill_action"] == "ClickUp lookup"
 
 
-def test_tracker_answer_with_no_tracker_names_both_and_what_is_connected(monkeypatch):
+def test_no_tracker_connected_reads_the_graph_across_both_adapters(monkeypatch):
+    """Nothing connected no longer dead-ends on "connect Jira or ClickUp": both
+    tracker adapters are offered so the shared loop reaches its KG-only branch and
+    answers from the graph."""
     _connections(monkeypatch, set())
     from app import db
 
     monkeypatch.setattr(db, "list_connections", lambda cid: [{"provider": "fireflies"}])
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "kg"})
     out = tracker.answer(enterprise_id="co", question="show my open tickets")
-    assert "Connect **Jira** or **ClickUp**" in out["answer"]
-    assert "Connected right now: Fireflies." in out["answer"]
-    assert out["_skill_action"] == "Tracker lookup"
+    assert out == {"answer": "kg"}
+    assert seen["include_knowledge_graph"] is True
+    assert [p.provider for p in seen["providers"]] == ["jira", "clickup"]
+    assert seen["skill_action"] == "Tracker lookup"
 
 
 def test_tracker_connection_check_survives_a_db_failure(monkeypatch):
@@ -595,5 +606,10 @@ def test_tracker_connection_check_survives_a_db_failure(monkeypatch):
     monkeypatch.setattr(db, "get_connection", boom)
     monkeypatch.setattr(db, "list_connections", lambda cid: [])
     monkeypatch.setattr(db, "list_slack_connections", lambda cid: [])
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "kg"})
     out = tracker.answer(enterprise_id="co", question="show my open tickets")
-    assert "Connect **Jira** or **ClickUp**" in out["answer"]
+    # A DB failure degrades _has_connection to "not connected" → the KG fallback,
+    # never a raised exception.
+    assert out == {"answer": "kg"}
+    assert seen["include_knowledge_graph"] is True
