@@ -1719,6 +1719,21 @@ def _skip_project_connectors(
       skipped so it falls through to `PROJECT_FACTS_AUTHORITATIVE_PREAMBLE` +
       the project ledger instead of a "connect a connector" deflection.
 
+    An explicit project-content ask ("give me the context") beats a STALE
+    connector mention: `is_connector_lookup` also fires on a sticky-thread
+    follow-up (`_CONNECTOR_FOLLOWUP_DETAIL`, e.g. bare "context") whenever
+    `history` names a connector a few turns back, even though the CURRENT
+    message names nothing at all. Left alone, that stale hit vetoed the
+    sixth-branch project loop for the exact phrasing
+    `is_project_content_request` exists to admit, and sent it to a
+    company-wide/connector search instead of the project's own content. Fixed
+    by re-running `is_connector_lookup` history-free (in-message-only, same
+    shape as the `:2256` named_sources read below): a connector named IN THIS
+    message still wins outright (the two calls agree, `names_source` stays
+    True); a connector that only shows up once `history` is added is stale —
+    if this is also an explicit content ask, the veto is lifted so the
+    project branch can claim the turn.
+
     Best-effort — a detector failure degrades to NOT skipping (interceptors run
     as before), never raising into the answer path."""
     if scope is None or scope.surface == Surface.main:
@@ -1726,11 +1741,22 @@ def _skip_project_connectors(
     try:
         from app.connector_lookup import tracker
 
+        named_tracker = tracker.named_trackers(routing_text)
+        named_document = document_lookup_candidates(routing_text)
+        connector_in_message = bool(is_connector_lookup(routing_text))
+        connector_with_history = bool(is_connector_lookup(routing_text, history))
         names_source = bool(
-            tracker.named_trackers(routing_text)
-            or is_connector_lookup(routing_text, history)
-            or document_lookup_candidates(routing_text)
+            named_tracker or connector_with_history or named_document
         )
+        stale_connector_only = connector_with_history and not connector_in_message
+        if (
+            names_source
+            and stale_connector_only
+            and not named_tracker
+            and not named_document
+            and is_project_content_request(routing_text)
+        ):
+            names_source = False
     except Exception:  # noqa: BLE001 — never break the answer over a routing hint
         return False
     return not names_source
