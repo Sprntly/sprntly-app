@@ -897,6 +897,7 @@ def _find_owned_turn(conversation_id: int, role: str, **key: Any) -> dict[str, A
 @retry_on_disconnect
 def post_owned_individual_user_turn(
     *, project_id: int, user_id: str, content: str, client_message_id: str,
+    attachments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Write the CALLER'S OWN user turn into THEIR individual project chat —
     the owned, idempotent counterpart of `post_individual_turn` (the
@@ -906,7 +907,15 @@ def post_owned_individual_user_turn(
     individual chat (AC6). Idempotent on `(conversation_id, role='user',
     client_message_id)` (AC4): a retry/double-submit with the SAME key
     returns the SAME row rather than inserting a second one. Advances the
-    author's own read cursor (AC8). Returns the row (incl. `id`)."""
+    author's own read cursor (AC8). Returns the row (incl. `id`).
+
+    `attachments` (optional): the resolved structured attachment texts
+    ([{name, content, …}]) riding this send, written to the EXISTING
+    `conversation_turns.attachments` column (no new column) when truthy —
+    mirroring `post_group_turn`'s structured-attachment write so
+    `_load_history` folds them onto the answer's context on a follow-up. The
+    default (None) leaves the insert byte-identical to the pre-attachment
+    write, so every existing call site is unaffected."""
     conversation_id = _owned_conversation_id(project_id, user_id)
 
     existing = _find_owned_turn(
@@ -917,18 +926,19 @@ def post_owned_individual_user_turn(
         return existing
 
     client = require_client()
+    insert_payload: dict[str, Any] = {
+        "conversation_id": conversation_id,
+        "role": "user",
+        "content": content,
+        "author_user_id": user_id,
+        "client_message_id": client_message_id,
+    }
+    if attachments:
+        insert_payload["attachments"] = attachments
     try:
         row = (
             client.table("conversation_turns")
-            .insert(
-                {
-                    "conversation_id": conversation_id,
-                    "role": "user",
-                    "content": content,
-                    "author_user_id": user_id,
-                    "client_message_id": client_message_id,
-                }
-            )
+            .insert(insert_payload)
             .execute()
             .data[0]
         )

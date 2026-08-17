@@ -338,6 +338,11 @@ export async function runAskGeneration(
      *  server persists this turn's user side under. Passed straight through
      *  to `askApi.start`. */
     client_message_id?: string
+    /** Individual-project-chat structured attachments — the resolved
+     *  attachment texts riding this send. Passed straight through to
+     *  `askApi.start`; the server persists them onto the user turn and folds
+     *  them into the answer's question (project branch only). */
+    attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial

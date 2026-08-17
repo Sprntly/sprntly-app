@@ -277,7 +277,10 @@ function ChatShellInner(
           wrapperClassName: `bc-turn ${shellStyles.gcMsg} ${shellStyles.gcMsgAgent}`,
           agentName: transcript.agentName,
           agentBadge: transcript.agentBadge ?? null,
-          agentTimestamp: time,
+          // Driven by the SHARED `transcript.timestamps` field (same rule as
+          // `mapSingleParty`), not a hardcoded `time` — so both project
+          // descriptors' `"none"` yields no agent timestamp, matching main.
+          agentTimestamp: transcript.timestamps === "fromTurn" ? time : null,
           agentHeadExtra: transcript.turnHeadExtra?.(turn) ?? undefined,
           showAgent: true,
           ...(hostBody != null
@@ -333,11 +336,14 @@ function ChatShellInner(
             turn.author.avatarStyle && typeof turn.author.avatarStyle === "object"
               ? turn.author.avatarStyle
               : undefined,
-          // The viewer's own bubble renders in the SAME light treatment as
-          // peers (and as the main/private surfaces) — no dark-green own-bubble.
-          // Self stays distinguishable by right-alignment (`gcMsgMe`), not by
-          // colour, matching the private surface's light right-aligned bubble.
-          bubbleClassName: shellStyles.gcBubbleOther,
+          // Both group bubbles are single-sourced onto the shared
+          // `bc-user-bubble` skin: the self turn flows through `ChatBubble`'s
+          // standard branch (pure `bc-user-bubble`, right-aligned); the peer
+          // turn flows through the native `otherRow` branch, which now applies
+          // `bc-user-bubble` + the `.otherBubble` left-lane geometry reset. No
+          // `bubbleClassName` fill is passed — the retired `gc*` parallel
+          // bubble system is gone; self stays distinguished by right-alignment
+          // (`gcMsgMe`), not colour.
           bodyNode: transcript.renderUserBody?.(turn),
         },
       }
@@ -398,6 +404,10 @@ function ChatShellInner(
               bodyNode: transcript.renderUserBody?.(turn),
               hideHead: transcript.userHead === "hidden",
               name: turn.author.name ?? null,
+              // The shared `ChatBubble` avatar monogram — engine-derived
+              // (mirrors main's first-name/initials split), so the private
+              // user avatar chip renders "BO"-style initials, not empty.
+              initials: turn.author.initials ?? null,
             }
           : undefined,
         // The edit-target pick + the structured clarify gate — UNCONDITIONAL
@@ -511,6 +521,11 @@ function ChatShellInner(
                 // Surface hook (mention detection / typing broadcast) fires
                 // with the REAL caret BEFORE the shell's own draft update.
                 draftApiRef.current?.onInputCapture?.(value, caret)
+                // Declarative composer input seam (typed-`/` palette): the
+                // shared controller's `onInput` opens/filters the skill palette
+                // on a leading `/`. Coexists with the imperative mention seam
+                // above (both fire; the two are orthogonal).
+                composer.onInput?.(value)
                 setDraft(value)
                 draftRef.current = value
               }}

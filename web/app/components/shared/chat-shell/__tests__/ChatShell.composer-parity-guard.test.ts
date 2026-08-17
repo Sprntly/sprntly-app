@@ -20,6 +20,7 @@ import {
   auditRenderInheritance,
   PROJECT_CAPABILITY_MANIFEST,
   PROJECT_CHAT_SURFACE_SOURCES,
+  SHELL_DEFAULT_AFFORDANCES,
   type ComposerParityInput,
   type ComposerPropWiring,
   type RenderInheritanceInput,
@@ -408,6 +409,31 @@ const RENDER_DIVERGENCES: { capability: string; surface: ChatSurfaceKind }[] = [
   { capability: "mutation.confirmGate", surface: "project_group" },
 ]
 
+/** The source markers that prove a surface CONSUMES each shell-default
+ *  affordance — the next-prompt strip is consumed when a surface's file set
+ *  imports `useNextPrompts`/`NextPromptSuggestions` (the shared primitives).
+ *  Source-parsed exactly like the fork detectors above, kept OUT of the pure
+ *  audit (mirrors `renderDivergences`). */
+const SHELL_DEFAULT_AFFORDANCE_MARKERS: Record<string, RegExp> = {
+  "affordance.nextPrompts": /\buseNextPrompts\b|\bNextPromptSuggestions\b/,
+}
+
+/** For each shell-default affordance × project surface, does the surface's
+ *  whole source set import the affordance's shared primitive? Returns the
+ *  consumed pairs — the inversion's "consume OR ledger" evidence. */
+function sourceConsumedAffordances(): { affordance: string; surface: ChatSurfaceKind }[] {
+  const out: { affordance: string; surface: ChatSurfaceKind }[] = []
+  for (const affordance of SHELL_DEFAULT_AFFORDANCES) {
+    const marker = SHELL_DEFAULT_AFFORDANCE_MARKERS[affordance]
+    if (!marker) continue
+    for (const { surface, files } of PROJECT_CHAT_SURFACE_SOURCES) {
+      const combined = files.map((f) => read(projectsDir, f)).join("\n")
+      if (marker.test(combined)) out.push({ affordance, surface })
+    }
+  }
+  return out
+}
+
 function realRenderInput(): RenderInheritanceInput {
   const registeredFiles = new Set(PROJECT_CHAT_SURFACE_SOURCES.flatMap((s) => s.files))
   return {
@@ -428,6 +454,9 @@ function realRenderInput(): RenderInheritanceInput {
     // guard fails closed on a surface it does not know about. Empty on real
     // code (both discovered hosts are registered).
     unregisteredChatHosts: discoverProjectChatHosts().filter((host) => !registeredFiles.has(host)),
+    // Which shell-default affordance each surface consumes (source-derived):
+    // private imports useNextPrompts/NextPromptSuggestions; group does not.
+    consumedAffordances: sourceConsumedAffordances(),
   }
 }
 
@@ -671,6 +700,99 @@ describe("render-inheritance guard — five per-service fork arms (AC17/AC18)", 
     }
     const openDest = PARITY_OPT_OUTS.filter((o) => o.capability === "open.destination")
     expect(openDest.map((o) => o.surface).sort()).toEqual(["project_group", "project_private"])
+  })
+})
+
+describe("render-inheritance guard — shell-default affordance ABSENCE inversion (AC17/AC18)", () => {
+  it("test_absent_shell_affordance_fails_closed", () => {
+    // Omit `affordance.nextPrompts` for project_private from BOTH the consume
+    // set and (implicitly) the ledger — private is not ledgered for it, so
+    // dropping its consume leaves it neither consumed nor ledgered → RED.
+    const base = realRenderInput()
+    const mutated: RenderInheritanceInput = {
+      ...base,
+      consumedAffordances: base.consumedAffordances.filter((c) => c.surface !== "project_private"),
+    }
+    const violations = auditRenderInheritance(mutated)
+    expect(
+      violations.some(
+        (v) => v.capability === "render.absentAffordance" && v.surface === "project_private",
+      ),
+    ).toBe(true)
+  })
+
+  it("test_absent_affordance_cleared_by_consume_or_ledger", () => {
+    const base = realRenderInput()
+    const stripped: RenderInheritanceInput = {
+      ...base,
+      consumedAffordances: base.consumedAffordances.filter((c) => c.surface !== "project_private"),
+    }
+    // RED first.
+    expect(
+      auditRenderInheritance(stripped).some(
+        (v) => v.capability === "render.absentAffordance" && v.surface === "project_private",
+      ),
+    ).toBe(true)
+    // (a) Re-adding the CONSUME clears it.
+    const consumed: RenderInheritanceInput = {
+      ...stripped,
+      consumedAffordances: [
+        ...stripped.consumedAffordances,
+        { affordance: "affordance.nextPrompts", surface: "project_private" },
+      ],
+    }
+    expect(
+      auditRenderInheritance(consumed).some(
+        (v) => v.capability === "render.absentAffordance" && v.surface === "project_private",
+      ),
+    ).toBe(false)
+    // (b) OR a LEDGER entry clears it — consume-OR-ledger, never neither.
+    const ledgered: RenderInheritanceInput = {
+      ...stripped,
+      ledger: [
+        ...stripped.ledger,
+        {
+          capability: "affordance.nextPrompts",
+          surface: "project_private",
+          reason: "test-only synthetic opt-out proving the ledger silences a matched absence.",
+          owner: "projects-chat",
+        },
+      ],
+    }
+    expect(
+      auditRenderInheritance(ledgered).some(
+        (v) => v.capability === "render.absentAffordance" && v.surface === "project_private",
+      ),
+    ).toBe(false)
+  })
+
+  it("test_real_ledger_and_consumes_have_zero_violations", () => {
+    const input = realRenderInput()
+    // The inversion working on real code: private CONSUMES the pill strip;
+    // group LEDGERS it. `SHELL_DEFAULT_AFFORDANCES` is the single genuine
+    // consume-path affordance.
+    expect(SHELL_DEFAULT_AFFORDANCES).toEqual(["affordance.nextPrompts"])
+    expect(input.consumedAffordances).toContainEqual({
+      affordance: "affordance.nextPrompts",
+      surface: "project_private",
+    })
+    expect(input.consumedAffordances).not.toContainEqual({
+      affordance: "affordance.nextPrompts",
+      surface: "project_group",
+    })
+    expect(auditRenderInheritance(input)).toEqual([])
+  })
+
+  it("test_no_service_forks_on_either_surface", () => {
+    const input = realRenderInput()
+    // No surface re-implements any shared host service (all five fork arms
+    // empty), and the whole render audit is clean.
+    expect(input.executorForks).toEqual([])
+    expect(input.actionRowForks).toEqual([])
+    expect(input.nextPromptForks).toEqual([])
+    expect(input.inlineCardForks).toEqual([])
+    expect(input.openDestForks).toEqual([])
+    expect(auditRenderInheritance(input)).toEqual([])
   })
 })
 

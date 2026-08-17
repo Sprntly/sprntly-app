@@ -607,6 +607,11 @@ export const askApi = {
        *  the answer to via ask_job_id. Ignored server-side on every other
        *  branch. */
       client_message_id?: string
+      /** Individual-project-chat structured attachments (project branch only):
+       *  persisted onto the user turn's `conversation_turns.attachments` and
+       *  folded into the answer's question server-side. Ignored on every
+       *  other branch. */
+      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
@@ -626,6 +631,9 @@ export const askApi = {
       ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
       ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
       ...(opts?.client_message_id != null ? { client_message_id: opts.client_message_id } : {}),
+      // Structured attachments (project branch): the server persists them onto
+      // the user turn and folds their text into the answer's question.
+      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),

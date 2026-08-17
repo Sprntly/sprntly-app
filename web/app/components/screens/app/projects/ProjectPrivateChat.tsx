@@ -18,6 +18,7 @@
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ChatShell } from "../../../shared/chat-shell/ChatShell"
+import { NextPromptSuggestions } from "../../../shared/NextPromptSuggestions"
 import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
 import type { ChatSurfaceDescriptor, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
@@ -130,7 +131,9 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
     transcript: {
       agentName: AGENT_NAME,
       agentBadge: AGENT_BADGE,
-      timestamps: "fromTurn",
+      // "none" (was "fromTurn") — the SAME shared control main uses, so the
+      // agent turn shows no timestamp, matching main.
+      timestamps: "none",
       userHead: "named",
       renderUserBody: markdownUserBody,
       // NO `renderAgentBody` override: private agent turns now render through
@@ -154,6 +157,8 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       features: composerCtl.features,
       slashMenu: composerCtl.slashMenu,
       onKeyDownCapture: composerCtl.onKeyDownCapture,
+      // Typed-`/` palette: the shared controller's declarative input seam.
+      onInput: composerCtl.onInput,
     },
     reply: {
       mode: "streamed",
@@ -167,6 +172,19 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       onCancelMutation: engine.cancelMutation,
     },
     send: { onSubmit: composerCtl.submit, pendingSendBubble: true },
+    // Next-prompt pills: the SHARED `NextPromptSuggestions` strip, fed by
+    // the engine's shared `useNextPrompts` consume, keyed to this private
+    // conversation. Renders nothing (no empty container) until a turn settles
+    // with non-empty suggestions. Group opts out (ledgered) — see the guard.
+    dock: {
+      aboveComposer: (
+        <NextPromptSuggestions
+          suggestions={engine.pillSuggestions}
+          disabled={engine.busy}
+          onPick={(p) => engine.send(p)}
+        />
+      ),
+    },
   }
 
   return (

@@ -46,3 +46,14 @@
   font-weight: 600;
   color: var(--ink, inherit);
 }
+
+/* The ONLY local rule for the multi-party peer bubble: a geometry reset of the
+   shared `bc-user-bubble` skin (globals.css), which is hard-coded
+   `align-self: flex-end; margin-right: 34px` for the reader's own right-aligned
+   lane. The peer bubble draws its FILL from that one shared rule and only
+   resets the alignment for the left multi-party lane — this is geometry, not a
+   second bubble skin. */
+.otherBubble {
+  align-self: flex-start;
+  margin-right: 0;
+}

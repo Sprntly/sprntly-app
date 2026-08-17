@@ -317,12 +317,11 @@ export function ChatBubble(props: ChatBubbleProps) {
       >
         {user && humanAlign === "start" ? (
           // A third party's turn in a multi-party thread — left-aligned,
-          // avatar flanking a name/role header + bubble, deliberately its
-          // OWN layout rather than a variant of `bc-user-head`/
-          // `bc-user-bubble` above: those are hard-coded right-aligned
-          // (globals.css, shared with every 1:1 surface) and flattening a
-          // third party onto them is exactly the "everyone reads as the
-          // reader" regression this branch exists to prevent.
+          // avatar flanking a name/role header + bubble. The ROW/COLUMN layout
+          // is its own (avatar beside a name/role header), but the bubble FILL
+          // is single-sourced from the shared `bc-user-bubble` skin below, with
+          // only a local `.otherBubble` geometry reset for the left lane — so
+          // there is one bubble skin across every surface, not a parallel copy.
           <div className={styles.otherRow}>
             <span className="bc-avatar" style={user.avatarStyle}>
               {user.initials}
@@ -333,7 +332,10 @@ export function ChatBubble(props: ChatBubbleProps) {
                 {userHeadExtra ?? null}
               </div>
               {user.query || user.bodyNode ? (
-                <div className={user.bubbleClassName} data-testid={user.dataTestId}>
+                <div
+                  className={`bc-user-bubble ${styles.otherBubble}${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
+                  data-testid={user.dataTestId}
+                >
                   {user.bodyNode ?? user.query}
                 </div>
               ) : null}
