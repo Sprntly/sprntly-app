@@ -5179,13 +5179,17 @@ export const conversationsApi = {
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
     }),
-  /** Retract the conversation's LAST turn, which must be a user turn. The one
-   *  caller is edit-and-resend on a question that was stopped before it
-   *  answered: the original wording is already persisted, so it has to come
-   *  back out or the reopened thread shows both versions. 409 when the thread
-   *  has moved on (the turn is no longer last, or it isn't a user turn) —
-   *  every caller treats that as "leave it alone". */
-  deleteTurn: (conversationId: number, turnId: number) =>
+  /** REWIND the conversation to just before `turnId` — deletes that turn and
+   *  every turn after it. `turnId` must be a USER turn: you rewind to a
+   *  question, never into the middle of an answer.
+   *
+   *  The callers are edit-and-resend and retry on a past prompt. The thread on
+   *  screen rewinds to the point being re-asked, and the record follows, or the
+   *  same conversation reopened from history shows the old pair AND the new
+   *  one. 409 when the turn isn't in this conversation (the client's thread has
+   *  moved on) or isn't a user turn — every caller treats that as "leave it
+   *  alone". */
+  rewindToTurn: (conversationId: number, turnId: number) =>
     api.delete(`/v1/conversations/${conversationId}/turns/${turnId}`),
 }
 

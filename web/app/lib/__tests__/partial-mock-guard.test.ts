@@ -297,19 +297,19 @@ describe("partial mocks of dynamically-imported modules", () => {
 
   it("test_optional_calls_are_not_required", () => {
     // The other half of the derivation's contract (see `requiredApiMethods`).
-    // `retractUserTurn` calls `api.deleteTurn?.(…)` — optional by construction,
-    // because an api without it loses only a best-effort tidy-up, never a whole
-    // suite's persistence. It must therefore NOT be demanded of the ~50 partial
-    // `conversationsApi` mocks in this repo.
+    // `rewindToUserTurn` calls `api.rewindToTurn?.(…)` — optional by
+    // construction, because an api without it loses only a best-effort tidy-up,
+    // never a whole suite's persistence. It must therefore NOT be demanded of
+    // the ~50 partial `conversationsApi` mocks in this repo.
     //
     // Pinned on the real module, not a fixture: the risk is somebody "fixing"
-    // that call site to `api.deleteTurn(…)` and turning every one of those mocks
-    // red for no defect at all.
+    // that call site to `api.rewindToTurn(…)` and turning every one of those
+    // mocks red for no defect at all.
     const src = fs.readFileSync(CHAT_PERSISTENCE, "utf8")
     expect(src, "the optional-call site this pin is about has moved").toContain(
-      "api.deleteTurn?.(",
+      "api.rewindToTurn?.(",
     )
-    expect(required).not.toContain("deleteTurn")
+    expect(required).not.toContain("rewindToTurn")
   })
 
   it("finds the test suite it is supposed to scan", () => {

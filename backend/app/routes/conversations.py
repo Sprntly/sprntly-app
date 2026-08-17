@@ -4,6 +4,8 @@
   POST   /v1/conversations               -> create a new conversation (stamped with the caller)
   PATCH  /v1/conversations/{id}          -> update title/reply/pinned/prd_id
   DELETE /v1/conversations/{id}          -> delete a conversation
+  DELETE /v1/conversations/{id}/turns/{turn_id}
+                                         -> rewind to just before a user turn
 
 Chats are PER-USER: every row is stamped with the creating member's user_id
 and only that member can list/read/update/delete it — teammates in the same
@@ -461,32 +463,35 @@ def add_turn(
 
 
 @router.delete("/{conversation_id}/turns/{turn_id}")
-def delete_turn(
+def rewind_to_turn(
     conversation_id: int,
     turn_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """Retract the conversation's LAST turn — owner only.
+    """REWIND the conversation to just before `turn_id` — owner only.
 
-    This exists for exactly one flow: editing a question that never got an
-    answer. The composer's Stop button leaves a user turn already persisted
-    (`add_turn` fires the moment a message is sent, long before the reply
-    lands), so re-sending an edited version would otherwise leave the abandoned
-    wording behind — the live thread would show one question and the same
-    thread reopened from history would show two, the second unanswered.
+    Deletes that turn and every turn after it. One flow needs this: editing or
+    retrying a past question. The client rewinds the thread on screen to the
+    point being re-asked, and the record has to follow, or the same
+    conversation reopened from history would show the old question, its old
+    answer, AND the new pair — the second copy of a conversation nobody had.
 
-    Deliberately narrow, because a conversation is a record and this is the
-    only endpoint that can take something out of one:
+    This is the only endpoint that removes anything from a conversation, so the
+    two rules it keeps are what make it safe to have:
 
-      * LAST turn only. A turn in the middle cannot be removed, so history can
-        never be punched full of holes and a user turn can never be orphaned
-        from the assistant turn that answered it.
-      * `role='user'` only. An assistant turn is what the product said; the
-        user does not get to edit that out from under it.
+      * `role='user'` only. The anchor is always a QUESTION — you rewind to a
+        thing you said, never into the middle of an answer. So an assistant
+        turn can never be deleted while the question it answered survives, and
+        the product's own words are never edited out from under it.
+      * SUFFIX only. It cuts from a point to the end, never a hole in the
+        middle, so whatever remains is a coherent prefix of the conversation
+        that actually happened — every surviving question keeps its answer.
 
-    Both violations return 409, not 404: the row exists and belongs to the
-    caller, and saying so is not a cross-tenant leak. A conversation that isn't
-    the caller's own still 404s exactly like every other route here.
+    A turn id that isn't in this conversation (or isn't a user turn) is 409,
+    not 404: the caller is a client whose thread has moved on, and the honest
+    answer is "that isn't a thing you can rewind to", not "no such row". A
+    conversation that isn't the caller's own still 404s exactly like every
+    other route here — a foreign tenant must not learn it exists.
     """
     c = require_client()
     if _get_owned_conversation(c, conversation_id, company) is None:
@@ -499,23 +504,25 @@ def delete_turn(
         .execute()
     )
     turns = resp.data or []
-    if not turns or int(turns[-1].get("id") or 0) != turn_id:
-        # Includes the "no such turn in this conversation" case — the caller
-        # only ever asks about a turn it just wrote, so a miss means the thread
-        # moved on and retracting is no longer the right thing to do.
-        raise HTTPException(409, "Only the last turn can be retracted")
-    last = turns[-1]
-    if last.get("role") != "user":
-        raise HTTPException(409, "Only a user turn can be retracted")
+    cut = next(
+        (i for i, t in enumerate(turns) if int(t.get("id") or 0) == turn_id),
+        -1,
+    )
+    if cut == -1:
+        raise HTTPException(409, "That turn is not in this conversation")
+    if turns[cut].get("role") != "user":
+        raise HTTPException(409, "A conversation can only be rewound to a user turn")
 
-    c.table("conversation_turns").delete().eq("id", turn_id).execute()
-    # Roll the list preview back to whatever the previous user turn said, so the
-    # chat-history row doesn't keep advertising a message that no longer exists.
+    for doomed in turns[cut:]:
+        c.table("conversation_turns").delete().eq("id", doomed.get("id")).execute()
+    # Roll the list preview back to whatever the last SURVIVING user turn said,
+    # so the chat-history row doesn't keep advertising a message that no longer
+    # exists. Empty when the rewind took the whole conversation.
     prior = next(
-        (t.get("content") or "" for t in reversed(turns[:-1]) if t.get("role") == "user"),
+        (t.get("content") or "" for t in reversed(turns[:cut]) if t.get("role") == "user"),
         "",
     )
     c.table("conversations").update(
         {"preview": prior[:200], "updated_at": utc_now()}
     ).eq("id", conversation_id).execute()
-    return {"ok": True}
+    return {"ok": True, "removed": len(turns) - cut}

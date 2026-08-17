@@ -7107,7 +7107,10 @@
     opacity: 1;
   }
 
-  .bc-user-edit-btn {
+  /* One skin for every per-turn action (copy / edit / retry). `.bc-user-edit-btn`
+     rides alongside it on the edit button only, so existing selectors and tests
+     that name it keep working. */
+  .bc-user-act {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -7121,15 +7124,21 @@
     cursor: pointer;
   }
 
-  .bc-user-edit-btn:hover {
+  .bc-user-act:hover {
     background: var(--surface-3);
     color: var(--ink);
   }
 
-  .bc-user-edit-btn:focus-visible {
+  .bc-user-act:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
     opacity: 1;
+  }
+
+  /* The copy button's "done" tick, held for a beat by the caller. Colour is the
+     only signal — the row must not change width mid-hover. */
+  .bc-user-act[aria-label="Copied"] {
+    color: var(--accent);
   }
 
   /* The in-place editor that replaces the bubble while a stopped question is

@@ -55,6 +55,9 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     submitClarifyAnswers,
     setViewerAttachment,
     editingTurnId,
+    copiedTurnId,
+    onCopyTurn,
+    onRetryTurn,
     onEditTurn,
     onSubmitTurnEdit,
     onCancelTurnEdit,
@@ -159,27 +162,44 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     // turn ever written before quoting existed goes down this path.
     const { body: queryBody, quote } = splitQuotedSuffix(turn.query)
 
-    // Editable ONLY while no answer has landed on this turn — a stopped,
-    // failed, timed-out or interrupted question. Three further exclusions, each
-    // for its own reason:
+    // ── What can be done to this past prompt ──────────────────────────────
+    // Copy is free: it changes nothing, so any turn the user actually spoke
+    // offers it, answered or not.
+    const canCopyTurn = !!onCopyTurn && !!queryBody
+
+    // Edit and retry both RE-ASK, which rewinds the thread to this point —
+    // everything below is replaced by the new answer. That is the Claude
+    // behaviour and it is what makes editing a past prompt coherent rather than
+    // orphaning the reply underneath it. Four exclusions, each for its own
+    // reason:
     //  * still generating — the question is live; Stop is the affordance there.
+    //  * a summary still being written — same, one rung down.
     //  * attachments — re-sending drops them (their bytes left component state
     //    on the original send), and quietly re-asking WITHOUT the files is a
     //    different question. Those turns keep "Ask again", which hands the text
     //    back to the composer instead. Same rule `handleAskAgain` already uses.
     //  * an open clarify batch — the turn is mid-conversation with the gate,
     //    and rewriting the question under it would strand the answers.
-    const canEditTurn =
-      !!onEditTurn &&
-      !turn.reply &&
+    //
+    // Note what is NOT excluded any more: an ANSWERED turn. It was, while there
+    // was no way to take its answer back out of the record; the rewind
+    // (`rewindToUserTurn` → `DELETE …/turns/{id}`) is what made past prompts
+    // editable at all.
+    const canReAskTurn =
+      !!queryBody &&
       !isGenerating &&
       !turn.summaryPending &&
       !turn.attachments?.length &&
       !turn.clarify?.length
+    const canEditTurn = !!onEditTurn && canReAskTurn
+    const canRetryTurn = !!onRetryTurn && canReAskTurn
     const isEditing = canEditTurn && editingTurnId === turn.id
 
     return {
       turnId: turn.id,
+      onCopyUserTurn: canCopyTurn ? () => onCopyTurn!(turn) : undefined,
+      copied: copiedTurnId === turn.id,
+      onRetryUserTurn: canRetryTurn ? () => onRetryTurn!(turn) : undefined,
       onEditUserTurn: canEditTurn ? () => onEditTurn!(turn.id) : undefined,
       editing: isEditing,
       onSubmitEdit: isEditing ? (text: string) => onSubmitTurnEdit?.(turn, text) : undefined,

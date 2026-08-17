@@ -61,6 +61,8 @@ function makeDeps(over: Partial<MapMainTurnsDeps> = {}): MapMainTurnsDeps {
     handleOpenPrd: vi.fn(),
     handleViewPrototype: vi.fn(),
     handlePrototypeSettled: vi.fn(),
+    onCopyTurn: vi.fn(),
+    onRetryTurn: vi.fn(),
     onEditTurn: vi.fn(),
     onSubmitTurnEdit: vi.fn(),
     onCancelTurnEdit: vi.fn(),
@@ -129,54 +131,113 @@ describe("mapMainTurns — quoted passage", () => {
   })
 })
 
-describe("mapMainTurns — edit-and-resend eligibility", () => {
+describe("mapMainTurns — copy a past prompt", () => {
+  const copyOf = (turn: ThreadTurn, over: Partial<MapMainTurnsDeps> = {}) =>
+    mapMainTurns([turn], makeDeps(over))[0]
+
+  it("is offered on any turn the user spoke, answered or not", () => {
+    // Copy changes nothing, so none of the re-ask exclusions apply to it.
+    expect(!!copyOf({ id: "t", query: "q", reply: reply("a") }).onCopyUserTurn).toBe(true)
+    expect(!!copyOf({ id: "t", query: "q", stopped: true }).onCopyUserTurn).toBe(true)
+    expect(
+      !!copyOf({ id: "t", query: "q", attachments: [{ name: "spec.pdf" }] }).onCopyUserTurn,
+    ).toBe(true)
+    expect(!!copyOf({ id: "t", query: "q" }, { busy: true, lastLiveTurnIdx: 0 }).onCopyUserTurn)
+      .toBe(true)
+  })
+
+  it("is NOT offered on an agent-only turn", () => {
+    expect(!!copyOf({ id: "t", query: "", reply: reply("a") }).onCopyUserTurn).toBe(false)
+  })
+
+  it("marks only the turn named by copiedTurnId", () => {
+    const mapped = mapMainTurns(
+      [{ id: "t1", query: "one", reply: reply("a") }, { id: "t2", query: "two", reply: reply("b") }],
+      makeDeps({ copiedTurnId: "t2", lastLiveTurnIdx: 1 }),
+    )
+    expect(mapped[0].copied).toBe(false)
+    expect(mapped[1].copied).toBe(true)
+  })
+})
+
+describe("mapMainTurns — re-asking a past prompt (edit / retry)", () => {
   const editableOf = (turn: ThreadTurn, over: Partial<MapMainTurnsDeps> = {}) =>
     !!mapMainTurns([turn], makeDeps(over))[0].onEditUserTurn
+  const retryableOf = (turn: ThreadTurn, over: Partial<MapMainTurnsDeps> = {}) =>
+    !!mapMainTurns([turn], makeDeps(over))[0].onRetryUserTurn
 
-  it("offers edit on a question that never got an answer", () => {
+  it("offers edit and retry on a question that never got an answer", () => {
     expect(editableOf({ id: "t", query: "waht is it", stopped: true })).toBe(true)
     expect(editableOf({ id: "t", query: "waht is it", error: "boom" })).toBe(true)
     expect(editableOf({ id: "t", query: "waht is it", timedOut: true })).toBe(true)
     expect(editableOf({ id: "t", query: "waht is it", interrupted: true })).toBe(true)
+    expect(retryableOf({ id: "t", query: "waht is it", stopped: true })).toBe(true)
   })
 
-  it("does NOT offer edit on an answered turn", () => {
-    // Rewriting it would orphan the reply below it, and the persisted record
-    // cannot express that — retraction only reaches the LAST turn.
-    expect(editableOf({ id: "t", query: "q", reply: reply("a") })).toBe(false)
+  it("offers edit and retry on an ANSWERED turn", () => {
+    // The behaviour this wave added. It is safe because re-asking rewinds the
+    // conversation to that turn on BOTH sides — the thread on screen and the
+    // persisted record — so the old answer is never orphaned under a rewritten
+    // question.
+    const turn: ThreadTurn = { id: "t", query: "q", reply: reply("a") }
+    expect(editableOf(turn)).toBe(true)
+    expect(retryableOf(turn)).toBe(true)
   })
 
-  it("does NOT offer edit while the question is still generating", () => {
+  it("does NOT offer either while the question is still generating", () => {
     expect(editableOf({ id: "t", query: "q" }, { busy: true, lastLiveTurnIdx: 0 })).toBe(false)
+    expect(retryableOf({ id: "t", query: "q" }, { busy: true, lastLiveTurnIdx: 0 })).toBe(false)
   })
 
-  it("does NOT offer edit on a turn that carried attachments", () => {
+  it("does NOT offer either while an artifact summary is still being written", () => {
+    expect(editableOf({ id: "t", query: "q", summaryPending: true })).toBe(false)
+    expect(retryableOf({ id: "t", query: "q", summaryPending: true })).toBe(false)
+  })
+
+  it("does NOT offer either on a turn that carried attachments", () => {
     // Re-sending drops the files (their bytes left component state on the
-    // original send), so the edited question would silently be a different
+    // original send), so the re-asked question would silently be a different
     // one. Those turns keep "Ask again", which hands the text to the composer.
-    expect(
-      editableOf({ id: "t", query: "q", stopped: true, attachments: [{ name: "spec.pdf" }] }),
-    ).toBe(false)
+    const turn: ThreadTurn = {
+      id: "t", query: "q", stopped: true, attachments: [{ name: "spec.pdf" }],
+    }
+    expect(editableOf(turn)).toBe(false)
+    expect(retryableOf(turn)).toBe(false)
   })
 
-  it("does NOT offer edit on a turn with an open clarify batch", () => {
-    expect(
-      editableOf({
-        id: "t",
-        query: "q",
-        stopped: true,
-        clarify: [{ prompt: "Which?", options: ["A"], header: "Scope" }],
-      }),
-    ).toBe(false)
+  it("does NOT offer either on a turn with an open clarify batch", () => {
+    const turn: ThreadTurn = {
+      id: "t",
+      query: "q",
+      stopped: true,
+      clarify: [{ prompt: "Which?", options: ["A"], header: "Scope" }],
+    }
+    expect(editableOf(turn)).toBe(false)
+    expect(retryableOf(turn)).toBe(false)
   })
 
-  it("offers nothing at all when the host wires no edit flow", () => {
+  it("does NOT offer either on an agent-only turn", () => {
+    expect(editableOf({ id: "t", query: "", reply: reply("a") })).toBe(false)
+    expect(retryableOf({ id: "t", query: "", reply: reply("a") })).toBe(false)
+  })
+
+  it("offers nothing at all when the host wires no such flow", () => {
     const [turn] = mapMainTurns(
       [{ id: "t", query: "q", stopped: true }],
-      makeDeps({ onEditTurn: undefined }),
+      makeDeps({ onEditTurn: undefined, onRetryTurn: undefined, onCopyTurn: undefined }),
     )
     expect(turn.onEditUserTurn).toBeUndefined()
+    expect(turn.onRetryUserTurn).toBeUndefined()
+    expect(turn.onCopyUserTurn).toBeUndefined()
     expect(turn.editing).toBe(false)
+  })
+
+  it("hands the whole turn to retry, so the host can rewind to it", () => {
+    const onRetryTurn = vi.fn()
+    const turn: ThreadTurn = { id: "t1", query: "q", reply: reply("a"), dbTurnId: 42 }
+    const [mapped] = mapMainTurns([turn], makeDeps({ onRetryTurn }))
+    mapped.onRetryUserTurn?.()
+    expect(onRetryTurn).toHaveBeenCalledWith(turn)
   })
 
   it("opens the editor for the turn named by editingTurnId, and only that one", () => {

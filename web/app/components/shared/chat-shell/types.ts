@@ -438,12 +438,20 @@ export interface MapMainTurnsDeps {
   // main-chat screen's private types — the idiomatic bivariant-handler pattern)
   handleAskAgain(turn: { id: string }): void
   handleStopAsk: () => void
-  // ── Edit and re-send an unanswered question ───────────────────────────────
-  // Optional as a bag, like the Slack-share trio: a host with no edit flow
-  // omits all four and no affordance renders. `editingTurnId` names the ONE
-  // turn currently open in the editor (host-owned, like every other in-flight
-  // signal here).
+  // ── Acting on a past prompt: copy / edit / retry ──────────────────────────
+  // Optional as a bag, like the Slack-share trio: a host with no such flow
+  // omits these and no affordance renders. `editingTurnId` names the ONE turn
+  // currently open in the editor and `copiedTurnId` the one showing its
+  // transient "Copied" tick — both host-owned, like every other in-flight
+  // signal here.
+  //
+  // Edit and retry both RE-ASK, which rewinds the conversation to that turn.
+  // The host owns what that means (thread truncation plus the persisted
+  // rewind); the mapper only decides which turns are eligible.
   editingTurnId?: string | null
+  copiedTurnId?: string | null
+  onCopyTurn?(turn: { id: string; query: string }): void
+  onRetryTurn?(turn: { id: string; query: string }): void
   onEditTurn?: (turnId: string) => void
   /** The edited text. The host re-composes anything the editor doesn't own (a
    *  quoted passage) and re-sends. */

@@ -214,16 +214,22 @@ export interface ChatBubbleProps {
    *  own turn id. */
   onPickOption?: (option: { id: string; title: string; instruction?: string }) => void
 
-  // ── Editing a message that never got an answer ───────────────────────────
-  // A question you stopped (or that failed) is a dead end you can only re-ask
-  // verbatim. These three props make it editable in place: `onEditUserTurn`
-  // renders the affordance, `editing` swaps the bubble for a textarea, and
-  // `onSubmitEdit` hands the caller the new text to re-send with.
+  // ── Acting on a past prompt: copy / edit / retry ─────────────────────────
+  // A message you already sent used to be inert. These make it a thing you can
+  // do something with: take the words somewhere else, fix a typo and re-ask, or
+  // just run it again.
   //
-  // Caller-OWNED, like every other in-flight signal here (see the header note):
-  // which turn is being edited, whether a turn is eligible at all, and what
-  // re-sending does are all decisions this leaf must not make. Unset → no
-  // affordance renders and the DOM is byte-identical.
+  // Every one is caller-OWNED, like every other in-flight signal here (see the
+  // header note). Which turn is being edited, whether a turn is eligible at all,
+  // and what re-asking DOES to the conversation are decisions this leaf must
+  // not make — each unset prop simply renders no button, and a turn with none
+  // of them set has byte-identical DOM to before they existed.
+  /** Copy this message's text. The caller owns the clipboard write (and any
+   *  "Copied" feedback) — a leaf that reached for `navigator.clipboard` would
+   *  be untestable and would fight the surface's own toast conventions. */
+  onCopyUserTurn?: () => void
+  /** Re-ask this message unchanged. */
+  onRetryUserTurn?: () => void
   /** Show the edit affordance on this turn's user bubble. */
   onEditUserTurn?: () => void
   /** This turn is the one currently being edited. */
@@ -232,6 +238,9 @@ export interface ChatBubbleProps {
    *  not own (a quoted passage, a pinned skill trigger) and re-sends. */
   onSubmitEdit?: (text: string) => void
   onCancelEdit?: () => void
+  /** Transient "Copied" confirmation on this turn's copy button. Caller-owned
+   *  and caller-expired, for the same reason the copy itself is. */
+  copied?: boolean
 
   /** Rendered after both blocks, inside the turn wrapper — an artifact
    *  action row, a "save as artifact" button. Turn-scoped, caller-composed. */
@@ -433,10 +442,13 @@ export function ChatBubble(props: ChatBubbleProps) {
     agentBodyNode,
     pickOptions,
     onPickOption,
+    onCopyUserTurn,
+    onRetryUserTurn,
     onEditUserTurn,
     editing,
     onSubmitEdit,
     onCancelEdit,
+    copied,
     footer,
     afterNode,
   } = props
@@ -538,24 +550,67 @@ export function ChatBubble(props: ChatBubbleProps) {
                 >
                   {user.bodyNode ?? user.query}
                 </div>
-                {onEditUserTurn ? (
+                {onCopyUserTurn || onRetryUserTurn || onEditUserTurn ? (
                   // Revealed on hover/focus of the turn (see `.bc-user-actions`)
                   // — always in the DOM, so it is reachable by keyboard and by a
                   // screen reader on a surface that has no hover at all.
+                  //
+                  // Ordered least- to most-consequential left to right: copy
+                  // changes nothing, edit opens a box you can still cancel out
+                  // of, retry re-runs immediately. The destructive-ish one is
+                  // last, where a mis-aimed click is least likely to land.
                   <div className="bc-user-actions">
-                    <button
-                      type="button"
-                      className="bc-user-edit-btn"
-                      onClick={onEditUserTurn}
-                      aria-label="Edit and resend this message"
-                      title="Edit and resend"
-                      data-testid="user-turn-edit"
-                    >
-                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                        <path d="M12 20h9" />
-                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                      </svg>
-                    </button>
+                    {onCopyUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act"
+                        onClick={onCopyUserTurn}
+                        aria-label={copied ? "Copied" : "Copy this message"}
+                        title={copied ? "Copied" : "Copy"}
+                        data-testid="user-turn-copy"
+                      >
+                        {copied ? (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <rect x="9" y="9" width="12" height="12" rx="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                        )}
+                      </button>
+                    ) : null}
+                    {onEditUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act bc-user-edit-btn"
+                        onClick={onEditUserTurn}
+                        aria-label="Edit and resend this message"
+                        title="Edit and resend"
+                        data-testid="user-turn-edit"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                        </svg>
+                      </button>
+                    ) : null}
+                    {onRetryUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act"
+                        onClick={onRetryUserTurn}
+                        aria-label="Ask this again"
+                        title="Ask again"
+                        data-testid="user-turn-retry"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M21 12a9 9 0 1 1-3.2-6.9" />
+                          <polyline points="21 3 21 9 15 9" />
+                        </svg>
+                      </button>
+                    ) : null}
                   </div>
                 ) : null}
               </>

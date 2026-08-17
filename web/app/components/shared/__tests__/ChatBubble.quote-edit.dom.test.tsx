@@ -90,6 +90,82 @@ describe("ChatBubble quoted passage", () => {
   })
 })
 
+describe("ChatBubble past-prompt actions", () => {
+  const user = { query: "waht is the audit findings form?" }
+
+  it("renders no action row at all when nothing is wired", () => {
+    const view = render(<ChatBubble turnId="a1" agentName="Sprntly" user={user} />)
+    expect(view.container.querySelector(".bc-user-actions")).toBeNull()
+    expect(view.queryByTestId("user-turn-copy")).toBeNull()
+    expect(view.queryByTestId("user-turn-retry")).toBeNull()
+    expect(view.queryByTestId("user-turn-edit")).toBeNull()
+  })
+
+  it("renders each action independently of the others", () => {
+    // The mapper decides eligibility per action — copy is offered on turns
+    // that can't be re-asked — so the row must not be all-or-nothing.
+    const view = render(
+      <ChatBubble turnId="a2" agentName="Sprntly" user={user} onCopyUserTurn={() => {}} />,
+    )
+    expect(view.queryByTestId("user-turn-copy")).not.toBeNull()
+    expect(view.queryByTestId("user-turn-retry")).toBeNull()
+    expect(view.queryByTestId("user-turn-edit")).toBeNull()
+  })
+
+  it("reports copy and retry clicks", () => {
+    const onCopyUserTurn = vi.fn()
+    const onRetryUserTurn = vi.fn()
+    const view = render(
+      <ChatBubble
+        turnId="a3"
+        agentName="Sprntly"
+        user={user}
+        onCopyUserTurn={onCopyUserTurn}
+        onRetryUserTurn={onRetryUserTurn}
+      />,
+    )
+    fireEvent.click(view.getByTestId("user-turn-copy"))
+    fireEvent.click(view.getByTestId("user-turn-retry"))
+    expect(onCopyUserTurn).toHaveBeenCalledTimes(1)
+    expect(onRetryUserTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it("announces the copied state without resizing the row", () => {
+    const view = render(
+      <ChatBubble
+        turnId="a4"
+        agentName="Sprntly"
+        user={user}
+        onCopyUserTurn={() => {}}
+        copied
+      />,
+    )
+    // Label changes, no text node appears — the row must not reflow under the
+    // cursor that just clicked it.
+    expect(view.getByTestId("user-turn-copy").getAttribute("aria-label")).toBe("Copied")
+    expect(view.getByTestId("user-turn-copy").textContent).toBe("")
+  })
+
+  it("orders the row copy → edit → retry", () => {
+    // Least- to most-consequential: a mis-aimed click should not land on the
+    // one that re-runs a generation.
+    const view = render(
+      <ChatBubble
+        turnId="a5"
+        agentName="Sprntly"
+        user={user}
+        onCopyUserTurn={() => {}}
+        onRetryUserTurn={() => {}}
+        onEditUserTurn={() => {}}
+      />,
+    )
+    const ids = Array.from(
+      view.container.querySelectorAll(".bc-user-actions button"),
+    ).map((b) => b.getAttribute("data-testid"))
+    expect(ids).toEqual(["user-turn-copy", "user-turn-edit", "user-turn-retry"])
+  })
+})
+
 describe("ChatBubble edit-and-resend", () => {
   const user = { query: "waht is the audit findings form?" }
 

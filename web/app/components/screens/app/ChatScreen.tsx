@@ -122,6 +122,15 @@ export type ThreadTurn = {
    *  remove the whole turn, and the persist effect never saves a still-pending
    *  one (a reload cannot restore a skeleton nothing will ever fill). */
   summaryPending?: boolean
+  /** The `conversation_turns.id` this turn was persisted as, when known.
+   *
+   *  Only needed to REWIND the conversation to this turn (editing or retrying a
+   *  past prompt): the server needs the row id, and the client turn id is its
+   *  own invention. Stamped on restore (`buildRestored`, straight off the DB
+   *  row) — turns sent in THIS session are resolved from `chatPersistence`'s own
+   *  map instead, since their id only arrives after the write settles. Absent on
+   *  every other path, which makes the rewind a no-op rather than a guess. */
+  dbTurnId?: number
   /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
    *  (options as buttons, one submit for the batch) instead of the flattened
    *  numbered list that `reply.answer` carries. Both live on the same turn: the
@@ -762,6 +771,9 @@ export const BUSY_ENTER_HINT_LEAD = "Sprntly is still answering. Your message is
 export const BUSY_ENTER_HINT_TAIL = " to interrupt."
 /** How long the busy-Enter hint stays before clearing itself. */
 const BUSY_HINT_MS = 6000
+/** How long a copied-prompt tick stays on the button. Long enough to be seen
+ *  after the click that caused it, short enough not to read as state. */
+const COPIED_HINT_MS = 1600
 
 // Main's next-prompt fetch: the shared endpoint keyed by the settled
 // conversation id. A stable module const so the shared hook's fetch-after-settle
@@ -1189,6 +1201,9 @@ export function ChatScreen() {
   // changes (an editor left open on a tab you navigated away from would come
   // back seated over a different thread's turn).
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
+  // The turn whose copy button is showing its transient "Copied" tick.
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // The composer's `+` menu (Attach a file / Browse skills).
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [plusMenuActive, setPlusMenuActive] = useState(0)
@@ -2745,7 +2760,7 @@ export function ChatScreen() {
         setResumePanelTabId(tabId)
       }
       const buildRestored = (
-        turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
+        turns: { id?: number; role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -2756,6 +2771,10 @@ export function ChatScreen() {
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
             restored.push({
               id: `${keyPrefix}-${i}`,
+              // Carried through so a rehydrated thread can still be rewound to
+              // this turn (edit/retry on a past prompt) — the persistence
+              // layer's own id map only covers turns THIS session sent.
+              ...(typeof t.id === "number" ? { dbTurnId: t.id } : {}),
               query: t.content,
               reply,
               // Rehydrate persisted attachment texts so the card viewer AND a
@@ -5569,54 +5588,96 @@ export function ChatScreen() {
     composerRef.current?.focus()
   }, [])
 
-  // ── Edit and re-send a question that never got an answer ──────────────────
-  // Stopping an ask used to leave a dead end: the words you typed were on
-  // screen, slightly wrong, and the only way forward was to retype them. These
-  // three make that turn editable in place.
+  // ── Copy a past prompt ────────────────────────────────────────────────────
+  // The WORDS, not the wire form: a message that quoted a passage stores it as
+  // a trailing blockquote, and pasting "> …" markup into wherever you are
+  // taking this is never what was meant. The excerpt has its own affordance
+  // (the quote block opens in the viewer).
+  const handleCopyTurn = useCallback((turn: ThreadTurn) => {
+    const body = splitQuotedSuffix(turn.query).body || turn.query
+    if (!body) return
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(body)
+        setCopiedTurnId(turn.id)
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+        copiedTimerRef.current = setTimeout(() => setCopiedTurnId(null), COPIED_HINT_MS)
+      } catch {
+        // Denied permission, an insecure origin, a browser without the API —
+        // say so rather than leaving a button that silently does nothing.
+        showToast("Couldn't copy", "Your browser blocked clipboard access — select the text and copy it manually.")
+      }
+    })()
+  }, [showToast])
+
+  // ── Re-ask a past prompt (edit / retry) ───────────────────────────────────
+  // Both rewind the conversation to that turn: it and everything after it are
+  // replaced by the new question and its answer. That is the only coherent
+  // meaning for editing something already answered — leaving the old reply
+  // underneath a rewritten question would make the thread a record of a
+  // conversation that never happened.
   //
-  // Scope is deliberately narrow — see `canEditTurn` in `mapMainTurns` — and
-  // the rule is "no reply landed on it". A turn that HAS an answer is history:
-  // rewriting it would orphan the reply below it, and the persisted record has
-  // no way to express that (`conversation_turns` is append-only apart from the
-  // last-turn retraction this uses).
+  // The rewind is TWO things that must agree, which is the whole reason this is
+  // one shared helper rather than two similar ones:
+  //   * the thread on screen, truncated at `turn`; and
+  //   * the persisted conversation, rewound to the same point
+  //     (`rewindToUserTurn` → DELETE …/turns/{id}, which drops that row and
+  //     every row after it).
+  // Queued so the server sees rewind-then-add; best-effort, so a failure leaves
+  // the record longer than the screen rather than breaking the send.
+  const reAskFromTurn = useCallback((turn: ThreadTurn, nextQuery: string) => {
+    const tabId = activeTabId
+    if (!tabId || !nextQuery.trim()) return
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== tabId) return t
+      const idx = t.thread.findIndex((x) => x.id === turn.id)
+      // Not found means the thread moved under us (a background answer landed,
+      // the tab was rehydrated) — drop the whole thing rather than truncate at
+      // a guess. The user can act on the turn again.
+      return idx === -1 ? t : { ...t, thread: t.thread.slice(0, idx) }
+    }))
+    void persistence.rewindToUserTurn(tabId, turn.id, turn.dbTurnId)
+    void submitAsk(nextQuery)
+  }, [activeTabId, persistence, submitAsk])
+
+  const handleRetryTurn = useCallback((turn: ThreadTurn) => {
+    // Verbatim — including the quoted passage, which is part of the question
+    // that is being asked again.
+    reAskFromTurn(turn, turn.query.trim())
+  }, [reAskFromTurn])
+
   const handleEditTurn = useCallback((turnId: string) => {
     setEditingTurnId(turnId)
   }, [])
   const handleCancelTurnEdit = useCallback(() => setEditingTurnId(null), [])
 
   const handleSubmitTurnEdit = useCallback((turn: ThreadTurn, text: string) => {
-    const tabId = activeTabId
     setEditingTurnId(null)
     const body = text.trim()
-    if (!tabId || body.length < DRAFT_MIN_CHARS) return
+    if (body.length < DRAFT_MIN_CHARS) return
     // The passage the original message was replying to is kept: the editor owns
     // your words, not the excerpt they were about. Re-composed the same way the
     // composer would have.
     const { quote: repliedTo } = splitQuotedSuffix(turn.query)
     const next = buildQuotedMessage(body, repliedTo)
-    // Saving without changing anything is a no-op, not a re-run. A stopped ask
-    // that the user wants to retry verbatim already has "Ask again" for that,
-    // and this path would spend a whole generation on the same question.
+    // Saving without changing anything closes the editor and stops. Re-running
+    // an identical question is what Retry is for, and doing it silently here
+    // would spend a whole generation on a keystroke the user took back.
     if (next === turn.query) return
-    // The abandoned turn goes away in the same commit the new one arrives in —
-    // the point of editing is that there is ONE question, the one you meant.
-    setTabs((prev) => prev.map((t) => (
-      t.id !== tabId ? t : { ...t, thread: t.thread.filter((x) => x.id !== turn.id) }
-    )))
-    // And it comes back out of the persisted conversation too. The user turn is
-    // written the moment a message is sent — long before the reply it never
-    // got — so without this the same thread reopened from history would show
-    // the original wording as an unanswered question above the edited one.
-    // Best-effort and queued behind its own write (see `retractUserTurn`); a
-    // failure leaves the record slightly long, never the UI broken.
-    void persistence.retractUserTurn(tabId, turn.id)
-    void submitAsk(next)
-  }, [activeTabId, persistence, submitAsk])
+    reAskFromTurn(turn, next)
+  }, [reAskFromTurn])
 
   // An editor left open on a tab the user navigated away from would come back
   // seated over whatever turn happens to be there now. Close it on any tab
-  // change — the thread it belonged to is no longer the one on screen.
-  useEffect(() => { setEditingTurnId(null) }, [activeTabId])
+  // change — the thread it belonged to is no longer the one on screen. The
+  // "Copied" tick goes with it for the same reason.
+  useEffect(() => {
+    setEditingTurnId(null)
+    setCopiedTurnId(null)
+  }, [activeTabId])
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+  }, [])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
   // A question typed on the top-insights surface must open its OWN chat tab, not
@@ -7369,6 +7430,9 @@ export function ChatScreen() {
               clarifyPopupOpen, pendingClarifyTurn,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
               editingTurnId,
+              copiedTurnId,
+              onCopyTurn: handleCopyTurn,
+              onRetryTurn: handleRetryTurn,
               onEditTurn: handleEditTurn,
               onSubmitTurnEdit: handleSubmitTurnEdit,
               onCancelTurnEdit: handleCancelTurnEdit,
