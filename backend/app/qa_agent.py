@@ -41,6 +41,7 @@ from __future__ import annotations
 from app.timing import timed_def
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
@@ -1806,6 +1807,22 @@ def _is_bare_send_to_roster_member(
         return False
 
 
+#: Catches the OTHER `edit_prd` failure mode — the model never calls the
+#: tool at all (skips it entirely) but still composes a free-text final
+#: answer that claims the PRD was changed ("Done — it's live", "I've
+#: updated the PRD"). Scoped narrowly to an edit-claim ("done"/"updated"/
+#: "edited"/"changed"/"applied"/"saved"/"live") co-occurring with "prd"
+#: within a short span, so it does not fire on unrelated group-chat "Done"
+#: replies (e.g. a delegate_task confirmation) that never mention the PRD.
+_PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE = re.compile(
+    r"\b(done|updated?|edited?|changed?|applied?|saved?|(?:is|now)\s+live)\b"
+    r"[^.!?\n]{0,40}\bprd\b"
+    r"|\bprd\b[^.!?\n]{0,40}"
+    r"\b(done|updated?|edited?|changed?|applied?|saved?|(?:is|now)\s+live)\b",
+    re.IGNORECASE,
+)
+
+
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
     enterprise_id: str, dataset: str,
@@ -1838,6 +1855,17 @@ def _try_scoped_tool_answer(
     identity = scope.assigner_identity or {}
     assigner_user_id = identity.get("assigner_user_id")
     roster = list(scope.roster)
+    # Captures every `edit_prd` dispatch's narration, in call order. The
+    # model's own FINAL text (returned by `run_tool_loop` below) is free-form
+    # and is NOT guaranteed to match what the tool actually did — a model
+    # can call `edit_prd`, receive a no-PRD-open refusal or a no-op result,
+    # and still compose a "Done — it's live" final answer on its own. When
+    # `edit_prd` was called at all, the LAST captured narration (already
+    # authored by the handler to reflect the real outcome: applied,
+    # refused, or no-op) overrides the model's free text below — the
+    # narration the user sees is grounded in the tool's actual return, never
+    # in the model's own claim.
+    edit_prd_narrations: list[str] = []
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1855,6 +1883,7 @@ def _try_scoped_tool_answer(
             # always returns `(narration, None)` — the edit is already
             # applied by the time the narration is produced.
             narration, _pending = scope.edit_prd_handler(tool_input)
+            edit_prd_narrations.append(narration)
             return narration
         if name == "delegate_task":
             from app import project_delegation
@@ -1916,6 +1945,30 @@ def _try_scoped_tool_answer(
         if scope.surface == Surface.project_private:
             return None
         raise
+
+    if edit_prd_narrations:
+        # Ground the final answer in the tool's real outcome (the critical
+        # fix): never let the model's own free-text final turn override an
+        # `edit_prd` call's actual result. Last call wins — mirrors "the
+        # PRD is now in whatever state the last edit call left it in".
+        text = edit_prd_narrations[-1]
+    elif (
+        scope.edit_prd_handler is not None
+        and _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE.search(text or "")
+    ):
+        # The OTHER mechanism: `edit_prd` was never invoked this turn at
+        # all, yet the model's own final text claims the PRD was changed.
+        # There is no tool result to ground on here (the tool never ran) —
+        # the only honest answer is to say so, never to relay the model's
+        # unearned success claim.
+        logger.warning(
+            "group_edit_prd_claim_without_tool_call project_id=%s",
+            scope.project_id,
+        )
+        text = (
+            "I didn't actually make that change — open the PRD beside this "
+            "chat and ask me again so I can apply it."
+        )
 
     # Exactly one structured cost line per scoped reply — identifiers only,
     # never the body/question (Rule #24). Relocated from the two duplicate

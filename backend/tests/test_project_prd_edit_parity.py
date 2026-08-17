@@ -271,6 +271,68 @@ def test_group_edit_applies_in_one_turn_without_confirm(
     assert len(_versions(prd_id)) == before_versions + 1
 
 
+# ── Observability — every `edit_prd` dispatch is logged, invoked + outcome ──
+# The incident this ticket fixes had ZERO tool-call logging: there was no way
+# to tell from logs alone whether a failing turn never reached the handler at
+# all (model skipped the tool) or reached it and got a refusal/no-op the
+# model's own final text then silently overrode. These pin that the handler
+# now logs on every path.
+def test_group_edit_prd_tool_call_logs_invocation_and_applied_outcome(
+    tenant_client, isolated_settings, monkeypatch, caplog
+):
+    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+    from app.db import projects as projects_db
+
+    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
+    projects_db.add_artifact(project_id, "prd", prd_id)
+
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
+    _mock_editor(monkeypatch)
+    _mock_edit_prd_tool_call(monkeypatch)
+
+    with caplog.at_level("INFO", logger="app.routes.projects"):
+        resp = t.client.post(
+            f"/v1/projects/{project_id}/group/turns",
+            json={"content": "@Sprntly tighten the requirements section", "prd_id": prd_id},
+        )
+    assert resp.status_code == 200, resp.text
+
+    called = [r.message for r in caplog.records if "group_edit_prd_tool_called" in r.message]
+    outcomes = [r.message for r in caplog.records if "group_edit_prd_tool_outcome" in r.message]
+    assert called, "edit_prd invocation must be logged"
+    assert f"edit_target_prd_id={prd_id}" in called[0]
+    assert outcomes, "edit_prd outcome must be logged"
+    assert "outcome=applied" in outcomes[0]
+    assert f"edit_target_prd_id={prd_id}" in outcomes[0]
+
+
+def test_group_edit_prd_tool_call_logs_no_prd_open_outcome(
+    tenant_client, isolated_settings, monkeypatch, caplog
+):
+    # No `prd_id` on the POST — the handler's `edit_target_prd_id` closure
+    # resolves to None, so the outcome must log the no-PRD-open refusal, not
+    # a silent pass-through.
+    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
+    _mock_edit_prd_tool_call(monkeypatch)
+
+    with caplog.at_level("INFO", logger="app.routes.projects"):
+        resp = t.client.post(
+            f"/v1/projects/{project_id}/group/turns",
+            json={"content": "@Sprntly tighten the requirements section"},
+        )
+    assert resp.status_code == 200, resp.text
+
+    outcomes = [r.message for r in caplog.records if "group_edit_prd_tool_outcome" in r.message]
+    assert outcomes
+    assert "outcome=no_prd_open" in outcomes[0]
+
+
 # ── AC2/AC4 — group applied result matches main's for the same input ────────
 def test_group_edit_matches_main_result_shape(
     tenant_client, isolated_settings, monkeypatch
