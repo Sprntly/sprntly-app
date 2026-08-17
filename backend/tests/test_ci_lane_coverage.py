@@ -231,8 +231,8 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "actually honors the new prompt rules or that the narration guard "
         "holds against a real editor response. Deterministic backstop: "
         "test_group_trigger_and_no_fabrication.py covers the "
-        "agent_spoke_last/trigger_kind derivation, the _GroupEditOutcome "
-        "three cases, the narration branch, the edit_note fallback, the "
+        "agent_spoke_last/trigger_kind derivation, the in-band edit tool "
+        "handler's cases, the proposal narration branch, the "
         "addressing-note selection, and the DRY source-scans in the fast "
         "lane; this suite is the real-DB/real-LLM proof, run locally "
         "against the dev rig when touching this trigger surface."
@@ -517,9 +517,9 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
     ),
     ("test_group_chat_prd_edit_live.py", "RUN_GROUP_CHAT_PRD_EDIT_LIVE"): (
         "Real local-Supabase + real-LLM round-trip for the @Sprntly GROUP "
-        "chat's edit_prd dispatch (`_classify_and_maybe_edit_group_prd` -> "
-        "`apply_chat_edit_scoped`, the SAME shared writer + ★ IDOR gate the "
-        "private surface proves): classify-then-edit through the real group "
+        "chat's in-band edit_prd tool (`_propose_group_prd_edit` -> "
+        "`propose_chat_edit_scoped`, the SAME shared gate + ★ IDOR check the "
+        "private surface proves): tool-driven propose→confirm through the real group "
         "turn path, a genuine cross-project prd_id writes ZERO rows and is "
         "refused end to end, and an own-project edit persists (payload_md "
         "changes, exactly one prd_versions snapshot) AND broadcasts "

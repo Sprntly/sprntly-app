@@ -247,17 +247,17 @@ def test_group_envelope_carries_open_candidates(
         "artifact_query": "checkout", "reason": "open", "source": "llm",
     }
     monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: (held, prd_id, None),
+        projects_route, "resolve_chat_intent",
+        lambda *a, **kw: held,
     )
 
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, 0, _ctx(t), "open the checkout PRD", [], "acme",
+    # `_classify_group_envelope` classifies for CARD ENRICHMENT only (the edit
+    # is now an in-band tool); it enriches the envelope in place and returns it.
+    envelope = projects_route._classify_group_envelope(
+        project_id, _ctx(t), "open the checkout PRD", [], "acme",
     )
-    # Not an edit: nothing applied, the reply falls through as usual…
-    assert outcome.applied_turn is None
-    assert outcome.was_edit_request is False
-    # …but the classify envelope was enriched IN PLACE with the lookup.
+    assert envelope is held
+    # The classify envelope was enriched IN PLACE with the lookup.
     assert held["open"]["status"] in {"resolved", "ambiguous"}
     candidates = held["open"]["candidates"]
     assert candidates and candidates[0]["prd_id"] == prd_id
@@ -445,13 +445,14 @@ def test_enrich_default_project_id_is_none_workspace_wide(
 
 
 def test_enrichment_adds_no_resolve_intent_call():
-    """The enrichment attaches to the envelopes the EXISTING
-    `resolve_project_chat_intent` calls return — def + 2 call sites, same
-    count the trigger suite pins — and BOTH project call sites (private
-    route + group classify) run the shared enrichment."""
+    """Both project chat surfaces run the shared `enrich_chat_envelope`: the
+    private route (via `resolve_project_chat_intent`) and the group
+    card-classify (`_classify_group_envelope`). The group no longer uses
+    `resolve_project_chat_intent`, so that helper is now def + 1 call
+    site (private), while `enrich_chat_envelope` still fires on both paths."""
     src = (REPO_ROOT / "backend" / "app" / "routes" / "projects.py").read_text()
-    assert src.count("resolve_project_chat_intent(") == 3  # def + 2 call sites
-    assert src.count("enrich_chat_envelope(") == 2  # private route + group path
+    assert src.count("resolve_project_chat_intent(") == 2  # def + 1 call site (private)
+    assert src.count("enrich_chat_envelope(") == 2  # private route + group card-classify
 
     chat_src = (REPO_ROOT / "backend" / "app" / "routes" / "chat.py").read_text()
     assert chat_src.count("enrich_chat_envelope(") == 1  # main consumes it too

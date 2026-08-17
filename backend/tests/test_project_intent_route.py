@@ -219,25 +219,21 @@ def test_project_intent_returns_chat_intent_envelope_shape(
     assert expected_keys.issubset(body.keys())
 
 
-# ── AC8 (revised) — the group path is BEHAVIOR-identical, not byte-identical ─
-# The single-source extraction (`resolve_project_chat_intent`) makes
-# `_classify_and_maybe_edit_group_prd` call a shared helper instead of its
-# own inline resolve+classify pair — a deliberate, planner-ratified diff.
-# AC8's new contract is behavioural: this test (still green) + the ship-
-# gate's live group-edit re-verify, NOT a `git diff` byte-identity check.
-def test_group_classify_unchanged(tenant_client, isolated_settings, monkeypatch):
-    """Regression: `_classify_and_maybe_edit_group_prd` still resolves+
-    classifies (now via the shared `resolve_project_chat_intent` helper) and
-    a group edit still applies in place — the extraction must be provably
-    behavior-preserving."""
+# ── The group edit is IN-BAND via the `edit_prd` tool ─────────────────
+# The group no longer forks a classify-then-propose pre-step; a PRD change is
+# handled by the model calling `edit_prd` mid-answer, routed to the SAME
+# propose→confirm gate the private surface uses. Behaviour is proven end to
+# end here + at the ship-gate's live group-edit re-verify.
+def test_group_edit_in_band_tool_proposes_then_confirms(tenant_client, isolated_settings, monkeypatch):
+    """A group edit request reaches the tool loop, the model calls `edit_prd`,
+    the handler proposes (no write) and the group turn carries the pending
+    mutation; the existing confirm route then commits applied == proposed."""
     t = tenant_client.make(slug="acme")
     project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
     before_versions = len(_versions(prd_id))
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: {"intent": "edit_prd", "instruction": "tighten requirements"},
-    )
+    # Card classify (edit is the tool's job now) — keep it off the LLM.
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
     monkeypatch.setattr(
         prd_questions, "apply_chat_edit",
         lambda *a, **kw: {
@@ -246,19 +242,19 @@ def test_group_classify_unchanged(tenant_client, isolated_settings, monkeypatch)
             "summary": "Tightened requirements.",
         },
     )
-    loop_calls = []
+    # The model calls `edit_prd` once.
     monkeypatch.setattr(
-        "app.llm.run_tool_loop", lambda **kw: loop_calls.append(1) or "unused"
+        "app.llm.run_tool_loop",
+        lambda *, dispatch, **kw: dispatch("edit_prd", {"instruction": "tighten requirements"}),
     )
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly tighten the requirements section"},
+        json={"content": "@Sprntly tighten the requirements section of the PRD"},
     )
     assert resp.status_code == 200, resp.text
-    assert loop_calls == []  # classified straight to edit_prd, never fell through
-    # Under the confirmation gate the classify pass PROPOSES (no write yet);
-    # the edit commits only when the confirm route applies the token.
+    # Under the confirmation gate the tool PROPOSES (no write yet); the edit
+    # commits only when the confirm route applies the token.
     from app.db import conversations as conversations_db
 
     conv = conversations_db.get_group_chat(project_id)
@@ -278,15 +274,14 @@ def test_group_classify_unchanged(tenant_client, isolated_settings, monkeypatch)
     assert len(_versions(prd_id)) == before_versions + 1
 
 
-# ── Single-source proof: both surfaces resolve through the SAME helper ──────
-def test_group_and_private_share_the_resolve_helper(
+# ── The PRIVATE route still routes through the shared resolve helper ─────────
+def test_private_route_uses_the_shared_resolve_helper(
     tenant_client, isolated_settings, monkeypatch
 ):
-    """The private route (`project_chat_intent`) and the group classifier
-    (`_classify_and_maybe_edit_group_prd`) both reach `resolve_project_chat_
-    intent` — not their own inline resolve+classify pair — proving the
-    extraction is genuinely single-sourced, not just parallel duplicate
-    call sites that happen to agree today."""
+    """The private route (`project_chat_intent`) resolves+classifies through
+    the shared `resolve_project_chat_intent` helper. (The GROUP surface no
+    longer uses it — it edits in-band via the `edit_prd` tool, which resolves
+    its OWN target via `_resolve_prd_id`; see `_propose_group_prd_edit`.)"""
     t = tenant_client.make(slug="acme")
     project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
 
@@ -302,30 +297,11 @@ def test_group_and_private_share_the_resolve_helper(
 
     monkeypatch.setattr(projects_route, "resolve_project_chat_intent", _spy)
 
-    def _fake_loop(*, system, user, tools, dispatch, model, meta_out=None, **kw):
-        if meta_out is not None:
-            meta_out.update(
-                {
-                    "model": model, "input_tokens": 1, "output_tokens": 1,
-                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
-                }
-            )
-        return "unused"
-
-    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
-
     resp = t.client.post(
         f"/v1/projects/{project_id}/chat/intent", json={"message": "what's next?"},
     )
     assert resp.status_code == 200, resp.text
     assert len(calls) == 1  # the private route went through the shared helper
-
-    resp2 = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly what's next?"},
-    )
-    assert resp2.status_code == 200, resp2.text
-    assert len(calls) == 2  # the group classifier ALSO went through it
 
 
 # ── AC1 — the private route surfaces the >1-PRD disambiguation as a real ────

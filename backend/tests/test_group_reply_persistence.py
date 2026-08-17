@@ -56,15 +56,12 @@ def test_group_reply_persists_structured_payload_with_card_data(
         "candidates": [{"type": "prd", "id": 7, "prd_id": 7, "title": "Checkout PRD"}],
     }
     monkeypatch.setattr(
-        projects_route, "_classify_and_maybe_edit_group_prd",
-        lambda *a, **kw: projects_route._GroupEditOutcome(
-            applied_turn=None, was_edit_request=False, refusal=None,
-            envelope={
-                "intent": "list_artifacts",
-                "artifact_list": card_rows,
-                "open": open_result,
-            },
-        ),
+        projects_route, "_classify_group_envelope",
+        lambda *a, **kw: {
+            "intent": "list_artifacts",
+            "artifact_list": card_rows,
+            "open": open_result,
+        },
     )
     monkeypatch.setattr(
         projects_route.qa_agent, "answer",
@@ -101,6 +98,48 @@ def test_group_reply_persists_structured_payload_with_card_data(
         if event == "turn.created" and p.get("role") == "assistant"
     ]
     assert agent_payloads and agent_payloads[-1]["reply"]["artifact_list"] == card_rows
+
+
+def test_group_reply_carries_pending_mutation_from_the_tool(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """Net-new plumbing: when the in-band `edit_prd` tool proposes, the
+    engine's `answer()` result carries `pending_mutation`; the group turn's
+    persistence lifts it onto `reply.pending_mutation` (and the broadcast) so
+    the FE confirm card fires and the existing confirm route applies it."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv = conversations_db.create_group_chat(project_id, t.user_id)
+
+    monkeypatch.setattr(projects_route, "_classify_group_envelope", lambda *a, **kw: {"intent": "answer"})
+    pending = {"token": "tok-xyz", "summary": "Tightened it.", "prd_id": 42}
+    monkeypatch.setattr(
+        projects_route.qa_agent, "answer",
+        lambda **kw: {
+            "answer": "I'd like to update the PRD: Tightened it. Confirm to apply.",
+            "citations": [], "pending_mutation": pending,
+        },
+    )
+    broadcasts: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        projects_route, "publish_broadcast",
+        lambda topic, event, payload: broadcasts.append((event, payload)),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/group/turns",
+        json={"content": "@Sprntly update the PRD to tighten it"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    assistant = [x for x in conversations_db.list_group_turns(conv["id"]) if x["role"] == "assistant"]
+    assert assistant
+    assert assistant[-1]["reply"]["pending_mutation"] == pending
+    agent_payloads = [
+        p for (event, p) in broadcasts
+        if event == "turn.created" and p.get("role") == "assistant"
+    ]
+    assert agent_payloads and agent_payloads[-1]["reply"]["pending_mutation"] == pending
 
 
 def test_prehistory_assistant_turn_roundtrips_from_content(

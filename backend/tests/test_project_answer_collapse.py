@@ -750,15 +750,13 @@ def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_set
     turns = conversations_db.list_individual_turns(conv["id"], "greeted-user")
     assert len(turns) == 1 and turns[0]["role"] == "assistant"
 
-    # `_classify_and_maybe_edit_group_prd` still runs before the reply on
-    # every trigger kind (the IDOR gate itself is proven end-to-end in
-    # test_group_chat_prd_edit.py) — here: structural wiring only.
+    # `_classify_group_envelope` (card enrichment only — the edit is now an
+    # in-band tool, proven end-to-end in test_group_chat_prd_edit.py) runs
+    # before the reply on every trigger kind — here: structural wiring only.
     classify_calls = []
     monkeypatch.setattr(
-        projects_route, "_classify_and_maybe_edit_group_prd",
-        lambda *a, **kw: classify_calls.append(1) or projects_route._GroupEditOutcome(
-            applied_turn=None, was_edit_request=False, refusal=None,
-        ),
+        projects_route, "_classify_group_envelope",
+        lambda *a, **kw: classify_calls.append(1) or {"intent": "answer"},
     )
     monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "ok", "citations": []})
     resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})
@@ -766,7 +764,13 @@ def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_set
     assert classify_calls == [1]
 
 
-def test_lt8_input_shape_switch(tenant_client, isolated_settings, monkeypatch):
+def test_group_question_is_latest_turn_transcript_rides_scope(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The LT-8 input-shape switch (`_GROUP_TRANSCRIPT_AS_QUESTION`) is retired
+    — group collapses to the single live form: `question` is the latest
+    triggering message, while the full attributed transcript always rides on
+    `scope.prerendered_transcript` so the model still sees the whole thread."""
     from app.db import conversations as conversations_db
 
     t = tenant_client.make(slug="acme")
@@ -783,24 +787,17 @@ def test_lt8_input_shape_switch(tenant_client, isolated_settings, monkeypatch):
     )
     ctx = _ctx(t.company_id, ensure_default_workspace(t.company_id)["id"], t.user_id)
 
-    # Default: latest-turn-as-question (conservative — build-spec §Group).
-    assert projects_route._GROUP_TRANSCRIPT_AS_QUESTION is False
+    # The retired flag no longer exists.
+    assert not hasattr(projects_route, "_GROUP_TRANSCRIPT_AS_QUESTION")
     asyncio.run(
         projects_route._respond_as_group_agent(
             project_id, conv["id"], ctx, "mention", job_id=1, run_id="r",
         )
     )
     assert captured["question"] == "@Sprntly what's up?"
-    assert captured["scope"].prerendered_transcript is not None  # full transcript still rides either way
-
-    # Switch flipped: transcript-as-question.
-    monkeypatch.setattr(projects_route, "_GROUP_TRANSCRIPT_AS_QUESTION", True)
-    asyncio.run(
-        projects_route._respond_as_group_agent(
-            project_id, conv["id"], ctx, "mention", job_id=2, run_id="r2",
-        )
-    )
-    assert captured["question"] == captured["scope"].prerendered_transcript
+    # The full transcript still rides on the scope, always.
+    assert captured["scope"].prerendered_transcript is not None
+    assert "@Sprntly what's up?" in captured["scope"].prerendered_transcript
 
 
 # ── Gated routing — group context-fold + accept-with-nudge (AC5b/AC5c) ─────

@@ -118,6 +118,14 @@ class SurfaceScope:
     prerendered_transcript: Optional[str] = None
     capabilities: Optional[dict] = None
     multi_party: bool = False
+    #: GROUP surface only: the in-band `edit_prd` tool's handler. Given the
+    #: tool's `{instruction}` input, it resolves the edit target server-side
+    #: and routes to the shared propose→confirm gate, returning
+    #: `(narration, pending_mutation | None)`. `None` for main/private (they
+    #: register no edit tool), so the sixth-branch tool loop only ever routes
+    #: an `edit_prd` call to a handler on the group surface — private/main
+    #: `answer()` result shape is unaffected.
+    edit_prd_handler: Optional[Callable[[dict], "tuple[str, Optional[dict]]"]] = None
 
     @property
     def is_noop(self) -> bool:

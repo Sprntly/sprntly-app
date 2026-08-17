@@ -483,21 +483,16 @@ def test_group_edit_proposes_and_posts_pending_turn(tenant_client, isolated_sett
 
     conv = conversations_db.create_group_chat(project_id, t.user_id)
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "tighten it"}, prd_id, None),
-    )
     _mock_editor(monkeypatch, summary="Tightened it.")
 
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "@Sprntly tighten the PRD", [], t.slug,
+    # The in-band `edit_prd` tool handler proposes: NOTHING written; the
+    # returned pending mutation carries the token the group turn stamps onto
+    # `reply.pending_mutation`, and a proposal row (surface="group") is stored.
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, conv["id"], _ctx(t), t.slug, "tighten it",
     )
-    # A PROPOSAL turn posts, carrying reply.pending_mutation; NOTHING written.
-    assert outcome.applied_turn is not None
-    content = outcome.applied_turn["content"]
-    assert content.startswith("I'd like to update the PRD:")
-    assert "Confirm to apply." in content
-    pending = outcome.applied_turn["reply"]["pending_mutation"]
+    assert narration.startswith("I'd like to update the PRD:")
+    assert "Confirm to apply." in narration
     assert pending["token"] and pending["prd_id"] == prd_id
     assert _payload(prd_id) == before
     assert _versions(prd_id) == []
@@ -513,16 +508,12 @@ def test_group_confirm_commits_and_posts_done(tenant_client, isolated_settings, 
 
     conv = conversations_db.create_group_chat(project_id, t.user_id)
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "tighten it"}, prd_id, None),
-    )
     _mock_editor(monkeypatch, summary="Tightened it.")
 
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "@Sprntly tighten the PRD", [], t.slug,
+    _, pending = projects_route._propose_group_prd_edit(
+        project_id, conv["id"], _ctx(t), t.slug, "tighten it",
     )
-    token = outcome.applied_turn["reply"]["pending_mutation"]["token"]
+    token = pending["token"]
 
     confirm = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
