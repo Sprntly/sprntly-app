@@ -13,6 +13,7 @@ import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
+import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
 import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import {
   providerNoticeFromEnvelope,
@@ -4264,105 +4265,115 @@ export function ChatScreen() {
    *  passes none — it is direct manipulation of the panel, not another message,
    *  so it must not put words in the user's mouth or spend an ask. */
   const openArtifactInPanel = useCallback(
-    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
-      if (candidate.type === "evidence") {
-        if (candidate.brief_id == null || candidate.insight_index == null) return false
-        // The SAME binding guard the PRD branch uses. Pinning the active tab
-        // unconditionally let an evidence open hijack a tab already holding a
-        // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
-        // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
-        // the panel renders B's evidence beside A's document and the tab is
-        // flagged evidence-only while holding a prd id. `reusableActiveTab`
-        // declines exactly that tab, and the open gets a chat of its own.
-        const inTab = reusableActiveTab()
-        const req: LocalPrdTabRequest = {
-          title: candidate.title || "Evidence",
-          ...(seedQuery ? { seedQuery } : {}),
-          ...(inTab ? { inTabId: inTab.id } : {}),
-          source: {
-            kind: "evidence",
-            meta: { briefId: candidate.brief_id, insightIndex: candidate.insight_index },
-            detail: null,
+    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean =>
+      // The evidence-vs-PRD branch, resume-conversation-first, reuse-by-prd-id
+      // and null-id guards are the shared `openArtifactDestination` decision;
+      // ChatScreen supplies the PANEL terminal actions (its exact current
+      // bodies) as the adapter, so the routing is byte-identical. Project
+      // surfaces open the artifacts MODAL instead — the sanctioned, ledgered
+      // `open.destination` divergence — and do NOT route through this decision.
+      openArtifactDestination(
+        candidate,
+        {
+          openEvidence: (c, sq) => {
+            // The SAME binding guard the PRD branch uses. Pinning the active tab
+            // unconditionally let an evidence open hijack a tab already holding a
+            // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
+            // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
+            // the panel renders B's evidence beside A's document and the tab is
+            // flagged evidence-only while holding a prd id. `reusableActiveTab`
+            // declines exactly that tab, and the open gets a chat of its own.
+            const inTab = reusableActiveTab()
+            const req: LocalPrdTabRequest = {
+              title: c.title || "Evidence",
+              ...(sq ? { seedQuery: sq } : {}),
+              ...(inTab ? { inTabId: inTab.id } : {}),
+              source: {
+                kind: "evidence",
+                meta: { briefId: c.brief_id!, insightIndex: c.insight_index! },
+                detail: null,
+              },
+            }
+            const tabId = openPrdInTab(req)
+            seedCommandTurn(req, tabId)
+            return true
           },
-        }
-        const tabId = openPrdInTab(req)
-        seedCommandTurn(req, tabId)
-        return true
-      }
-      const prdId = candidate.prd_id ?? candidate.id
-      if (prdId == null) return false
-      // The PRD's own THREAD outranks a panel-beside-this-chat open (owner
-      // decision, 2026-08-14): when the conversation that produced the
-      // document survives, "open the PRD" means going back to that chat —
-      // history restored, PRD panel over it — exactly like clicking the same
-      // row on the Artifacts screen. Both halves must be present (a
-      // title-less id means the chat row is gone), and an uploaded or
-      // brief-generated PRD carries neither, so it keeps today's panel-only
-      // open — never a fake history.
-      if (candidate.conversation_id != null && candidate.conversation_title) {
-        try {
-          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
-            dbId: candidate.conversation_id,
-            title: candidate.conversation_title,
-            fallbackTurns: [],
-            prdId,
-          }))
-          checkResume()
-          return true
-        } catch { /* storage unavailable → the panel-only open below */ }
-      }
-      // Reuse BY PRD ID, never by title. A tab already holding this document
-      // wins over the tab the user is typing in, so opening a PRD that is
-      // already open focuses it instead of spawning a second tab for the same
-      // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
-      // this path would otherwise reintroduce from a different entry point (the
-      // titles here are real document titles, so a title match would look like
-      // it works right up until two documents share a name).
-      const holder = tabsRef.current.find(
-        (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
-      )
-      // Otherwise: the CHAT the user is in, so the panel opens beside the
-      // conversation that asked for it (the stated requirement) rather than in
-      // a tab of its own. `reusableActiveTab` declines a tab already bound to a
-      // different PRD/insight, which must not be repointed.
-      const inTab = holder ?? reusableActiveTab()
-      // Is the document ALREADY cached on the tab we're about to open into? Then
-      // openPrdInTab returns straight from that cache and never reaches the
-      // async block, so the acknowledgment has to ride the seed turn instead of
-      // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
-      // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
-      // returns tabs with no PRD by definition.
-      const ackInline = holder?.prd?.prd_id === prdId
-      const req: LocalPrdTabRequest = {
-        title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
-        ...(seedQuery ? { seedQuery } : {}),
-        ...(inTab ? { inTabId: inTab.id } : {}),
-        ...(ackInline ? { ackInline: true } : {}),
-        source: {
-          kind: "load",
-          prdId,
-          // The finding this PRD came from, so the panel's Evidence tab has
-          // something to load (it reads `content.prdMeta` and fetches by
-          // (briefId, insightIndex) — with null meta that tab is simply dead,
-          // while the SAME document opened from Artifacts worked).
-          //
-          // Only when the backend says the pair is real: a chat / ideation /
-          // uploaded PRD carries insight_index 0 as a storage sentinel, and
-          // passing that would load the brief's first finding under a document
-          // that has nothing to do with it. Those PRDs genuinely have no
-          // insight, so null is the correct answer for them, not a limitation.
-          meta:
-            candidate.brief_anchored &&
-            candidate.brief_id != null &&
-            candidate.insight_index != null
-              ? { briefId: candidate.brief_id, insightIndex: candidate.insight_index }
-              : null,
+          resumeConversation: ({ conversationId, conversationTitle, prdId }) => {
+            // The PRD's own THREAD outranks a panel-beside-this-chat open (owner
+            // decision, 2026-08-14): when the conversation that produced the
+            // document survives, "open the PRD" means going back to that chat —
+            // history restored, PRD panel over it — exactly like clicking the same
+            // row on the Artifacts screen. Storage unavailable → false, and the
+            // decision falls through to the panel-only open.
+            try {
+              localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+                dbId: conversationId,
+                title: conversationTitle,
+                fallbackTurns: [],
+                prdId,
+              }))
+              checkResume()
+              return true
+            } catch {
+              return false
+            }
+          },
+          openPrd: (c, prdId, sq) => {
+            // Reuse BY PRD ID, never by title. A tab already holding this document
+            // wins over the tab the user is typing in, so opening a PRD that is
+            // already open focuses it instead of spawning a second tab for the same
+            // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
+            // this path would otherwise reintroduce from a different entry point (the
+            // titles here are real document titles, so a title match would look like
+            // it works right up until two documents share a name).
+            const holder = tabsRef.current.find(
+              (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
+            )
+            // Otherwise: the CHAT the user is in, so the panel opens beside the
+            // conversation that asked for it (the stated requirement) rather than in
+            // a tab of its own. `reusableActiveTab` declines a tab already bound to a
+            // different PRD/insight, which must not be repointed.
+            const inTab = holder ?? reusableActiveTab()
+            // Is the document ALREADY cached on the tab we're about to open into? Then
+            // openPrdInTab returns straight from that cache and never reaches the
+            // async block, so the acknowledgment has to ride the seed turn instead of
+            // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
+            // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
+            // returns tabs with no PRD by definition.
+            const ackInline = holder?.prd?.prd_id === prdId
+            const req: LocalPrdTabRequest = {
+              title: c.title ? `PRD · ${c.title}` : "PRD",
+              ...(sq ? { seedQuery: sq } : {}),
+              ...(inTab ? { inTabId: inTab.id } : {}),
+              ...(ackInline ? { ackInline: true } : {}),
+              source: {
+                kind: "load",
+                prdId,
+                // The finding this PRD came from, so the panel's Evidence tab has
+                // something to load (it reads `content.prdMeta` and fetches by
+                // (briefId, insightIndex) — with null meta that tab is simply dead,
+                // while the SAME document opened from Artifacts worked).
+                //
+                // Only when the backend says the pair is real: a chat / ideation /
+                // uploaded PRD carries insight_index 0 as a storage sentinel, and
+                // passing that would load the brief's first finding under a document
+                // that has nothing to do with it. Those PRDs genuinely have no
+                // insight, so null is the correct answer for them, not a limitation.
+                meta:
+                  c.brief_anchored &&
+                  c.brief_id != null &&
+                  c.insight_index != null
+                    ? { briefId: c.brief_id, insightIndex: c.insight_index }
+                    : null,
+              },
+            }
+            const tabId = openPrdInTab(req)
+            seedCommandTurn(req, tabId)
+            return true
+          },
         },
-      }
-      const tabId = openPrdInTab(req)
-      seedCommandTurn(req, tabId)
-      return true
-    },
+        seedQuery,
+      ),
     [openPrdInTab, reusableActiveTab, seedCommandTurn, checkResume],
   )
 
