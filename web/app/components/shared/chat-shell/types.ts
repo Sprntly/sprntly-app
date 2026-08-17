@@ -304,6 +304,11 @@ export interface ChatSurfaceDescriptor {
      *  `escToStop`. Returning `false`/undefined lets the shell's own
      *  Enter-to-send / Esc handling run (an adversarial review). */
     onKeyDownCapture?: (e: KeyboardEvent) => boolean
+    /** Declarative composer-input seam (typed-`/` palette): the shell calls
+     *  this with the live draft value on every input, alongside the imperative
+     *  `draftApiRef` mention seam. The shared `useChatComposerController`
+     *  supplies it to open/filter the skill palette on a leading `/`. */
+    onInput?: (value: string) => void
     minChars?: number
     hint?: ReactNode
     /** ADDITIVE: the un-stubbed project-composer feature bag. When PRESENT the

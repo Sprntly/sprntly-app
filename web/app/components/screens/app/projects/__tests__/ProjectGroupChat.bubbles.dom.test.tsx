@@ -82,7 +82,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     expect(screen.queryByTestId("group-chat-scroll")).toBeNull()
   })
 
-  it("test_group_multiparty_lanes_light_fill_agent_bubbleless_testids — self=me/other=peer both carry the LIGHT gcBubbleOther fill (self distinguished by alignment, not colour); the agent turn is bubble-less via bc-agent-body; gc-msg-* testids + AGENT badge preserved", async () => {
+  it("test_group_multiparty_lanes_shared_fill_agent_bubbleless_testids — self=me/other=peer both draw from the SHARED bc-user-bubble skin (self distinguished by alignment, not colour); the agent turn is bubble-less via bc-agent-body; gc-msg-* testids + AGENT badge preserved", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
@@ -90,19 +90,21 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
-    // Own turn: the row-reverse `gcMsgMe` lane, bubble carries the SAME light
-    // `gcBubbleOther` fill as peers (NAMED INTENDED CHANGE: main/private
-    // parity — self is distinguished by right-alignment, not a dark
-    // colour-coded bubble).
+    // Own turn: the row-reverse `gcMsgMe` lane, bubble draws from the SHARED
+    // `bc-user-bubble` skin (NAMED INTENDED CHANGE: main/private parity — the
+    // retired `gcBubble*` parallel system is gone; self is distinguished by
+    // right-alignment, not a dark colour-coded bubble).
     const me = await screen.findByTestId("gc-msg-me")
     expect(me.className).toMatch(/gcMsgMe/)
-    expect(within(me).getByText("my reply").closest("[class*='gcBubbleOther']")).toBeTruthy()
-    expect(me.querySelector("[class*='gcBubbleMe']")).toBeNull()
+    expect(within(me).getByText("my reply").closest(".bc-user-bubble")).toBeTruthy()
+    expect(me.querySelector("[class*='gcBubble']")).toBeNull()
 
-    // Peer turn: the left `gcMsgOther` lane, second fill `gcBubbleOther`.
+    // Peer turn: the left `gcMsgOther` lane, bubble ALSO the shared
+    // `bc-user-bubble` skin (+ the `otherBubble` left-lane geometry reset).
     const other = screen.getByTestId("gc-msg-other")
     expect(other.className).toMatch(/gcMsgOther/)
-    expect(within(other).getByText("hey").closest("[class*='gcBubbleOther']")).toBeTruthy()
+    expect(within(other).getByText("hey").closest(".bc-user-bubble")).toBeTruthy()
+    expect(other.querySelector("[class*='gcBubble']")).toBeNull()
 
     // Agent turn: its own `gcMsgAgent` lane, bubble-LESS (renders through
     // `bc-agent-body`, matching main — no invented green agent bubble).
@@ -111,6 +113,59 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     expect(within(agent).getByText("Product Coworker")).toBeTruthy()
     expect(agent.querySelector(".bc-agent-body")).toBeTruthy()
     expect(agent.querySelector("[class*='gcBubble']")).toBeNull()
+  })
+
+  it("test_group_bubbles_use_shared_bc_user_bubble_class — every group message bubble node carries bc-user-bubble; none carries a gcBubble* class (AC2)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
+      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const me = await screen.findByTestId("gc-msg-me")
+    const other = screen.getByTestId("gc-msg-other")
+    expect(within(me).getByText("my reply").closest(".bc-user-bubble")).toBeTruthy()
+    expect(within(other).getByText("hey").closest(".bc-user-bubble")).toBeTruthy()
+    // The retired parallel `gcBubble*` system is gone from the whole DOM.
+    expect(document.querySelector("[class*='gcBubble']")).toBeNull()
+  })
+
+  it("test_group_peer_bubble_keeps_multiparty_attribution_header — a peer turn renders avatar + otherName + role/time header (AC3)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "hey" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const other = await screen.findByTestId("gc-msg-other")
+    // The native multi-party attribution header is preserved.
+    expect(other.querySelector("[class*='otherRow']")).toBeTruthy()
+    expect(other.querySelector(".bc-avatar")).toBeTruthy()
+    expect(other.querySelector("[class*='otherName']")?.textContent).toContain("Shristi")
+    // The role decoration rides the attribution header.
+    expect(other.textContent).toContain("Design")
+  })
+
+  it("test_group_peer_bubble_left_aligned_self_right_aligned — peer bubble carries the otherBubble reset, self bubble does not (AC4)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
+      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const me = await screen.findByTestId("gc-msg-me")
+    const other = screen.getByTestId("gc-msg-other")
+    const peerBubble = within(other).getByText("hey").closest(".bc-user-bubble")!
+    const selfBubble = within(me).getByText("my reply").closest(".bc-user-bubble")!
+    // Peer gets the left-lane geometry reset; self keeps `bc-user-bubble`'s
+    // right-alignment (both draw fill from the ONE shared rule).
+    expect(peerBubble.className).toMatch(/otherBubble/)
+    expect(selfBubble.className).not.toMatch(/otherBubble/)
+  })
+
+  it("test_group_agent_turn_has_no_timestamp — an agent turn shows no agentTime node, matching main (AC5)", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null, content: "agent reply" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const agent = await screen.findByTestId("gc-msg-agent")
+    expect(agent.querySelector("[class*='agentTime']")).toBeNull()
   })
 
   it("test_group_own_message_mention_chip_has_contrast_class — an own-message @-mention chip carries the gc-mention-chip marker inside the LIGHT own bubble; the base blue --info chip styling holds AA contrast on the light fill", async () => {
@@ -123,11 +178,11 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     expect(chip.textContent).toContain("@David")
     // The stable GLOBAL marker class override selectors can target.
     expect(chip.classList.contains("gc-mention-chip")).toBe(true)
-    // The chip sits inside the own bubble — which now wears the SAME light
-    // `gcBubbleOther` fill as peers (self is alignment-distinguished, not
-    // colour-coded), so the dark-bubble AA override no longer applies to it.
-    expect(chip.closest("[class*='gcBubbleOther']")).toBeTruthy()
-    expect(chip.closest("[class*='gcBubbleMe']")).toBeNull()
+    // The chip sits inside the own bubble — which now wears the SHARED
+    // `bc-user-bubble` skin (self is alignment-distinguished, not colour-coded),
+    // so the retired dark-bubble AA override no longer applies to it.
+    expect(chip.closest(".bc-user-bubble")).toBeTruthy()
+    expect(chip.closest("[class*='gcBubble']")).toBeNull()
 
     // On the light fill the chip keeps the base blue `--info` pill styling
     // (mention-picker.module.css) — the same treatment peer bubbles get.

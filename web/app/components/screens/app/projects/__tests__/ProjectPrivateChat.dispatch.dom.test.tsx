@@ -59,6 +59,26 @@ vi.mock("../../../../../lib/runPrdGeneration", () => ({
   runPrdGenerationFromTask: (...a: unknown[]) => runPrdGenerationFromTaskMock(...a),
 }))
 
+// The skill palette load (composer controller) — mocked so the typed-`/`
+// pinning path has a real skill to pin.
+const skillsMock = vi.fn((..._a: unknown[]) =>
+  Promise.resolve({
+    skills: [{ id: "s1", label: "Competitive intel", trigger: "/competitive", description: "compare us", category: "Custom" }],
+  }),
+)
+// The attachment best-effort upload — MOCKED so `buildSendCommand`'s
+// `resolveAttachmentRefs` never touches the real `fetch` at send time. Left
+// unmocked, the structured-attachment test relied on the real `attachmentsApi.
+// upload` (→ `api.post` → global `fetch`) rejecting FAST in isolation; in the
+// full suite a sibling lib test (e.g. app/lib/__tests__/*) that stubs
+// `global.fetch` without restoring it can make that upload hang, so the send's
+// `buildSendCommand` never resolves, `runAskGeneration` is never reached, and
+// the spy sees 0 calls. Mocking the leaf makes the attachment path hermetic
+// regardless of ambient fetch state.
+const uploadMock = vi.fn((..._a: unknown[]) =>
+  Promise.resolve({ key: "K1", name: "notes.txt", mime: "text/plain", size: 1 }),
+)
+
 vi.mock("../../../../../lib/poll", () => ({
   sleepUntilNextPoll: () => Promise.resolve(),
 }))
@@ -67,6 +87,14 @@ vi.mock("../../../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/api")>("../../../../../lib/api")
   return {
     ...actual,
+    askApi: {
+      ...actual.askApi,
+      skills: (...a: unknown[]) => skillsMock(...a),
+    },
+    attachmentsApi: {
+      ...actual.attachmentsApi,
+      upload: (...a: unknown[]) => uploadMock(...a),
+    },
     projectsApi: {
       ...actual.projectsApi,
       individualChat: (...a: unknown[]) => individualChatMock(...(a as [number])),
@@ -128,6 +156,10 @@ beforeEach(() => {
   getJobMock.mockReset()
   runPrdGenerationFromTaskMock.mockReset()
   persistIndividualTurnsMock.mockReset().mockResolvedValue({ user_turn_id: 1, assistant_turn_id: 2 })
+  skillsMock.mockReset().mockResolvedValue({
+    skills: [{ id: "s1", label: "Competitive intel", trigger: "/competitive", description: "compare us", category: "Custom" }],
+  })
+  uploadMock.mockReset().mockResolvedValue({ key: "K1", name: "notes.txt", mime: "text/plain", size: 1 })
 })
 afterEach(() => cleanup())
 
@@ -402,5 +434,81 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     expect(resolveIntentMock).toHaveBeenCalledWith(
       202, "what's the status?", { conversationId: 9001 },
     )
+  })
+
+  it("test_private_send_posts_structured_pinned_skill — a pinned-skill send posts pinned_skill:<id> and a PLAIN question, no /trigger splice (AC11)", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "question", source: "llm", prd_id: null, prd_title: null,
+    })
+    runAskGenerationMock.mockResolvedValue({
+      answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
+    })
+
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    // Open the palette by typing `/`, then pin the loaded skill.
+    await act(async () => { fireEvent.change(textarea, { target: { value: "/comp" } }) })
+    await waitFor(() => expect(document.querySelector(".chat-slash-item")).toBeTruthy())
+    await act(async () => { fireEvent.mouseDown(document.querySelector(".chat-slash-item")!) })
+    await waitFor(() => expect(screen.getByTestId("skill-chip")).toBeTruthy())
+    // Type the real message and send.
+    await act(async () => { fireEvent.change(textarea, { target: { value: "compare us to Acme" } }) })
+    await act(async () => { fireEvent.click(screen.getByLabelText("Send")) })
+
+    await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(1))
+    const [q, company, tab, opts] = runAskGenerationMock.mock.calls[0] as [string, string, string, Record<string, unknown>]
+    // PLAIN question — no "/competitive " prefix spliced in.
+    expect(q).toBe("compare us to Acme")
+    expect(company).toBe("acme")
+    expect(tab).toBe("project-individual-202")
+    expect(opts).toMatchObject({ pinned_skill: "s1", project_id: 202 })
+  })
+
+  it("test_private_send_posts_structured_attachments — an attachment send posts attachments[] and a question with no [Attached files] block (AC12)", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "question", source: "llm", prd_id: null, prd_title: null,
+    })
+    runAskGenerationMock.mockResolvedValue({
+      answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
+    })
+
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File(["the attached body text"], "notes.txt", { type: "text/plain" })
+    await act(async () => { fireEvent.change(fileInput, { target: { files: [file] } }) })
+    // The chip appears once the client-side text read resolves.
+    await waitFor(() => expect(screen.getByTestId("attachment-chip")).toBeTruthy())
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => { fireEvent.change(textarea, { target: { value: "summarize the notes" } }) })
+    await act(async () => { fireEvent.click(screen.getByLabelText("Send")) })
+
+    await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(1))
+    const [q, , , opts] = runAskGenerationMock.mock.calls[0] as [string, string, string, { attachments?: { name: string; content: string }[] }]
+    // Structured attachments ride the opts; the question is the plain text only.
+    expect(q).toBe("summarize the notes")
+    expect(q).not.toContain("[Attached files]")
+    expect(opts.attachments).toHaveLength(1)
+    expect(opts.attachments![0]).toMatchObject({ name: "notes.txt", content: "the attached body text" })
+  })
+
+  it("test_private_send_without_skill_or_attachment_unchanged — a plain send posts neither structured field (regression guard)", async () => {
+    resolveIntentMock.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "question", source: "llm", prd_id: null, prd_title: null,
+    })
+    runAskGenerationMock.mockResolvedValue({
+      answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
+    })
+
+    await sendMessage("what did we land on?")
+
+    await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(1))
+    const [q, , , opts] = runAskGenerationMock.mock.calls[0] as [string, string, string, Record<string, unknown>]
+    expect(q).toBe("what did we land on?")
+    expect(opts.pinned_skill).toBeUndefined()
+    expect(opts.attachments).toBeUndefined()
   })
 })

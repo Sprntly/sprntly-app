@@ -33,6 +33,11 @@ const resumeAskGenerationMock = vi.fn()
 const getPendingAskMock = vi.fn(() => null as { id: string } | null)
 const individualChatMock = vi.fn()
 const individualTurnsMock = vi.fn()
+const chatSuggestionsNextMock = vi.fn((..._a: unknown[]) => Promise.resolve({ suggestions: [] as string[] }))
+// Mutable so a test can supply a caller profile (name/initials derivation)
+// without a per-file re-mock; default null keeps every existing test byte-
+// identical (callerName falls through to null, as before).
+let workspaceProfile: { first_name?: string; last_name?: string } | null = null
 
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
@@ -55,6 +60,10 @@ vi.mock("../../../../../lib/api", async () => {
       individualChat: (...a: unknown[]) => individualChatMock(...a),
       individualTurns: (...a: unknown[]) => individualTurnsMock(...a),
     },
+    chatSuggestionsApi: {
+      ...actual.chatSuggestionsApi,
+      next: (...a: unknown[]) => chatSuggestionsNextMock(...(a as [number, { prdId?: number | null }])),
+    },
   }
 })
 
@@ -70,7 +79,7 @@ vi.mock("../../../../../context/CompanyContext", () => ({
 // byte-identical: plain `/v1/ask`-only sends).
 vi.mock("../../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => ({
-    loading: false, profile: null,
+    loading: false, profile: workspaceProfile,
     workspace: { feature_flags: { chat_intent_envelope: false } },
     refresh: async () => {},
   }),
@@ -107,6 +116,9 @@ beforeEach(() => {
   individualChatMock.mockImplementation((id: number) => Promise.resolve(individualChatRecord(9001, id)))
   individualTurnsMock.mockReset()
   individualTurnsMock.mockResolvedValue([])
+  chatSuggestionsNextMock.mockReset()
+  chatSuggestionsNextMock.mockResolvedValue({ suggestions: [] })
+  workspaceProfile = null
 })
 afterEach(() => cleanup())
 
@@ -212,6 +224,104 @@ describe("ProjectPrivateChat — empty state (AC9)", () => {
     render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
     expect(screen.getByTestId("individual-chat-empty")).toBeTruthy()
+  })
+})
+
+describe("ProjectPrivateChat — user head name + avatar via shared props (AC6/AC7)", () => {
+  it("test_private_user_head_shows_first_name_only — the user head shows the caller's FIRST name only, not the full name", async () => {
+    workspaceProfile = { first_name: "Babajide", last_name: "Okusanya" }
+    individualTurnsMock.mockResolvedValue([
+      { id: 1, role: "user", content: "what did we decide?", created_at: "2026-08-10T10:00:00Z" },
+    ])
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await waitFor(() => expect(screen.getByTestId("ic-history-you")).toBeTruthy())
+    const name = document.querySelector(".bc-user-name")
+    expect(name?.textContent).toBe("Babajide")
+    expect(document.querySelector(".bc-user-name")?.textContent).not.toContain("Okusanya")
+  })
+
+  it("test_private_user_avatar_shows_initials — the avatar chip shows the caller's initials (BO), same rule as main", async () => {
+    workspaceProfile = { first_name: "Babajide", last_name: "Okusanya" }
+    individualTurnsMock.mockResolvedValue([
+      { id: 1, role: "user", content: "what did we decide?", created_at: "2026-08-10T10:00:00Z" },
+    ])
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await waitFor(() => expect(screen.getByTestId("ic-history-you")).toBeTruthy())
+    // The user-head avatar carries the "BO" monogram (not empty).
+    const avatars = [...document.querySelectorAll(".bc-user-head .bc-avatar")]
+    expect(avatars.some((a) => a.textContent === "BO")).toBe(true)
+  })
+
+  it("test_private_agent_turn_has_no_timestamp — a private agent turn shows no agentTime node, matching main (AC5)", async () => {
+    individualTurnsMock.mockResolvedValue([
+      { id: 2, role: "assistant", content: "Flat $49/mo.", created_at: "2026-08-10T10:01:00Z" },
+    ])
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    const agent = await screen.findByTestId("ic-history-agent")
+    expect(agent.querySelector("[class*='agentTime']")).toBeNull()
+  })
+})
+
+describe("ProjectPrivateChat — next-prompt pills in the dock (AC8/AC9)", () => {
+  it("test_private_pills_render_in_dock_after_settle — pills render after a turn settles with non-empty suggestions; absent when suggestions are []", async () => {
+    chatSuggestionsNextMock.mockResolvedValue({ suggestions: ["Ask about pricing", "Review the brief"] })
+    runAskGenerationMock.mockResolvedValue(reply("here's the answer"))
+
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    // Before any settle: no strip (no empty container).
+    expect(screen.queryByTestId("next-prompt-suggestions")).toBeNull()
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "what did we decide?" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    const strip = await screen.findByTestId("next-prompt-suggestions")
+    expect(strip.textContent).toContain("Ask about pricing")
+    expect(strip.textContent).toContain("Review the brief")
+  })
+
+  it("test_private_pills_absent_when_empty — an empty suggestions result renders no strip", async () => {
+    chatSuggestionsNextMock.mockResolvedValue({ suggestions: [] })
+    runAskGenerationMock.mockResolvedValue(reply("here's the answer"))
+
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "what did we decide?" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
+    // Empty suggestions → nothing rendered (the negative contract).
+    expect(screen.queryByTestId("next-prompt-suggestions")).toBeNull()
+  })
+
+  it("test_private_pills_call_shared_chat_suggestions_endpoint — the adapter calls chatSuggestionsApi.next(convId, { prdId: null }) (AC9)", async () => {
+    chatSuggestionsNextMock.mockResolvedValue({ suggestions: ["Ask about pricing"] })
+    runAskGenerationMock.mockResolvedValue(reply("answer"))
+
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
+
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "what did we decide?" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Send"))
+    })
+
+    await waitFor(() => expect(chatSuggestionsNextMock).toHaveBeenCalled())
+    expect(chatSuggestionsNextMock).toHaveBeenCalledWith(9001, { prdId: null })
   })
 })
 

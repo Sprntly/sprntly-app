@@ -24,7 +24,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
-import { spliceSkill } from "../../../shared/chatComposerController"
+import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
 import {
   clarifyAnswersText,
   clarifyQuestionsText,
@@ -52,6 +52,7 @@ import { runPrdGenerationFromTask } from "../../../../lib/runPrdGeneration"
 import { sleepUntilNextPoll } from "../../../../lib/poll"
 import {
   askApi,
+  chatSuggestionsApi,
   prdApi,
   projectsApi,
   storiesApi,
@@ -69,6 +70,18 @@ import {
  *  named re-export so existing importers of the engine's `MORE_MARKER` keep
  *  working while the string itself is defined exactly once. */
 export { MORE_MARKER } from "../../../shared/chat-shell/types"
+
+/** The private next-prompt fetch: the SHARED `chatSuggestionsApi.next` endpoint
+ *  keyed by the resolved conversation id (`prdId` is always null for a private
+ *  project chat). A module-level const so the shared `useNextPrompts` hook's
+ *  fetch-after-settle callback keeps a stable identity across renders — the same
+ *  pattern main uses (`MAIN_NEXT_PROMPTS_ADAPTER`). Consuming this shared hook
+ *  (not a bespoke fetch/state) is what keeps private off the `nextPromptForks`
+ *  guard arm. */
+const PRIVATE_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
+  fetchSuggestions: (conversationId, opts) =>
+    chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
+}
 
 /** Merge two persisted-turn lists, dedup by id, and re-sort by the persisted
  *  clock (tie-broken by id) — `loaded` is the authority; any turn present only
@@ -180,6 +193,10 @@ export type UseProjectPrivateThread = {
   emitDelegation: (delegationId: number, event: string, note?: string) => void
   /** The caller's display name for the named user head, best-effort. */
   callerName: string | null
+  /** The shared next-prompt pill suggestions for this private conversation,
+   *  keyed to the thread's stable id — empty until a turn settles with
+   *  suggestions. The host renders them via `NextPromptSuggestions`. */
+  pillSuggestions: string[]
 }
 
 export type UseProjectPrivateThreadOpts = {
@@ -221,6 +238,18 @@ export function useProjectPrivateThread(
     }
     return null
   })()
+  // First-name + monogram, derived from `callerName` by the SAME rule main
+  // chat uses for its own head: the user head shows "Babajide" (not "Babajide
+  // Okusanya") and the avatar chip shows "BO". Fed onto the self turns'
+  // `author` below.
+  const callerFirstName = callerName?.split(/\s+/)[0] ?? null
+  const callerInitials = callerName
+    ? callerName
+        .split(/\s+/)
+        .slice(0, 2)
+        .map((w) => w[0]?.toUpperCase() ?? "")
+        .join("")
+    : null
 
   const [sessionTurns, setSessionTurns] = useState<SessionTurn[]>([])
   // A live mirror of `sessionTurns`, read synchronously inside `submitClarify`/
@@ -236,6 +265,19 @@ export function useProjectPrivateThread(
 
   const stoppedRef = useRef(false)
   const tabId = useMemo(() => `project-individual-${projectId}`, [projectId])
+
+  // Next-prompt pills: consume the SHARED `useNextPrompts` (never a bespoke
+  // fetch/state), keyed by this private thread's stable `tabId`. Pills settle
+  // AFTER an answer lands and are retired at send time. `mountedRef` is the
+  // late-arrival guard the shared hook re-checks before publishing chips.
+  const nextPrompts = useNextPrompts(PRIVATE_NEXT_PROMPTS_ADAPTER)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   // The durable per-(project, caller) conversation id, get-or-created lazily
   // on first send and cached so every later send on this mount reuses the same
@@ -510,20 +552,13 @@ export function useProjectPrivateThread(
     // context onto `/v1/ask` — the splice/extract is NOT re-implemented here.
     (input: string | SendCommand) => {
       const cmd = typeof input === "string" ? null : input
-      // The ridden query (skill splice) — display + classify + edit-instruction
-      // all use this; attachments ride ONLY the `/v1/ask` answer path below.
-      const question = (typeof input === "string" ? input : spliceSkill(input.pinnedSkill, input.text)).trim()
+      // The PLAIN typed text — display + classify + edit-instruction all use it.
+      // The skill is no longer spliced inline: it rides the `/v1/ask` answer
+      // path as the structured `pinned_skill` field; attachments ride it as the
+      // structured `attachments[]` array. Both are single-sourced from the
+      // shared `SendCommand` the composer controller built.
+      const question = (typeof input === "string" ? input : input.text).trim()
       if (question.length < DRAFT_MIN_CHARS || busy) return
-      // Extracted attachment context (scope boundary: the answer path only — the
-      // edit/generate/tickets/pick classify branches ignore attachments).
-      const attachmentCtx =
-        cmd?.attachments?.length
-          ? `\n\n[Attached files]\n${cmd.attachments
-              .map((a) => `--- ${a.name} ---\n${a.content}`)
-              .join("\n\n")
-              .slice(0, 100000)}`
-          : ""
-      const askQuestion = `${question}${attachmentCtx}`
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`
       // Minted ONCE per send and reused as this turn's `id` (the shell's
       // React key) — the SAME value threads onto every server persist call
@@ -536,6 +571,23 @@ export function useProjectPrivateThread(
       ])
       setBusy(true)
       stoppedRef.current = false
+      // Any prior turn's suggestion chips are stale the instant a new send fires.
+      nextPrompts.retire(tabId)
+
+      // Fetch-after-settle for the next-prompt pills: fired once an answer
+      // lands (never awaited by the turn). Resolves the conversation id, then
+      // hands the SHARED hook a fetch it publishes only if still mounted and not
+      // stopped (the late-arrival guard). Every fault degrades to no chips.
+      const firePills = () => {
+        void ensureConversationId().then((conversationId) => {
+          if (conversationId == null) return
+          nextPrompts.onSettled(tabId, conversationId, {
+            prdId: null,
+            ready: Promise.resolve(),
+            shouldApply: () => mountedRef.current && !stoppedRef.current,
+          })
+        })
+      }
 
       // The pre-fold send: `/v1/ask` with `project_id`, plus the
       // `answer`/low-confidence/unknown/`generate_prototype` fall-through AND
@@ -543,9 +595,14 @@ export function useProjectPrivateThread(
       const runAsk = () =>
         ensureConversationId()
           .then((conversationId) =>
-            runAskGeneration(askQuestion, activeCompany, tabId, {
+            runAskGeneration(question, activeCompany, tabId, {
               project_id: Number(projectId),
               conversation_id: conversationId,
+              // The structured skill + attachments ride the answer path —
+              // no inline splice / `[Attached files]` concat. Scope boundary:
+              // the classify-dispatch branches take neither.
+              pinned_skill: cmd?.pinnedSkill?.id ?? undefined,
+              attachments: cmd?.attachments?.length ? cmd.attachments : undefined,
               // Server persists both sides (§C); no client persist call.
               client_message_id: clientMessageId,
               isStopped: () => stoppedRef.current,
@@ -578,6 +635,7 @@ export function useProjectPrivateThread(
                   : t,
               ),
             )
+            firePills()
           })
           .catch((err: unknown) => {
             if (err instanceof AskStoppedError) {
@@ -621,6 +679,7 @@ export function useProjectPrivateThread(
         if (stoppedRef.current) return
         setSessionTurns((prev) => prev.map((t) => (t.id === id ? { ...t, reply, pending: false, createdAt: Date.now() } : t)))
         setBusy(false)
+        firePills()
       }
       const settleError = (message: string) => {
         if (stoppedRef.current) return
@@ -894,7 +953,7 @@ export function useProjectPrivateThread(
     },
     [
       busy, activeCompany, tabId, projectId, ensureConversationId, envelopeDispatchEnabled,
-      persistTurnPair, opts?.onArtifactsChanged,
+      persistTurnPair, opts?.onArtifactsChanged, nextPrompts.retire, nextPrompts.onSettled,
     ],
   )
 
@@ -1120,7 +1179,7 @@ export function useProjectPrivateThread(
       }
       return {
         id: `history-${h.id}`,
-        author: { kind: "self", name: callerName ?? undefined },
+        author: { kind: "self", name: callerFirstName ?? undefined, initials: callerInitials },
         content: h.content,
         createdAt,
       }
@@ -1144,7 +1203,7 @@ export function useProjectPrivateThread(
       .filter((t) => !persistedClientMessageIds.has(t.clientMessageId))
       .map((t) => ({
         id: t.id,
-        author: { kind: "self", name: callerName ?? undefined },
+        author: { kind: "self", name: callerFirstName ?? undefined, initials: callerInitials },
         content: t.question,
         // `citations` is STRIPPED before the reply reaches the render ladder:
         // the engine's citations carry raw retrieval-source keys (storage
@@ -1178,10 +1237,13 @@ export function useProjectPrivateThread(
       }))
 
     return [...historyTurns, ...session]
-  }, [history, sessionTurns, delegationsByTurn, callerName])
+  }, [history, sessionTurns, delegationsByTurn, callerFirstName, callerInitials])
 
   return {
     turns, send, stop, pickOption, submitClarify, skipClarify, confirmMutation, cancelMutation,
     busy, resuming, emitDelegation, callerName,
+    // The shared next-prompt pills, keyed to this private conversation —
+    // the host renders them via `NextPromptSuggestions` in the composer dock.
+    pillSuggestions: nextPrompts.suggestionsFor(tabId),
   }
 }

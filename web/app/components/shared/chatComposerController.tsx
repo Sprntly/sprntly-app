@@ -27,6 +27,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ChangeEvent,
@@ -164,6 +165,10 @@ export interface ChatComposerController {
   /** `descriptor.composer.onKeyDownCapture` — consumes arrow/enter/escape while
    *  the palette is open so they don't reach Enter-to-send. */
   onKeyDownCapture: (e: KeyboardEvent) => boolean
+  /** `descriptor.composer.onInput` — the typed-`/` seam: opens+filters the
+   *  skill palette on a leading `/`, closes it otherwise. No-op on a surface
+   *  with skills disabled. */
+  onInput: (value: string) => void
   /** `descriptor.send.onSubmit` — reads the live feature state, builds the
    *  `SendCommand`, hands it to `onCommand`, then clears its own state. */
   submit: (draftText: string) => void
@@ -179,15 +184,31 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashActive, setSlashActive] = useState(0)
+  // The typed-`/` palette filter (the text after the leading `/`) — mirrors
+  // main's `slashFilter` (ChatScreen.tsx). Empty string = show all skills.
+  const [slashFilter, setSlashFilter] = useState("")
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   // Live mirrors so `submit`/`onKeyDownCapture` read current state without being
   // re-created (and re-wired) on every keystroke.
+  // The palette skills filtered by the typed-`/` query — mirrors main's
+  // `filteredSkills` (ChatScreen.tsx). Keyboard nav + Enter-select operate on
+  // THIS list (via the ref) so a filtered palette pins the row you see.
+  const filteredSkills = useMemo(() => {
+    if (!slashFilter) return skills
+    return skills.filter(
+      (s) =>
+        s.trigger.toLowerCase().includes("/" + slashFilter) ||
+        s.label.toLowerCase().includes(slashFilter) ||
+        s.description.toLowerCase().includes(slashFilter),
+    )
+  }, [skills, slashFilter])
+
   const attachmentsRef = useRef(attachments); attachmentsRef.current = attachments
   const pinnedSkillRef = useRef(pinnedSkill); pinnedSkillRef.current = pinnedSkill
   const slashOpenRef = useRef(slashOpen); slashOpenRef.current = slashOpen
   const slashActiveRef = useRef(slashActive); slashActiveRef.current = slashActive
-  const skillsRef = useRef(skills); skillsRef.current = skills
+  const filteredSkillsRef = useRef(filteredSkills); filteredSkillsRef.current = filteredSkills
   const scopeRef = useRef(config.scope); scopeRef.current = config.scope
   const onCommandRef = useRef(onCommand); onCommandRef.current = onCommand
 
@@ -219,14 +240,33 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
   const pinSkill = useCallback((skill: SkillInfo) => {
     setPinnedSkill({ id: skill.id, label: skill.label, trigger: skill.trigger })
     setSlashOpen(false)
+    setSlashFilter("")
   }, [])
+
+  // Typed-`/` palette control: a leading `/` opens+filters the SAME
+  // `SlashSkillMenu` + `pinSkill` the `+`-menu already uses (no second palette
+  // or detection path); any other draft closes it. Mirrors main's
+  // `handleComposerInput` (ChatScreen.tsx) but reuses THIS controller's state.
+  const onInput = useCallback(
+    (value: string) => {
+      if (!skillsEnabled) return
+      if (value.startsWith("/")) {
+        setSlashFilter(value.slice(1).toLowerCase())
+        setSlashActive(0)
+        setSlashOpen(true)
+      } else {
+        setSlashOpen(false)
+      }
+    },
+    [skillsEnabled],
+  )
 
   const onKeyDownCapture = useCallback((e: KeyboardEvent): boolean => {
     if (!slashOpenRef.current) return false
-    const count = skillsRef.current.length
+    const count = filteredSkillsRef.current.length
     if (e.key === "ArrowDown") { e.preventDefault(); setSlashActive((i) => (count ? (i + 1) % count : 0)); return true }
     if (e.key === "ArrowUp") { e.preventDefault(); setSlashActive((i) => (count ? (i - 1 + count) % count : 0)); return true }
-    if (e.key === "Enter") { e.preventDefault(); const s = skillsRef.current[slashActiveRef.current]; if (s) pinSkill(s); return true }
+    if (e.key === "Enter") { e.preventDefault(); const s = filteredSkillsRef.current[slashActiveRef.current]; if (s) pinSkill(s); return true }
     if (e.key === "Escape") { e.preventDefault(); setSlashOpen(false); return true }
     return false
   }, [pinSkill])
@@ -245,12 +285,13 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
     setAttachments([])
     setMenuOpen(false)
     setSlashOpen(false)
+    setSlashFilter("")
   }, [])
 
   const slashMenu: ReactNode =
     slashOpen && skillsEnabled ? (
       <SlashSkillMenu
-        skills={skills}
+        skills={filteredSkills}
         activeIndex={slashActive}
         onSelect={pinSkill}
         onHover={setSlashActive}
@@ -277,14 +318,15 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
           onMenuSelect: (i: number) => {
             setMenuOpen(false)
             if (i === 0 && attachmentsEnabled) { fileInputRef.current?.click(); return }
-            if (i === 1 && skillsEnabled) { setSlashActive(0); setSlashOpen(true) }
+            // Browse-skills opens the SAME palette typed-`/` uses, unfiltered.
+            if (i === 1 && skillsEnabled) { setSlashFilter(""); setSlashActive(0); setSlashOpen(true) }
           },
           onCloseMenu: () => setMenuOpen(false),
           fileInputRef: attachmentsEnabled ? fileInputRef : undefined,
         }
       : undefined
 
-  return { features, slashMenu, onKeyDownCapture, submit }
+  return { features, slashMenu, onKeyDownCapture, onInput, submit }
 }
 
 // ── FE agent run-status consume (the honest failure UI) ──────────────────────

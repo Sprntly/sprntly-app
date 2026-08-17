@@ -97,7 +97,12 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       agentName: AGENT_NAME,
       agentBadge: AGENT_BADGE,
       multiParty: true,
-      timestamps: "fromTurn",
+      // "none" (was "fromTurn") — the shared control main uses, so the AGENT
+      // turn shows no timestamp, matching main. The multi-party ATTRIBUTION
+      // header's peer time (a `gcTime` decoration in `userHeadExtra`) is
+      // independent of this and stays — it is the preserved attribution
+      // affordance, not the agent timestamp.
+      timestamps: "none",
       renderUserBody: (turn: ShellTurn) => <MentionBubble content={turn.content ?? ""} />,
       // NO `renderAgentBody` override: agent turns render through
       // `ChatBubble`'s native reply ladder (the engine feeds `ShellTurn.reply`
@@ -133,6 +138,10 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       // consumed the key (arrow nav / Enter-selects / Escape-closes) —
       // mention picker first, then the skill palette.
       onKeyDownCapture: (e) => mentions.handleKeys(e) || composerCtl.onKeyDownCapture(e),
+      // Typed-`/` palette: the shared controller's declarative input seam,
+      // coexisting with the imperative `@`-mention detection (draftApiRef).
+      // Group skills are armed by a prior wave; if ever re-gated it no-ops.
+      onInput: composerCtl.onInput,
       voice: "default",
       attachments: true,
       features: composerCtl.features,

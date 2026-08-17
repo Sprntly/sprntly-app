@@ -82,6 +82,22 @@ export const PROJECT_CAPABILITY_MANIFEST: string[] = [
 
 const PROJECT_SURFACES: ChatSurfaceKind[] = ["project_private", "project_group"]
 
+/**
+ * The affordances the shell renders BY DEFAULT for every surface — a shell-
+ * default a project surface must either CONSUME (wire the shared primitive) or
+ * carry a ledger opt-out for, else the build fails closed. This is the INVERSION
+ * of the fork detectors: those catch a surface that RE-IMPLEMENTS a shared
+ * primitive; this catches a surface that silently NEVER inherits one.
+ *
+ * Seeded with `affordance.nextPrompts` ONLY: the next-prompt pill strip is a
+ * genuine shell-default main affordance (private consumes it via
+ * `useNextPrompts`/`NextPromptSuggestions`; group ledgers it as a sanctioned
+ * server-classified non-consumer). No `nav.openProject` entry — it is not a real
+ * shell primitive anywhere in the codebase, so seeding it would be a
+ * permanently-satisfied no-op that misleads future maintainers.
+ */
+export const SHELL_DEFAULT_AFFORDANCES: string[] = ["affordance.nextPrompts"]
+
 /** `ChatComposer` props that are facade-fed (RHS wired `f?.X ?? …`) in the
  *  REAL shell construction — the set `surfacesWithoutFeatures` must ledger
  *  as ONE umbrella `composer.plusMenu` entry (or a per-prop entry each). */
@@ -211,6 +227,13 @@ export type RenderInheritanceInput = {
    *  the test (discovered hosts minus the registered file sets); empty on real
    *  code (both hosts are registered). */
   unregisteredChatHosts: string[]
+  /** Which shell-default affordance each project surface CONSUMES — source-
+   *  parsed by the test (a surface consumes `affordance.nextPrompts` when its
+   *  file set imports `useNextPrompts`/`NextPromptSuggestions`). Kept OUT of the
+   *  pure audit (mirrors `renderDivergences`). The absence check below fails
+   *  closed on any `SHELL_DEFAULT_AFFORDANCES × PROJECT_SURFACES` pair that is
+   *  neither consumed here nor ledgered. */
+  consumedAffordances: { affordance: string; surface: ChatSurfaceKind }[]
 }
 
 /** The guard's declared knowledge of which file(s) implement each project
@@ -239,7 +262,7 @@ const SERVICE_FORK_ARMS: {
 ]
 
 export function auditRenderInheritance(input: RenderInheritanceInput): ParityViolation[] {
-  const { agentReplyForks, renderDivergences, ledger, unregisteredChatHosts } = input
+  const { agentReplyForks, renderDivergences, ledger, unregisteredChatHosts, consumedAffordances } = input
   const violations: ParityViolation[] = []
 
   // (a) A project surface that re-implements the agent-reply ladder via
@@ -285,6 +308,26 @@ export function auditRenderInheritance(input: RenderInheritanceInput): ParityVio
       capability: "render.unregisteredSurface",
       reason: `Project chat host "${host}" mounts ChatShell with a project surface but is absent from PROJECT_CHAT_SURFACE_SOURCES — register its source set so the inheritance detectors scan it.`,
     })
+  }
+
+  // (d) The INVERSION: a shell-default affordance a project surface neither
+  // CONSUMES nor ledgers fails closed. This is the arm that keeps "add an
+  // affordance to the shell → every surface inherits it, or CI goes red" true:
+  // an absent inheritance can no longer pass silently. Consume OR ledger, never
+  // neither (private consumes `affordance.nextPrompts`; group ledgers it).
+  for (const affordance of SHELL_DEFAULT_AFFORDANCES) {
+    for (const surface of PROJECT_SURFACES) {
+      const consumed = consumedAffordances.some(
+        (c) => c.affordance === affordance && c.surface === surface,
+      )
+      if (consumed) continue
+      if (isLedgered(ledger, affordance, surface)) continue
+      violations.push({
+        capability: "render.absentAffordance",
+        surface,
+        reason: `Shell-default affordance "${affordance}" is neither consumed nor ledgered for surface "${surface}" — a project surface must inherit every shell default or ledger the opt-out.`,
+      })
+    }
   }
 
   return violations

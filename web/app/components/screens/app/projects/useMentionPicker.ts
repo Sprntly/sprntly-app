@@ -69,9 +69,10 @@ export function MentionBubble({ content }: { content: string }): ReactNode {
         ? createElement(
             "span",
             // The `gc-mention-chip` GLOBAL marker (alongside the hashed module
-            // class) lets ChatShell.module.css reach the chip across the module
-            // boundary for the own-bubble AA override (`.gcBubbleMe :global(.gc-
-            // mention-chip)`) restored at the fold (T3b, Fable #2).
+            // class) is a stable cross-module hook. The own-bubble AA override
+            // it once carried is retired now that the own group bubble renders
+            // in the shared light `bc-user-bubble` skin (no dark own bubble),
+            // so the chip keeps its base `mention-picker.module.css` treatment.
             { key: i, className: `${styles.mentionChip} gc-mention-chip`, "data-testid": "gc-mention-chip" },
             `@${seg.label}`,
           )
