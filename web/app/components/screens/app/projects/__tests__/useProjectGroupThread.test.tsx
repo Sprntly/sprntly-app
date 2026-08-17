@@ -112,8 +112,8 @@ const draftApiRef: { current: ComposerDraftApi | null } = {
   },
 }
 
-function Harness({ projectId }: { projectId: number }) {
-  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId: null })
+function Harness({ projectId, openPrdId = null }: { projectId: number; openPrdId?: number | null }) {
+  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId })
   latest = engine
   return React.createElement("div", { "data-testid": "n" }, engine.turns.length)
 }
@@ -442,5 +442,70 @@ describe("useProjectGroupThread — named intended fixes (AC8)", () => {
     await flush()
     expect(latest!.turns.map((t) => t.content)).toEqual(["proj8"])
     expect(latest!.turns.some((t) => t.content === "proj7")).toBe(false)
+  })
+
+  // Group PRD-edit reliability: the group agent narrated "Done — it's live"
+  // on turns that never wrote, and one candidate mechanism was `prd_id`
+  // going missing on LATER posts within the same open-PRD session (the
+  // first edit in a thread worked, later ones didn't). These pin the wire
+  // contract: every post while a PRD is open carries `prd_id`, not just
+  // the first.
+  it("test_group_engine_sends_prd_id_on_every_post_while_a_prd_is_open", async () => {
+    groupTurnsMock.mockResolvedValue([gt({ id: 1 })])
+    postGroupTurnMock.mockResolvedValue(undefined)
+    render(React.createElement(Harness, { projectId: 7, openPrdId: 42 }))
+    await flush()
+
+    await act(async () => {
+      latest!.post("@Sprntly tighten the requirements section")
+      await Promise.resolve()
+    })
+    await flush()
+    await act(async () => {
+      latest!.post("@Sprntly now tighten the scope section too")
+      await Promise.resolve()
+    })
+    await flush()
+
+    expect(postGroupTurnMock).toHaveBeenCalledTimes(2)
+    for (const call of postGroupTurnMock.mock.calls) {
+      expect(call[2]).toMatchObject({ prd_id: 42 })
+    }
+  })
+
+  it("test_group_engine_omits_prd_id_when_no_prd_is_open", async () => {
+    groupTurnsMock.mockResolvedValue([gt({ id: 1 })])
+    postGroupTurnMock.mockResolvedValue(undefined)
+    render(React.createElement(Harness, { projectId: 7, openPrdId: null }))
+    await flush()
+
+    await act(async () => {
+      latest!.post("@Sprntly what's the status")
+      await Promise.resolve()
+    })
+    await flush()
+
+    expect(postGroupTurnMock).toHaveBeenCalledTimes(1)
+    expect(postGroupTurnMock.mock.calls[0][2]?.prd_id).toBeUndefined()
+  })
+
+  it("test_group_engine_picks_up_a_newly_opened_prd_on_the_next_post", async () => {
+    // The drawer opens AFTER the engine already mounted (no PRD open on
+    // first render) — the next send must carry the now-open PRD's id, not
+    // the stale `null` the `post` closure captured at mount.
+    groupTurnsMock.mockResolvedValue([gt({ id: 1 })])
+    postGroupTurnMock.mockResolvedValue(undefined)
+    const { rerender } = render(React.createElement(Harness, { projectId: 7, openPrdId: null }))
+    await flush()
+    rerender(React.createElement(Harness, { projectId: 7, openPrdId: 99 }))
+
+    await act(async () => {
+      latest!.post("@Sprntly tighten the requirements section")
+      await Promise.resolve()
+    })
+    await flush()
+
+    expect(postGroupTurnMock).toHaveBeenCalledTimes(1)
+    expect(postGroupTurnMock.mock.calls[0][2]).toMatchObject({ prd_id: 99 })
   })
 })

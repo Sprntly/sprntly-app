@@ -346,6 +346,12 @@ a teammate to manually accept it before it takes effect. Never describe
 your role as merely advisory, or claim you cannot edit the PRD, or say
 edits must be accepted before they apply.
 
+You must ACTUALLY call the edit_prd tool to make a PRD change happen —
+never say "Done", "it's live", or that you have updated/edited/changed the
+PRD unless you called edit_prd on THIS turn and are relaying what it told
+you. If you did not call it, or it told you no PRD is open or that nothing
+changed, say that plainly instead of claiming success.
+
 Everything you can read or edit is scoped to THIS project only; never assume
 data from another project or company.
 
@@ -1896,14 +1902,39 @@ async def _respond_as_group_agent(
             model-supplied id, and never a server-side inference across the
             project's PRDs. Always returns `(narration, None)`: the edit is
             already applied by the time the narration is produced, so there is
-            no pending mutation to ride out."""
+            no pending mutation to ride out.
+
+            Every call logs `group_edit_prd_tool_called` on entry and
+            `group_edit_prd_tool_outcome` on every return path — the
+            observability the "narrates success, never writes" incident
+            didn't have: without this, there is no way to tell from logs
+            alone whether a failing turn never reached this handler at all
+            (the model skipped the tool) or reached it and got a refusal/
+            no-op the model's own final text then overrode."""
+            logger.info(
+                "group_edit_prd_tool_called project_id=%s conversation_id=%s "
+                "edit_target_prd_id=%s",
+                project_id, conversation_id, edit_target_prd_id,
+            )
             instruction = (tool_input.get("instruction") or "").strip()
             if not instruction:
+                logger.info(
+                    "group_edit_prd_tool_outcome project_id=%s outcome=no_instruction",
+                    project_id,
+                )
                 return ("I need to know what change to make to the PRD.", None)
             if not project_prd_edit_enabled():
+                logger.info(
+                    "group_edit_prd_tool_outcome project_id=%s outcome=disabled",
+                    project_id,
+                )
                 return ("PRD editing from chat isn't turned on for this project yet.", None)
             if edit_target_prd_id is None:
                 # No PRD open beside this chat — simple clarify, no inference.
+                logger.info(
+                    "group_edit_prd_tool_outcome project_id=%s outcome=no_prd_open",
+                    project_id,
+                )
                 return ("Open a PRD beside this chat and I'll edit it.", None)
             try:
                 r = apply_chat_edit_scoped(
@@ -1911,12 +1942,27 @@ async def _respond_as_group_agent(
                     project_id=project_id, dataset=dataset,
                 )
             except ProjectPrdWriteDenied:
+                logger.info(
+                    "group_edit_prd_tool_outcome project_id=%s "
+                    "edit_target_prd_id=%s outcome=denied",
+                    project_id, edit_target_prd_id,
+                )
                 return ("I can only edit a PRD that's attached to this project.", None)
             if not r["sections_changed"]:
+                logger.info(
+                    "group_edit_prd_tool_outcome project_id=%s "
+                    "edit_target_prd_id=%s outcome=no_op",
+                    project_id, edit_target_prd_id,
+                )
                 return (
                     r.get("summary") or "I didn't find anything in the PRD to change for that.",
                     None,
                 )
+            logger.info(
+                "group_edit_prd_tool_outcome project_id=%s edit_target_prd_id=%s "
+                "outcome=applied sections_changed=%s",
+                project_id, edit_target_prd_id, r["sections_changed"],
+            )
             summary = (r.get("summary") or "").strip()
             narration = f"Done — I've updated the PRD. {summary}".strip() if summary \
                 else "Done — I've updated the PRD."
