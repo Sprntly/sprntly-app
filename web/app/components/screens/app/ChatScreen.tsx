@@ -911,6 +911,8 @@ export function ChatScreen() {
     setPendingSearchHandoff,
     pendingOndemandDraft,
     setPendingOndemandDraft,
+    pendingDocumentQuote,
+    setPendingDocumentQuote,
     pendingChatHandoff,
     setPendingChatHandoff,
     pendingPrdTab,
@@ -2649,6 +2651,42 @@ export function ChatScreen() {
     openTab(title, [{ id: convId, query, reply }])
     setActiveConv(0)
   }, [pendingSearchHandoff, setPendingSearchHandoff, openTab])
+
+  // A passage highlighted in the Document panel lands in THIS thread's
+  // composer, quoted, with the caret after it — the "it comes up in the chat
+  // text field" half of the requirement. The user then types the question or
+  // the edit they want; nothing is sent for them.
+  //
+  // THE EXCERPT IS THE GROUNDING. It goes into the message itself rather than
+  // riding as hidden context, which means the answer is grounded on exactly
+  // the words the user pointed at, and the thread still reads honestly later:
+  // anyone scrolling back sees what was being discussed instead of a question
+  // about "this" with no referent.
+  //
+  // Appended to whatever is already typed, never replacing it: a half-written
+  // question is the user's, and highlighting a passage mid-sentence must not
+  // discard it.
+  useEffect(() => {
+    if (pendingDocumentQuote == null) return
+    const { excerpt } = pendingDocumentQuote
+    setPendingDocumentQuote(null)
+    if (!excerpt.trim()) return
+    setDraft((prev) => {
+      const quoted = `> ${excerpt}\n\n`
+      const next = prev.trim() ? `${prev.replace(/\s+$/, "")}\n\n${quoted}` : quoted
+      return next.slice(0, DRAFT_MAX_CHARS)
+    })
+    requestAnimationFrame(() => {
+      const ta = composerRef.current
+      if (!ta) return
+      ta.style.height = "auto"
+      ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
+      ta.focus()
+      // Caret at the END, so the next keystroke starts the question rather
+      // than landing inside the quotation.
+      ta.setSelectionRange(ta.value.length, ta.value.length)
+    })
+  }, [pendingDocumentQuote, setPendingDocumentQuote])
 
   useEffect(() => {
     if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return

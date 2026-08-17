@@ -133,9 +133,15 @@ function Harness() {
   // `useThreadDocumentSync` sets `documentId` in production regardless, so a test
   // that checks only the pointer stays green through a full revert of the panel
   // open. Review of #1197 proved exactly that by mutation.
-  const { contentPanelTab } = useNavigation()
+  const { contentPanelTab, setPendingDocumentQuote } = useNavigation()
   return (
     <>
+      <button
+        data-testid="send-quote"
+        onClick={() => setPendingDocumentQuote({
+          documentId: 42, excerpt: "the pilot-partner scoping track",
+        })}
+      >quote</button>
       <div data-testid="panel-probe">{contentPanelTab ?? "closed"}</div>
       <div data-testid="doc-probe">
         {content.documentId != null ? String(content.documentId) : "none"}
@@ -358,5 +364,36 @@ describe("a genuine thread change still retires the document", () => {
     await settle()
 
     expect(docProbe()).toBe("none")
+  })
+})
+
+// ── Highlight → chat composer (the PR5 requirement) ─────────────────────────
+//
+// The panel hands over a passage; this is the half that puts it in front of the
+// user. What matters: it lands in the CURRENT thread's composer, it is quoted
+// so the thread still reads honestly later, and it never eats a half-written
+// question.
+describe("a highlighted passage arrives in the composer", () => {
+  const composer = () => document.querySelector(".cx-input") as HTMLTextAreaElement
+
+  it("quotes the passage into the draft", async () => {
+    await act(async () => { renderChat() })
+    await act(async () => {
+      screen.getByTestId("send-quote").click()
+    })
+    await waitFor(() => expect(composer().value).toContain("the pilot-partner scoping track"))
+    // Quoted, not pasted raw: the reader of this thread later sees what was
+    // being discussed rather than a question about "this".
+    expect(composer().value.startsWith("> ")).toBe(true)
+  })
+
+  it("appends to what the user has already typed instead of replacing it", async () => {
+    await act(async () => { renderChat() })
+    await act(async () => {
+      fireEvent.change(composer(), { target: { value: "is this still true?" } })
+    })
+    await act(async () => { screen.getByTestId("send-quote").click() })
+    await waitFor(() => expect(composer().value).toContain("the pilot-partner"))
+    expect(composer().value).toContain("is this still true?")
   })
 })

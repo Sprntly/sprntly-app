@@ -337,7 +337,10 @@ export type ContentPanelProps = {
 }
 
 export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
-  const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
+  const {
+    contentPanelTab, openContentPanel, closeContentPanel, showToast,
+    setPendingDocumentQuote,
+  } = useNavigation()
   const guestSession = useGuestSession()
   const { content } = useContent()
 
@@ -742,7 +745,12 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                   version, the user's unsaved text, the dirty flag) belongs to
                   the document it was mounted for. Remounting is the only way
                   none of it leaks into the next one. */}
-              <DocumentTab key={content.documentId} documentId={content.documentId} />
+              <DocumentTab
+                key={content.documentId}
+                documentId={content.documentId}
+                onQuote={(excerpt) =>
+                  setPendingDocumentQuote({ documentId: content.documentId!, excerpt })}
+              />
             </Suspense>
           )}
           </>
