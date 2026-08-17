@@ -56,8 +56,13 @@ vi.mock("../../../../../context/NavigationContext", () => ({
 // The container mounts `<ArtifactsModal>`, whose redesign reads `useRouter` for
 // its legacy deep-link fallback — stub it (no Next app-router provider in jsdom)
 // or the shell throws on mount.
+// The container also reads `useSearchParams` (to preserve the other query
+// params when it writes `?chat=…` on a surface switch) — provide it alongside
+// `useRouter`, an empty param set by default. A mock missing it does not fail
+// one assertion, it throws on every mount in this file.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }))
 vi.mock("next/link", () => ({
   default: ({
