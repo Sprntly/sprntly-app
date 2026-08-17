@@ -1034,6 +1034,12 @@ export function ChatScreen() {
   // hundred milliseconds later when a fetch comes back.
   const contentPanelTabRef = useRef(contentPanelTab)
   contentPanelTabRef.current = contentPanelTab
+  // The document currently in the panel, readable AFTER an await — the
+  // document resume probe uses it to refuse to overwrite a generation that
+  // started while its list read was in flight (the stale-read rule
+  // `useThreadDocumentSync` states for the same fetch).
+  const contentDocumentIdRef = useRef<number | null>(null)
+  contentDocumentIdRef.current = content.documentId ?? null
   // Which ticket set the SHARED panel is currently holding, for the tab-switch
   // reconcile. A ref rather than a dependency: taking `content` would re-run
   // that reconcile on every content write, when the only thing it reacts to is
@@ -3990,6 +3996,12 @@ export function ChatScreen() {
   // while a manual close sticks for as long as you stay.
   const ticketSetAutoOpenedRef = useRef<Set<string>>(new Set())
 
+  /** Tabs whose DOCUMENT has been auto-opened on this visit. Same claim, same
+   *  retirement point as its two siblings above — leaving a tab retires it, so
+   *  coming back opens the document again. Declared here rather than beside its
+   *  effect so the tab-switch reconcile (which retires it) reads in order. */
+  const documentAutoOpenedRef = useRef<Set<string>>(new Set())
+
   /** Kick off ONE run for `tabId` and own its whole lifecycle on the tab.
    *
    *  The latch is written on the same commit as the kick-off, before any await,
@@ -5644,6 +5656,14 @@ export function ChatScreen() {
       if (!left?.ticketSetRunning) {
         ticketSetAutoOpenedRef.current.delete(prevTabForPanelRef.current)
       }
+      // Same claim, same retirement, for a thread whose artifact is a DOCUMENT.
+      // Without this the probe fires once per session: leaving a document
+      // thread closes the panel and the thread-reset clears `documentId`, so
+      // coming back would land in exactly the state the probe exists to fix —
+      // panel shut, document reachable only from the library — and a
+      // `generating` document would lose its live view for the rest of the
+      // session.
+      documentAutoOpenedRef.current.delete(prevTabForPanelRef.current)
     }
     // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
     // any of the early returns below — a set left on screen is wrong on every
@@ -5857,6 +5877,68 @@ export function ChatScreen() {
         // A resume PROBE must never throw. It runs on every chat open, its only
         // job is to surface an artifact that may not exist, and an unhandled
         // rejection here would take the thread down with it.
+      }
+    })()
+  }, [
+    activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
+    tabs, setContent, openContentPanel,
+  ])
+
+  // ── A thread that produced a DOCUMENT opens on it ──────────────────────────
+  // The same requirement as the ticket-set probe directly above, for the one
+  // artifact that never had it. A chat-written document was reachable ONLY
+  // while the panel stayed open: `useThreadDocumentSync` (AppShell) re-attaches
+  // the pointer after a reload, but nothing opens the panel, and a document
+  // turn has no reply-footer button the way a ticket set does. So the ack said
+  // "it will open in the panel on the right", you reloaded, and the only route
+  // back to your leadership update was the Artifacts library.
+  //
+  // Deliberately the same shape as its sibling, including what it refuses to
+  // do: claim the tab BEFORE the fetch (this effect re-runs on unchanged-but-
+  // new deps, and an unclaimed probe would re-issue the request forever), never
+  // open over a tab the user has moved to, never fight a panel that is already
+  // open, and never auto-open a FAILED document — reopening a chat should not
+  // greet you with an error state you already dismissed. A failed document
+  // still shows in the library, which is where #1184 made it visible.
+  //
+  // `generating` DOES open, because that is the live state the panel exists to
+  // show: the tab polls the row to a terminal state on its own.
+  useEffect(() => {
+    if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return
+    if (documentAutoOpenedRef.current.has(activeTabId)) return
+    const tabId = activeTabId
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab || tab.dbConvId == null) return
+    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
+    const convId = tab.dbConvId
+    documentAutoOpenedRef.current.add(tabId)
+    void (async () => {
+      try {
+        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
+        if (!docs.length) return
+        const newest = docs[0]
+        if (activeTabIdRef.current !== tabId) return
+        if (newest.status === "failed") return
+        if (contentPanelTabRef.current) return
+        // A GENERATION STARTED WHILE THIS WAS IN FLIGHT MUST WIN. This is a
+        // list read of the thread; `documentCommandFlow` writes the id of the
+        // document the user just asked for. Overwriting that with an older
+        // row is the same stale-read `useThreadDocumentSync` guards against,
+        // and it would put the previous document in front of someone watching
+        // a new one being written.
+        if (contentDocumentIdRef.current != null) return
+        // TICKETS WIN THE PANEL. Both probes run on thread open, both await,
+        // and both saw an empty panel before their fetch — so without this the
+        // slower network response decides which artifact you land on, and a
+        // document could open over tickets `loadTicketSet` is still filling.
+        // The ticket-set probe is older and its ack promises a Tickets panel,
+        // so it keeps precedence; the document is one click away in the strip.
+        if (tabsRef.current.find((t) => t.id === tabId)?.ticketSetId != null) return
+        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
+        openContentPanel("document")
+      } catch {
+        // A resume PROBE must never throw — it runs on every chat open and its
+        // only job is to surface an artifact that may not exist.
       }
     })()
   }, [
