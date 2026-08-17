@@ -112,8 +112,12 @@ vi.mock("../../../../../context/NavigationContext", () => ({
 // its legacy deep-link fallback. Stub it — no Next app-router provider exists in
 // jsdom — or the shell throws on mount. `onOpenInPlace` is always wired here, so
 // the router `push` is never actually reached.
+// The container also reads `useSearchParams` (to preserve the other query
+// params when it writes `?chat=…` on a surface switch) — provide it alongside
+// `useRouter`, an empty param set by default.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }))
 vi.mock("next/link", () => ({
   default: ({
@@ -467,6 +471,23 @@ describe("ProjectDetailView — state", () => {
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
     expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
+  })
+
+  it("renders a per-surface identity badge — neutral 'Group' for the group chat, accent 'Private' for the individual chat", () => {
+    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
+    const groupNote = screen.getByTestId("chat-note")
+    const groupBadge = groupNote.querySelector('[data-surface="group"]')
+    expect(groupBadge).toBeTruthy()
+    expect(groupBadge?.textContent).toContain("Group")
+    // The other surface's badge is not present in the group state.
+    expect(groupNote.querySelector('[data-surface="individual"]')).toBeNull()
+
+    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
+    const indivNote = screen.getByTestId("chat-note")
+    const indivBadge = indivNote.querySelector('[data-surface="individual"]')
+    expect(indivBadge).toBeTruthy()
+    expect(indivBadge?.textContent).toContain("Private")
+    expect(indivNote.querySelector('[data-surface="group"]')).toBeNull()
   })
 
   // ProjectMainThread OWNS the composer for whichever chat is active — the

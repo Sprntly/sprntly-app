@@ -13,6 +13,32 @@
   overflow-y: auto;
 }
 
+/* Getting-started empty state for a fresh project thread (zero turns) — a
+   centered, muted note in the transcript column so a brand-new project reads
+   as intentional rather than a blank void. Tokens only. */
+.projectChatEmpty {
+  max-width: 440px;
+  margin: 44px auto 0;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.projectChatEmpty b {
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.projectChatEmptyTitle {
+  display: block;
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 19px;
+  color: var(--ink);
+  margin-bottom: 7px;
+}
+
 /* A `clarify` reply's PRD choices (2+-PRD disambiguation) — rendered by the
    shell for project-private surfaces from `ShellTurn.pickOptions`. Lives here,
    shell-owned, because the shell renders these options and its module graph
