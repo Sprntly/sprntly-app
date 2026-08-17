@@ -17,9 +17,22 @@ Proven here:
 """
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
+import app.qa_agent as qa
 import app.routes.projects as projects_route
 from app.db import conversations as conversations_db
 from app.db.workspaces import ensure_default_workspace
+
+
+def _ctx(company_id, user_id):
+    return SimpleNamespace(
+        company_id=company_id,
+        workspace_id=ensure_default_workspace(company_id)["id"],
+        user_id=user_id,
+        user_email=None,
+    )
 
 
 def _seed_project(t) -> int:
@@ -128,3 +141,96 @@ def test_plain_post_without_opts_unchanged(
     assert calls and "[Attached files]" not in calls[-1]["question"]
     turns = conversations_db.list_group_turns(conv["id"])
     assert turns[0]["content"] == "@Sprntly hello there"
+
+
+# ── Group passes conversation history to the engine (connector parity) ──────
+# The group surface must hand the prior turns to `qa_agent.answer` as
+# `history` (recent-minus-trigger), exactly like the private surface — without
+# it, every history-dependent router/interceptor signal dies on group and a
+# source-named follow-up ("what did they say?") loses its connector thread.
+# `history or None` keeps the trigger-less degenerate path at None so a
+# transcript-as-question is not ALSO rendered as history.
+
+
+def test_group_answer_receives_history_recent_minus_trigger(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """AC2: a group reply with a human trigger passes `history` = recent turns
+    EXCLUDING the trigger turn (the prior assistant turn only, here)."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv = conversations_db.create_group_chat(project_id, t.user_id)
+    conversations_db.post_group_turn(
+        conv["id"], None, "Slack: the launch slipped to Q3.", role="assistant",
+    )
+    _stub_classify(monkeypatch)
+    calls = _spy_answer(monkeypatch)
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/group/turns",
+        json={"content": "@Sprntly what did they say?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls, "the mention must have produced a reply run"
+    assert calls[-1]["history"] == [
+        {"role": "assistant", "content": "Slack: the launch slipped to Q3."}
+    ]
+
+
+def test_group_triggerless_passes_history_none(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """AC2/AC3: a reply with NO human trigger (an assistant-only thread) passes
+    `history=None` (`[] or None`), so the transcript-as-question is not also
+    rendered as history — no double-count on the degenerate path."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv = conversations_db.create_group_chat(project_id, t.user_id)
+    conversations_db.post_group_turn(
+        conv["id"], None, "System note: standup at 10.", role="assistant",
+    )
+    calls = _spy_answer(monkeypatch)
+
+    asyncio.run(
+        projects_route._respond_as_group_agent(
+            project_id, conv["id"], _ctx(t.company_id, t.user_id),
+            "mention", job_id=1, run_id="r",
+        )
+    )
+    assert calls, "the group agent must have produced a reply run"
+    assert calls[-1]["history"] is None
+
+
+def test_group_no_double_count_in_prompt(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """AC3: with `_GROUP_TRANSCRIPT_AS_QUESTION=False`, the question is the
+    trigger content and history is recent-minus-trigger, so each recent turn's
+    text appears EXACTLY ONCE across `_render_history(history)` + question —
+    the prior turn only in history, the trigger only in the question."""
+    assert projects_route._GROUP_TRANSCRIPT_AS_QUESTION is False
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv = conversations_db.create_group_chat(project_id, t.user_id)
+    conversations_db.post_group_turn(
+        conv["id"], None, "The Q3 launch is on track.", role="assistant",
+    )
+    _stub_classify(monkeypatch)
+    calls = _spy_answer(monkeypatch)
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/group/turns",
+        json={"content": "@Sprntly anything else I should know?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert calls
+    history = calls[-1]["history"]
+    question = calls[-1]["question"]
+    rendered = qa._render_history(history)
+
+    # Prior turn: once in history, never in the question.
+    assert rendered.count("The Q3 launch is on track.") == 1
+    assert "The Q3 launch is on track." not in question
+    # Trigger turn: in the question, never re-rendered into history.
+    assert "@Sprntly anything else I should know?" in question
+    assert "@Sprntly anything else I should know?" not in rendered
