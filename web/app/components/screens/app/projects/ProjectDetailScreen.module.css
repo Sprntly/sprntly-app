@@ -437,14 +437,14 @@
   justify-content: center;
   gap: 6px;
   padding: 6px 8px;
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
   font-family: var(--font-body);
   font-size: 12px;
   font-weight: 600;
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 
 .chatToggleBtn svg {
@@ -461,8 +461,9 @@
 }
 
 .chatToggleBtnActive {
-  background: var(--surface);
-  color: var(--ink);
+  background: var(--accent-muted);
+  color: var(--accent-ink);
+  border-color: var(--accent-soft);
   box-shadow: var(--shadow-sm);
 }
 
