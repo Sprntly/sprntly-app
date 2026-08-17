@@ -23,10 +23,15 @@
 import type { conversationsApi as ConversationsApi } from "./api"
 
 /** Minimal slice of conversationsApi this module needs (eases mocking in tests). */
+/** `deleteTurn` is OPTIONAL, unlike the two writers: retraction is a
+ *  best-effort tidy-up on one flow (edit-and-resend), so an API surface that
+ *  lacks it simply never retracts. Requiring it would make every existing
+ *  caller and test double grow a method none of them call. */
 export type ConversationsPersistenceApi = Pick<
   typeof ConversationsApi,
   "create" | "addTurn"
->
+> &
+  Partial<Pick<typeof ConversationsApi, "deleteTurn">>
 
 export type ChatPersistenceDeps = {
   /** Lazily resolve the conversations API (the component imports it dynamically). */
@@ -85,6 +90,17 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   // late, since whichever push finished resolving first would queue first and
   // the race would simply move.
   const appendQueues = new Map<string, Promise<unknown>>()
+
+  // The DB row id each client turn id was written as, so a turn can later be
+  // retracted (edit-and-resend on a question that was stopped before it
+  // answered). Keyed `${tabId}:${clientTurnId}` — client turn ids are unique
+  // per tab, and keying by tab keeps parallel chats from colliding.
+  //
+  // In-memory only, and deliberately so: a reload cannot retract anything
+  // anyway (the thread it would edit has been re-rendered from storage), and a
+  // persisted map of row ids would be one more thing that can go stale against
+  // the server. An unknown id makes `retractUserTurn` a no-op, never a guess.
+  const dbTurnIds = new Map<string, number>()
 
   function enqueueAppend(tabId: string, work: () => Promise<void>): Promise<void> {
     const prev = appendQueues.get(tabId) ?? Promise.resolve()
@@ -173,9 +189,52 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         })
         if (convId == null) return
         const api = await deps.getApi()
-        await api.addTurn(convId, "user", args.query, args.attachments)
+        const row = await api.addTurn(convId, "user", args.query, args.attachments)
+        const rowId = Number((row as { id?: unknown } | null)?.id)
+        if (Number.isFinite(rowId)) dbTurnIds.set(`${tabId}:${args.turnId}`, rowId)
       } catch {
         /* fire-and-forget: never break the UI on a persistence failure */
+      }
+    })
+  }
+
+  /**
+   * Take a user turn back out of the persisted conversation — the durable half
+   * of edit-and-resend on a question that was stopped before it answered.
+   *
+   * Queued behind the tab's other appends (`enqueueAppend`), which is what
+   * makes the sequencing safe: the retract runs AFTER the write that created
+   * the row, so its id is already known, and BEFORE the edited turn's own
+   * append, so the server sees retract-then-add and the edited message ends up
+   * as the conversation's last user turn rather than racing ahead of the
+   * deletion of the one it replaced.
+   *
+   * Best-effort like everything else here. An unknown row id (the write failed,
+   * or this tab was rehydrated after a reload), a 409 from the server because
+   * the thread has moved on, a network failure — all leave the original turn in
+   * place and none of them reach the UI.
+   */
+  function retractUserTurn(tabId: string, clientTurnId: string): Promise<void> {
+    return enqueueAppend(tabId, async () => {
+      const key = `${tabId}:${clientTurnId}`
+      try {
+        const rowId = dbTurnIds.get(key)
+        if (rowId == null) return
+        const convId = currentConvId(tabId)
+        if (convId == null) return
+        const api = await deps.getApi()
+        // OPTIONALLY called (`?.`), and the syntax is load-bearing: it is how
+        // this module says "an api without this method is fine", which is what
+        // keeps `partial-mock-guard` from demanding it of every partial mock in
+        // the repo. `create`/`addTurn` are called unconditionally precisely
+        // because a missing one there silently voids a whole suite.
+        await api.deleteTurn?.(convId, rowId)
+      } catch {
+        /* fire-and-forget */
+      } finally {
+        // Forget it either way: a retract that failed must not be retried
+        // against a row id that may now belong to a different turn.
+        dbTurnIds.delete(key)
       }
     })
   }
@@ -227,7 +286,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     }
   }
 
-  return { pushUserTurn, pushAssistantTurn, resolveConvId, ensureConversation }
+  return { pushUserTurn, pushAssistantTurn, retractUserTurn, resolveConvId, ensureConversation }
 }
 
 export type ChatPersistence = ReturnType<typeof createChatPersistence>

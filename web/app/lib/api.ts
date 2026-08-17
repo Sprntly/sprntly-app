@@ -5179,6 +5179,14 @@ export const conversationsApi = {
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
     }),
+  /** Retract the conversation's LAST turn, which must be a user turn. The one
+   *  caller is edit-and-resend on a question that was stopped before it
+   *  answered: the original wording is already persisted, so it has to come
+   *  back out or the reopened thread shows both versions. 409 when the thread
+   *  has moved on (the turn is no longer last, or it isn't a user turn) —
+   *  every caller treats that as "leave it alone". */
+  deleteTurn: (conversationId: number, turnId: number) =>
+    api.delete(`/v1/conversations/${conversationId}/turns/${turnId}`),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------

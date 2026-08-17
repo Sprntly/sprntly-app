@@ -438,6 +438,17 @@ export interface MapMainTurnsDeps {
   // main-chat screen's private types — the idiomatic bivariant-handler pattern)
   handleAskAgain(turn: { id: string }): void
   handleStopAsk: () => void
+  // ── Edit and re-send an unanswered question ───────────────────────────────
+  // Optional as a bag, like the Slack-share trio: a host with no edit flow
+  // omits all four and no affordance renders. `editingTurnId` names the ONE
+  // turn currently open in the editor (host-owned, like every other in-flight
+  // signal here).
+  editingTurnId?: string | null
+  onEditTurn?: (turnId: string) => void
+  /** The edited text. The host re-composes anything the editor doesn't own (a
+   *  quoted passage) and re-sends. */
+  onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
+  onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
   setViewerAttachment: (a: {
     name: string

@@ -458,3 +458,64 @@ def add_turn(
         patch["preview"] = body.content[:200]
     c.table("conversations").update(patch).eq("id", conversation_id).execute()
     return resp.data[0] if resp.data else {}
+
+
+@router.delete("/{conversation_id}/turns/{turn_id}")
+def delete_turn(
+    conversation_id: int,
+    turn_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Retract the conversation's LAST turn — owner only.
+
+    This exists for exactly one flow: editing a question that never got an
+    answer. The composer's Stop button leaves a user turn already persisted
+    (`add_turn` fires the moment a message is sent, long before the reply
+    lands), so re-sending an edited version would otherwise leave the abandoned
+    wording behind — the live thread would show one question and the same
+    thread reopened from history would show two, the second unanswered.
+
+    Deliberately narrow, because a conversation is a record and this is the
+    only endpoint that can take something out of one:
+
+      * LAST turn only. A turn in the middle cannot be removed, so history can
+        never be punched full of holes and a user turn can never be orphaned
+        from the assistant turn that answered it.
+      * `role='user'` only. An assistant turn is what the product said; the
+        user does not get to edit that out from under it.
+
+    Both violations return 409, not 404: the row exists and belongs to the
+    caller, and saying so is not a cross-tenant leak. A conversation that isn't
+    the caller's own still 404s exactly like every other route here.
+    """
+    c = require_client()
+    if _get_owned_conversation(c, conversation_id, company) is None:
+        raise HTTPException(404, "Conversation not found")
+    resp = (
+        c.table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", conversation_id)
+        .order("created_at")
+        .execute()
+    )
+    turns = resp.data or []
+    if not turns or int(turns[-1].get("id") or 0) != turn_id:
+        # Includes the "no such turn in this conversation" case — the caller
+        # only ever asks about a turn it just wrote, so a miss means the thread
+        # moved on and retracting is no longer the right thing to do.
+        raise HTTPException(409, "Only the last turn can be retracted")
+    last = turns[-1]
+    if last.get("role") != "user":
+        raise HTTPException(409, "Only a user turn can be retracted")
+
+    c.table("conversation_turns").delete().eq("id", turn_id).execute()
+    # Roll the list preview back to whatever the previous user turn said, so the
+    # chat-history row doesn't keep advertising a message that no longer exists.
+    prior = next(
+        (t.get("content") or "" for t in reversed(turns[:-1]) if t.get("role") == "user"),
+        "",
+    )
+    c.table("conversations").update(
+        {"preview": prior[:200], "updated_at": utc_now()}
+    ).eq("id", conversation_id).execute()
+    return {"ok": True}

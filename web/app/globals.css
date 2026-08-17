@@ -2850,6 +2850,62 @@
     background: var(--surface-4);
   }
 
+  /* The quoted passage parked above the input — what you highlighted in an
+     answer and pressed Reply on. A left rule plus muted text, the universal
+     quote shape, so it reads as "the thing I'm answering" rather than as
+     something you typed. Clamped to four lines: a quote points AT a passage,
+     it is not a second copy of it, and an unclamped one would push the
+     textarea off a short screen. */
+  .cx-quote {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 10px 12px 0;
+    padding: 7px 8px 7px 10px;
+    border-left: 2px solid var(--line-strong, var(--line));
+    border-radius: 0 6px 6px 0;
+    background: var(--surface-3);
+  }
+
+  .cx-quote-text {
+    flex: 1;
+    margin: 0;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ink-3, var(--ink-2));
+    white-space: pre-wrap;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  .cx-quote-x {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--ink-3, var(--ink-2));
+    opacity: 0.6;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    font-family: inherit;
+  }
+
+  .cx-quote-x:hover {
+    opacity: 1;
+    background: var(--surface-4);
+  }
+
   .cx-input {
     display: block;
     width: 100%;
@@ -6958,6 +7014,136 @@
        moment it was sent. Mirrors .tvw-turn-body--plain in the staff
        transcript viewer, which has always kept them. */
     white-space: pre-wrap;
+  }
+
+  /* The passage this message was a reply to, above the bubble. Same left-rule
+     shape as the composer's parked quote (`.cx-quote`), so the excerpt looks
+     the same before and after sending — right-aligned into the user lane and
+     clamped, because the answer it came from is a few turns up the thread and
+     the full text is still there. */
+  .bc-user-quote {
+    align-self: flex-end;
+    max-width: min(100%, 420px);
+    margin: 0 34px 5px 0;
+    padding: 6px 10px;
+    border: none;
+    border-right: 2px solid var(--line-strong, var(--line));
+    border-radius: 6px 0 0 6px;
+    background: var(--surface-3);
+    color: var(--ink-3, var(--ink-2));
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: left;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  /* Per-turn actions under a user bubble (today: edit-and-resend, offered only
+     on a message that never got an answer). Hidden until the turn is hovered
+     or something inside it takes focus — a row of controls under every message
+     you ever sent is noise — but always PRESENT in the DOM, so it is reachable
+     by keyboard and announced by a screen reader. */
+  .bc-user-actions {
+    align-self: flex-end;
+    display: flex;
+    gap: 4px;
+    margin: 3px 34px 0 0;
+    opacity: 0;
+    transition: opacity 0.14s;
+  }
+
+  .bc-turn:hover .bc-user-actions,
+  .bc-user-actions:focus-within {
+    opacity: 1;
+  }
+
+  .bc-user-edit-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3, var(--ink-2));
+    cursor: pointer;
+  }
+
+  .bc-user-edit-btn:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .bc-user-edit-btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    opacity: 1;
+  }
+
+  /* The in-place editor that replaces the bubble while a stopped question is
+     being rewritten. Sized to the user lane rather than the full column so the
+     message does not jump sides the moment it becomes editable. */
+  .bc-user-edit {
+    align-self: flex-end;
+    width: min(100%, 560px);
+    margin-right: 34px;
+    padding: 10px 12px;
+    border: 1px solid var(--accent-alpha-40, var(--line));
+    border-radius: 14px 4px 14px 14px;
+    background: var(--surface-2);
+  }
+
+  .bc-user-edit-input {
+    display: block;
+    width: 100%;
+    min-height: 42px;
+    max-height: 240px;
+    border: none;
+    outline: none;
+    background: transparent;
+    resize: none;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .bc-user-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .bc-user-edit-cancel,
+  .bc-user-edit-save {
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .bc-user-edit-save {
+    border-color: transparent;
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .bc-user-edit-save:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   /* Attached-file cards on a user turn — shown INSTEAD of dumping the document

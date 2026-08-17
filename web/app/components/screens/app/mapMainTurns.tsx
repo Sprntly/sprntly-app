@@ -18,6 +18,7 @@
  */
 
 import { AGENT_NAME } from "../../../lib/agent"
+import { splitQuotedSuffix } from "../../../lib/chatQuote"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
@@ -53,6 +54,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleStopAsk,
     submitClarifyAnswers,
     setViewerAttachment,
+    editingTurnId,
+    onEditTurn,
+    onSubmitTurnEdit,
+    onCancelTurnEdit,
     openReportByTitle,
     openArtifactInPanel,
     openChatArtifactItem,
@@ -148,13 +153,43 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       extra: shareNode,
     })
 
+    // The passage this message was a reply to, lifted out of the stored query
+    // so it renders as a quote block above the bubble instead of as literal
+    // "> " text inside it. A turn that carries none is unaffected — every user
+    // turn ever written before quoting existed goes down this path.
+    const { body: queryBody, quote } = splitQuotedSuffix(turn.query)
+
+    // Editable ONLY while no answer has landed on this turn — a stopped,
+    // failed, timed-out or interrupted question. Three further exclusions, each
+    // for its own reason:
+    //  * still generating — the question is live; Stop is the affordance there.
+    //  * attachments — re-sending drops them (their bytes left component state
+    //    on the original send), and quietly re-asking WITHOUT the files is a
+    //    different question. Those turns keep "Ask again", which hands the text
+    //    back to the composer instead. Same rule `handleAskAgain` already uses.
+    //  * an open clarify batch — the turn is mid-conversation with the gate,
+    //    and rewriting the question under it would strand the answers.
+    const canEditTurn =
+      !!onEditTurn &&
+      !turn.reply &&
+      !isGenerating &&
+      !turn.summaryPending &&
+      !turn.attachments?.length &&
+      !turn.clarify?.length
+    const isEditing = canEditTurn && editingTurnId === turn.id
+
     return {
       turnId: turn.id,
+      onEditUserTurn: canEditTurn ? () => onEditTurn!(turn.id) : undefined,
+      editing: isEditing,
+      onSubmitEdit: isEditing ? (text: string) => onSubmitTurnEdit?.(turn, text) : undefined,
+      onCancelEdit: isEditing ? () => onCancelTurnEdit?.() : undefined,
       // Only when the user actually said something. A turn can be AGENT-ONLY.
       user: {
         name,
         initials: userInitials,
-        query: turn.query,
+        query: queryBody,
+        quote,
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,

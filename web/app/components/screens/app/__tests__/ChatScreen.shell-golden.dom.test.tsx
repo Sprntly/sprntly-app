@@ -19,6 +19,16 @@
 // project surfaces are folded; the durable semantic assertions live in
 // chat-shell/__tests__/ChatShell.unit.dom.test.tsx.
 //
+// BASELINE MOVED ONCE, deliberately (edit-and-resend, 2026-08-17). Four
+// goldens — stopped / error / timed-out / interrupted — gained a
+// `.bc-user-actions` row carrying the edit affordance, because those are
+// exactly the four states a question can be edited and re-sent from. That is a
+// FEATURE changing rendered DOM, not the extraction changing it: the other
+// fifteen goldens are untouched, which is what still makes the C1→C3 equality
+// argument above hold for everything the migration covered. A future diff here
+// that is NOT a named, intended feature is still the bug this suite exists to
+// catch.
+//
 // NOTE (authorized overage): this ticket's diff exceeds the ~500-line guideline
 // by design. It is a byte-identical extraction whose bulk is this file plus the
 // auto-generated .snap goldens — authorized overage, not a split trigger.

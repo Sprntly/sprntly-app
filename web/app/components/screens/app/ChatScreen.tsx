@@ -55,6 +55,8 @@ import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
 import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
 import { SlashSkillMenu } from "../../shared/SlashSkillMenu"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
+// Highlight-to-reply: one definition of how a quoted passage rides a message.
+import { buildQuotedMessage, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
@@ -1161,6 +1163,17 @@ export function ChatScreen() {
   // query at send time so the backend's deterministic slash fast-path is
   // unchanged.
   const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
+  // A passage of an answer the reader highlighted and pressed Reply on, parked
+  // above the input until they send or dismiss it. Host state (not the shell's)
+  // because main renders its own composer; the shell reports the selection
+  // through `onQuoteSelection` and owns nothing else about it.
+  const [quote, setQuote] = useState<string | null>(null)
+  // The turn whose question is currently being rewritten in place. Exactly one
+  // at a time, and only ever a turn that never got an answer — see
+  // `canEditTurn`. Cleared on save, on cancel, and whenever the active tab
+  // changes (an editor left open on a tab you navigated away from would come
+  // back seated over a different thread's turn).
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
   // The composer's `+` menu (Attach a file / Browse skills).
   const [plusMenuOpen, setPlusMenuOpen] = useState(false)
   const [plusMenuActive, setPlusMenuActive] = useState(0)
@@ -5518,6 +5531,65 @@ export function ChatScreen() {
     void submitAsk(q)
   }, [submitAsk])
 
+  // ── Highlight-to-reply ────────────────────────────────────────────────────
+  // A passage the reader selected in an answer, handed up by the shell's
+  // selection toolbar. It parks above the input and rides the next message as
+  // a trailing blockquote (`buildQuotedMessage`) — quoting is a way to point at
+  // a sentence, not a second send button, so nothing is dispatched here.
+  const handleQuoteSelection = useCallback((text: string) => {
+    setQuote(text)
+    composerRef.current?.focus()
+  }, [])
+
+  // ── Edit and re-send a question that never got an answer ──────────────────
+  // Stopping an ask used to leave a dead end: the words you typed were on
+  // screen, slightly wrong, and the only way forward was to retype them. These
+  // three make that turn editable in place.
+  //
+  // Scope is deliberately narrow — see `canEditTurn` in `mapMainTurns` — and
+  // the rule is "no reply landed on it". A turn that HAS an answer is history:
+  // rewriting it would orphan the reply below it, and the persisted record has
+  // no way to express that (`conversation_turns` is append-only apart from the
+  // last-turn retraction this uses).
+  const handleEditTurn = useCallback((turnId: string) => {
+    setEditingTurnId(turnId)
+  }, [])
+  const handleCancelTurnEdit = useCallback(() => setEditingTurnId(null), [])
+
+  const handleSubmitTurnEdit = useCallback((turn: ThreadTurn, text: string) => {
+    const tabId = activeTabId
+    setEditingTurnId(null)
+    const body = text.trim()
+    if (!tabId || body.length < DRAFT_MIN_CHARS) return
+    // The passage the original message was replying to is kept: the editor owns
+    // your words, not the excerpt they were about. Re-composed the same way the
+    // composer would have.
+    const { quote: repliedTo } = splitQuotedSuffix(turn.query)
+    const next = buildQuotedMessage(body, repliedTo)
+    // Saving without changing anything is a no-op, not a re-run. A stopped ask
+    // that the user wants to retry verbatim already has "Ask again" for that,
+    // and this path would spend a whole generation on the same question.
+    if (next === turn.query) return
+    // The abandoned turn goes away in the same commit the new one arrives in —
+    // the point of editing is that there is ONE question, the one you meant.
+    setTabs((prev) => prev.map((t) => (
+      t.id !== tabId ? t : { ...t, thread: t.thread.filter((x) => x.id !== turn.id) }
+    )))
+    // And it comes back out of the persisted conversation too. The user turn is
+    // written the moment a message is sent — long before the reply it never
+    // got — so without this the same thread reopened from history would show
+    // the original wording as an unanswered question above the edited one.
+    // Best-effort and queued behind its own write (see `retractUserTurn`); a
+    // failure leaves the record slightly long, never the UI broken.
+    void persistence.retractUserTurn(tabId, turn.id)
+    void submitAsk(next)
+  }, [activeTabId, persistence, submitAsk])
+
+  // An editor left open on a tab the user navigated away from would come back
+  // seated over whatever turn happens to be there now. Close it on any tab
+  // change — the thread it belonged to is no longer the one on screen.
+  useEffect(() => { setEditingTurnId(null) }, [activeTabId])
+
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
   // A question typed on the top-insights surface must open its OWN chat tab, not
   // thread inline into the brief. BriefChat sets pendingChatHandoff; we consume
@@ -6146,7 +6218,11 @@ export function ChatScreen() {
     // would have produced — the chip is a composer affordance, not a new
     // protocol. The trigger stays visible on the sent turn, which is what makes
     // the wait's skill chip verifiable from the thread itself.
-    const sent = spliceSkill(pinnedSkill, q)
+    // The pinned skill is spliced FIRST, then the quote appended, so the slash
+    // trigger stays the query's first token — the backend's deterministic
+    // fast-path and `skillForQuery` both read it there. (This ordering is the
+    // whole reason a quote rides at the END of the message; see `chatQuote.ts`.)
+    const sent = buildQuotedMessage(spliceSkill(pinnedSkill, q), quote)
     // Sending ends the dictation that produced the question — and CANCELS it
     // rather than stopping it. A graceful stop still delivers the phrase the
     // engine was finalising, and the hook's transcript is cumulative, so that
@@ -6156,6 +6232,7 @@ export function ChatScreen() {
     voiceBaseRef.current = ""
     setDraft("")
     setPinnedSkill(null)
+    setQuote(null)
     setPlusMenuOpen(false)
     void submitAsk(sent)
     const ta = composerRef.current
@@ -6364,6 +6441,8 @@ export function ChatScreen() {
       voiceSupported={voice.supported}
       voiceListening={voice.listening}
       onToggleVoice={handleToggleVoice}
+      quote={quote}
+      onRemoveQuote={() => setQuote(null)}
     />
   )
 
@@ -7261,6 +7340,10 @@ export function ChatScreen() {
               inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
               clarifyPopupOpen, pendingClarifyTurn,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
+              editingTurnId,
+              onEditTurn: handleEditTurn,
+              onSubmitTurnEdit: handleSubmitTurnEdit,
+              onCancelTurnEdit: handleCancelTurnEdit,
               openReportByTitle, openArtifactInPanel, openChatArtifactItem,
               handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
               handleViewPrototype, handlePrototypeSettled,
@@ -7518,6 +7601,7 @@ export function ChatScreen() {
                 turns={mainTurns}
                 pendingSend={pendingSendNode}
                 composerNode={renderComposer(false)}
+                onQuoteSelection={handleQuoteSelection}
               />
             )
           })()

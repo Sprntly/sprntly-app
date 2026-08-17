@@ -27,7 +27,7 @@
  * escape hatch for content that doesn't fit that ladder at all (a static
  * insight card, a "loading conversation…" skeleton).
  */
-import type { CSSProperties, ReactNode } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { IconSparkle } from "./app-icons"
 import { AskReplyBody } from "./AskReplyBody"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
@@ -90,6 +90,11 @@ export type ChatBubbleUserBlock = {
    *  multi-party surface's own bubble-fill styling lives here, keyed off its
    *  own CSS module rather than a new global rule. */
   bubbleClassName?: string
+  /** The passage of an earlier answer this message was a reply TO, rendered as
+   *  a quote block above the words. Callers split it off the stored message
+   *  with `splitQuotedSuffix` — it is not a separate field on the wire (see
+   *  `lib/chatQuote.ts` for why). Unset/null renders nothing. */
+  quote?: string | null
 }
 
 export interface ChatBubbleProps {
@@ -203,6 +208,25 @@ export interface ChatBubbleProps {
    *  own turn id. */
   onPickOption?: (option: { id: string; title: string; instruction?: string }) => void
 
+  // ── Editing a message that never got an answer ───────────────────────────
+  // A question you stopped (or that failed) is a dead end you can only re-ask
+  // verbatim. These three props make it editable in place: `onEditUserTurn`
+  // renders the affordance, `editing` swaps the bubble for a textarea, and
+  // `onSubmitEdit` hands the caller the new text to re-send with.
+  //
+  // Caller-OWNED, like every other in-flight signal here (see the header note):
+  // which turn is being edited, whether a turn is eligible at all, and what
+  // re-sending does are all decisions this leaf must not make. Unset → no
+  // affordance renders and the DOM is byte-identical.
+  /** Show the edit affordance on this turn's user bubble. */
+  onEditUserTurn?: () => void
+  /** This turn is the one currently being edited. */
+  editing?: boolean
+  /** The edited text, on save. The caller re-composes anything the editor does
+   *  not own (a quoted passage, a pinned skill trigger) and re-sends. */
+  onSubmitEdit?: (text: string) => void
+  onCancelEdit?: () => void
+
   /** Rendered after both blocks, inside the turn wrapper — an artifact
    *  action row, a "save as artifact" button. Turn-scoped, caller-composed. */
   footer?: ReactNode
@@ -221,6 +245,97 @@ function attachmentMeta(name: string, content?: string): string {
   if (!content) return type || "File"
   const lines = content.split("\n").length
   return [type, `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`].filter(Boolean).join(" · ")
+}
+
+/** The in-place editor for a question that never got an answer.
+ *
+ *  Its own component so the draft is LOCAL state that mounts with the edit and
+ *  dies with it — a `useState` seeded inside `ChatBubble` would keep the last
+ *  edit alive across turns and re-seat stale text the next time any turn was
+ *  edited. Enter saves, Shift+Enter adds a line, Escape cancels: the same
+ *  contract as the composer this text came from. */
+function UserTurnEditor({ initial, onSubmit, onCancel }: {
+  initial: string
+  onSubmit: (text: string) => void
+  onCancel: () => void
+}) {
+  const [text, setText] = useState(initial)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  // Focus with the caret at the END, not selecting the whole message: the
+  // common edit is a tweak to what you wrote, and a select-all means the first
+  // keystroke silently destroys it.
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    try {
+      el.setSelectionRange(el.value.length, el.value.length)
+    } catch {
+      /* jsdom/older engines may reject setSelectionRange */
+    }
+    el.style.height = "auto"
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
+  }, [])
+  const save = () => {
+    const next = text.trim()
+    if (!next) return
+    onSubmit(next)
+  }
+  return (
+    <div className="bc-user-edit" data-testid="user-turn-editor">
+      <textarea
+        ref={ref}
+        className="bc-user-edit-input"
+        aria-label="Edit your message"
+        value={text}
+        rows={1}
+        onChange={(e) => {
+          setText(e.target.value)
+          e.target.style.height = "auto"
+          e.target.style.height = `${Math.min(e.target.scrollHeight, 240)}px`
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault()
+            save()
+            return
+          }
+          if (e.key === "Escape") {
+            // Stops the surface-level Esc listeners (which cancel a running
+            // generation) from also firing on a keystroke that meant "close
+            // this box".
+            e.preventDefault()
+            e.stopPropagation()
+            onCancel()
+          }
+        }}
+      />
+      <div className="bc-user-edit-actions">
+        <button type="button" className="bc-user-edit-cancel" onClick={onCancel} data-testid="user-turn-edit-cancel">
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="bc-user-edit-save"
+          onClick={save}
+          disabled={!text.trim()}
+          data-testid="user-turn-edit-save"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The quoted passage above a user message — the reply-to excerpt, rendered
+ *  the way the composer parked it. */
+function UserQuote({ text }: { text: string }) {
+  return (
+    <blockquote className="bc-user-quote" data-testid="turn-quote">
+      {text}
+    </blockquote>
+  )
 }
 
 // A function, not a module-level element: module-level JSX evaluates at
@@ -285,6 +400,10 @@ export function ChatBubble(props: ChatBubbleProps) {
     agentBodyNode,
     pickOptions,
     onPickOption,
+    onEditUserTurn,
+    editing,
+    onSubmitEdit,
+    onCancelEdit,
     footer,
     afterNode,
   } = props
@@ -317,6 +436,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <span className={styles.otherName}>{userHeadName}</span>
                 {userHeadExtra ?? null}
               </div>
+              {user.quote ? <UserQuote text={user.quote} /> : null}
               {user.query || user.bodyNode ? (
                 <div
                   className={`bc-user-bubble ${styles.otherBubble}${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
@@ -365,13 +485,47 @@ export function ChatBubble(props: ChatBubbleProps) {
                 })}
               </div>
             ) : null}
-            {user?.query || user?.bodyNode ? (
-              <div
-                className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
-                data-testid={user.dataTestId}
-              >
-                {user.bodyNode ?? user.query}
-              </div>
+            {user?.quote && !editing ? <UserQuote text={user.quote} /> : null}
+            {/* Editing REPLACES the bubble rather than sitting beside it — two
+                copies of the same message on screen, one live and one stale,
+                is the state this affordance exists to get rid of. The quoted
+                passage is hidden with it and re-attached on send: the editor
+                owns your words, not the excerpt they were about. */}
+            {editing && onSubmitEdit && onCancelEdit ? (
+              <UserTurnEditor
+                initial={user?.query ?? ""}
+                onSubmit={onSubmitEdit}
+                onCancel={onCancelEdit}
+              />
+            ) : user?.query || user?.bodyNode ? (
+              <>
+                <div
+                  className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
+                  data-testid={user.dataTestId}
+                >
+                  {user.bodyNode ?? user.query}
+                </div>
+                {onEditUserTurn ? (
+                  // Revealed on hover/focus of the turn (see `.bc-user-actions`)
+                  // — always in the DOM, so it is reachable by keyboard and by a
+                  // screen reader on a surface that has no hover at all.
+                  <div className="bc-user-actions">
+                    <button
+                      type="button"
+                      className="bc-user-edit-btn"
+                      onClick={onEditUserTurn}
+                      aria-label="Edit and resend this message"
+                      title="Edit and resend"
+                      data-testid="user-turn-edit"
+                    >
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <path d="M12 20h9" />
+                        <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                      </svg>
+                    </button>
+                  </div>
+                ) : null}
+              </>
             ) : null}
           </>
         )}
