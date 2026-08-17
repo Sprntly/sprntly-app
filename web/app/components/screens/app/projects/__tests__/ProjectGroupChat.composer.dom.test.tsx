@@ -74,7 +74,7 @@ afterEach(() => cleanup())
 describe("ProjectGroupChat — composer not blocked while a reply generates in the background", () => {
   it("the Send button never becomes the (no-op) Stop button — busy is never fed by the send round-trip", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {})
 
     let resolvePost: (v: unknown) => void = () => {}
@@ -106,7 +106,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
 
   it("a second, DIFFERENT message is typeable and sendable immediately after the first send, before it settles", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {})
 
     let resolveFirstPost: (v: unknown) => void = () => {}
@@ -147,7 +147,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
 
   it("every send still routes through postGroupTurn — no client-side gate, no synchronous reply", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {})
 
     postGroupTurnMock.mockResolvedValueOnce(turn({ id: 5, content: "@Sprntly summarize this" }))
@@ -176,7 +176,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
 
   it("test_group_never_block_sends_during_pending_reply — an identical RETYPE while the first send is in flight is NOT silently eaten by the shell's clear (Fable #10)", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {})
 
     // The first send stays in flight (never resolves) so the same-content guard
@@ -214,7 +214,7 @@ describe("ProjectGroupChat — composer not blocked while a reply generates in t
 
   it("double-submit of the SAME draft is still prevented — a rapid re-send before the POST settles is a no-op", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {})
 
     let resolvePost: (v: unknown) => void = () => {}

@@ -91,7 +91,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     candidateSearchMock.mockResolvedValue([
       { kind: "member", user_id: "u2", name: "Fortune Ade", email: "fortune@acme.com" },
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@For")
@@ -106,7 +106,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
   it("test_sprntly_does_not_open_picker_and_invokes_agent", async () => {
     candidateSearchMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // @sprntly is the agent token — no people picker, no candidate search.
@@ -128,7 +128,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly help" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     // The debug-y "invoked by <name>" / "detected this was for it" trigger
     // badge is no longer user-facing — the agent turn still renders, but no
     // badge node exists. `trigger_kind` stays recorded server-side.
@@ -140,7 +140,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     candidateSearchMock.mockResolvedValue([
       { kind: "member", user_id: "u2", name: "Mabel", email: "mabel@acme.com" },
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Mab")
@@ -159,7 +159,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     candidateSearchMock.mockResolvedValue([
       { kind: "member", user_id: "u2", name: "Mabel", email: "mabel@acme.com" },
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Mab")
@@ -198,7 +198,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       { kind: "workspace", user_id: "u3", name: "Nadia", email: "nadia@acme.com" },
     ])
     tagCandidateMock.mockResolvedValue({ tier: "t_workspace", added: { user_id: "u3" } })
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Nad")
@@ -217,7 +217,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
   it("test_invite_by_email_row_present_and_drives_invite", async () => {
     candidateSearchMock.mockResolvedValue([]) // no directory match
     tagCandidateMock.mockResolvedValue({ tier: "t_newuser", invited: true, email_status: "sent" })
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@jane@acme.com")
@@ -242,7 +242,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       invited: true,
       email_status: "failed",
     })
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@zoe@acme.com")
@@ -267,7 +267,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     tagCandidateMock.mockRejectedValue(
       Object.assign(new Error("That person can't be added to this project"), { status: 403 }),
     )
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@Person")
@@ -288,7 +288,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     // Loading: the picker shows a loading hint immediately on an active query.
     let resolveSearch: (rows: unknown[]) => void = () => {}
     candidateSearchMock.mockReturnValue(new Promise((r) => (resolveSearch = r)))
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@Load")
     expect(await screen.findByTestId("gc-mention-loading")).toBeTruthy()
@@ -300,7 +300,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
     // Empty: an empty directory yields the "No matches — invite by email" row.
     candidateSearchMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@zzz")
     const invite = await screen.findByTestId("gc-mention-invite")
@@ -309,7 +309,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
     // Error: a rejected search renders the error state and never throws.
     candidateSearchMock.mockRejectedValue(new Error("boom"))
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@Err")
     expect(await screen.findByTestId("gc-mention-error")).toBeTruthy()
@@ -320,7 +320,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey @Fortune take a look" }),
       turn({ id: 2, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly summarise" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const others = await screen.findAllByTestId("gc-msg-other")
 
     // The @name mention is a chip; @sprntly is NOT chipped as a person.
@@ -335,7 +335,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
     candidateSearchMock.mockResolvedValue([
       { kind: "member", user_id: "u2", name: "Sprocket", email: "sprocket@acme.com" },
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // "spr" is a partial prefix of BOTH "Sprntly" (the agent) and "Sprocket"
@@ -361,7 +361,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
   it("an empty '@' query (no typed prefix yet) still leads with the Agent row", async () => {
     candidateSearchMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     await typeDraft("@")
@@ -371,7 +371,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
   it("regression guard: does NOT regress the base @sprntly-invokes-agent-no-picker guard even with the agent row wired", async () => {
     candidateSearchMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
 
     // The COMPLETE word "@sprntly" still routes to the agent-invoke path —
@@ -387,7 +387,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
 
   it("the sent draft, when it carries @Sprntly, is recognized by the backend's _MENTION_RE shape (word-boundary, case-insensitive)", async () => {
     candidateSearchMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send") // folded host: composer is the mount gate (the old scroll wrapper is now shell-owned)
     await typeDraft("@spr")
     const agentRow = await screen.findByTestId("gc-mention-agent")
@@ -414,7 +414,7 @@ describe("ProjectGroupChat — @-mention people picker", () => {
       turn({ id: 2, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "@Sprntly help" }),
       turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     // Multi-author bubbles intact; no trigger badge (it's not user-facing).
     const other = await screen.findByTestId("gc-msg-other")

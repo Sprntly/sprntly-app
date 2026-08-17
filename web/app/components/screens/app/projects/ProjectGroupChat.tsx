@@ -41,13 +41,17 @@ export type ProjectGroupChatProps = {
    *  artifact callback; a no-op here is a legitimate caller until that modal
    *  lands). */
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
+  /** The PRD open in the artifact drawer beside this chat — the explicit
+   *  edit target (parity with main chat's open-tab `prd_id`). `null` when
+   *  no PRD is open. */
+  openPrdId: number | null
 }
 
-export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChatProps) {
+export function ProjectGroupChat({ projectId, onOpenArtifact, openPrdId }: ProjectGroupChatProps) {
   // Declared FIRST — both engines require it up front (they read `.current`
   // lazily, so the shell can populate it on mount without a circular pass).
   const draftApiRef = useRef<ComposerDraftApi | null>(null)
-  const engine = useProjectGroupThread({ projectId, draftApiRef })
+  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId })
   const mentions = useMentionPicker({ projectId, draftApiRef })
   // The shared composer controller unifies the send producer: group's send
   // builds a `SendCommand` and hands it to `engine.post`. Attachments and
@@ -184,10 +188,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           prefix: "gc",
           retryRun: engine.retryRun,
         }),
-      // The confirmation gate's confirm/cancel seams — the shell's mapped
-      // confirm card calls back here with (turnId, token).
-      onConfirmMutation: engine.confirmMutation,
-      onCancelMutation: engine.cancelMutation,
     },
     send: { onSubmit: composerCtl.submit, pendingSendBubble: false },
     // Error + typing indicator (engine-fed, styled) + the picker's post-select

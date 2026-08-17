@@ -1676,35 +1676,6 @@ CREATE INDEX idx_project_delegations_project  ON project_delegations (project_id
 CREATE INDEX idx_project_delegations_assignee ON project_delegations (assignee_user_id, created_at);
 CREATE INDEX idx_project_delegations_assigner ON project_delegations (assigner_user_id, created_at);
 
--- Mirrors 20260816170000_prd_edit_proposals.sql. The transient, single-use
--- store behind the project PRD-edit confirmation gate. company_id/
--- workspace_id are plain TEXT (no FK) — same reasoning as the projects
--- tables above (route tests fabricate tenant ids with no parent row); prd_id
--- is likewise FK-free so unit tests can seed a proposal against any id.
--- sections_changed is jsonb in Postgres, JSON-text here (registered in
--- _fake_supabase._JSONB_COLUMNS). expires_at is a plain ISO-8601 UTC TEXT so
--- the `expires_at > ?` string comparison in get_proposal stays chronological.
-CREATE TABLE prd_edit_proposals (
-    token             TEXT PRIMARY KEY,
-    prd_id            INTEGER NOT NULL,
-    project_id        INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
-    conversation_id   INTEGER REFERENCES conversations (id) ON DELETE CASCADE,
-    surface           TEXT NOT NULL,
-    company_id        TEXT NOT NULL,
-    workspace_id      TEXT NOT NULL,
-    instruction       TEXT NOT NULL,
-    base_html         TEXT NOT NULL,
-    proposed_title    TEXT,
-    proposed_html     TEXT NOT NULL,
-    summary           TEXT,
-    sections_changed  TEXT,
-    client_message_id TEXT,
-    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at        TEXT NOT NULL
-);
-CREATE INDEX idx_prd_edit_proposals_tenant
-    ON prd_edit_proposals (company_id, workspace_id);
-
 -- Mirrors 20260813140100_delegation_events.sql. No FK on actor_user_id —
 -- same reasoning as project_delegations above (auth.users ids the fake
 -- DB never seeds a row for). The migration's own CHECK constraint and

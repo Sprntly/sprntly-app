@@ -57,18 +57,9 @@ from app import project_delegation
 from app import project_group_context
 from app import project_join_greeting
 from app import project_task_execution
-from app.project_chat_edit import (
-    apply_chat_edit_scoped,
-    apply_proposed_chat_edit,
-    propose_chat_edit_scoped,
-)
-from app.db import prd_edit_proposals as prd_edit_proposals_db
+from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
-from app.project_prd_patch_tool import (
-    _project_prd_ids,
-    _resolve_prd_id,
-    project_prd_edit_enabled,
-)
+from app.project_prd_patch_tool import project_prd_edit_enabled
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -157,6 +148,7 @@ def _schedule_group_reply(
     job_id: int | None = None,
     run_id: str | None = None,
     pinned_skill: str | None = None,
+    edit_target_prd_id: int | None = None,
 ) -> None:
     """Mint the run's execution identity + persist a `generating` `ask_jobs`
     row SYNCHRONOUSLY (so a crash before the background thread starts leaves a
@@ -215,7 +207,7 @@ def _schedule_group_reply(
     )
     coro = _respond_as_group_agent(
         project_id, conversation_id, ctx, trigger_kind, job_id=job_id, run_id=run_id,
-        pinned_skill=resolved_pinned_skill,
+        pinned_skill=resolved_pinned_skill, edit_target_prd_id=edit_target_prd_id,
     )
     if "pytest" in sys.modules:
         _run_group_reply_blocking(coro)
@@ -459,6 +451,12 @@ class PostGroupTurnRequest(BaseModel):
     client_message_id: str | None = None
     pinned_skill: dict | None = None
     attachments: list | None = None
+    # The PRD open in the artifact drawer beside this group chat, if any —
+    # mirrors the private surface's explicit open-drawer target (parity with
+    # main chat's tab-bound `prd_id`, `routes/chat.py:87`). Threaded through
+    # `_schedule_group_reply` -> `_respond_as_group_agent` -> the `edit_prd`
+    # tool handler's closure. `None` when no PRD is open.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 class EmitDelegationEventRequest(BaseModel):
@@ -917,19 +915,15 @@ def add_project_artifact(
 
 class ProjectChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
-    # OPTIONAL — the id the caller picked off a prior `clarify` envelope's
-    # `prd_options` (2+-PRD disambiguation). Omitted (the default, and the
-    # ONLY value pre-fix callers ever sent), target resolution is unchanged:
-    # server-side auto-select on exactly one project PRD, refuse on 0/2+.
-    # A client-SUPPLIED id is NOT trusted on its own — `_resolve_prd_id`
-    # returns it verbatim (`tool_input.get("prd_id")` → `(int(raw), None)`,
-    # no signature change), but `apply_chat_edit_scoped` below runs the ★
-    # cross-project (`assert_prd_on_project`) + cross-tenant
-    # (`require_owned_prd`) gate on WHATEVER `prd_id` reaches it,
-    # unconditionally and BEFORE any read/write — identically whether that
-    # id was server-auto-selected or client-supplied. See
-    # `test_project_chat_edit_explicit_id_cross_project_denied` for the
-    # mutation-proofed IDOR guard.
+    # The PRD open in the artifact drawer beside this chat — the EXPLICIT
+    # edit target (parity with main chat's tab-bound `prd_id`,
+    # `routes/chat.py:87`). There is no server-side inference: `None` means
+    # no PRD is open, and the route returns the simple "open a PRD" clarify
+    # rather than guessing or disambiguating across the project's PRDs.
+    # `apply_chat_edit_scoped` runs the ★ cross-project
+    # (`assert_prd_on_project`) + cross-tenant (`require_owned_prd`) gate on
+    # WHATEVER `prd_id` reaches it, before any read/write — this is the
+    # PRIMARY defense against a client naming a PRD on a different project.
     prd_id: int | None = Field(default=None, ge=1)
     # The idempotency key a retry/double-submit carries for the owned
     # both-sides persist below — client-issued when the sender's engine
@@ -944,33 +938,27 @@ def project_chat_edit(
     body: ProjectChatEditIn,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
-    """The private (and, later, group) project chat's PRD-edit write path —
-    the in-place, versioned counterpart to the retired propose/review
-    `prd_patches` flow, reusing the SAME `apply_chat_edit_scoped`
-    the main chat's `POST /v1/prd/{id}/chat-edit` calls guard-off.
+    """The private (and group) project chat's PRD-edit write path — applies
+    directly through the SAME `apply_chat_edit_scoped` the main chat's
+    `POST /v1/prd/{id}/chat-edit` calls, no confirm step.
 
     Membership-gated (`_require_project_member`), THEN the request-time
-    `PROJECT_PRD_EDIT_ENABLED` rollout flag (503 semantics degrade to a
-    no-op — off means no write and a no-edit reply, never an error), THEN
-    target resolution: `_resolve_prd_id` auto-selects on exactly one project
-    PRD, or — on 2+ PRDs — accepts the id the caller picked off a prior
-    `clarify` envelope's `prd_options` (`body.prd_id`, OPTIONAL, `None` on
-    every pre-fix call). 0/ambiguous-and-unpicked PRDs make no write and
-    return a no-edit, answer-shaped payload (`{"edited": false, "answer"}`)
-    instead of an error, so the private chat can degrade to a grounded ask.
+    `PROJECT_PRD_EDIT_ENABLED` rollout flag (off means no write and a no-edit
+    reply, never an error), THEN the explicit open-drawer target:
+    `body.prd_id` is None when no PRD is open beside this chat, in which case
+    the route returns the simple "open a PRD" clarify — never an inferred or
+    auto-selected target, and never a cross-project PRD enumeration.
 
     ★ `body.prd_id` is CLIENT-SUPPLIED and UNTRUSTED on its own — a member of
     project A could name a PRD on project B, or (probed) another tenant's.
     `apply_chat_edit_scoped` runs the ★ cross-project IDOR gate
     (`assert_prd_on_project`) — fail-closed, before any read/write — on
-    WHATEVER `prd_id` reaches it, identically whether server-auto-selected
-    or client-supplied, THEN the cross-tenant gate (`require_owned_prd`).
-    This is the PRIMARY defense for the client-supplied case, not defense in
-    depth — `_resolve_prd_id` performs no project/tenant check of its own on
-    an explicit id. A `ProjectPrdWriteDenied` from that gate is caught
-    and degrades to the same no-edit shape rather than a raw 403/404, since
-    the resolved-target contract promises callers a soft refusal, not an
-    error, on this route.
+    WHATEVER `prd_id` reaches it, THEN the cross-tenant gate
+    (`require_owned_prd`). This is the PRIMARY defense for the
+    client-supplied target. A `ProjectPrdWriteDenied` from that gate is
+    caught and degrades to the same no-edit shape rather than a raw
+    403/404, since the resolved-target contract promises callers a soft
+    refusal, not an error, on this route.
     """
     _require_project_member(project_id, ctx)
 
@@ -1006,146 +994,35 @@ def project_chat_edit(
                 project_id, exc_info=True,
             )
 
-    dataset = _dataset_for(ctx)
-    # `body.prd_id` present (the caller picked a PRD off a prior `clarify`
-    # envelope's `prd_options`) -> thread it through explicitly, same shape
-    # `_resolve_prd_id` already honors (`tool_input.get("prd_id")`) for the
-    # write-tool caller. Absent -> `{}`, preserving today's server-side
-    # auto-select/refuse behavior byte-for-byte.
-    tool_input = {"prd_id": body.prd_id} if body.prd_id is not None else {}
-    prd_id, refusal = _resolve_prd_id(tool_input, project_id, dataset, ctx.company_id)
-    if prd_id is None:
-        answer = refusal or "I couldn't work out which PRD to edit."
+    if body.prd_id is None:
+        # No PRD open beside this chat — simple clarify, no inference across
+        # the project's PRDs (Design clarification, mirrors main's open-tab
+        # requirement).
+        answer = "Open a PRD beside this chat and I'll edit it."
         _persist_edit_turns(answer)
         return {"edited": False, "answer": answer}
 
+    dataset = _dataset_for(ctx)
     try:
-        proposal = propose_chat_edit_scoped(
-            prd_id, body.instruction, ctx,
+        result = apply_chat_edit_scoped(
+            body.prd_id, body.instruction, ctx,
             project_id=project_id, dataset=dataset,
-            surface="private", client_message_id=resolved_client_message_id,
         )
     except ProjectPrdWriteDenied:
         answer = "I can only edit a PRD that's attached to this project."
         _persist_edit_turns(answer)
         return {"edited": False, "answer": answer}
 
-    if not proposal.get("proposed"):
-        # The editor judged the instruction wasn't an edit — nothing to
-        # confirm. Terminal no-op answer, same shape as the refusals above.
-        answer = proposal.get("summary") or "I didn't find anything in the PRD to change for that."
+    if not result["sections_changed"]:
+        # The editor judged the instruction wasn't an edit — nothing changed.
+        answer = result.get("summary") or "I didn't find anything in the PRD to change for that."
         _persist_edit_turns(answer)
         return {"edited": False, "answer": answer}
-
-    # An edit is READY but NOT yet written — nothing touched `prds`. Hand the
-    # caller the token to confirm (or cancel). The turn pair is persisted at
-    # confirm, not here, so an unconfirmed proposal leaves no chat trace.
-    return {
-        "edited": False,
-        "pending": True,
-        "mutation": {
-            "token": proposal["token"],
-            "summary": proposal["summary"],
-            "sections_changed": proposal["sections_changed"],
-            "prd_id": proposal["prd_id"],
-        },
-    }
-
-
-class ProjectPrdChatEditTokenIn(BaseModel):
-    """Body for the confirm/cancel legs of the project PRD chat-edit gate — the
-    opaque single-use token a prior `chat-edit` call returned under
-    `mutation.token`."""
-    token: str = Field(..., min_length=1)
-
-
-@router.post("/{project_id}/prd/chat-edit/confirm")
-def project_chat_edit_confirm(
-    project_id: int,
-    body: ProjectPrdChatEditTokenIn,
-    ctx: WorkspaceContext = Depends(require_workspace),
-):
-    """Confirm a previously-proposed project PRD edit: commit exactly the
-    token's stored patch (applied content == proposed content, no second edit
-    pass). Membership-gated; rides the same `PROJECT_PRD_EDIT_ENABLED` flag.
-
-    The two IDOR gates re-run on the CALLER inside `apply_proposed_chat_edit`
-    (the stored token target is untrusted), and the proposal lookup is
-    tenant-scoped + expiry-filtered + single-use. A denied/unknown/expired/
-    already-consumed token degrades to a soft `{"edited": False, "answer"}`
-    (never a raw 403/404 to chat), mirroring this route's write-denied
-    discipline. On success the owned turn pair persists (private surface) or a
-    completed 'Done' group turn is posted + broadcast (group surface)."""
-    _require_project_member(project_id, ctx)
-
-    if not project_prd_edit_enabled():
-        return {
-            "edited": False,
-            "answer": "PRD editing from chat isn't turned on for this project yet.",
-        }
-
-    dataset = _dataset_for(ctx)
-    try:
-        result = apply_proposed_chat_edit(
-            body.token, ctx, project_id=project_id, dataset=dataset,
-        )
-    except ProjectPrdWriteDenied:
-        return {
-            "edited": False,
-            "answer": "I can only edit a PRD that's attached to this project.",
-        }
-    except HTTPException as exc:
-        if exc.status_code == 404:
-            # Unknown / expired / already-applied / cross-tenant — all soft to
-            # chat, never a raw 404.
-            return {
-                "edited": False,
-                "answer": "That change is no longer available to apply.",
-            }
-        raise
-
-    if not result.get("applied"):
-        # Concurrent change since propose — nothing was clobbered.
-        return {
-            "edited": False,
-            "answer": "The PRD changed since this edit was proposed, so I didn't apply it. Please try again.",
-        }
 
     summary = result.get("summary") or ""
     done_answer = f"Done — I've updated the PRD. {summary}".strip() if summary \
         else "Done — I've updated the PRD."
-
-    if result.get("surface") == "group" and result.get("conversation_id") is not None:
-        # Group surface: narrate the completed edit as a group turn, exactly
-        # the past-tense 'Done' the pre-gate group path posted inline.
-        assistant_turn = conversations_db.post_group_turn(
-            result["conversation_id"], None, done_answer, role="assistant",
-        )
-        _publish_group_turn_created(project_id, result["conversation_id"], assistant_turn)
-    else:
-        # Private surface: persist the owned instruction + done-summary turn
-        # pair, keyed by the proposal's client_message_id so a double-confirm
-        # dedups per side. Best-effort — a persist hiccup never blocks the
-        # already-committed edit.
-        cmid = result.get("client_message_id") or str(uuid.uuid4())
-        try:
-            conversations_db.post_owned_individual_user_turn(
-                project_id=project_id,
-                user_id=ctx.user_id,
-                content=result.get("instruction") or "",
-                client_message_id=cmid,
-            )
-            conversations_db.post_owned_individual_assistant_turn(
-                project_id=project_id,
-                user_id=ctx.user_id,
-                content=done_answer,
-                client_message_id=cmid,
-            )
-        except Exception:  # noqa: BLE001 — best-effort, AD-P7
-            logger.warning(
-                "failed to persist confirmed edit turns project_id=%s",
-                project_id, exc_info=True,
-            )
+    _persist_edit_turns(done_answer)
 
     return {
         "edited": True,
@@ -1153,22 +1030,6 @@ def project_chat_edit_confirm(
         "sections_changed": result["sections_changed"],
         "summary": result["summary"],
     }
-
-
-@router.post("/{project_id}/prd/chat-edit/cancel")
-def project_chat_edit_cancel(
-    project_id: int,
-    body: ProjectPrdChatEditTokenIn,
-    ctx: WorkspaceContext = Depends(require_workspace),
-):
-    """Cancel a pending project PRD edit: drop the proposal row so its token
-    can never apply. Membership-gated; makes NO `prds` write. The delete is
-    tenant-scoped (`company_id` in the query), so a cross-tenant token
-    silently matches nothing — the response is always `{"cancelled": True}`
-    (no existence disclosure)."""
-    _require_project_member(project_id, ctx)
-    prd_edit_proposals_db.delete_proposal(body.token, ctx.company_id)
-    return {"cancelled": True}
 
 
 class ProjectPrdContentIn(BaseModel):
@@ -1614,6 +1475,7 @@ async def post_group_turn_route(
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
             pinned_skill=pinned_skill_id,
+            edit_target_prd_id=payload.prd_id,
         )
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
@@ -1631,6 +1493,7 @@ async def post_group_turn_route(
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
             pinned_skill=pinned_skill_id,
+            edit_target_prd_id=payload.prd_id,
         )
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
@@ -1657,6 +1520,7 @@ async def post_group_turn_route(
                 source_turn_id=turn["id"] if turn else None,
                 client_message_id=payload.client_message_id,
                 pinned_skill=pinned_skill_id,
+                edit_target_prd_id=payload.prd_id,
             )
         elif turn:
             # No reply scheduled — the stay-out decision has no agent turn
@@ -1745,6 +1609,11 @@ class ProjectChatIntentIn(BaseModel):
     # individual conversation) so deictic messages ("make it shorter")
     # resolve against the thread — same reason `/v1/chat/intent` takes one.
     conversation_id: int | None = None
+    # The PRD open in the artifact drawer beside this chat — the EXPLICIT
+    # edit target (mirrors main chat's tab-bound `prd_id`, `routes/chat.py:87`).
+    # `None` when no PRD is open; there is no server-side inference over the
+    # project's own PRDs to fall back on.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 @router.post("/{project_id}/chat/intent")
@@ -1755,26 +1624,21 @@ def project_chat_intent(
 ):
     """The PRIVATE project chat's classify decision — the project-scoped
     counterpart to `POST /v1/chat/intent` (`routes/chat.py`), giving the
-    private surface server-side target resolution via ONE resolve+classify
-    sequence, `resolve_project_chat_
-    intent` (single-sourced so the two surfaces can never drift on how a
-    project's edit target is found).
+    private surface the SAME single resolve+classify sequence,
+    `resolve_project_chat_intent` (single-sourced so the two surfaces can
+    never drift on how a project's edit target is bound).
 
-    Without this route the private client classified with an EMPTY target
-    (`prd_id=None`), so `resolve_chat_intent`'s `_NEEDS_PRD` downgrade
-    rewrote every `edit_prd` verdict to `answer` and a project-attached
-    PRD edit never reached `POST /{project_id}/prd/chat-edit`. Resolving
-    the target here, server-side, fixes that without touching the shared
-    `/v1/chat/intent` route or `resolve_chat_intent` itself.
+    The target is the open-drawer `prd_id` the client sends on the request
+    body — the project analogue of main's open-tab `prd_id`. When it is
+    bound, `resolve_chat_intent`'s `_NEEDS_PRD` downgrade never fires and an
+    `edit_prd` verdict survives; when no PRD is open, the downgrade fires and
+    `resolve_project_chat_intent` converts it to the simple "open a PRD"
+    clarify — never a cross-project disambiguation.
 
-    Membership-gated (`_require_project_member`). The target is resolved
-    via `_resolve_prd_id` over THIS project's own PRDs — never a client-
-    supplied id, so there is nothing here for a caller to spoof, and the
-    classify target always agrees with the write route's own resolution.
-    History is loaded ownership-scoped for the caller's own conversation
-    via the SAME reader `/v1/chat/intent` uses (`_load_history`); a
-    missing/absent `conversation_id` degrades to no-history classification,
-    never an error.
+    Membership-gated (`_require_project_member`). History is loaded
+    ownership-scoped for the caller's own conversation via the SAME reader
+    `/v1/chat/intent` uses (`_load_history`); a missing/absent
+    `conversation_id` degrades to no-history classification, never an error.
 
     Returns the envelope in the SAME shape `/v1/chat/intent` returns, so
     the client's `dispatchChatIntent` needs no project-specific branch.
@@ -1787,23 +1651,9 @@ def project_chat_intent(
     _require_project_member(project_id, ctx)
     dataset = _dataset_for(ctx)
     history = _load_history(body.conversation_id, ctx.company_id, ctx.user_id)
-    envelope, prd_id, refusal = resolve_project_chat_intent(
-        project_id, body.message, history, dataset, ctx
+    envelope, prd_id, _refusal = resolve_project_chat_intent(
+        project_id, body.message, history, dataset, ctx, body.prd_id,
     )
-    # The `_NEEDS_PRD` downgrade (chat_intent.py) fires whenever a PRD-target
-    # intent's target didn't resolve, rewriting the envelope to a plain
-    # `answer` with `source="no_target_prd"` — that alone doesn't distinguish
-    # "no PRD to edit" (nothing to disambiguate, the honest `answer` stands)
-    # from "more than one PRD, which one?" (a genuine choice the caller was
-    # never asked to make). Surface the latter as a first-class `clarify`
-    # envelope instead of a silent no-op; single-sourced off `_project_prd_
-    # ids` + the `_resolve_prd_id` refusal string, same as the group side.
-    if envelope.get("source") == "no_target_prd":
-        prd_options = _project_prd_ids(project_id, dataset, ctx.company_id)
-        if len(prd_options) >= 2:
-            envelope["intent"] = "clarify"
-            envelope["clarification"] = refusal
-            envelope["prd_options"] = prd_options
     envelope["prd_id"] = prd_id
     envelope["prd_title"] = None
     # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
@@ -1815,32 +1665,44 @@ def project_chat_intent(
     return envelope
 
 
+_OPEN_A_PRD_CLARIFY = "Open a PRD beside this chat and I'll edit it."
+
+
 def resolve_project_chat_intent(
     project_id: int,
     message: str,
     history: list[dict],
     dataset: str,
     ctx: WorkspaceContext,
+    prd_id: int | None,
 ) -> tuple[dict, int | None, str | None]:
     """The single-sourced resolve+classify pair BOTH project chat surfaces
-    run: resolve the edit target server-side over THIS project's own PRDs
-    (`_resolve_prd_id` — never a client/model-supplied id) then classify
-    with that target threaded in (`resolve_chat_intent(..., prd_id=prd_id)`)
-    so an `edit_prd` verdict survives the `_NEEDS_PRD` downgrade whenever a
-    target actually resolves. Returns `(envelope, prd_id, refusal)` —
-    the private route echoes envelope+prd_id onto its `/chat/intent` response.
-    (The group surface no longer classifies to edit — it edits in-band via the
-    `edit_prd` tool, which resolves its OWN target via `_resolve_prd_id`; see
-    `_propose_group_prd_edit`.)
+    run: classify with the EXPLICIT open-drawer `prd_id` threaded straight
+    into `resolve_chat_intent(..., prd_id=prd_id)` — mirroring main chat's
+    own tab-bound target (`routes/chat.py:87`). There is NO server-side
+    inference over the project's own PRDs here; `prd_id` is exactly what the
+    caller sent. Returns `(envelope, prd_id, refusal)` — the private route
+    echoes envelope+prd_id onto its `/chat/intent` response. (The group
+    surface no longer classifies to edit — it edits in-band via the
+    `edit_prd` tool, applying directly against its own closed-over
+    open-drawer target; see `_edit_prd_handler`.)
 
-    `refusal` is `_resolve_prd_id`'s human-readable reason a target did NOT
-    resolve (no PRD / more than one PRD on the project) — `None` when a
-    target resolved. The private route uses it to surface a genuine 2+-PRD
-    ambiguity as a `clarify` envelope so the caller can ask which
-    PRD instead of silently generating a confirmation it never made."""
-    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    When `prd_id` is bound, this is pure parity with main: an `edit_prd`
+    verdict survives the `_NEEDS_PRD` downgrade because a target resolved.
+    When `prd_id` is `None` (no PRD open beside this chat), the downgrade
+    fires and `resolve_chat_intent` returns a plain `answer` with
+    `source="no_target_prd"` — converted HERE to the SIMPLE "open a PRD"
+    clarify (Design clarification, 2026-08-17): `intent="clarify"` with a
+    fixed message and NO `prd_options` — the project's PRDs are never
+    enumerated or auto-selected, regardless of how many the project has (0,
+    1, or 2+). `refusal` is always `None` — there is no server-side
+    resolution step left to produce one."""
     envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
-    return envelope, prd_id, refusal
+    if envelope.get("source") == "no_target_prd":
+        envelope["intent"] = "clarify"
+        envelope["clarification"] = _OPEN_A_PRD_CLARIFY
+        envelope.pop("prd_options", None)
+    return envelope, prd_id, None
 
 
 def _classify_group_envelope(
@@ -1859,76 +1721,13 @@ def _classify_group_envelope(
     group surface's cards/counts agree with its project-scoped prose.
 
     The PRD-EDIT decision is NO longer made here: group edits are an
-    in-band `edit_prd` tool routed to the shared confirm gate — so this pass
-    never resolves an edit target, never proposes, and never steers a
-    no-fabrication note. It classifies for cards and nothing else. Returns the
-    enriched envelope."""
+    in-band `edit_prd` tool that applies directly (`_edit_prd_handler`,
+    `_respond_as_group_agent`) — so this pass never resolves an edit target
+    and never steers a no-fabrication note. It classifies for cards and
+    nothing else. Returns the enriched envelope."""
     envelope = resolve_chat_intent(ctx.company_id, message, history)
     enrich_chat_envelope(envelope, ctx, dataset, project_id=project_id)
     return envelope
-
-
-def _propose_group_prd_edit(
-    project_id: int,
-    conversation_id: int,
-    ctx: WorkspaceContext,
-    dataset: str,
-    instruction: str,
-) -> tuple[str, dict | None]:
-    """The @Sprntly group agent's in-band `edit_prd` tool handler —
-    the group half of the shared propose→confirm gate. Returns
-    `(narration, pending_mutation | None)`:
-
-    - flag off → a plain "not turned on" narration, no pending, no write;
-    - no target / an ambiguous 2+-PRD target → the server-resolved refusal as
-      the narration (so the model ASKS which PRD, `needs_prd_clarify`), no
-      pending, no write;
-    - the editor found nothing to change → a plain narration, no pending;
-    - an edit is ready → the proposal narration + the pending mutation
-      (token/summary/prd_id) the group turn stamps onto `reply.pending_mutation`
-      so the FE confirm card fires.
-
-    ★ SECURITY: the target is resolved SERVER-SIDE via
-    `_resolve_prd_id({}, ...)` — a HARD-CODED EMPTY DICT, exactly as the
-    retired pre-step did — never a model-supplied id (the `edit_prd` tool
-    schema exposes NO `prd_id`). Confirm gate preserved: this routes to the
-    SAME `propose_chat_edit_scoped` (propose writes NOTHING to `prds`); the
-    existing confirm route applies exactly the stored patch (applied ==
-    proposed). The two IDOR gates re-run on the CALLER inside
-    `propose_chat_edit_scoped`; `ProjectPrdWriteDenied` (cross-project) and
-    the cross-tenant `HTTPException(404)` PROPAGATE — ZERO write on either
-    refusal, fail-closed by construction, same as the retired pre-step."""
-    if not project_prd_edit_enabled():
-        return ("PRD editing from chat isn't turned on for this project yet.", None)
-    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
-    if prd_id is None:
-        # No PRD, or 2+ PRDs (`refusal` lists them) — the model relays this to
-        # ask which PRD; nothing is proposed and nothing is written.
-        return (refusal or "I couldn't work out which PRD to edit.", None)
-    proposal = propose_chat_edit_scoped(
-        prd_id, instruction, ctx,
-        project_id=project_id, dataset=dataset,
-        conversation_id=conversation_id, surface="group",
-    )
-    summary = (proposal.get("summary") or "").strip()
-    if not proposal.get("proposed"):
-        # The editor judged the instruction wasn't an edit — nothing to
-        # confirm, no token, no pending mutation (B2 no-fabrication).
-        return (summary or "I didn't find anything in the PRD to change for that.", None)
-    # An edit is READY but UNWRITTEN. Narrate the proposal and hand back the
-    # pending mutation so the group turn stamps `reply.pending_mutation` and
-    # the FE confirm card fires; the write happens only when the confirm route
-    # commits the stored patch (applied == proposed).
-    narration = (
-        f"I'd like to update the PRD: {summary} Confirm to apply." if summary
-        else "I'd like to update the PRD. Confirm to apply."
-    )
-    pending = {
-        "token": proposal["token"],
-        "summary": proposal["summary"],
-        "prd_id": proposal["prd_id"],
-    }
-    return (narration, pending)
 
 
 # Addressing notes appended to the group agent's reply system prompt, keyed
@@ -1970,6 +1769,7 @@ async def _respond_as_group_agent(
     project_id: int, conversation_id: int, ctx: WorkspaceContext,
     trigger_kind: str = "mention", *, job_id: int, run_id: str,
     pinned_skill: str | None = None,
+    edit_target_prd_id: int | None = None,
 ) -> None:
     """Produce the group agent's reply THROUGH the shared execution
     lifecycle primitive (`run_execution_job`), so the group surface *inherits*
@@ -1981,11 +1781,11 @@ async def _respond_as_group_agent(
     then assemble the recent speaker-attributed group context and produce ONE
     assistant turn via the unified engine (`qa_agent.answer`, scoped to this
     project) — with the GROUP-only in-band `edit_prd` tool in scope, so a PRD
-    change asked for on this turn is proposed mid-answer and rides back as
-    `reply.pending_mutation` (no pre-classify edit fork). On a forced failure
-    the primitive writes `status='error'` + `error_class` and NO assistant turn
-    is fabricated — the old `except`-that-only-logs is GONE, the primitive owns
-    failure.
+    change asked for on this turn is applied DIRECTLY, mid-answer, against the
+    explicit open-drawer target (no pre-classify edit fork, no confirm step).
+    On a forced failure the primitive writes `status='error'` + `error_class`
+    and NO assistant turn is fabricated — the old `except`-that-only-logs is
+    GONE, the primitive owns failure.
 
     Group inherits report/promote/ingest via the primitive's `on_committed`
     hook, reusing the SAME project-gated calls main/private use
@@ -2072,16 +1872,40 @@ async def _respond_as_group_agent(
                 )
                 question = f"{question}{folded[:100_000]}"
 
-        def _edit_prd_handler(tool_input: dict) -> tuple[str, dict | None]:
-            """GROUP-only `edit_prd` tool handler bound to this turn. Resolves
-            the target SERVER-SIDE (never a model id) and routes to the shared
-            propose→confirm gate via `_propose_group_prd_edit`."""
+        def _edit_prd_handler(tool_input: dict) -> tuple[str, None]:
+            """GROUP-only `edit_prd` tool handler bound to this turn. Applies
+            DIRECTLY through the shared `apply_chat_edit_scoped` against the
+            explicit open-drawer target this closure captures
+            (`edit_target_prd_id`, threaded from `PostGroupTurnRequest.prd_id`
+            via `_schedule_group_reply` -> `_respond_as_group_agent`) — never a
+            model-supplied id, and never a server-side inference across the
+            project's PRDs. Always returns `(narration, None)`: the edit is
+            already applied by the time the narration is produced, so there is
+            no pending mutation to ride out."""
             instruction = (tool_input.get("instruction") or "").strip()
             if not instruction:
                 return ("I need to know what change to make to the PRD.", None)
-            return _propose_group_prd_edit(
-                project_id, conversation_id, ctx, dataset, instruction,
-            )
+            if not project_prd_edit_enabled():
+                return ("PRD editing from chat isn't turned on for this project yet.", None)
+            if edit_target_prd_id is None:
+                # No PRD open beside this chat — simple clarify, no inference.
+                return ("Open a PRD beside this chat and I'll edit it.", None)
+            try:
+                r = apply_chat_edit_scoped(
+                    edit_target_prd_id, instruction, ctx,
+                    project_id=project_id, dataset=dataset,
+                )
+            except ProjectPrdWriteDenied:
+                return ("I can only edit a PRD that's attached to this project.", None)
+            if not r["sections_changed"]:
+                return (
+                    r.get("summary") or "I didn't find anything in the PRD to change for that.",
+                    None,
+                )
+            summary = (r.get("summary") or "").strip()
+            narration = f"Done — I've updated the PRD. {summary}".strip() if summary \
+                else "Done — I've updated the PRD."
+            return (narration, None)
 
         scope = SurfaceScope(
             surface=Surface.project_group,
@@ -2122,8 +1946,9 @@ async def _respond_as_group_agent(
         # open lookup) — so a reload renders the same cards the live turn
         # does. `content` keeps the plain answer text as the fallback every
         # pre-column consumer still reads. When the in-band `edit_prd` tool
-        # proposed an edit, `result` carries `pending_mutation` — `dict(result)` lifts it onto `reply_payload` here, so the
-        # FE confirm card fires and the existing confirm route applies it.
+        # applied an edit, it already happened by the time `qa_agent.answer`
+        # returns — the narration IS the answer, there is no pending mutation
+        # to carry on `reply_payload`.
         reply_payload: dict = dict(result or {"answer": reply})
         if classify_envelope:
             for key in ("artifact_list", "artifact_counts", "open"):

@@ -2,15 +2,16 @@
 classify decision, the project-scoped counterpart to `POST /v1/chat/intent`
 (`routes/chat.py`).
 
-Covers: the target is resolved SERVER-side over the project's own PRDs
-(never a client-supplied id) and threaded into `resolve_chat_intent` as
-`prd_id`, so a project-attached PRD survives the `_NEEDS_PRD` downgrade and
-an `edit_prd` verdict comes back intact (AC2/AC5); membership is required
-(AC4); the response is shaped exactly like `/v1/chat/intent`'s envelope, so
-the client's dispatch needs no project-specific branch (AC5); and the
-shared group-classify reference this route mirrors is functionally
-unperturbed (AC8's behavioural half — the byte-identity half is a
-ship-gate `git diff` check, not a unit test, per TICKET_STANDARD_ADDENDUM).
+Covers: the target is the EXPLICIT open-drawer `prd_id` the client sends on
+the request body (never a server-side resolution over the project's own
+PRDs) threaded into `resolve_chat_intent` as `prd_id`, so a bound target
+survives the `_NEEDS_PRD` downgrade and an `edit_prd` verdict comes back
+intact; membership is required; the response is shaped exactly like
+`/v1/chat/intent`'s envelope, so the client's dispatch needs no
+project-specific branch; a plain (non-PRD-target) question never triggers
+the clarify branch. The 0/1/2+-PRD "open a PRD" clarify design (no
+enumeration, no auto-select) is covered by
+`test_project_prd_edit_parity.py`.
 
 `resolve_chat_intent` is monkeypatched at `app.routes.projects.resolve_chat_
 intent` for determinism — its own thresholds/prompt are unit-tested
@@ -18,9 +19,9 @@ elsewhere (`test_chat_intent_route.py`/`test_chat_intent_evals.py`), not
 re-litigated here. Real `projects`/`project_members`/`project_artifacts`/
 `prds`/`prd_versions` rows via `tenant_client` + `isolated_settings` (the
 fake in-memory Supabase every backend suite composes on) — same convention
-`test_projects_prd_chat_edit_route.py` and `test_group_chat_prd_edit.py`
-already use. The real cross-tenant Postgres fan-out through a real LLM is
-exercised by the env-gated `test_project_intent_route_live.py`.
+`test_projects_prd_chat_edit_route.py` already uses. The real cross-tenant
+Postgres fan-out through a real LLM is exercised by the env-gated
+`test_project_intent_route_live.py`.
 """
 from __future__ import annotations
 
@@ -28,10 +29,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.prd_questions as prd_questions
 import app.routes.projects as projects_route
 from tests import _fake_supabase
-from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace
 from tests._project_helpers import seed_same_tenant_non_member
 
@@ -70,19 +69,6 @@ def _seed_prd(db_mod, dataset="acme", html="<html><body><h1>Doc</h1></body></htm
     return prd_id
 
 
-def _versions(prd_id):
-    return (
-        require_client().table("prd_versions").select("*")
-        .eq("prd_id", prd_id).execute().data or []
-    )
-
-
-def _payload(prd_id):
-    return require_client().table("prds").select("payload_md").eq(
-        "id", prd_id
-    ).execute().data[0]["payload_md"]
-
-
 def _seed_project(t, isolated_settings, *, with_prd: bool = True):
     from app.db import projects as projects_db
 
@@ -106,34 +92,6 @@ def _fake_envelope(intent="answer", **overrides):
     return envelope
 
 
-# ── AC2/AC5 — server-resolved target survives into resolve_chat_intent ──────
-def test_project_intent_resolves_target_and_keeps_edit_prd(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
-
-    captured_prd_ids = []
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        captured_prd_ids.append(prd_id)
-        return _fake_envelope(intent="edit_prd", instruction="tighten it")
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # The route passed a NON-None, server-resolved prd_id in — proving the
-    # `_NEEDS_PRD` downgrade (chat_intent.py) never had a reason to fire.
-    assert captured_prd_ids == [prd_id]
-    assert body["intent"] == "edit_prd"
-    assert body["prd_id"] == prd_id
-
-
 # ── AC4 — membership required ────────────────────────────────────────────────
 def test_project_intent_requires_membership(tenant_client, isolated_settings, monkeypatch):
     t = tenant_client.make(slug="acme")
@@ -152,48 +110,6 @@ def test_project_intent_requires_membership(tenant_client, isolated_settings, mo
     )
     assert resp.status_code == 403
     assert classify_calls == []
-
-
-# ── AC5 — target is server-resolved, never a client id; 0/ambiguous → None ──
-def test_project_intent_target_is_server_resolved_not_client(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)  # zero PRDs
-    captured_prd_ids = []
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        captured_prd_ids.append(prd_id)
-        return _fake_envelope()
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        # Nothing in the request body can even NAME a prd_id (the route only
-        # ever reads `{message, conversation_id}`) — this proves the zero-PRD
-        # refusal path, not a client-id bypass.
-        json={"message": "edit prd 999999 please"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert captured_prd_ids == [None]
-    assert resp.json()["prd_id"] is None
-
-    # Ambiguous: two PRDs on the project → also refused to a None target.
-    from app.db import projects as projects_db
-
-    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
-    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_a)
-    projects_db.add_artifact(project_id, "prd", prd_b)
-
-    resp2 = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp2.status_code == 200, resp2.text
-    assert captured_prd_ids[-1] is None
-    assert resp2.json()["prd_id"] is None
 
 
 # ── AC5 — response shape matches /v1/chat/intent's envelope ─────────────────
@@ -219,69 +135,15 @@ def test_project_intent_returns_chat_intent_envelope_shape(
     assert expected_keys.issubset(body.keys())
 
 
-# ── The group edit is IN-BAND via the `edit_prd` tool ─────────────────
-# The group no longer forks a classify-then-propose pre-step; a PRD change is
-# handled by the model calling `edit_prd` mid-answer, routed to the SAME
-# propose→confirm gate the private surface uses. Behaviour is proven end to
-# end here + at the ship-gate's live group-edit re-verify.
-def test_group_edit_in_band_tool_proposes_then_confirms(tenant_client, isolated_settings, monkeypatch):
-    """A group edit request reaches the tool loop, the model calls `edit_prd`,
-    the handler proposes (no write) and the group turn carries the pending
-    mutation; the existing confirm route then commits applied == proposed."""
-    t = tenant_client.make(slug="acme")
-    project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
-    before_versions = len(_versions(prd_id))
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    # Card classify (edit is the tool's job now) — keep it off the LLM.
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    monkeypatch.setattr(
-        prd_questions, "apply_chat_edit",
-        lambda *a, **kw: {
-            "html": "<html><body><h1>Doc v2</h1></body></html>",
-            "sections_changed": ["Requirements"],
-            "summary": "Tightened requirements.",
-        },
-    )
-    # The model calls `edit_prd` once.
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda *, dispatch, **kw: dispatch("edit_prd", {"instruction": "tighten requirements"}),
-    )
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly tighten the requirements section of the PRD"},
-    )
-    assert resp.status_code == 200, resp.text
-    # Under the confirmation gate the tool PROPOSES (no write yet); the edit
-    # commits only when the confirm route applies the token.
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_group_chat(project_id)
-    proposal_turn = [
-        tn for tn in conversations_db.list_group_turns(conv["id"])
-        if tn["role"] == "assistant"
-    ][-1]
-    token = proposal_turn["reply"]["pending_mutation"]["token"]
-    assert "Doc v2" not in _payload(prd_id)
-
-    confirm = t.client.post(
-        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
-    )
-    assert confirm.status_code == 200, confirm.text
-    assert confirm.json()["edited"] is True
-    assert "Doc v2" in _payload(prd_id)
-    assert len(_versions(prd_id)) == before_versions + 1
-
-
 # ── The PRIVATE route still routes through the shared resolve helper ─────────
 def test_private_route_uses_the_shared_resolve_helper(
     tenant_client, isolated_settings, monkeypatch
 ):
     """The private route (`project_chat_intent`) resolves+classifies through
     the shared `resolve_project_chat_intent` helper. (The GROUP surface no
-    longer uses it — it edits in-band via the `edit_prd` tool, which resolves
-    its OWN target via `_resolve_prd_id`; see `_propose_group_prd_edit`.)"""
+    longer uses it — it edits in-band via the `edit_prd` tool, applying
+    directly through the shared editor against its own closed-over
+    open-drawer target.)"""
     t = tenant_client.make(slug="acme")
     project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
 
@@ -302,122 +164,6 @@ def test_private_route_uses_the_shared_resolve_helper(
     )
     assert resp.status_code == 200, resp.text
     assert len(calls) == 1  # the private route went through the shared helper
-
-
-# ── AC1 — the private route surfaces the >1-PRD disambiguation as a real ────
-# clarify instead of silently discarding it (`refusal`) and returning
-# `intent:"answer", prd_id:null`.
-def test_private_intent_two_prds_returns_clarify_not_silent_answer(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
-    from app.db import projects as projects_db
-
-    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
-    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_a)
-    projects_db.add_artifact(project_id, "prd", prd_b)
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        # Mirrors the REAL `_NEEDS_PRD` downgrade (chat_intent.py): an
-        # edit-phrased message whose target failed to resolve comes back
-        # rewritten to `answer`, `source="no_target_prd"` — exactly what
-        # `resolve_chat_intent` itself would produce for `prd_id=None`.
-        return _fake_envelope(intent="answer", source="no_target_prd")
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    # NOT the silent no-op the unfixed route returns.
-    assert body["intent"] == "clarify"
-    assert body["prd_id"] is None
-    assert "more than one PRD" in body["clarification"]
-    assert {o["id"] for o in body["prd_options"]} == {prd_a, prd_b}
-
-
-# ── AC5 — the clarify's `prd_options` is exactly `_project_prd_ids(...)` ────
-# for the project — tenant-scoped, never a client-supplied listing.
-def test_private_intent_clarify_options_are_project_prds(
-    tenant_client, isolated_settings, monkeypatch
-):
-    from app.project_prd_patch_tool import _project_prd_ids
-
-    t = tenant_client.make(slug="acme")
-    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
-    from app.db import projects as projects_db
-
-    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
-    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_a)
-    projects_db.add_artifact(project_id, "prd", prd_b)
-
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: _fake_envelope(intent="answer", source="no_target_prd"),
-    )
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp.status_code == 200, resp.text
-    expected = _project_prd_ids(project_id, "acme", t.company_id)
-    assert resp.json()["prd_options"] == expected
-
-
-# ── AC3 — exactly ONE PRD: unchanged edit_prd verdict, no clarify ───────────
-def test_private_intent_one_prd_unchanged_edit_prd(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id, prd_id = _seed_project(t, isolated_settings, with_prd=True)
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        # A single project PRD resolves — the target survives, no downgrade.
-        return _fake_envelope(intent="edit_prd", instruction="tighten it", source="llm")
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["intent"] == "edit_prd"
-    assert body["prd_id"] == prd_id
-    assert "clarification" not in body
-    assert "prd_options" not in body
-
-
-# ── AC4 — zero PRDs: unchanged honest answer, no clarify ────────────────────
-def test_private_intent_zero_prd_unchanged_answer(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id, _ = _seed_project(t, isolated_settings, with_prd=False)
-
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: _fake_envelope(intent="answer", source="no_target_prd"),
-    )
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "tighten the scope"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["intent"] == "answer"
-    assert body["prd_id"] is None
-    assert "clarification" not in body
-    assert "prd_options" not in body
 
 
 # ── AC6 — a plain non-edit question on a 2-PRD project does NOT over-fire ───

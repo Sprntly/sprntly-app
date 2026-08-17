@@ -47,6 +47,10 @@ export type ProjectPrivateChatProps = {
    *  refreshes the host's artifacts list + count immediately, without
    *  waiting on the realtime `artifact.added` echo. */
   onArtifactsChanged?: () => void
+  /** The PRD open in the artifact drawer beside this chat — the explicit
+   *  edit target (parity with main chat's open-tab `prd_id`). `null` when
+   *  no PRD is open. */
+  openPrdId: number | null
 }
 
 /** The insight banner's location phrase — derived from the ACTUAL source
@@ -64,8 +68,8 @@ function isHistoryTurn(turn: ShellTurn): boolean {
   return turn.id.startsWith("history-")
 }
 
-export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onArtifactsChanged }: ProjectPrivateChatProps) {
-  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged })
+export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onArtifactsChanged, openPrdId }: ProjectPrivateChatProps) {
+  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged, openPrdId })
   // The shared composer controller (un-stubs the project composer). Private
   // rides `/v1/ask`, so BOTH attachments and skills go live: the built
   // `SendCommand` (splice + extracted attachment context) hands to `engine.send`.
@@ -166,10 +170,6 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       // `ShellTurn.runStatus` (undefined → nothing); private has no retry seam
       // (it re-asks via the turn), so no Retry is offered.
       runStatus: (status, turn) => renderRunStatus({ status, turn, prefix: "ic" }),
-      // The confirmation gate's confirm/cancel seams — the shell's mapped
-      // confirm card calls back here with (turnId, token).
-      onConfirmMutation: engine.confirmMutation,
-      onCancelMutation: engine.cancelMutation,
     },
     send: { onSubmit: composerCtl.submit, pendingSendBubble: true },
     // Next-prompt pills: the SHARED `NextPromptSuggestions` strip, fed by
