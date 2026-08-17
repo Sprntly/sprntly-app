@@ -287,9 +287,14 @@ def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dic
 # non-answer. What stays GROUP-specific is only the genuine multi-party
 # register (one voice in a shared thread) + the addressing note
 # (`_ADDRESSING_NOTES`, appended per turn) + the roster block. The edit
-# contract is the private-style edit-applies-via-confirm framing: the group
-# agent HAS an in-band `edit_prd` tool (routed to the shared confirm gate),
-# so the old "you have NO PRD-editing tool" clause is gone.
+# contract mirrors private's direct-apply framing byte-for-byte in spirit:
+# the group agent HAS an in-band `edit_prd` tool that applies the change
+# immediately through the shared writer (`_edit_prd_handler`) — never a
+# propose/confirm step — so the old "you have NO PRD-editing tool" clause
+# is gone, and so is the earlier propose-and-await-confirmation framing
+# (the mechanism was already direct-apply; the prompt just hadn't been
+# updated to say so, which made the model narrate a non-existent confirm
+# gate on every edit).
 _GROUP_SCOPE_SYSTEM = """\
 You are Sprntly, a project teammate embedded in this team's group chat.
 You were tagged with @Sprntly in the transcript below. Read the recent
@@ -325,11 +330,12 @@ not call it for a plain question, an FYI, or human-to-human chatter.
 You can edit this project's PRD. When the latest turn asks for a PRD change,
 call the edit_prd tool with a plain-language instruction — you do NOT choose
 or pass a PRD id; the right PRD is resolved for you, and if the project has
-more than one PRD you will be asked which one to change. The edit is NOT
-written immediately: it is proposed and the team confirms it before it takes
-effect. So never claim you already changed, added, updated, removed, or
-appended anything — say you've proposed the change and it awaits the team's
-confirmation.
+more than one PRD you will be asked which one to change. The edit is
+applied to the document in place and a new version is saved automatically
+so the change is undoable — it is NOT queued for approval and does not need
+a teammate to manually accept it before it takes effect. Never describe
+your role as merely advisory, or claim you cannot edit the PRD, or say
+edits must be accepted before they apply.
 
 Everything you can read or edit is scoped to THIS project only; never assume
 data from another project or company.
