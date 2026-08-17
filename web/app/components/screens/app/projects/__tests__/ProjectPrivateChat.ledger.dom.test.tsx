@@ -141,7 +141,7 @@ describe("ProjectPrivateChat — inline brief-turn affordance (AC7)", () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockResolvedValue([ledgerRow({ delegation_id: 5, delivered_turn_id: 42, status: "assigned" })])
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1, openPrdId: null }))
 
     await waitFor(() => expect(screen.getByTestId("ic-brief-delegation-actions")).toBeTruthy())
     const affordance = screen.getByTestId("ic-brief-delegation-actions")
@@ -166,7 +166,7 @@ describe("ProjectPrivateChat — inline brief-turn affordance (AC7)", () => {
     individualTurnsMock.mockResolvedValue([briefTurn(99)])
     ledgerMock.mockResolvedValue([ledgerRow({ delegation_id: 5, delivered_turn_id: 42 })])
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1, openPrdId: null }))
 
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     // The turn renders exactly as today — no affordance.
@@ -185,7 +185,7 @@ describe("ProjectPrivateChat — inline brief-turn affordance (AC7)", () => {
   it("renders no affordance when the ledger read is empty (best-effort, no throw)", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockResolvedValue([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1, openPrdId: null }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     expect(screen.queryByTestId("ic-brief-delegation-actions")).toBeNull()
   })
@@ -193,7 +193,7 @@ describe("ProjectPrivateChat — inline brief-turn affordance (AC7)", () => {
   it("a failed ledger read leaves the thread working with no affordance", async () => {
     individualTurnsMock.mockResolvedValue([briefTurn(42)])
     ledgerMock.mockRejectedValue(new Error("ledger down"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 1 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 1, openPrdId: null }))
     await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
     expect(screen.queryByTestId("ic-brief-delegation-actions")).toBeNull()
     // The thread still renders and stays usable (the composer is present) —

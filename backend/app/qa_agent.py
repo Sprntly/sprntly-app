@@ -1786,13 +1786,6 @@ def _try_scoped_tool_answer(
     identity = scope.assigner_identity or {}
     assigner_user_id = identity.get("assigner_user_id")
     roster = list(scope.roster)
-    # Side-effect sink for the GROUP-only `edit_prd` tool: the handler writes
-    # the proposed edit's token/summary here, and it is lifted onto the
-    # returned payload's `pending_mutation` AFTER the loop so the group turn's
-    # persistence can stamp `reply.pending_mutation` (net-new plumbing). Stays
-    # empty for main/private (no edit tool / no handler), so their `answer()`
-    # result shape is unaffected.
-    pending_mutation: dict = {}
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1804,14 +1797,12 @@ def _try_scoped_tool_answer(
         if read is not None:
             return read
         if name == "edit_prd" and scope.edit_prd_handler is not None:
-            # GROUP-only in-band PRD edit → the shared propose→confirm gate.
-            # The handler resolves the target server-side (never a model id)
-            # and returns `(narration, pending | None)`; the pending proposal
-            # rides the sink out to the group turn's `reply.pending_mutation`.
-            narration, pending = scope.edit_prd_handler(tool_input)
-            if pending is not None:
-                pending_mutation.clear()
-                pending_mutation.update(pending)
+            # GROUP-only in-band PRD edit → applies DIRECTLY through the
+            # shared editor against the handler's own closed-over
+            # open-drawer target (never a model-supplied id). The handler
+            # always returns `(narration, None)` — the edit is already
+            # applied by the time the narration is produced.
+            narration, _pending = scope.edit_prd_handler(tool_input)
             return narration
         if name == "delegate_task":
             from app import project_delegation
@@ -1900,11 +1891,6 @@ def _try_scoped_tool_answer(
         mode="individual" if scope.surface == Surface.project_private else "group",
     )
     result: dict = {"answer": text, "citations": []}
-    # GROUP only, and only when the `edit_prd` tool actually proposed an edit:
-    # carry the proposal out so the group turn stamps `reply.pending_mutation`.
-    # Empty for main/private → key absent → their result shape is unchanged.
-    if pending_mutation:
-        result["pending_mutation"] = dict(pending_mutation)
     return result
 
 

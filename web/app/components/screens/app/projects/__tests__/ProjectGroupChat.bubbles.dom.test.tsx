@@ -70,7 +70,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
     ])
-    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const me = await screen.findByTestId("gc-msg-me")
     // The rows live inside the shell's shared `bc-thread` column (the 868px
     // width David asked for — feedback #3/#4/#8), which the shell renders for
@@ -88,7 +88,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
       turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null, content: "agent reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     // Own turn: the row-reverse `gcMsgMe` lane, bubble draws from the SHARED
     // `bc-user-bubble` skin (NAMED INTENDED CHANGE: main/private parity — the
@@ -120,7 +120,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const me = await screen.findByTestId("gc-msg-me")
     const other = screen.getByTestId("gc-msg-other")
     expect(within(me).getByText("my reply").closest(".bc-user-bubble")).toBeTruthy()
@@ -133,7 +133,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "hey" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const other = await screen.findByTestId("gc-msg-other")
     // The native multi-party attribution header is preserved.
     expect(other.querySelector("[class*='otherRow']")).toBeTruthy()
@@ -148,7 +148,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const me = await screen.findByTestId("gc-msg-me")
     const other = screen.getByTestId("gc-msg-other")
     const peerBubble = within(other).getByText("hey").closest(".bc-user-bubble")!
@@ -163,7 +163,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null, content: "agent reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const agent = await screen.findByTestId("gc-msg-agent")
     expect(agent.querySelector("[class*='agentTime']")).toBeNull()
   })
@@ -172,7 +172,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "Ping @David about the quote" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const me = await screen.findByTestId("gc-msg-me")
     const chip = within(me).getByTestId("gc-mention-chip")
     expect(chip.textContent).toContain("@David")
@@ -204,7 +204,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
       }),
     ])
     const onOpenArtifact = vi.fn()
-    render(React.createElement(ProjectGroupChat, { projectId: 101, onOpenArtifact }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, onOpenArtifact, openPrdId: null }))
     const chip = await screen.findByTestId("open-artifact-chip")
     fireEvent.click(chip)
     expect(onOpenArtifact).toHaveBeenCalledWith(expect.objectContaining({ id: 9, type: "prd" }))
@@ -245,7 +245,7 @@ describe("ProjectGroupChat — persisted reply citations never render as raw sou
         } as never,
       }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     const agent = await screen.findByTestId("gc-msg-agent")
     // The reply settled (full answer text on screen) — so the assertion below
@@ -271,7 +271,7 @@ describe("ProjectGroupChat — viewport pins to newest turn after history load (
         resolveTurns = resolve
       }),
     )
-    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     // The scroll region is now the shell's standalone viewport (it owns project
     // scrolling post-fold), not the old `group-chat-scroll` div.
@@ -306,7 +306,7 @@ describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (
         created_at: new Date(Date.now() - 60_000).toISOString(),
       }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     // A human-only, long-settled last turn with no reply → the QUIET declined
     // node renders (the honest replacement); the OLD alarming `gc-stayed-out`
     // pill and its `.stayedOut*` classes are gone from the DOM.
@@ -326,5 +326,23 @@ describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (
     expect(extrasCss).not.toContain(".stateBadge")
     expect(extrasCss).not.toContain(".roster")
     expect(extrasCss).not.toContain(".rosterDot")
+  })
+})
+
+describe("ProjectGroupChat — applied edit_prd turn, no confirm affordance", () => {
+  it("test_group_edit_turn_has_no_confirm_card", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "@Sprntly tighten the requirements section" }),
+      turn({
+        id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null,
+        content: "Done — I've updated the PRD. Tightened requirements.",
+      }),
+    ])
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: 501 }))
+    await screen.findByTestId("gc-msg-agent")
+    expect(container.textContent).toContain("Done — I've updated the PRD.")
+    expect(container.querySelector('[data-testid="mutation-confirm-card"]')).toBeNull()
+    expect(screen.queryByTestId("mutation-confirm")).toBeNull()
+    expect(screen.queryByTestId("mutation-cancel")).toBeNull()
   })
 })

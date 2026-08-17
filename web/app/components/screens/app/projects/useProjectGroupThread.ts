@@ -122,6 +122,11 @@ export interface UseProjectGroupThreadArgs {
   /** The lazily-read draft API ref (shell-populated on mount) — the engine owns
    *  send-failure draft-restore through it (compare-and-set, a review). */
   draftApiRef: MutableRefObject<ComposerDraftApi | null>
+  /** The PRD open in the artifact drawer beside this chat — the explicit
+   *  `edit_prd` target (parity with main chat's own open-tab `prd_id`).
+   *  `null` when no PRD is open. Threaded onto every posted turn so an
+   *  in-band edit request applies against the right PRD. */
+  openPrdId: number | null
 }
 
 export interface UseProjectGroupThread {
@@ -153,17 +158,9 @@ export interface UseProjectGroupThread {
   /** Backend seam: the idempotent per-turn retry entrypoint. Undefined until the
    *  backend wires it (so the run-status render offers NO Retry — dark). */
   retryRun?: (turn: ShellTurn | null) => void
-  /** Confirm an agent turn's parked PRD-edit proposal (the confirmation
-   *  gate): calls the confirm route with the token; the "Done" group turn
-   *  arrives via the existing realtime/poll — no local turn synthesis, only
-   *  the local clear of `pendingMutation` once the token is spent. */
-  confirmMutation: (turnId: string, token: string) => void
-  /** Cancel a parked proposal: fire-and-forget the cancel route and clear
-   *  the turn's `pendingMutation` locally. */
-  cancelMutation: (turnId: string, token: string) => void
 }
 
-export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGroupThreadArgs): UseProjectGroupThread {
+export function useProjectGroupThread({ projectId, draftApiRef, openPrdId }: UseProjectGroupThreadArgs): UseProjectGroupThread {
   const auth = useAuth()
   const myUserId = auth.kind === "authed" ? auth.user.id : null
   const myName = authDisplayName(auth.kind === "authed" ? auth.user : null)
@@ -393,13 +390,16 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
       projectsApi
         .postGroupTurn(
           projectId, content,
-          cmd
-            ? {
-                pinned_skill: cmd.pinnedSkill ?? undefined,
-                attachments: cmd.attachments?.length ? cmd.attachments : undefined,
-                client_message_id: cmd.clientMessageId,
-              }
-            : undefined,
+          {
+            ...(cmd
+              ? {
+                  pinned_skill: cmd.pinnedSkill ?? undefined,
+                  attachments: cmd.attachments?.length ? cmd.attachments : undefined,
+                  client_message_id: cmd.clientMessageId,
+                }
+              : {}),
+            prd_id: openPrdId ?? undefined,
+          },
         )
         .then(() => {
           inFlightDraftRef.current = null
@@ -425,7 +425,7 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
           if (gen === genRef.current) setPosting(false)
         })
     },
-    [projectId, applyTurns, myUserId, myName, draftApiRef],
+    [projectId, applyTurns, myUserId, myName, draftApiRef, openPrdId],
   )
 
   const lastTurn = turns[turns.length - 1]
@@ -471,41 +471,6 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
     !!lastTurn && lastTurn.role === "user" && !posting &&
     !tailMentionsAgent && !withinStayoutGrace
 
-  // Tokens whose proposal is locally resolved (confirmed or cancelled). A
-  // group turn's `reply.pending_mutation` is PERSISTED on the turn row, so
-  // clearing the card is a client-side overlay: the mapping below skips a
-  // token in this set. Inputs-only state — the set stores what the user did,
-  // and the render derives from it (never a mutated copy of the turn).
-  const [resolvedMutationTokens, setResolvedMutationTokens] = useState<Set<string>>(new Set())
-
-  // Confirm: the token is single-use and the IDOR gates re-run server-side;
-  // BOTH result arms (applied / soft-refused) spend it, so the card clears on
-  // any resolution. A transport failure leaves the card for a retry click.
-  // The "Done" group turn the backend posts arrives via realtime/poll.
-  const confirmMutation = useCallback(
-    (_turnId: string, token: string) => {
-      projectsApi
-        .prdChatEditConfirm(projectId, token)
-        .then(() => {
-          setResolvedMutationTokens((prev) => new Set(prev).add(token))
-        })
-        .catch(() => {
-          /* card stays; the user can confirm again */
-        })
-    },
-    [projectId],
-  )
-
-  // Cancel: clear locally at once (fire-and-forget the server drop — with the
-  // card gone there is no confirm affordance left, so the token cannot apply).
-  const cancelMutation = useCallback(
-    (_turnId: string, token: string) => {
-      projectsApi.prdChatEditCancel(projectId, token).catch(() => {})
-      setResolvedMutationTokens((prev) => new Set(prev).add(token))
-    },
-    [projectId],
-  )
-
   // Normalize GroupTurn[] → ShellTurn[]. Cross-turn facts (`invokedBy`/
   // `invokedByMe`) are precomputed HERE from the previous turn — the shell
   // mapping never inspects neighbours (§2.5/G5b).
@@ -550,19 +515,6 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
             ? (turn.reply?.open?.candidates ?? turn.open_candidates ?? [])
             : undefined,
           artifactList: isAgent ? (turn.reply?.artifact_list ?? []) : undefined,
-          // The confirmation gate's parked proposal riding a persisted agent
-          // turn — skipped once its token is locally resolved (the persisted
-          // row still carries it; resolution is a client overlay).
-          pendingMutation:
-            isAgent &&
-            turn.reply?.pending_mutation &&
-            !resolvedMutationTokens.has(turn.reply.pending_mutation.token)
-              ? {
-                  token: turn.reply.pending_mutation.token,
-                  summary: turn.reply.pending_mutation.summary,
-                  sectionsChanged: [],
-                }
-              : undefined,
           // Kept for compatibility with existing consumers of the fold-era
           // footer shape (the engine suite asserts it); the render path now
           // reads the native fields above.
@@ -576,7 +528,7 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
           runStatus: turn.run_status ?? null,
         }
       }),
-    [turns, myUserId, resolvedMutationTokens],
+    [turns, myUserId],
   )
 
   // These nodes carry their relocated `GroupChatExtras` classes (T3b) so the
@@ -621,7 +573,5 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
     // backend wires it — so the run-status render shows NO Retry (dark), not a
     // broken affordance.
     retryRun: undefined as ((turn: ShellTurn | null) => void) | undefined,
-    confirmMutation,
-    cancelMutation,
   }
 }

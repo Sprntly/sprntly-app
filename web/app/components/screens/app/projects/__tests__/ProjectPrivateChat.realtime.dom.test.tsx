@@ -147,7 +147,7 @@ afterEach(() => cleanup())
 
 describe("ProjectPrivateChat — live subscribe (AC-1)", () => {
   it("test_subscribes_to_per_user_topic_on_open: one channel for project:{id}:user:{uid}", async () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
@@ -159,7 +159,7 @@ describe("ProjectPrivateChat — live subscribe (AC-1)", () => {
 describe("ProjectPrivateChat — live apply (AC-2)", () => {
   it("test_brief_delivered_appends_live: broadcast -> brief in history, no re-open, no poll", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
     const callsAfterLoad = individualTurnsMock.mock.calls.length
 
@@ -176,7 +176,7 @@ describe("ProjectPrivateChat — live apply (AC-2)", () => {
 
   it("ignores unknown broadcast event names", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     await act(async () => {
@@ -189,7 +189,7 @@ describe("ProjectPrivateChat — live apply (AC-2)", () => {
 describe("ProjectPrivateChat — reconnect reconcile (AC-3)", () => {
   it("test_reconnect_runs_one_individual_reconcile: onReconcile -> single individualTurns read, merged", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     individualTurnsMock.mockResolvedValueOnce([turn({ id: 4, content: "reconciled brief" })])
@@ -207,7 +207,7 @@ describe("ProjectPrivateChat — reconnect reconcile (AC-3)", () => {
 describe("ProjectPrivateChat — idempotency / dedup (AC-4)", () => {
   it("test_duplicate_brief_event_and_reconcile_renders_once: same id via event + reconcile -> one bubble", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     const dup = turn({ id: 9, content: "dup brief" })
@@ -230,7 +230,7 @@ describe("ProjectPrivateChat — idempotency / dedup (AC-4)", () => {
   it("a brief already present in the loaded history is not re-rendered when its broadcast arrives", async () => {
     const existing = turn({ id: 3, content: "already loaded" })
     individualTurnsMock.mockResolvedValueOnce([existing])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(screen.getAllByTestId("ic-history-agent")).toHaveLength(1))
 
     await act(async () => {
@@ -248,7 +248,7 @@ describe("ProjectPrivateChat — degradation (AC-5)", () => {
     individualTurnsMock.mockResolvedValueOnce([
       { id: 1, role: "assistant", content: "loaded on open", created_at: new Date().toISOString() },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
 
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(202))
     expect(await screen.findByText("loaded on open")).toBeTruthy()
@@ -261,7 +261,7 @@ describe("ProjectPrivateChat — degradation (AC-5)", () => {
     individualTurnsMock.mockResolvedValueOnce([
       { id: 1, role: "assistant", content: "existing brief", created_at: new Date().toISOString() },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
 
     individualTurnsMock.mockRejectedValueOnce(new Error("channel degraded"))
@@ -280,7 +280,7 @@ describe("ProjectPrivateChat — degradation (AC-5)", () => {
 describe("ProjectPrivateChat — non-breakage / cleanup (AC-6/AC-7)", () => {
   it("test_unmount_tears_down_channel: no further reconcile/apply activity survives unmount", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
-    const { unmount } = render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    const { unmount } = render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledTimes(1))
     const handlers = lastHandlers()
     const callsAtUnmount = individualTurnsMock.mock.calls.length
@@ -298,7 +298,7 @@ describe("ProjectPrivateChat — non-breakage / cleanup (AC-6/AC-7)", () => {
   it("test_send_path_and_open_effect_unchanged: same props, load-on-open + composer/send path untouched", async () => {
     individualTurnsMock.mockResolvedValueOnce([])
     runAskGenerationMock.mockResolvedValue(reply("still works"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
 
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(202))
     expect(individualChatMock).not.toHaveBeenCalled()

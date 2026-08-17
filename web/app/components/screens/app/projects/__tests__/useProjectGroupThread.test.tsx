@@ -113,7 +113,7 @@ const draftApiRef: { current: ComposerDraftApi | null } = {
 }
 
 function Harness({ projectId }: { projectId: number }) {
-  const engine = useProjectGroupThread({ projectId, draftApiRef })
+  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId: null })
   latest = engine
   return React.createElement("div", { "data-testid": "n" }, engine.turns.length)
 }

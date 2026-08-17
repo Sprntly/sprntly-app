@@ -137,7 +137,7 @@ describe("ProjectGroupChat — thin host renders through ChatShell (AC1/AC5)", (
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hi" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "yo" }),
     ])
-    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { container } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     // The group turns render inside the shell's shared 868px thread column.
     const thread = await waitFor(() => {
       const el = container.querySelector(".bc-thread")
@@ -150,7 +150,7 @@ describe("ProjectGroupChat — thin host renders through ChatShell (AC1/AC5)", (
 
   it("test_group_host_wires_draftApiRef_via_onDraftApiReady — the picker reads the lazily-populated draft API, so typing @ opens the picker (proves the ref handoff)", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByLabelText("Send")
     // If onDraftApiReady never populated the ref, onInputCapture would stay
     // undefined and the picker would be dead — typing @ would do nothing.
@@ -166,7 +166,7 @@ describe("ProjectGroupChat — thin host renders through ChatShell (AC1/AC5)", (
 describe("ProjectGroupChat — empty-thread getting-started node", () => {
   it("renders the group empty node once a zero-turn thread finishes loading", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     // Mirrors the private surface's `individual-chat-empty`: a brand-new group
     // thread reads as intentional getting-started copy, not a blank void.
     const empty = await screen.findByTestId("group-chat-empty")
@@ -177,7 +177,7 @@ describe("ProjectGroupChat — empty-thread getting-started node", () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hi" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByTestId("gc-msg-other")
     expect(screen.queryByTestId("group-chat-empty")).toBeNull()
   })
@@ -190,7 +190,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
       turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", author_job_role: null, content: "agent reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     const other = await screen.findByTestId("gc-msg-other")
     expect(within(other).getByText("Shristi")).toBeTruthy()
@@ -221,7 +221,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
         created_at: new Date(Date.now() - 60_000).toISOString(),
       }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByTestId("gc-msg-me")
     // The alarming "Sprntly stayed out — no reply yet" pill is gone; the interim
     // `showStayedOut` stay-out case now renders the QUIET declined treatment
@@ -237,7 +237,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly help" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "sure" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await screen.findByTestId("gc-msg-agent")
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
@@ -247,7 +247,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "@Sprntly can you help?" }),
       turn({ id: 2, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "on it" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     // The invoked-by / detected trigger badge is debug-y internal gate state,
     // not user-facing — the agent turn still renders, but no badge node
     // exists. The decision stays recorded server-side via `trigger_kind`.
@@ -269,7 +269,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
       }),
     ])
     const onOpenArtifact = vi.fn()
-    render(React.createElement(ProjectGroupChat, { projectId: 101, onOpenArtifact }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, onOpenArtifact, openPrdId: null }))
     const chip = await screen.findByTestId("open-artifact-chip")
     fireEvent.click(chip)
     expect(onOpenArtifact).toHaveBeenCalledWith(expect.objectContaining({ id: 9, type: "prd" }))
@@ -279,7 +279,7 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
 describe("ProjectGroupChat — send + refetch", () => {
   it("posting a turn calls projectsApi.postGroupTurn, refetches, and clears the composer", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))
@@ -304,7 +304,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
   it("test_composer_clears_optimistically_on_send — the draft empties the instant send starts, BEFORE the POST resolves", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let resolvePost: (v: unknown) => void = () => {}
@@ -334,7 +334,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
   it("test_composer_restores_only_if_still_empty_on_fail — a failed send restores the text; a message typed during the wait is NOT clobbered", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let rejectPost: (e: unknown) => void = () => {}
@@ -366,7 +366,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
   it("a message typed during the wait is not clobbered by a failed-send restore", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let rejectPost: (e: unknown) => void = () => {}
@@ -405,7 +405,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 
   it("the composer carries the group-chat placeholder, not the individual-chat one", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => {
       const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
       expect(ta.placeholder).toBe("Message the team, or @Sprntly to hand it a task…")
@@ -416,7 +416,7 @@ describe("ProjectGroupChat — send + refetch", () => {
 describe("ProjectGroupChat — optimistic own-message send", () => {
   it("renders the sender's own turn immediately, before the POST resolves", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let resolvePost: (v: unknown) => void = () => {}
@@ -447,7 +447,7 @@ describe("ProjectGroupChat — optimistic own-message send", () => {
 
   it("is not duplicated when the poster's own real turn arrives via the post-send reconcile", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))
@@ -477,7 +477,7 @@ describe("ProjectGroupChat — optimistic own-message send", () => {
 
   it("rolls back the optimistic turn and restores the draft on a failed send", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let rejectPost: (e: unknown) => void = () => {}
@@ -515,7 +515,7 @@ describe("ProjectGroupChat — optimistic own-message send", () => {
 describe("ProjectGroupChat — stayed-out badge suppressed while posting", () => {
   it("hides the stayed-out badge during posting, and shows it once posting settles with no reply", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     let resolvePost: (v: unknown) => void = () => {}
@@ -571,7 +571,7 @@ describe("ProjectGroupChat — focus-gated polling (AD-P4)", () => {
     const hasFocusSpy = vi.spyOn(document, "hasFocus").mockReturnValue(true)
     groupTurnsMock.mockResolvedValue([])
 
-    const { unmount } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { unmount } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -614,7 +614,7 @@ describe("ProjectGroupChat — no save-as-artifact affordance (removed)", () => 
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
       turn({ id: 3, role: "assistant", author_user_id: null, author_name: "Sprntly", content: "agent reply" }),
     ])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     const agent = await screen.findByTestId("gc-msg-agent")
     const other = screen.getByTestId("gc-msg-other")
     const me = screen.getByTestId("gc-msg-me")
@@ -652,7 +652,7 @@ describe("ProjectGroupChat — voice (shared composer default)", () => {
     const src = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
     expect(src).not.toContain("voiceSupported={false}")
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(screen.getByLabelText("Dictate your question")).toBeTruthy())
   })
 })

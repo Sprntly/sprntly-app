@@ -1012,9 +1012,9 @@ export type ChatIntentEnvelope = {
      *  main chat runs, so a `switch (envelope.intent)` consumer that never
      *  sees this surface is unaffected as long as it falls through on an
      *  unmatched case (every existing consumer does). A PRD-target intent
-     *  (`edit_prd`) that couldn't resolve its target because the project has
-     *  2+ PRDs — `clarification` names the choice, `prd_options` lists them,
-     *  so the surface can ask instead of silently answering. */
+     *  (`edit_prd`) with no PRD open beside this chat — `clarification`
+     *  carries the fixed "open a PRD" message; the project's PRDs are never
+     *  enumerated or auto-selected. */
     | "clarify"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
@@ -1107,14 +1107,14 @@ export type ChatIntentEnvelope = {
    *  first, capped). The client renders these as clickable items; a click
    *  opens the artifact in its own thread with its conversation history. */
   artifact_list?: ChatArtifactItem[]
-  /** `clarify` ONLY (private project chat) — the `_resolve_prd_id`
-   *  disambiguation string ("This project has more than one PRD — tell me
-   *  which to edit by id: …"). Absent on every other intent. */
+  /** `clarify` ONLY (private project chat) — the fixed "open a PRD" message
+   *  ("Open a PRD beside this chat and I'll edit it."). Absent on every
+   *  other intent. */
   clarification?: string
-  /** `clarify` ONLY (private project chat) — every PRD on the project,
-   *  tenant-scoped, so the surface can render the choice as clickable
-   *  options rather than parsing the id list out of `clarification`.
-   *  Absent on every other intent. */
+  /** Retained for shape stability; the private classify route no longer
+   *  enumerates or auto-selects across a project's PRDs, so this is always
+   *  absent/empty now — the edit target is always the caller's own
+   *  open-drawer `prd_id`, never a picked-from-a-list id. */
   prd_options?: { id: number; title: string }[]
 }
 
@@ -5931,10 +5931,6 @@ export type GroupTurn = {
   reply?: (AskResponse & {
     artifact_list?: ChatArtifactItem[]
     open?: { candidates?: OpenArtifactCandidate[] } | null
-    /** Stamped on a group agent turn that PROPOSES a PRD edit (the
-     *  confirmation gate): the single-use token + preview the client uses to
-     *  offer confirm/cancel. Absent on every other assistant turn. */
-    pending_mutation?: { token: string; summary: string; prd_id: number } | null
   }) | null
   /** The latest agent run-status, attached by the backend onto the HUMAN turn
    *  whose id == the run's `source_turn_id` (already mapped to the FE
@@ -6039,42 +6035,15 @@ export type DelegationEventResult = {
   status: string
 }
 
-/** The pending-mutation handle a project PRD chat-edit hands back when it has
- *  PROPOSED (but not yet written) an edit: the opaque single-use `token` the
- *  caller passes to `prdChatEditConfirm`/`prdChatEditCancel`, plus a preview
- *  (`summary`/`sections_changed`) of what the confirm would commit. */
-export type ProjectPrdEditPendingMutation = {
-  token: string
-  summary: string
-  sections_changed: string[]
-  prd_id: number
-}
-
 /** Response from `POST /v1/projects/{id}/prd/chat-edit` — a discriminated
- *  shape over three outcomes. Under the confirmation gate a resolvable edit no
- *  longer writes immediately: it returns `{ edited: false, pending: true,
- *  mutation }` (nothing has touched the PRD; call confirm/cancel with the
- *  token). `edited: false` WITHOUT `pending` is a terminal no-edit reply
- *  (flag off, unresolved/ambiguous target, refusal, or a no-op instruction)
- *  carrying a plain `answer`. The `edited: true` arm is retained for shape
- *  parity but the gated route no longer returns it from this endpoint — the
- *  actual write lands via `prdChatEditConfirm`. */
+ *  shape over two outcomes: `edited: true` applied DIRECTLY through the
+ *  shared editor (no confirm step — the PRD is already changed by the time
+ *  this resolves), carrying the changed sections + the rendered PRD;
+ *  `edited: false` is a terminal no-edit reply (flag off, no PRD open,
+ *  denied target, or a no-op instruction) carrying a plain `answer`. */
 export type ProjectChatEditResult =
   | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
-  | { edited: false; pending: true; mutation: ProjectPrdEditPendingMutation }
   | { edited: false; answer: string }
-
-/** Response from `POST /v1/projects/{id}/prd/chat-edit/confirm` — commits the
- *  token's stored patch (applied content == proposed content). `edited: false`
- *  is the soft-refuse shape (token unknown/expired/already-applied, a
- *  concurrent change, or a denied target) — never a raw 403/404 to chat. */
-export type ProjectChatEditConfirmResult =
-  | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
-  | { edited: false; answer: string }
-
-/** Response from `POST /v1/projects/{id}/prd/chat-edit/cancel` — the proposal
- *  row is dropped (its token can never apply); no PRD write. */
-export type ProjectChatEditCancelResult = { cancelled: true }
 
 /** Response from `GET`/`PUT /v1/projects/{id}/instructions` — `null` means
  *  nothing has been saved yet (or the value was cleared). */
@@ -6151,17 +6120,17 @@ export const projectsApi = {
       { artifact_type: artifactType, artifact_id: artifactId },
     ),
   /** Apply a free-form chat edit instruction to the project's PRD
-   *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private (and, later,
-   *  group) project chat's in-place, versioned edit path, reusing the same
-   *  scoped editor + ★ cross-project IDOR gate the main chat's
-   *  `prdApi.chatEdit` calls guard-off. Omitted (the default), the route
-   *  resolves its OWN edit target server-side: auto-select on exactly one
-   *  project PRD, refuse on 0/2+. OPTIONAL `prdId` is the id the caller
-   *  picked off a prior `clarify` envelope's `prd_options` (2+-PRD
-   *  disambiguation) — untrusted on its own; the route's ★ cross-project +
-   *  cross-tenant gate still runs on it before any write, unconditionally.
-   *  Membership-gated and `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading
-   *  to `edited: false` rather than an error. */
+   *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private project chat's
+   *  in-place, versioned edit path, reusing the same scoped editor + ★
+   *  cross-project IDOR gate the main chat's `prdApi.chatEdit` calls
+   *  guard-off, applying DIRECTLY — no confirm step. `prdId` is the PRD open
+   *  in the caller's artifact drawer (the explicit edit target, parity with
+   *  main chat's own open-tab `prd_id`); omitted/`null` means no PRD is open,
+   *  and the route returns the "open a PRD" clarify rather than a write. The
+   *  route's ★ cross-project + cross-tenant gate still runs on WHATEVER id
+   *  reaches it before any write, unconditionally. Membership-gated and
+   *  `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
+   *  rather than an error. */
   prdChatEdit: (id: number | string, instruction: string, prdId?: number | null, clientMessageId?: string) =>
     api.post<ProjectChatEditResult>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
@@ -6170,24 +6139,6 @@ export const projectsApi = {
         ...(prdId != null ? { prd_id: prdId } : {}),
         ...(clientMessageId != null ? { client_message_id: clientMessageId } : {}),
       },
-    ),
-  /** Confirm a pending project PRD chat-edit (`POST /v1/projects/{id}/prd/
-   *  chat-edit/confirm`) — commits exactly the patch the matching
-   *  `prdChatEdit` proposed, keyed by its `mutation.token`. The two IDOR gates
-   *  re-run on the caller server-side and the token is single-use; a stale/
-   *  denied token degrades to `edited: false`, never an error. */
-  prdChatEditConfirm: (id: number | string, token: string) =>
-    api.post<ProjectChatEditConfirmResult>(
-      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit/confirm`,
-      { token },
-    ),
-  /** Cancel a pending project PRD chat-edit (`POST /v1/projects/{id}/prd/
-   *  chat-edit/cancel`) — drops the proposal so its token can never apply. No
-   *  PRD write. */
-  prdChatEditCancel: (id: number | string, token: string) =>
-    api.post<ProjectChatEditCancelResult>(
-      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit/cancel`,
-      { token },
     ),
   /** Persist the caller's own owned user+assistant turn pair
    *  (`POST /v1/projects/{id}/individual/turns`) — the explicit-owner home
@@ -6205,22 +6156,25 @@ export const projectsApi = {
     ),
   /** Classify one private-chat message via the project-scoped counterpart
    *  of `chatIntentApi.resolve` (`POST /v1/projects/{id}/chat/intent`).
-   *  The backend resolves the edit target SERVER-side over THIS project's
-   *  own PRDs — never a client-supplied id — so an `edit_prd` verdict
-   *  survives the `_NEEDS_PRD` downgrade for a project-attached PRD.
-   *  Same contract as `chatIntentApi.resolve`: fail-open BY THE CALLER,
-   *  any network/HTTP failure should fall back to the ask path, never
-   *  block the send. */
+   *  `prdId` is the PRD open in the caller's artifact drawer — the EXPLICIT
+   *  edit target (parity with main chat's own open-tab `prd_id`); omitted/
+   *  `null` means no PRD is open, so an `edit_prd` verdict downgrades to the
+   *  "open a PRD" clarify. There is no server-side inference over the
+   *  project's own PRDs to fall back on — sending the real open id is what
+   *  keeps an `edit_prd` verdict from downgrading. Same contract as
+   *  `chatIntentApi.resolve`: fail-open BY THE CALLER, any network/HTTP
+   *  failure should fall back to the ask path, never block the send. */
   resolveIntent: (
     id: number | string,
     message: string,
-    opts?: { conversationId?: number | null },
+    opts?: { conversationId?: number | null; prdId?: number | null },
   ) =>
     api.post<ChatIntentEnvelope>(
       `/v1/projects/${encodeURIComponent(String(id))}/chat/intent`,
       {
         message,
         ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
+        ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       },
     ),
   /** Save a chat output as a first-class project artifact
@@ -6297,6 +6251,11 @@ export const projectsApi = {
       /** The idempotency key: a retry/double-submit carrying the same id
        *  replays the original turn instead of double-posting. */
       client_message_id?: string
+      /** The PRD open in the artifact drawer beside this group chat — the
+       *  explicit `edit_prd` target (parity with main chat's own open-tab
+       *  `prd_id`). `null`/omitted means no PRD is open, so an in-band edit
+       *  request gets the "open a PRD" clarify rather than a guess. */
+      prd_id?: number | null
     },
   ) =>
     api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, {
@@ -6304,6 +6263,7 @@ export const projectsApi = {
       ...(opts?.pinned_skill ? { pinned_skill: opts.pinned_skill } : {}),
       ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
       ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
+      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
     }),
   /** Get-or-create the caller's durable individual project chat
    *  (create-if-absent, idempotent — mirrors the group chat's own

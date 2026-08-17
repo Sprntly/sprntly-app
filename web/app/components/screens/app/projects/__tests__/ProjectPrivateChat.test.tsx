@@ -189,13 +189,13 @@ describe("ProjectPrivateChat — retained CSS atoms are tokens only", () => {
 
 describe("ProjectPrivateChat — composer", () => {
   it("carries the individual-chat placeholder", async () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
     const ta = document.querySelector(".cx-input") as HTMLTextAreaElement
     expect(ta.placeholder).toBe("Message Sprntly…")
   })
 
   it("shows an empty-state hint before any turn", () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 101 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
     expect(screen.getByTestId("individual-chat-empty")).toBeTruthy()
   })
 })
@@ -208,7 +208,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
         resolveAsk = resolve
       }),
     )
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
@@ -240,7 +240,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
 
   it("get-or-creates the individual conversation ONCE and reuses it across sends on the same mount", async () => {
     runAskGenerationMock.mockResolvedValue(reply("ok"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
 
     await act(async () => {
@@ -266,7 +266,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
   it("a failed get-or-create degrades to an unbound ask rather than blocking the send", async () => {
     individualChatMock.mockRejectedValue(new Error("network blip"))
     runAskGenerationMock.mockResolvedValue(reply("still answers"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "ask anyway please" } })
@@ -291,7 +291,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
         rejectAsk = reject
       }),
     )
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "a question worth stopping" } })
@@ -315,7 +315,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
       () => new Promise((_resolve, reject) => { rejectAsk = reject }),
     )
     runAskGenerationMock.mockResolvedValueOnce(reply("the resend answered"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "a question worth stopping" } })
@@ -352,7 +352,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
         rejectAsk = reject
       }),
     )
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     await act(async () => {
       fireEvent.change(textarea, { target: { value: "a slow one" } })
@@ -374,7 +374,7 @@ describe("ProjectPrivateChat — resume on mount", () => {
   it("resumes a pending job via the shared resumeAskGeneration and renders the answer once it lands", async () => {
     getPendingAskMock.mockReturnValue({ id: "555" })
     resumeAskGenerationMock.mockResolvedValue(reply("resumed answer"))
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     expect(screen.getByTestId("ic-resuming")).toBeTruthy()
     await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
     expect(resumeAskGenerationMock).toHaveBeenCalledWith(555, "acme", "project-individual-202")
@@ -382,7 +382,7 @@ describe("ProjectPrivateChat — resume on mount", () => {
   })
 
   it("no pending job — no resuming state, straight to the empty hint", () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     expect(screen.queryByTestId("ic-resuming")).toBeNull()
     expect(screen.getByTestId("individual-chat-empty")).toBeTruthy()
   })
@@ -394,6 +394,7 @@ describe("ProjectPrivateChat — cross-chat INSIGHT turn (design-spec AC7/AC11)"
       React.createElement(ProjectPrivateChat, {
         projectId: 202,
         insightNote: { by: "Shristi", text: "the pricing model changed" },
+        openPrdId: null,
       }),
     )
     const note = screen.getByTestId("cross-chat-insight")
@@ -403,7 +404,7 @@ describe("ProjectPrivateChat — cross-chat INSIGHT turn (design-spec AC7/AC11)"
   })
 
   it("renders no INSIGHT note when none is supplied (the default)", () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     expect(screen.queryByTestId("cross-chat-insight")).toBeNull()
   })
 
@@ -412,6 +413,7 @@ describe("ProjectPrivateChat — cross-chat INSIGHT turn (design-spec AC7/AC11)"
       React.createElement(ProjectPrivateChat, {
         projectId: 202,
         insightNote: { by: "Shristi", text: "the pricing model changed", source_kind: "group" },
+        openPrdId: null,
       }),
     )
     const note = screen.getByTestId("cross-chat-insight")
@@ -427,6 +429,7 @@ describe("ProjectPrivateChat — cross-chat INSIGHT turn (design-spec AC7/AC11)"
       React.createElement(ProjectPrivateChat, {
         projectId: 202,
         insightNote: { by: "David", text: "flat pricing, not tiered", source_kind: "individual" },
+        openPrdId: null,
       }),
     )
     const note = screen.getByTestId("cross-chat-insight")
@@ -439,6 +442,7 @@ describe("ProjectPrivateChat — cross-chat INSIGHT turn (design-spec AC7/AC11)"
       React.createElement(ProjectPrivateChat, {
         projectId: 202,
         insightNote: { by: "Sprntly", text: "no source kind resolved" },
+        openPrdId: null,
       }),
     )
     const note = screen.getByTestId("cross-chat-insight")
@@ -464,7 +468,7 @@ describe("ProjectPrivateChat — voice (shared composer default)", () => {
   it("renders a live mic — no more voiceSupported={false} hard-disable", () => {
     const src = readFileSync(join(__dirname, "../ProjectPrivateChat.tsx"), "utf8")
     expect(src).not.toContain("voiceSupported={false}")
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     expect(screen.getByLabelText("Dictate your question")).toBeTruthy()
   })
 })

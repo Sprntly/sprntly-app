@@ -118,7 +118,7 @@ afterEach(() => {
 describe("ProjectGroupChat — live subscribe (AC-1)", () => {
   it("test_subscribes_to_project_topic_on_mount: one channel for project:{id}", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     const topics = realtimeSpy.mock.calls.map((c) => c[0])
@@ -130,7 +130,7 @@ describe("ProjectGroupChat — live subscribe (AC-1)", () => {
 describe("ProjectGroupChat — live apply (AC-2)", () => {
   it("test_turn_created_appends_via_applyTurns: broadcast -> new bubble, no poll call", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
     const callsAfterLoad = groupTurnsMock.mock.calls.length
 
@@ -147,7 +147,7 @@ describe("ProjectGroupChat — live apply (AC-2)", () => {
 
   it("ignores unknown broadcast event names", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     await act(async () => {
@@ -161,7 +161,7 @@ describe("ProjectGroupChat — live apply (AC-2)", () => {
 describe("ProjectGroupChat — reconnect reconcile (AC-3)", () => {
   it("test_reconnect_runs_one_cursor_reconcile: onReconcile -> single groupTurns(since) read, applied", async () => {
     groupTurnsMock.mockResolvedValueOnce([turn({ id: 3, content: "seed" })])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     groupTurnsMock.mockResolvedValueOnce([turn({ id: 4, author_user_id: "u2", author_name: "Shristi", content: "reconciled" })])
@@ -179,7 +179,7 @@ describe("ProjectGroupChat — reconnect reconcile (AC-3)", () => {
 describe("ProjectGroupChat — idempotency / dedup (AC-4)", () => {
   it("test_duplicate_turn_event_and_poll_renders_once: same id via live event + reconcile -> one bubble", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     const dup = turn({ id: 9, author_user_id: "u2", author_name: "Shristi", content: "dup content" })
@@ -201,7 +201,7 @@ describe("ProjectGroupChat — idempotency / dedup (AC-4)", () => {
 
   it("test_own_post_echo_deduped: optimistic own-post reconcile + its own broadcast -> one bubble", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     postGroupTurnMock.mockResolvedValue(turn({ id: 5, content: "hi team" }))
@@ -229,7 +229,7 @@ describe("ProjectGroupChat — idempotency / dedup (AC-4)", () => {
 
   it("test_applyTurns_dedup_added: the same broadcast delivered twice yields one turn", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     const t = turn({ id: 12, author_user_id: "u2", author_name: "Shristi", content: "twice" })
@@ -252,7 +252,7 @@ describe("ProjectGroupChat — poll fallback / degradation (AC-5)", () => {
     realtimeState.degraded = false
     groupTurnsMock.mockResolvedValue([])
 
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -274,7 +274,7 @@ describe("ProjectGroupChat — poll fallback / degradation (AC-5)", () => {
     realtimeState.degraded = true
     groupTurnsMock.mockResolvedValue([])
 
-    const { rerender } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { rerender } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -291,7 +291,7 @@ describe("ProjectGroupChat — poll fallback / degradation (AC-5)", () => {
     expect(groupTurnsMock.mock.calls.length).toBeGreaterThan(callsAfterLoad)
     expect(screen.getByText("polled turn")).toBeTruthy()
 
-    rerender(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    rerender(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     hasFocusSpy.mockRestore()
   })
 
@@ -301,7 +301,7 @@ describe("ProjectGroupChat — poll fallback / degradation (AC-5)", () => {
     realtimeState.degraded = true
     groupTurnsMock.mockResolvedValue([])
 
-    const { rerender } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { rerender } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -310,7 +310,7 @@ describe("ProjectGroupChat — poll fallback / degradation (AC-5)", () => {
     // Channel recovers — flip degraded false and force the consumer to
     // re-render so it picks up the new hook return value.
     realtimeState.degraded = false
-    rerender(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    rerender(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     await act(async () => {
       vi.advanceTimersByTime(20_000)
@@ -329,7 +329,7 @@ describe("ProjectGroupChat — non-breakage / cleanup (AC-6/AC-7)", () => {
     realtimeState.degraded = true
     groupTurnsMock.mockResolvedValue([])
 
-    const { unmount } = render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    const { unmount } = render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -352,7 +352,7 @@ describe("ProjectGroupChat — non-breakage / cleanup (AC-6/AC-7)", () => {
 
   it("test_component_signature_unchanged: same props (onOpenArtifact optional), initial-load + composer/send path untouched", async () => {
     groupTurnsMock.mockResolvedValueOnce([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
 
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
     expect(groupTurnsMock).toHaveBeenCalledWith(101)

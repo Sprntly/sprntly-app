@@ -338,25 +338,25 @@ def read_tools() -> list[dict]:
 # private surface's tool set (and its `answer()` result shape) is unchanged.
 #
 # ★ SECURITY: the schema exposes an `instruction` param ONLY — NO
-# `prd_id`. The edit target is resolved SERVER-SIDE by the handler
-# (`_resolve_prd_id({}, ...)`, an empty dict, exactly as the retired group
-# pre-step did), so a model-supplied id can NEVER redirect the edit target, and
-# a multi-PRD project still asks which PRD (`needs_prd_clarify`) rather than
-# auto-picking. The handler routes to the shared `propose_chat_edit_scoped`
-# confirm gate — propose writes nothing; the existing confirm route
-# applies exactly the stored patch.
+# `prd_id`. The edit target is the PRD open in the artifact drawer beside
+# this chat, closed over by the handler (never a model-supplied id, never a
+# server-side inference across the project's PRDs). With no PRD open, the
+# handler declines with a simple "open a PRD" narration rather than
+# enumerating or guessing a target. The handler applies DIRECTLY through the
+# shared editor — no propose/confirm step; the edit is live by the time the
+# narration is produced.
 EDIT_PRD_TOOL = {
     "name": "edit_prd",
     "description": (
-        "Propose an edit to THIS project's PRD. Call this when the latest turn "
-        "asks to change, add to, update, remove from, tighten, or rewrite part "
-        "of the project's PRD. Pass a plain-language `instruction` describing "
-        "the change in the team's own words. You do NOT choose or pass a PRD id "
-        "— the right PRD is resolved for you, and if the project has more than "
-        "one PRD you will be told to ask which one. The edit is NOT applied "
-        "immediately: it is proposed and the team confirms it before it takes "
-        "effect. After calling this, tell the team you've proposed the change "
-        "and it awaits their confirmation — never claim it is already done."
+        "Edit the PRD currently open in the project's artifact drawer. Call "
+        "this when the latest turn asks to change, add to, update, remove "
+        "from, tighten, or rewrite part of the PRD. Pass a plain-language "
+        "`instruction` describing the change in the team's own words. You do "
+        "NOT choose or pass a PRD id — the target is whichever PRD the team "
+        "has open beside this chat; if none is open, tell them to open one "
+        "first. The edit applies IMMEDIATELY when you call this — there is "
+        "no confirmation step. After calling this, tell the team what you "
+        "changed in past tense (the change is already applied)."
     ),
     "input_schema": {
         "type": "object",

@@ -1,18 +1,19 @@
 """Real local-Supabase + real-LLM round-trip for
 `POST /v1/projects/{project_id}/prd/chat-edit` — the private project chat's
-write path, driving the ★ cross-project IDOR gate and the scoped editor
-against REAL rows and a REAL Anthropic model, through the REAL route (not the
-function directly).
+direct-apply write path, driving the ★ cross-project IDOR gate and the
+scoped editor against REAL rows and a REAL Anthropic model, through the REAL
+route (not the function directly).
 
 Every other backend test in this ticket substitutes a fake Supabase client and
 a mocked editor. This file deliberately does neither: it proves what those
-deterministic backstops (`test_project_chat_edit.py` +
+deterministic backstops (`test_project_prd_edit_parity.py` +
 `test_projects_prd_chat_edit_route.py`, fast lane, monkeypatched) cannot —
 
-  (a) a genuine cross-project prd_id (same company, sibling project) reached
-      through the REAL route writes ZERO rows and is refused, end to end;
-  (b) an own-project edit persists through the REAL route: `prds.payload_md`
-      changes AND exactly one `prd_versions` snapshot lands.
+  (a) an explicit own-project `prd_id` edit persists through the REAL route
+      IN ONE CALL (no confirm step): `prds.payload_md` changes AND exactly
+      one `prd_versions` snapshot lands;
+  (b) a sibling PRD on a DIFFERENT project in the SAME company is genuinely
+      untouched by that call.
 
 Gated on BOTH a real LLM and the run flag; skips cleanly otherwise. Registered
 in `test_ci_lane_coverage.py::_KNOWN_UNRUNNABLE` under both
@@ -166,48 +167,34 @@ def _version_count(sb, prd_id):
     return len(sb.table("prd_versions").select("id").eq("prd_id", prd_id).execute().data)
 
 
-def test_project_edit_route_cross_project_and_own_project_live(scene, sb, monkeypatch):
+def test_project_edit_route_applies_direct_and_sibling_prd_untouched_live(scene, sb, monkeypatch):
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     client = _make_client(scene["user_id"], scene["workspace_id"])
 
-    # (a) A1's caller has no way to name A2's PRD at all — the route resolves
-    # its OWN project's target server-side. Under the confirmation gate the
-    # first call only PROPOSES; prove A2's PRD (and A1's) is genuinely
-    # untouched by the propose (the ★ gate would deny A2 even if reached).
     before_a2 = _payload(sb, scene["prd_a2"])
     before_a2_versions = _version_count(sb, scene["prd_a2"])
     before_a1_versions = _version_count(sb, scene["prd_a1"])
 
+    # The explicit open-drawer target — A1's own PRD. ONE call, no confirm
+    # step: whether the live model wrote a real change or judged the
+    # instruction a no-op, the sibling project's PRD (A2) is untouched either
+    # way — it was never named.
     resp_a1 = client.post(
         f"/v1/projects/{scene['p_a1']}/prd/chat-edit",
-        json={"instruction": "Sharpen the problem statement to mention onboarding drop-off."},
+        json={
+            "instruction": "Sharpen the problem statement to mention onboarding drop-off.",
+            "prd_id": scene["prd_a1"],
+        },
     )
     assert resp_a1.status_code == 200, resp_a1.text
     body_a1 = resp_a1.json()
-    # PROPOSE writes nothing: whether the live model returned a pending edit or
-    # judged the instruction a no-op, neither A1 nor A2 is written yet.
-    assert body_a1["edited"] is False, body_a1
     assert _payload(sb, scene["prd_a2"]) == before_a2
     assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
-    assert _version_count(sb, scene["prd_a1"]) == before_a1_versions
 
-    # (b) A real edit was proposed -> CONFIRM commits it to A1's OWN PRD only:
-    # A1's content changes with exactly one version snapshot, A2 stays
-    # untouched. A no-op proposal has nothing to confirm.
-    if body_a1.get("pending"):
-        token = body_a1["mutation"]["token"]
-        confirm = client.post(
-            f"/v1/projects/{scene['p_a1']}/prd/chat-edit/confirm", json={"token": token},
-        )
-        assert confirm.status_code == 200, confirm.text
-        cbody = confirm.json()
-        assert cbody["edited"] is True, cbody
-        assert cbody["sections_changed"]
-        assert "onboarding" in cbody["prd"]["payload_md"].lower() or cbody["sections_changed"]
+    if body_a1["edited"]:
+        assert body_a1["sections_changed"]
+        assert "onboarding" in body_a1["prd"]["payload_md"].lower() or body_a1["sections_changed"]
         assert _version_count(sb, scene["prd_a1"]) == before_a1_versions + 1
-        # A2 is STILL provably untouched after the confirm.
-        assert _payload(sb, scene["prd_a2"]) == before_a2
-        assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
     else:
         assert "answer" in body_a1
         assert _version_count(sb, scene["prd_a1"]) == before_a1_versions

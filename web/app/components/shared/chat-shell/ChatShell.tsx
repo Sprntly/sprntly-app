@@ -292,18 +292,6 @@ function ChatShellInner(
                 onOpenCandidate: transcript.onOpenCandidate,
                 onOpenArtifactItem: transcript.onOpenArtifactItem,
               }),
-          // The confirmation gate's parked proposal — ChatBubble's native
-          // confirm card, wired back through the descriptor's reply seams
-          // with this turn's own token. Additive: unset renders nothing.
-          pendingMutation: turn.pendingMutation
-            ? { summary: turn.pendingMutation.summary, sectionsChanged: turn.pendingMutation.sectionsChanged }
-            : null,
-          onConfirmMutation: turn.pendingMutation
-            ? () => reply.onConfirmMutation?.(turn.id, turn.pendingMutation!.token)
-            : undefined,
-          onCancelMutation: turn.pendingMutation
-            ? () => reply.onCancelMutation?.(turn.id, turn.pendingMutation!.token)
-            : undefined,
           footer: transcript.turnFooter?.(turn) ?? undefined,
         }
       }
@@ -412,9 +400,9 @@ function ChatShellInner(
           : undefined,
         // The edit-target pick + the structured clarify gate — UNCONDITIONAL
         // native `ChatBubble` props, NOT nodes inside a resurrected
-        // `agentBodyNode`. `pickOptions` renders as a sibling card (like
-        // `pendingMutation`); `clarify` renders in the native ladder (taken
-        // whenever no host body node is supplied — the default now).
+        // `agentBodyNode`. `pickOptions` renders as a sibling card; `clarify`
+        // renders in the native ladder (taken whenever no host body node is
+        // supplied — the default now).
         pickOptions: turn.pickOptions ?? null,
         onPickOption: (opt) => onPickOption?.(turn.id, opt),
         clarify: turn.clarify?.questions?.length ? turn.clarify.questions : null,
@@ -441,18 +429,6 @@ function ChatShellInner(
               // send pipeline (the ladder's stopped/error "Ask again").
               onAskAgain: turn.content ? () => send.onSubmit(turn.content!) : undefined,
             }),
-        // The confirmation gate's parked proposal — same additive mapping as
-        // the multi-party path; the card renders INDEPENDENT of the
-        // native-ladder-vs-escape-hatch branch above.
-        pendingMutation: turn.pendingMutation
-          ? { summary: turn.pendingMutation.summary, sectionsChanged: turn.pendingMutation.sectionsChanged }
-          : null,
-        onConfirmMutation: turn.pendingMutation
-          ? () => reply.onConfirmMutation?.(turn.id, turn.pendingMutation!.token)
-          : undefined,
-        onCancelMutation: turn.pendingMutation
-          ? () => reply.onCancelMutation?.(turn.id, turn.pendingMutation!.token)
-          : undefined,
         footer: transcript.turnFooter?.(turn) ?? undefined,
       }
     }
