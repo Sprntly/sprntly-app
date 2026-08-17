@@ -351,22 +351,11 @@ export function ProjectDetailView({
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
               <>
-                {/* Surface-identity badge — a color-differentiated label so the
-                    two chats read apart at a glance (they share the same shell
-                    otherwise). Group is neutral; Private is accent-tinted. */}
-                <span className={styles.chatNoteBadge} data-surface="group">
-                  <GroupChatIcon />
-                  Group
-                </span>
                 Open to all members. Sprntly uses <b>smart interjection</b> — jumps in when a
                 turn is for it, stays out otherwise.
               </>
             ) : (
               <>
-                <span className={styles.chatNoteBadge} data-surface="individual">
-                  <LockIcon />
-                  Private
-                </span>
                 Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
                 transcripts; your chats outside this project stay walled off.
               </>
