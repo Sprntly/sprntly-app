@@ -385,6 +385,18 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     render(React.createElement(ProjectDetailView, viewProps({ openArtifact: ARTIFACTS[0] })))
     expect(screen.getByTestId("project-main-thread-host")).toBeTruthy()
   })
+
+  it("test_thread_host_stretches_the_mounted_chat_not_centers_it — .threadHost (the group⇆private swap host's wrapper) keeps its scroll-region sizing (flex/min-height/overflow-y) but no longer carries the deleted .threadPlaceholder's center/center alignment, so the live ChatShell it wraps fills the box on the flex default (stretch) instead of resting on height:100% alone against a non-stretch cross-axis — the group surface's taller multi-party rows are what actually exercise that gap; private's shorter rows never did (project-scroll fix)", () => {
+    render(React.createElement(ProjectDetailView, viewProps({ openArtifact: null })))
+    expect(screen.getByTestId("project-main-thread-host").className).toMatch(/threadHost/)
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    const rule = css.match(/\.threadHost\s*\{[^}]*\}/)?.[0] ?? ""
+    expect(rule).toMatch(/flex:\s*1/)
+    expect(rule).toMatch(/min-height:\s*0/)
+    expect(rule).toMatch(/overflow-y:\s*auto/)
+    expect(rule).not.toMatch(/align-items/)
+    expect(rule).not.toMatch(/justify-content/)
+  })
 })
 
 describe("ProjectDetailView — top-bar tasks trigger removed", () => {
