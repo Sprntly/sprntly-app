@@ -13,16 +13,16 @@
  * Every free identifier the original block read arrives through `deps`
  * (destructured below) except module-level values it imports directly
  * (`AGENT_NAME`) and the two module-level presentational components it renders
- * (`ChatArtifactActions` / `ChatTicketSetActions`), imported from ChatScreen —
- * a type-and-lazy-value cycle that resolves safely because both are hoisted
- * function declarations used only inside this function, called at render time.
+ * (`ChatArtifactActions` / `ChatTicketSetActions`), imported from their shared
+ * `chat-shell/` home so the main mapper and any future consumer share one copy.
  */
 
 import { AGENT_NAME } from "../../../lib/agent"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
-import { ChatArtifactActions, ChatTicketSetActions, type ThreadTurn } from "./ChatScreen"
+import { ChatArtifactActions, ChatTicketSetActions } from "../../shared/chat-shell/ChatArtifactActions"
+import { type ThreadTurn } from "./ChatScreen"
 
 export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): ChatTranscriptTurn[] {
   const {
