@@ -22,6 +22,7 @@ import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
 import { ChatArtifactActions, ChatTicketSetActions } from "../../shared/chat-shell/ChatArtifactActions"
+import { turnAfterNode } from "../../shared/chat-shell/turnAfterNode"
 import { type ThreadTurn } from "./ChatScreen"
 
 export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): ChatTranscriptTurn[] {
@@ -136,14 +137,16 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       />
     ) : null
 
-    const afterNode =
-      inlinePrdCards && idx === inlinePrdAnchorIdx ? (
-        <>
-          {insightCardNode}
-          {prdQuestionsNode}
-          {shareNode}
-        </>
-      ) : shareNode
+    // The inline insight/PRD-card placement is the shared `turnAfterNode`
+    // service; main injects its host-local card nodes + the per-turn share node
+    // as the adapter, so the composed after-node is byte-identical.
+    const afterNode = turnAfterNode(turn, idx, {
+      insightCardNode,
+      prdQuestionsNode,
+      inlinePrdCards,
+      inlinePrdAnchorIdx,
+      extra: shareNode,
+    })
 
     return {
       turnId: turn.id,
