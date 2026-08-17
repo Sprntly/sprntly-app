@@ -163,6 +163,26 @@ describe("ProjectGroupChat — thin host renders through ChatShell (AC1/AC5)", (
   })
 })
 
+describe("ProjectGroupChat — empty-thread getting-started node", () => {
+  it("renders the group empty node once a zero-turn thread finishes loading", async () => {
+    groupTurnsMock.mockResolvedValue([])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    // Mirrors the private surface's `individual-chat-empty`: a brand-new group
+    // thread reads as intentional getting-started copy, not a blank void.
+    const empty = await screen.findByTestId("group-chat-empty")
+    expect(empty.textContent).toContain("Start the group chat")
+  })
+
+  it("does not render the group empty node once the thread has turns", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({ id: 1, author_user_id: "u2", author_name: "Shristi", content: "hi" }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    await screen.findByTestId("gc-msg-other")
+    expect(screen.queryByTestId("group-chat-empty")).toBeNull()
+  })
+})
+
 describe("ProjectGroupChat — multi-author bubbles", () => {
   it("renders other/you/agent turns distinctly, with name+role+time on an other-turn", async () => {
     groupTurnsMock.mockResolvedValue([

@@ -31,6 +31,7 @@
 // screen.
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
+import { useRouter, useSearchParams } from "next/navigation"
 import { AppLayout } from "../AppLayout"
 import { Spinner } from "../../../auth/icons"
 import { EmptyPane } from "../../../shared/EmptyPane"
@@ -130,15 +131,6 @@ function LockIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
       <rect x="5" y="11" width="14" height="9" rx="2" />
       <path d="M8 11V8a4 4 0 0 1 8 0v3" />
-    </svg>
-  )
-}
-
-function ClockIcon() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 8v4l3 2" />
     </svg>
   )
 }
@@ -359,14 +351,23 @@ export function ProjectDetailView({
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
               <>
-                <ClockIcon />
-                Group chat · open to all members. Sprntly uses <b>smart interjection</b> — jumps in when a
+                {/* Surface-identity badge — a color-differentiated label so the
+                    two chats read apart at a glance (they share the same shell
+                    otherwise). Group is neutral; Private is accent-tinted. */}
+                <span className={styles.chatNoteBadge} data-surface="group">
+                  <GroupChatIcon />
+                  Group
+                </span>
+                Open to all members. Sprntly uses <b>smart interjection</b> — jumps in when a
                 turn is for it, stays out otherwise.
               </>
             ) : (
               <>
-                <LockIcon />
-                Private · just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
+                <span className={styles.chatNoteBadge} data-surface="individual">
+                  <LockIcon />
+                  Private
+                </span>
+                Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
                 transcripts; your chats outside this project stay walled off.
               </>
             )}
@@ -446,6 +447,8 @@ export function ProjectDetailScreen({
   initialChat?: ActiveChat
 }) {
   const auth = useAuth()
+  const router = useRouter()
+  const searchParams = useSearchParams()
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
@@ -659,6 +662,15 @@ export function ProjectDetailScreen({
   const onSelectChat = useCallback(
     (chat: ActiveChat) => {
       setActiveChat(chat)
+      // Persist the active surface to the URL (`?chat=group|individual`) so a
+      // refresh restores it — `ProjectsRoute` reads this back as `initialChat`
+      // on mount. Preserve every other param (`id`, `company`) rather than
+      // rebuilding the path, and skip the scroll reset (same idiom as
+      // `SettingsScreen`'s section sync). Without this, a reload defaults to
+      // the shell's own `"group"` and snaps a private chat back to group.
+      const params = new URLSearchParams(searchParams?.toString() ?? "")
+      params.set("chat", chat)
+      router.replace(`${PROJECTS_PATH}?${params.toString()}`, { scroll: false })
       if (chat !== "individual") return
       projectsApi
         .markIndividualRead(projectId)
@@ -667,7 +679,7 @@ export function ProjectDetailScreen({
           /* best-effort — badge stays until the next poll tick */
         })
     },
-    [projectId],
+    [projectId, router, searchParams],
   )
 
   // Re-fetches ONLY the project row (members + count) after a roster

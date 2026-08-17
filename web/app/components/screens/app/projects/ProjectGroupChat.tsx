@@ -80,6 +80,19 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
   }
 
+  // Getting-started empty state for a fresh group thread (zero turns, done
+  // loading) — mirrors the private surface's own `individual-chat-empty` node
+  // so a brand-new project doesn't render a blank void. Rides the transcript's
+  // `leading` slot (unused by group otherwise); undefined once any turn exists.
+  const emptyNode =
+    !engine.loading && engine.turns.length === 0 ? (
+      <div className={shellCss.projectChatEmpty} data-testid="group-chat-empty">
+        <span className={shellCss.projectChatEmptyTitle}>Start the group chat</span>
+        Message the team here, or <b>@Sprntly</b> to hand it a task — everyone on the project sees
+        this thread.
+      </div>
+    ) : undefined
+
   const descriptor: ChatSurfaceDescriptor = {
     surface: "project_group",
     projectId: Number(projectId),
@@ -115,6 +128,9 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       // lost for debugging.
       onOpenCandidate: (c: OpenArtifactCandidate) => onOpenArtifact?.(c),
       onOpenArtifactItem: (item: ChatArtifactItem) => onOpenArtifact?.(artifactItemAsCandidate(item)),
+      // Empty-thread getting-started node (leading slot, unused by group
+      // otherwise) — undefined once any turn exists.
+      leading: emptyNode,
       // The posting-wait node rides the transcript trailing slot (engine-fed,
       // styled by GroupChatExtras).
       trailing: engine.postingWaitNode,
