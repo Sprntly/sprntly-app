@@ -1275,6 +1275,15 @@ _ASK_WORDS = frozenset({
     # were. Among hundreds of calls a call-type noun names nothing; narrowing
     # BETWEEN candidates still keeps them, which is that stopword set's job.
     "demo", "demos", "check", "checkin", "standup", "huddle", "chat",
+    # FETCH VERBS AND INTERROGATIVES. These describe the request, never a call,
+    # and they only started reaching this filter when transcript nouns joined
+    # the summary verbs: "find me the transcripts" then survived as the "name"
+    # `find`, and "which calls have transcripts" as `which`/`have`, so a plural
+    # ask that names nothing was claimed by the single-call path and would have
+    # answered about ONE arbitrary call — the precise overreach documented
+    # below. A word that appears in every request cannot identify one call.
+    "find", "get", "fetch", "read", "open", "send", "which", "have", "has",
+    "there", "any", "all",
 })
 
 # Words that describe a call GENERICALLY — recency, who was on it in the
@@ -1306,9 +1315,28 @@ _GENERIC_CALL_WORDS = frozenset({
 })
 
 # A verb that means the caller wants THIS call's content, not a list.
+#
+# ASKING FOR THE TRANSCRIPT IS ASKING FOR THE CONTENT, and it was missing.
+# "find me the transcript of the Genworth call" carries no summary verb, so this
+# stood down, the question fell through to the listing leg, and the answer said
+# the transcripts "could not be loaded" — while "summarize the Genworth call",
+# the same call and the same data, read the transcript and answered in full.
+# Verified on staging 2026-08-16 against the same meeting, both ways.
+#
+# That is worse than a routing miss: the listing leg tells the model the index
+# holds titles and dates and NOT transcripts, so the answer states a limitation
+# the product does not have — and then offers a workaround ("ask me to check
+# Zoom") that does not route either.
+#
+# The transcript nouns are matched with or without a fetch verb, because the
+# bare noun phrase is how people ask ("transcript of the Genworth call"). They
+# are still subject to every gate below: a window word ("all the transcripts
+# from last week") still belongs to the digest, and something must still NAME a
+# call, so "find me the transcripts" alone stays with the listing.
 _SINGLE_SUMMARY_VERB = re.compile(
     r"\b(?:summari[sz]e|summary|recap|tell\s+me\s+about|what\s+(?:was|did|happened)|"
-    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through)\b",
+    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through|"
+    r"transcripts?|verbatim|what\s+(?:was|were)\s+said|read\s+me)\b",
     re.I,
 )
 

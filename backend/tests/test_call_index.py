@@ -320,6 +320,46 @@ def test_listing_questions_are_not_single_call():
     assert not ci.is_single_call_request("give me the 5 latest transcripts")
 
 
+# ── asking for the transcript IS asking for the content ──────────────────────
+#
+# Found on staging 2026-08-16, on one Zoom meeting, both ways:
+#
+#   "find me the transcript of David Mumuni's Zoom meeting"
+#       -> listing leg. Five meetings with times and attendees, and the claim
+#          that their "transcripts could not be loaded for this question".
+#   "summarize David Mumuni's Zoom meeting from Aug 5 at 14:45"
+#       -> the transcript, read and answered in full.
+#
+# Same call, same data, different verb. Worse than a routing miss: the listing
+# leg tells the model the index holds titles and dates and NOT transcripts, so
+# the answer stated a limitation the product does not have.
+
+def test_asking_for_a_named_transcript_is_a_single_call_request():
+    for question in (
+        "find me the transcript of David Mumuni's Zoom meeting",
+        "get me the Genworth transcript",
+        # The bare noun phrase, which is how people actually ask.
+        "transcript of the Mayer Brown call",
+        "what was said on the BBVA call",
+        "read me the NEFCO check-in",
+    ):
+        assert ci.is_single_call_request(question), question
+
+
+def test_transcript_asks_still_obey_every_other_gate():
+    """The new nouns buy no exemption. A window still means the digest, and a
+    plural ask that names no call still belongs to the listing — otherwise this
+    fix would trade a missed transcript for the far worse failure the
+    single-call guard exists to prevent: answering about ONE arbitrary call as
+    though it were the set that was asked about."""
+    for question in (
+        "give me all the transcripts from last week",
+        "find me the transcripts",
+        "which calls have transcripts",
+    ):
+        assert not ci.is_single_call_request(question), question
+
+
 # ── the single-call path must not claim a general ask ────────────────────────
 #
 # Reproduced live on staging (485 indexed calls): "can you summarize our recent
