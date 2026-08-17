@@ -34,10 +34,20 @@ export const UPLOAD_EXTENSIONS = [
   ".htm",
   ".log",
   ".zip",
+  // Images are read by the model (vision), not a parser — see
+  // backend/app/llm_file_read.py. Screenshots and photographed documents are
+  // a real way customer evidence arrives, and drag-and-drop already bypassed
+  // `accept` anyway, so advertising them matches what actually happens.
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".gif",
+  ".webp",
 ]
 
 /** Human-readable hint describing the broadly-accepted upload formats. */
-export const UPLOAD_ACCEPT_HINT = "Docs, sheets, slides, PDFs, text & data files"
+export const UPLOAD_ACCEPT_HINT =
+  "Docs, sheets, slides, PDFs, images, text & data files"
 
 /** Format a byte count as a short human string ("12 B", "234 KB", "1.4 MB"). */
 export function humanizeBytes(bytes: number): string {

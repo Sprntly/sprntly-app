@@ -200,6 +200,12 @@ async def upload_files(
     # forget: never blocks the upload response, never raises.
     if results:
         kickoff_corpus_seed(company.company_id, slug)
+        # Second pass for anything the converter couldn't parse (images,
+        # scanned PDFs): read it with the model in the background, then
+        # re-seed. Never blocks the upload response.
+        from app.upload_enrichment import kickoff_upload_enrichment
+
+        kickoff_upload_enrichment(company.company_id, slug)
 
     return {"slug": slug, "ingested": results, "errors": errors}
 

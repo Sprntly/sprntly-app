@@ -2900,6 +2900,11 @@ async def uploads_create_source(
     _ensure_uploads_connection(company.company_id)
     # Same fire-and-forget ingest every other connector runs on connect.
     kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+    # Read anything the converter couldn't parse (images, scanned PDFs) in
+    # the background; it re-syncs itself when a file becomes readable.
+    from app.upload_enrichment import kickoff_upload_enrichment
+
+    kickoff_upload_enrichment(company.company_id)
 
     return {
         "ok": True,
@@ -2929,6 +2934,9 @@ async def uploads_add_files(
     if stored:
         _ensure_uploads_connection(company.company_id)
         kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+        from app.upload_enrichment import kickoff_upload_enrichment
+
+        kickoff_upload_enrichment(company.company_id)
 
     return {
         "ok": bool(stored),

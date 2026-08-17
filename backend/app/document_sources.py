@@ -270,3 +270,57 @@ def delete_document_file(company_id: str, source_id: str, file_id: str) -> bool:
 def has_document_sources(company_id: str) -> bool:
     """True iff the company has at least one named document source."""
     return bool(list_document_sources(company_id))
+
+
+def get_file_raw_bytes(company_id: str, file_id: str) -> bytes | None:
+    """The originally-uploaded bytes for one file, or None.
+
+    The raw blob is stored alongside the extracted text precisely so a file we
+    couldn't parse at upload time can be re-read later — by a parser we ship
+    afterwards, or by the model (see app.llm_file_read). Fail-open: any
+    storage or decode error returns None.
+    """
+    try:
+        r = (
+            require_client().table("document_source_file")
+            .select("raw_b64")
+            .eq("company_id", company_id)
+            .eq("id", file_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — fail open
+        logger.warning("raw bytes fetch failed for %s/%s", company_id, file_id,
+                       exc_info=True)
+        return None
+    rows = r.data or []
+    if not rows or not rows[0].get("raw_b64"):
+        return None
+    try:
+        return base64.b64decode(rows[0]["raw_b64"])
+    except Exception:  # noqa: BLE001 — tolerate a corrupt blob
+        logger.warning("raw bytes undecodable for %s/%s", company_id, file_id,
+                       exc_info=True)
+        return None
+
+
+def set_file_extracted_text(company_id: str, file_id: str, text: str) -> bool:
+    """Replace one file's extracted text (same cap as the upload path).
+
+    Used when a later read succeeds where the upload-time conversion could
+    not — the file keeps its id, so nothing downstream has to be re-pointed.
+    Returns True on success; fail-open False on any storage error.
+    """
+    try:
+        (
+            require_client().table("document_source_file")
+            .update({"extracted_text": (text or "")[:MAX_EXTRACTED_CHARS]})
+            .eq("company_id", company_id)
+            .eq("id", file_id)
+            .execute()
+        )
+        return True
+    except Exception:  # noqa: BLE001 — fail open
+        logger.warning("extracted-text update failed for %s/%s", company_id, file_id,
+                       exc_info=True)
+        return False

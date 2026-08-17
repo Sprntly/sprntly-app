@@ -149,8 +149,17 @@ def llm_call(
     background: bool = False,
     temperature: Optional[float] = None,
     on_delta=None,
+    attachments: Optional[list[dict]] = None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
+
+    `attachments` are image / document content blocks (built by
+    app.llm_file_read) that ride the user turn — how a file we cannot parse
+    deterministically gets READ by the model. They go through this gateway
+    rather than a direct client call so a vision/PDF read is bound to the
+    customer's own key and lands in the decision log and cost telemetry like
+    every other call. Structured (`json_schema`) calls don't take them: the
+    file-reading path wants prose out, not a forced tool call.
 
     When `skill` is set, the bound skill's method text (its SKILL.md, plus the
     named `skill_module` if given, plus the skill's `references/*` docs under
@@ -239,6 +248,7 @@ def llm_call(
                 user_cacheable_prefix=user_cacheable_prefix,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_delta=on_delta,
+                attachments=attachments,
             )
     latency_ms = int((time.monotonic() - t0) * 1000)
 

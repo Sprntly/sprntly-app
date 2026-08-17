@@ -325,6 +325,7 @@ def _build_base_kwargs(
     user: str,
     user_cacheable_prefix: str | None,
     temperature: float | None = None,
+    attachments: list[dict] | None = None,
 ) -> dict:
     """Build the kwargs dict passed to `messages.create`.
 
@@ -339,11 +340,17 @@ def _build_base_kwargs(
     used, keeping every existing caller byte-identical.
     """
     if user_cacheable_prefix is None:
+        # `attachments` are image / document content blocks (see
+        # app.llm_file_read). They lead the user turn because the API expects
+        # media before the text that refers to it.
+        content: str | list[dict] = (
+            [*attachments, {"type": "text", "text": user}] if attachments else user
+        )
         base = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": content}],
         }
         if temperature is not None:
             base["temperature"] = temperature
@@ -359,6 +366,9 @@ def _build_base_kwargs(
             "text": user_cacheable_prefix,
             "cache_control": {"type": "ephemeral"},
         },
+        # Attachments sit AFTER the cacheable prefix: they are per-file and
+        # would bust the prefix cache if they led the turn.
+        *(attachments or []),
         {"type": "text", "text": user},
     ]
     base = {
@@ -512,6 +522,7 @@ def call_md(
     background: bool = False,
     temperature: float | None = None,
     on_delta=None,
+    attachments: list[dict] | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
 
@@ -537,6 +548,7 @@ def call_md(
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
         temperature=temperature,
+        attachments=attachments,
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
