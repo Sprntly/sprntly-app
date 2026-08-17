@@ -98,6 +98,7 @@ vi.mock("../../../../../context/WorkspaceContext", () => ({
 // actually reached. Same stub `ProjectDetailScreen.test.tsx` uses.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useSearchParams: () => new URLSearchParams(),
 }))
 vi.mock("../../../../../lib/runAskGeneration", async () => {
   const actual = await vi.importActual<typeof import("../../../../../lib/runAskGeneration")>(
