@@ -12,6 +12,7 @@ import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
+import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
 import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import {
   providerNoticeFromEnvelope,
@@ -741,6 +742,14 @@ export const BUSY_ENTER_HINT_TAIL = " to interrupt."
 /** How long the busy-Enter hint stays before clearing itself. */
 const BUSY_HINT_MS = 6000
 
+// Main's next-prompt fetch: the shared endpoint keyed by the settled
+// conversation id. A stable module const so the shared hook's fetch-after-settle
+// callback keeps a stable identity across renders.
+const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
+  fetchSuggestions: (conversationId, opts) =>
+    chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
+}
+
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
@@ -1130,10 +1139,9 @@ export function ChatScreen() {
   // background tab's suggestions never appear under another tab's thread, and
   // cleared the moment that tab sends again — stale chips proposing the
   // conversation the user has already moved past are worse than none.
-  const [suggestionsByTab, setSuggestionsByTab] = useState<Record<string, string[]>>({})
-  const clearSuggestions = useCallback((tabId: string) => {
-    setSuggestionsByTab((prev) => (prev[tabId]?.length ? { ...prev, [tabId]: [] } : prev))
-  }, [])
+  // Next-prompt suggestions are owned by the shared host hook (state + retire +
+  // fetch-after-settle); ChatScreen keys by tab id and injects the main fetch.
+  const nextPrompts = useNextPrompts(MAIN_NEXT_PROMPTS_ADAPTER)
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
@@ -4641,7 +4649,7 @@ export function ChatScreen() {
       // no suggestions to clear. Synchronous and unconditional — the instant
       // anything is sent, suggestions about the previous turn are stale, and
       // there is no branch where keeping them is right.
-      if (activeTabId) clearSuggestions(activeTabId)
+      if (activeTabId) nextPrompts.retire(activeTabId)
       // Show the user's message NOW — before the dispatch decision, which is a
       // network round-trip away. `settlePendingSend()` retires it at every exit
       // below; the branch that wins renders its own real turn in the same commit.
@@ -5263,21 +5271,19 @@ export function ChatScreen() {
           if (askConvId != null) {
             const convId = askConvId
             const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
-            try {
-              void Promise.resolve(persisted)
-                .then(() => chatSuggestionsApi.next(convId, { prdId }))
-                .then(({ suggestions }) => {
-                  // Late arrival guards: the screen may have unmounted, the tab
-                  // closed, or the user already sent the NEXT message (which
-                  // cleared the strip and left an ask in flight). In that last
-                  // case these chips belong to a superseded turn — drop them.
-                  if (!mountedRef.current || !suggestions?.length) return
-                  if (!tabsRef.current.some((t) => t.id === tabId)) return
-                  if (askingTabsRef.current.has(tabId)) return
-                  setSuggestionsByTab((prev) => ({ ...prev, [tabId]: suggestions }))
-                })
-                .catch(() => { /* silence is the designed fallback */ })
-            } catch { /* same fallback, for a synchronous throw */ }
+            // Fetch-after-settle via the shared hook: waits on `persisted`,
+            // fetches through the main adapter, and publishes only if the
+            // late-arrival guard still holds (screen mounted, tab still open,
+            // no newer send in flight — else these chips belong to a superseded
+            // turn). Every fault degrades to the empty state.
+            nextPrompts.onSettled(tabId, convId, {
+              prdId,
+              ready: persisted,
+              shouldApply: () =>
+                mountedRef.current &&
+                tabsRef.current.some((t) => t.id === tabId) &&
+                !askingTabsRef.current.has(tabId),
+            })
           }
         },
         onError: (tabId, e) => {
@@ -5364,7 +5370,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -7382,11 +7388,11 @@ export function ChatScreen() {
                     container, no reserved height — so a thread Sprntly has
                     nothing to add to looks exactly as it did before this
                     feature, and a late response never shifts the composer
-                    under the user's cursor. Active tab only: `suggestionsByTab`
-                    is keyed by tab so a background answer's chips stay with
-                    their own thread. */}
+                    under the user's cursor. Active tab only: the shared hook
+                    keys suggestions by tab so a background answer's chips stay
+                    with their own thread. */}
                 <NextPromptSuggestions
-                  suggestions={(activeTabId && suggestionsByTab[activeTabId]) || []}
+                  suggestions={nextPrompts.suggestionsFor(activeTabId)}
                   disabled={busy}
                   onPick={(prompt) => { void submitAsk(prompt) }}
                 />
