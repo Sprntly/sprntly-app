@@ -1991,7 +1991,7 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
 _PROJECT_CONTENT_INTENT = re.compile(
     r"^\s*(?:what|who|how|when|where|which)\b"
     r"|\b(?:summarize|summarise|catch\s+me\s+up|tell\s+me\s+about|status\s+of|"
-    r"read\s+(?:me\s+)?the|what'?s?\s+(?:in|on)|list|show\s+me)\b",
+    r"read\s+(?:me\s+)?the|what'?s?\s+(?:in|on)|list|show\s+me|give\s+me|open)\b",
     re.I,
 )
 
@@ -2001,7 +2001,7 @@ _PROJECT_CONTENT_INTENT = re.compile(
 _PROJECT_CONTENT_NOUN = re.compile(
     r"\bprds?\b|\breports?\b|\bevidence\b|\bprototypes?\b|\bartifacts?\b|"
     r"\bmemory\b|\btasks?\b|\bledger\b|\bdelegations?\b|\bmembers?\b|"
-    r"\broster\b|\bteam\b|"
+    r"\broster\b|\bteam\b|\bcontext\b|"
     r"\bwho(?:'?s|\s+is)\s+(?:on|working)\b|"
     r"\bthis\s+project\b|"
     r"\bwe\s+decided\b|\bdecisions?\b|"
