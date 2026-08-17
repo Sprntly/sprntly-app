@@ -924,7 +924,9 @@ def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_set
     # unaffected.
     from app.db import conversations as conversations_db
 
-    project_join_greeting.post_join_greeting(project_id, "greeted-user")
+    project_join_greeting.post_join_greeting(
+        project_id, "greeted-user", dataset=t.slug, company_id=t.company_id
+    )
     conv = conversations_db.get_individual_project_chat(project_id, "greeted-user")
     assert conv is not None
     turns = conversations_db.list_individual_turns(conv["id"], "greeted-user")

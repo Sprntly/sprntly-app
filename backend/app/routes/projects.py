@@ -634,7 +634,9 @@ def add_member(
         # drop a grounding greeting into this member's private project chat so
         # they land with context, not a blank thread. Best-effort/non-blocking
         # (AD-P7) — a greeting failure never breaks or delays the add.
-        project_join_greeting.post_join_greeting(project_id, res["user_id"])
+        project_join_greeting.post_join_greeting(
+            project_id, res["user_id"], dataset=_dataset_for(ctx), company_id=ctx.company_id
+        )
         return member
     # t_newuser / t_refuse (foreign company, or no in-tenant account) — no add,
     # no disclosure of which reason applied.
@@ -772,6 +774,14 @@ def tag_candidate_route(
         # (AD-TNM5); swallows every failure, never changes this response or
         # rolls back the add (AD-TNM2/AD-P22).
         project_delegation._publish_member_added(project_id, uid, project["name"])
+        # Same grounding greeting `add_member` drops for a new membership —
+        # this tag-invite branch adds a member too and previously skipped it,
+        # leaving a tag-added member with a blank private chat. Best-effort/
+        # non-blocking (AD-P7) — a greeting failure never breaks or delays
+        # the add.
+        project_join_greeting.post_join_greeting(
+            project_id, uid, dataset=_dataset_for(ctx), company_id=ctx.company_id
+        )
         return {"tier": tier, "added": member}
 
     if tier == projects_db.TIER_COMPANY:  # Extension A — workspace-join invite
