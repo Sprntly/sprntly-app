@@ -205,7 +205,23 @@ export type RenderInheritanceInput = {
   renderDivergences: { capability: string; surface: ChatSurfaceKind }[]
   /** The real, checked-in opt-out ledger. */
   ledger: ParityOptOut[]
+  /** Project chat hosts that mount `<ChatShell>` with a project surface but are
+   *  NOT covered by `PROJECT_CHAT_SURFACE_SOURCES` — the guard cannot audit a
+   *  surface it does not know about, so each one fails closed. Source-derived by
+   *  the test (discovered hosts minus the registered file sets); empty on real
+   *  code (both hosts are registered). */
+  unregisteredChatHosts: string[]
 }
+
+/** The guard's declared knowledge of which file(s) implement each project
+ *  chat surface — every render-inheritance fork detector scans the UNION of a
+ *  surface's files, so a re-implementation cannot hide in the host when the
+ *  detector historically only read the engine (or vice-versa). Basenames only;
+ *  the test joins them against the projects dir. */
+export const PROJECT_CHAT_SURFACE_SOURCES: { surface: ChatSurfaceKind; files: string[] }[] = [
+  { surface: "project_private", files: ["ProjectPrivateChat.tsx", "useProjectPrivateThread.ts"] },
+  { surface: "project_group", files: ["ProjectGroupChat.tsx", "useProjectGroupThread.ts"] },
+]
 
 /** The five per-service fork arms — capability + the human-readable service
  *  name, iterated identically (pattern (a)). Kept as data so the routine bodies
@@ -223,7 +239,7 @@ const SERVICE_FORK_ARMS: {
 ]
 
 export function auditRenderInheritance(input: RenderInheritanceInput): ParityViolation[] {
-  const { agentReplyForks, renderDivergences, ledger } = input
+  const { agentReplyForks, renderDivergences, ledger, unregisteredChatHosts } = input
   const violations: ParityViolation[] = []
 
   // (a) A project surface that re-implements the agent-reply ladder via
@@ -259,6 +275,16 @@ export function auditRenderInheritance(input: RenderInheritanceInput): ParityVio
         reason: `Render/context divergence "${d.capability}" for surface "${d.surface}" is not in PARITY_OPT_OUTS.`,
       })
     }
+  }
+
+  // (c) A project chat host that mounts ChatShell with a project surface but is
+  // not covered by PROJECT_CHAT_SURFACE_SOURCES — the guard cannot audit a
+  // surface it does not know about, so a new/unregistered host fails closed.
+  for (const host of unregisteredChatHosts) {
+    violations.push({
+      capability: "render.unregisteredSurface",
+      reason: `Project chat host "${host}" mounts ChatShell with a project surface but is absent from PROJECT_CHAT_SURFACE_SOURCES — register its source set so the inheritance detectors scan it.`,
+    })
   }
 
   return violations

@@ -11,7 +11,7 @@
 // would fail this on day one. The mutation self-check (AC8) proves the guard
 // actually discriminates, entirely via a synthetic input (no product-source
 // mutation).
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
@@ -19,6 +19,7 @@ import {
   auditComposerParity,
   auditRenderInheritance,
   PROJECT_CAPABILITY_MANIFEST,
+  PROJECT_CHAT_SURFACE_SOURCES,
   type ComposerParityInput,
   type ComposerPropWiring,
   type RenderInheritanceInput,
@@ -306,74 +307,88 @@ describe("composer parity guard — opt-out ledger completeness (AC10)", () => {
 
 // ── Render-inheritance guard ─────────────────────────────────────────────────
 
-/** Does a project host's descriptor set `renderAgentBody:` for the agent reply?
+// ── Render-inheritance fork detectors (consume-not-reimplement) ──────────────
+// Each is a POSITION-AGNOSTIC `(src: string) => boolean` run over the
+// CONCATENATION of a surface's whole source set (host `.tsx` + engine `.ts`,
+// from `PROJECT_CHAT_SURFACE_SOURCES`). A fork can no longer hide in the host
+// when the detector historically only read the engine (or vice-versa). Real
+// code returns false for every surface (private consumes; group is a
+// server-classified non-consumer, ledgered — never a fork).
+
+/** Does a surface's source set the `renderAgentBody:` key for the agent reply?
  *  Naive key probe (mirrors `hasComposerFeatures` above) — a comment that
  *  merely NAMES the field ("NO `renderAgentBody` override") never matches the
  *  key form `renderAgentBody:`. */
-function hasAgentReplyFork(hostFile: string): boolean {
-  const src = read(projectsDir, hostFile)
+function hasAgentReplyFork(src: string): boolean {
   return /\brenderAgentBody\s*:/.test(src)
 }
 
-// ── Five per-service fork detectors (consume-not-reimplement) ────────────────
-// Each returns true only when a surface re-implements the shared host service
-// LOCALLY instead of consuming its `chat-shell/` home. Real code returns false
-// for every surface (private consumes; group is a server-classified
-// non-consumer, ledgered — never a fork).
-
-/** Executors: an engine that calls `dispatchChatIntent(` with an inline
+/** Executors: a source that calls `dispatchChatIntent(` with an inline
  *  executor object instead of routing through `useChatIntentExecutors`. */
-function reimplementsExecutors(engineFile: string): boolean {
-  const src = read(projectsDir, engineFile)
+function reimplementsExecutors(src: string): boolean {
   const callsDispatch = /\bdispatchChatIntent\s*\(/.test(src)
   const consumesHook = /\buseChatIntentExecutors\b/.test(src)
   return callsDispatch && !consumesHook
 }
 
-/** Action rows: a host that DEFINES its own artifact-action row component
+/** Action rows: a source that DEFINES its own artifact-action row component
  *  instead of importing the shared `ChatArtifactActions`/`ChatTicketSetActions`. */
-function reimplementsActionRows(hostFile: string): boolean {
-  const src = read(projectsDir, hostFile)
+function reimplementsActionRows(src: string): boolean {
   return /function\s+ChatArtifactActions\b|function\s+ChatTicketSetActions\b/.test(src)
 }
 
-/** Next-prompts: an engine that drives the next-prompt fetch/state locally
+/** Next-prompts: a source that drives the next-prompt fetch/state locally
  *  (its own `chatSuggestionsApi.next` call or `suggestionsBy…` state) without
  *  consuming `useNextPrompts`. */
-function reimplementsNextPrompts(engineFile: string): boolean {
-  const src = read(projectsDir, engineFile)
+function reimplementsNextPrompts(src: string): boolean {
   const local = /chatSuggestionsApi\.next\b|suggestionsBy\w+\s*[=,]/.test(src)
   const consumesHook = /\buseNextPrompts\b/.test(src)
   return local && !consumesHook
 }
 
-/** Inline cards: a host that composes main's inline insight/PRD cards locally
+/** Inline cards: a source that composes main's inline insight/PRD cards locally
  *  (references `insightCardNode`/`prdQuestionsNode`) rather than the shared
  *  `turnAfterNode` service. */
-function reimplementsInlineCards(hostFile: string): boolean {
-  const src = read(projectsDir, hostFile)
+function reimplementsInlineCards(src: string): boolean {
   const local = /\binsightCardNode\b|\bprdQuestionsNode\b/.test(src)
   const consumesShared = /\bturnAfterNode\b/.test(src) && /chat-shell\/turnAfterNode/.test(src)
   return local && !consumesShared
 }
 
-/** Open-destination: a host that re-implements the PANEL open decision locally
- *  (the resume-first stash `sprntly_resume_conv`) instead of opening the
- *  artifacts modal (the ledgered divergence) or the shared decision. */
-function reimplementsOpenDest(hostFile: string): boolean {
-  const src = read(projectsDir, hostFile)
+/** Open-destination: a source that re-implements the PANEL open decision
+ *  locally (the resume-first stash `sprntly_resume_conv`) instead of opening
+ *  the artifacts modal (the ledgered divergence) or the shared decision. */
+function reimplementsOpenDest(src: string): boolean {
   return /sprntly_resume_conv/.test(src)
 }
 
-function serviceForks(
-  detector: (file: string) => boolean,
-  privateFile: string,
-  groupFile: string,
-): ChatSurfaceKind[] {
+/** Run a position-agnostic detector over the CONCATENATION of each surface's
+ *  whole source set (from `PROJECT_CHAT_SURFACE_SOURCES`), returning the
+ *  surfaces it flags. Because the union of host + engine is scanned, a fork is
+ *  caught wherever it is placed — closing the host↔engine placement blind
+ *  spot that the old one-file-per-detector wiring left open. */
+function surfaceForks(detector: (src: string) => boolean): ChatSurfaceKind[] {
   const forks: ChatSurfaceKind[] = []
-  if (detector(privateFile)) forks.push("project_private")
-  if (detector(groupFile)) forks.push("project_group")
+  for (const { surface, files } of PROJECT_CHAT_SURFACE_SOURCES) {
+    const combined = files.map((f) => read(projectsDir, f)).join("\n")
+    if (detector(combined)) forks.push(surface)
+  }
   return forks
+}
+
+/** Source-parse the projects dir for every `*.tsx` that mounts `<ChatShell>`
+ *  with a `surface: "project_` literal — the guard's discovered set of project
+ *  chat hosts. Non-recursive (the `__tests__` subdir is not walked); returns
+ *  sorted basenames. Compared against the registry to derive
+ *  `unregisteredChatHosts`. */
+function discoverProjectChatHosts(): string[] {
+  return readdirSync(projectsDir)
+    .filter((name) => name.endsWith(".tsx"))
+    .filter((name) => {
+      const src = read(projectsDir, name)
+      return src.includes("<ChatShell") && /surface:\s*"project_/.test(src)
+    })
+    .sort()
 }
 
 /** The sanctioned project↔main render/context divergences the guard tracks —
@@ -394,34 +409,129 @@ const RENDER_DIVERGENCES: { capability: string; surface: ChatSurfaceKind }[] = [
 ]
 
 function realRenderInput(): RenderInheritanceInput {
-  const agentReplyForks: ChatSurfaceKind[] = []
-  if (hasAgentReplyFork("ProjectPrivateChat.tsx")) agentReplyForks.push("project_private")
-  if (hasAgentReplyFork("ProjectGroupChat.tsx")) agentReplyForks.push("project_group")
+  const registeredFiles = new Set(PROJECT_CHAT_SURFACE_SOURCES.flatMap((s) => s.files))
   return {
-    agentReplyForks,
-    // The five per-service fork arms, each source-parsed from the two project
-    // engines/hosts. All empty on real code: private consumes the shared
-    // executor wiring; neither surface forks any host service; group is a
+    // Every render-inheritance fork detector now runs over the CONCATENATION of
+    // a surface's whole source set (host `.tsx` + engine `.ts`), so a fork is
+    // caught wherever placed. All empty on real code: private consumes the
+    // shared services; neither surface forks any host service; group is a
     // server-classified non-consumer (ledgered), not a fork.
-    executorForks: serviceForks(reimplementsExecutors, "useProjectPrivateThread.ts", "useProjectGroupThread.ts"),
-    actionRowForks: serviceForks(reimplementsActionRows, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
-    nextPromptForks: serviceForks(reimplementsNextPrompts, "useProjectPrivateThread.ts", "useProjectGroupThread.ts"),
-    inlineCardForks: serviceForks(reimplementsInlineCards, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
-    openDestForks: serviceForks(reimplementsOpenDest, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
+    agentReplyForks: surfaceForks(hasAgentReplyFork),
+    executorForks: surfaceForks(reimplementsExecutors),
+    actionRowForks: surfaceForks(reimplementsActionRows),
+    nextPromptForks: surfaceForks(reimplementsNextPrompts),
+    inlineCardForks: surfaceForks(reimplementsInlineCards),
+    openDestForks: surfaceForks(reimplementsOpenDest),
     renderDivergences: RENDER_DIVERGENCES,
     ledger: PARITY_OPT_OUTS,
+    // Every discovered project chat host that the registry does not cover — the
+    // guard fails closed on a surface it does not know about. Empty on real
+    // code (both discovered hosts are registered).
+    unregisteredChatHosts: discoverProjectChatHosts().filter((host) => !registeredFiles.has(host)),
   }
 }
 
 describe("render-inheritance guard — real input (AC9)", () => {
   it("test_render_inheritance_clean_on_real_code", () => {
     const input = realRenderInput()
-    // Sanity: today's real code forks NEITHER surface's agent reply — both
-    // consume ChatBubble's native ladder (an empty forks list is the whole
-    // point of the inheritance rule, not a vacuous pass, so we assert it
-    // explicitly).
+    // Sanity: today's real code forks NEITHER surface anywhere in its widened
+    // whole-source-set scan — both consume the shared services and neither host
+    // is unregistered. An all-empty forks state is the whole point of the
+    // inheritance rule, not a vacuous pass, so we assert each arm explicitly.
     expect(input.agentReplyForks).toEqual([])
+    expect(input.executorForks).toEqual([])
+    expect(input.actionRowForks).toEqual([])
+    expect(input.nextPromptForks).toEqual([])
+    expect(input.inlineCardForks).toEqual([])
+    expect(input.openDestForks).toEqual([])
+    expect(input.unregisteredChatHosts).toEqual([])
     expect(auditRenderInheritance(input)).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — surface source registry (AC1)", () => {
+  it("test_project_chat_surface_sources_names_both_surfaces_with_file_sets", () => {
+    expect(PROJECT_CHAT_SURFACE_SOURCES).toEqual([
+      { surface: "project_private", files: ["ProjectPrivateChat.tsx", "useProjectPrivateThread.ts"] },
+      { surface: "project_group", files: ["ProjectGroupChat.tsx", "useProjectGroupThread.ts"] },
+    ])
+  })
+
+  it("test_project_chat_surface_sources_all_files_exist", () => {
+    for (const { files } of PROJECT_CHAT_SURFACE_SOURCES) {
+      for (const f of files) {
+        // A rename that de-syncs the registry throws here (fail-closed).
+        expect(() => read(projectsDir, f), `registry file ${f} must exist`).not.toThrow()
+      }
+    }
+  })
+})
+
+describe("render-inheritance guard — whole source-set scan (AC2)", () => {
+  it("test_render_detectors_scan_whole_surface_set", () => {
+    // surfaceForks reads >=2 files per surface (host + engine).
+    for (const { files } of PROJECT_CHAT_SURFACE_SOURCES) {
+      expect(files.length).toBeGreaterThanOrEqual(2)
+    }
+    // The SWAP proves the closed blind-spot, not merely "detector works on a
+    // joined string": a combined source with a HOST-placed `dispatchChatIntent(`
+    // and NO `useChatIntentExecutors` trips reimplementsExecutors — the host
+    // placement previously escaped this formerly ENGINE-only detector.
+    const hostForkedExecutorUnion = [
+      "function ProjectSomethingChat() { dispatchChatIntent({ create_prd: () => {} }) }",
+      "// engine half — no shared hook imported here",
+    ].join("\n")
+    expect(reimplementsExecutors(hostForkedExecutorUnion)).toBe(true)
+    // And a combined source with an ENGINE-placed `function ChatArtifactActions`
+    // trips reimplementsActionRows — the engine placement previously escaped
+    // this formerly HOST-only detector.
+    const engineForkedActionRowUnion = [
+      "// host half — no local action-row component",
+      "function ChatArtifactActions() { return null }",
+    ].join("\n")
+    expect(reimplementsActionRows(engineForkedActionRowUnion)).toBe(true)
+  })
+})
+
+describe("render-inheritance guard — unregistered host fail-closed (AC4)", () => {
+  it("test_render_guard_flags_unregistered_chat_host", () => {
+    const base = realRenderInput()
+    const withUnknown: RenderInheritanceInput = {
+      ...base,
+      unregisteredChatHosts: ["ProjectSomethingChat.tsx"],
+    }
+    const violations = auditRenderInheritance(withUnknown)
+    expect(
+      violations.some(
+        (v) =>
+          v.capability === "render.unregisteredSurface" &&
+          v.reason.includes("ProjectSomethingChat.tsx"),
+      ),
+    ).toBe(true)
+    // GREEN again once the field is cleared — mutation-proof RED→GREEN.
+    expect(auditRenderInheritance({ ...base, unregisteredChatHosts: [] })).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — discovery matches registry (AC5)", () => {
+  it("test_discovered_project_chat_hosts_match_registry", () => {
+    const discovered = discoverProjectChatHosts()
+    expect(discovered).toEqual(["ProjectGroupChat.tsx", "ProjectPrivateChat.tsx"])
+    const registered = new Set(PROJECT_CHAT_SURFACE_SOURCES.flatMap((s) => s.files))
+    const unregistered = discovered.filter((h) => !registered.has(h))
+    expect(unregistered).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — lane execution self-check (AC6)", () => {
+  it("test_guard_test_file_is_not_skipped", () => {
+    const selfSrc = read(fileURLToPath(import.meta.url))
+    // Built from fragments so the assertion never matches its own source — the
+    // guard must execute in the collected lane, not be shelved.
+    const skipMarkers = ["describe" + ".skip", "it" + ".skip", "describe" + ".todo(", "it" + ".todo("]
+    for (const marker of skipMarkers) {
+      expect(selfSrc.includes(marker), `guard test must not contain ${marker}`).toBe(false)
+    }
   })
 })
 
