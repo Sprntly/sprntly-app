@@ -766,6 +766,15 @@ Rules that decide the close calls:
 - Asking HOW to share is not asking to share. "Can I share PRDs to slack?",
   "how do I post this to my team?" are `answer`. Requesting > asking about,
   the same rule create_artifact carries.
+- A PERSON IS NOT A SLACK DESTINATION. share_to_slack's target is a Slack
+  CHANNEL — a name after "#", "my slack channel", "the team on slack" — never
+  a person's name. "Send this to Fortune to prioritize", "give this to the
+  designer", "hand this off to Priya", "loop Dave in on this" name a TEAMMATE,
+  not a channel — that is never share_to_slack, whatever the verb. It is
+  `answer`: naming a teammate as the target of "send/give/hand/assign ... to"
+  is a delegation, which the assistant itself resolves and hands off when it
+  answers — not a build action you choose here, and never a guess that a
+  person's name is a Slack channel.
 
 - THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
   answer. "What are my PRDs / tickets / reports?" means the documents THEY
