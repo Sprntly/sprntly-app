@@ -10,6 +10,7 @@ import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceCont
 import { useAuth } from "../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
+import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import {
   providerNoticeFromEnvelope,
@@ -4981,7 +4982,11 @@ export function ChatScreen() {
               editTargetPrdId: targetPrdId,
               ticketsTarget,
             },
-            {
+            // The intent→executor WIRING is the shared
+            // `useChatIntentExecutors` half; ChatScreen injects today's exact
+            // flow bodies + tab guards as the adapter, so dispatch behaviour is
+            // byte-identical to the inline object it replaces.
+            useChatIntentExecutors({
               onGenerateTickets: (env) => {
                 if (docFile) {
                   setAttachments([])
@@ -5100,7 +5105,7 @@ export function ChatScreen() {
               // already runs unconditionally whenever `result.handled` is
               // false.
               onAnswer: () => {},
-            },
+            }),
           )
           if (result.handled) return
         }

@@ -38,6 +38,7 @@ import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { useAuth } from "../../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
+import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import {
   runAskGeneration,
@@ -847,15 +848,23 @@ export function useProjectPrivateThread(
             envelope,
             { hasEditTarget: true, editTargetPrdId: null, ticketsTarget: null },
             {
-              onEditPrd: (instruction) => void runEditPrd(instruction),
-              onGenerateTickets: () => void runGenerateTickets(),
-              onGeneratePrd: (env) => void runGeneratePrd(env.task || question),
-              onOpenArtifact: (open) => runOpenArtifact(open),
-              onChangeTemplate: () => void runAsk(),
-              onChangeTicketsTemplate: () => void runAsk(),
-              onListArtifacts: (env) => runListArtifacts(env),
-              onCreateArtifact: () => void runAsk(),
-              onAssignTickets: () => void runAsk(),
+              // The intent→executor WIRING is the shared
+              // `useChatIntentExecutors` half; this engine injects its own
+              // project-scoped flow bodies as the adapter. `onClarify` stays a
+              // call-site spread — a turn-state callback (persist/render), not a
+              // command-flow body, so it is kept OUT of the shared adapter.
+              ...useChatIntentExecutors({
+                onEditPrd: (instruction) => void runEditPrd(instruction),
+                onGenerateTickets: () => void runGenerateTickets(),
+                onGeneratePrd: (env) => void runGeneratePrd(env.task || question),
+                onOpenArtifact: (open) => runOpenArtifact(open),
+                onChangeTemplate: () => void runAsk(),
+                onChangeTicketsTemplate: () => void runAsk(),
+                onListArtifacts: (env) => runListArtifacts(env),
+                onCreateArtifact: () => void runAsk(),
+                onAssignTickets: () => void runAsk(),
+                onAnswer: () => void runAsk(),
+              }),
               onClarify: (clarification, prdOptions) => {
                 if (stoppedRef.current) return
                 // Persist the ASSISTANT clarification text — the
@@ -878,7 +887,6 @@ export function useProjectPrivateThread(
                 )
                 setBusy(false)
               },
-              onAnswer: () => void runAsk(),
             },
           )
         })

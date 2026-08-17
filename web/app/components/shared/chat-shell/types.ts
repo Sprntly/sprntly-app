@@ -20,6 +20,7 @@
  */
 
 import type { ChangeEvent, CSSProperties, MutableRefObject, ReactNode, Ref, RefObject } from "react"
+import type { ChatIntentExecutors } from "../../../lib/chat/dispatchChatIntent"
 import type { ChatTranscriptTurn } from "../ChatTranscript"
 import type { ClarifyAnswer, ClarifyQuestion, ClarifyResolution } from "../ClarifyQuestionsCard"
 import type { PinnedSkill } from "../ChatComposer"
@@ -371,6 +372,22 @@ export interface ChatSurfaceDescriptor {
   dock?: { aboveComposer?: ReactNode }
   overlays?: { attachmentViewer?: boolean }
 }
+
+// ── Shared chat-intent executor adapter ─────────────────────────────────────
+
+/**
+ * The SURFACE-SPECIFIC half of the shared chat-intent executor wiring: the flow
+ * bodies a surface injects into `useChatIntentExecutors`. Every slot is OPTIONAL
+ * — a surface provides only the intents it implements, and any omitted slot
+ * falls to the surface's `onAnswer` no-op inside the hook (the subset-allowed
+ * contract). Reuses the existing `ChatIntentExecutors` shape (from
+ * `dispatchChatIntent`) rather than re-declaring it.
+ *
+ * `onClarify` is intentionally excluded: it is a turn-state callback composed at
+ * the call site via object spread, never a command-flow body (see
+ * `useChatIntentExecutors`).
+ */
+export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onClarify">>
 
 // ── Main turn-mapping dependency bag ────────────────────────────────────────
 
