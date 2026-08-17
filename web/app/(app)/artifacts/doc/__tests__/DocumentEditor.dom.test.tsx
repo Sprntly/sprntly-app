@@ -99,6 +99,42 @@ describe("the editor renders the document it is given", () => {
   })
 })
 
+describe("opening a document is not editing it", () => {
+  it("emits nothing for its own normalization of the stored HTML", async () => {
+    // THE DEFECT, measured on staging: opening document 9 twice took it from
+    // version 3 to version 5 with nobody typing. TipTap re-serializes the
+    // stored HTML into its schema, and that round trip is not byte-identical
+    // to what the sanitizer wrote — so the resulting update looked exactly
+    // like a keystroke and the save layer wrote it.
+    //
+    // In a SHARED library that is three harms at once: the row says "Edited
+    // just now" by whoever merely READ it, `updated_by` names them, and the
+    // version bump makes the next save by the colleague who is genuinely
+    // typing fail its compare-and-set.
+    const { onChange } = await mount({
+      // Deliberately in a shape TipTap will re-serialize differently.
+      initialHtml: "<h1>Title</h1><p>body</p><hr>",
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("still emits for a real edit that only changes formatting", async () => {
+    // The other half, and the reason the gate is the OUTPUT rather than the
+    // event: it must not swallow a genuine edit. Bold changes the serialized
+    // HTML, so it differs from the last emitted value and goes through — the
+    // seven toolbar cases below are the same property at more angles.
+    const { onChange, container, selectAll } = await mount({
+      initialHtml: "<p>hello</p>",
+    })
+    onChange.mockClear()
+    selectAll()
+    fireEvent.click(container.querySelector('[data-doc-toolbar] button')!)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain("<strong>")
+  })
+})
+
 describe("the toolbar", () => {
   it("is shown when editable and hidden when not", async () => {
     const { container, unmount } = await mount({ editable: true })

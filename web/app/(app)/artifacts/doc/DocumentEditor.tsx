@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
 import Underline from "@tiptap/extension-underline"
@@ -53,11 +53,46 @@ export function DocumentEditor({
   editable?: boolean
   /** Fired on every change with the serialized document. The caller debounces —
    *  this is deliberately not throttled here, so the save layer owns the timing
-   *  and can be tested without an editor (see lib/documentSave.ts). */
+   *  and can be tested without an editor (see lib/documentSave.ts).
+   *
+   *  NOT FIRED FOR THE EDITOR'S OWN NORMALIZATION — see `interactedRef`. */
   onChange?: (html: string) => void
   onBlur?: () => void
   onReady?: (editor: Editor) => void
 }) {
+  // Has a person actually touched this editor yet?
+  //
+  // OPENING A DOCUMENT WAS SAVING IT. TipTap parses `initialHtml` into its
+  // schema and re-serializes it, and that round trip is not byte-identical to
+  // what the server stored (the stored HTML came from the sanitizer, which
+  // makes different — equally valid — choices about attributes and spacing).
+  // The resulting `onUpdate` looked exactly like a keystroke, so every open
+  // scheduled a body save: on staging, opening document 9 twice took it from
+  // version 3 to version 5 without anyone typing a character.
+  //
+  // In a SHARED library that is three separate harms. The row reads "Edited
+  // just now" by whoever merely read it; `updated_by` names them; and the
+  // version bump makes the next save by the colleague who is genuinely typing
+  // fail its compare-and-set — a "someone else saved this document" banner
+  // raised by a reader.
+  //
+  // AN UPDATE THAT FOLLOWS NO USER EVENT IS NOT A USER EDIT. Set by the
+  // capture handlers on the wrapper below — every way a person can change this
+  // document goes through one of them (typing, paste, a toolbar click, a
+  // toolbar select, a drop), and the editor's own start-up normalization goes
+  // through none.
+  //
+  // Two other instruments were tried and are worse:
+  //   * TipTap's `onFocus` — does not fire for `chain().focus()` under jsdom,
+  //     so it suppressed seven REAL toolbar edits in this component's own
+  //     tests. A gate that drops genuine writing is worse than the save it
+  //     prevents.
+  //   * comparing serialized output against a baseline — needs a baseline
+  //     captured before the first update, and `onCreate` does not reliably run
+  //     first; it also silently drops a real edit that restores the original
+  //     text.
+  const interactedRef = useRef(false)
+  const markInteracted = useCallback(() => { interactedRef.current = true }, [])
   const editor = useEditor({
     // Next renders this route on the server first; without this TipTap warns
     // about an SSR/client mismatch and re-mounts the document.
@@ -98,7 +133,10 @@ export function DocumentEditor({
       }),
     ],
     content: initialHtml || "",
-    onUpdate: ({ editor: ed }) => onChange?.(ed.getHTML()),
+    onUpdate: ({ editor: ed }) => {
+      if (!interactedRef.current) return
+      onChange?.(ed.getHTML())
+    },
     onBlur: () => onBlur?.(),
   })
 
@@ -113,7 +151,19 @@ export function DocumentEditor({
   if (!editor) return null
 
   return (
-    <div data-doc-editor>
+    <div
+      data-doc-editor
+      // CAPTURE, so the mark lands before TipTap's own handler turns the event
+      // into a transaction — otherwise the resulting `onUpdate` would still see
+      // `interactedRef` false and be swallowed. Every user path is here:
+      // typing and shortcuts (keydown), pasting, dropping, a toolbar button
+      // (click) and a toolbar select (change).
+      onKeyDownCapture={markInteracted}
+      onPasteCapture={markInteracted}
+      onDropCapture={markInteracted}
+      onClickCapture={markInteracted}
+      onChangeCapture={markInteracted}
+    >
       {editable && <Toolbar editor={editor} />}
       <EditorContent editor={editor} />
       <style>{`
