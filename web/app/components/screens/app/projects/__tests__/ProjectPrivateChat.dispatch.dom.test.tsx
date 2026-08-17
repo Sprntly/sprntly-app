@@ -60,12 +60,23 @@ vi.mock("../../../../../lib/runPrdGeneration", () => ({
 }))
 
 // The skill palette load (composer controller) — mocked so the typed-`/`
-// pinning path has a real skill to pin. attachmentsApi.upload stays the real
-// (best-effort) call, which rejects harmlessly in jsdom → attachment key null.
+// pinning path has a real skill to pin.
 const skillsMock = vi.fn((..._a: unknown[]) =>
   Promise.resolve({
     skills: [{ id: "s1", label: "Competitive intel", trigger: "/competitive", description: "compare us", category: "Custom" }],
   }),
+)
+// The attachment best-effort upload — MOCKED so `buildSendCommand`'s
+// `resolveAttachmentRefs` never touches the real `fetch` at send time. Left
+// unmocked, the structured-attachment test relied on the real `attachmentsApi.
+// upload` (→ `api.post` → global `fetch`) rejecting FAST in isolation; in the
+// full suite a sibling lib test (e.g. app/lib/__tests__/*) that stubs
+// `global.fetch` without restoring it can make that upload hang, so the send's
+// `buildSendCommand` never resolves, `runAskGeneration` is never reached, and
+// the spy sees 0 calls. Mocking the leaf makes the attachment path hermetic
+// regardless of ambient fetch state.
+const uploadMock = vi.fn((..._a: unknown[]) =>
+  Promise.resolve({ key: "K1", name: "notes.txt", mime: "text/plain", size: 1 }),
 )
 
 vi.mock("../../../../../lib/poll", () => ({
@@ -79,6 +90,10 @@ vi.mock("../../../../../lib/api", async () => {
     askApi: {
       ...actual.askApi,
       skills: (...a: unknown[]) => skillsMock(...a),
+    },
+    attachmentsApi: {
+      ...actual.attachmentsApi,
+      upload: (...a: unknown[]) => uploadMock(...a),
     },
     projectsApi: {
       ...actual.projectsApi,
@@ -144,6 +159,7 @@ beforeEach(() => {
   skillsMock.mockReset().mockResolvedValue({
     skills: [{ id: "s1", label: "Competitive intel", trigger: "/competitive", description: "compare us", category: "Custom" }],
   })
+  uploadMock.mockReset().mockResolvedValue({ key: "K1", name: "notes.txt", mime: "text/plain", size: 1 })
 })
 afterEach(() => cleanup())
 
