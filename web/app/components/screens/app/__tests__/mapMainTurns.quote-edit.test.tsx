@@ -116,6 +116,10 @@ describe("mapMainTurns — quoted passage", () => {
     expect(setViewerAttachment).toHaveBeenCalledWith({
       name: "Quoted from the answer",
       content: "a long excerpt",
+      // Verbatim, NOT through markdown: the excerpt was already lifted out of
+      // a rendered answer, and re-parsing it collapses the newlines that are
+      // its structure (a quoted list came back as one run-on paragraph).
+      plain: true,
     })
   })
 

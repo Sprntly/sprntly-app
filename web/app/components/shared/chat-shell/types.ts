@@ -455,6 +455,9 @@ export interface MapMainTurnsDeps {
     content: string
     key?: string | null
     mime?: string | null
+    /** Render verbatim rather than through markdown — the quoted-passage
+     *  viewer, whose text was already lifted out of a rendered answer. */
+    plain?: boolean
   }) => void
   openReportByTitle: (title: string) => void
   openArtifactInPanel: (candidate: OpenArtifactCandidate) => void

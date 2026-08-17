@@ -13,7 +13,8 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
-import { SelectionReplyToolbar } from "../SelectionReplyToolbar"
+import { SelectionReplyToolbar, rangeToText } from "../SelectionReplyToolbar"
+import { normalizeQuote } from "../../../lib/chatQuote"
 
 afterEach(() => {
   cleanup()
@@ -107,6 +108,37 @@ describe("SelectionReplyToolbar", () => {
     selectAll(view.getByTestId("answer"))
     fireEvent.scroll(view.getByTestId("column"))
     expect(view.queryByTestId("selection-reply-toolbar")).toBeNull()
+  })
+
+  it("keeps a quoted LIST a list, not one run-on line", () => {
+    // The reported defect: highlighting an answer's list of assignments and
+    // pressing Reply produced a wall of text, because `Selection.toString()`
+    // drops the block boundaries. `rangeToText` walks the cloned DOM instead.
+    const host = document.createElement("div")
+    host.className = "bc-agent-body"
+    host.innerHTML =
+      "<p>All set — assigned:</p><ul><li>Validate SPF record → Fortune Tede</li>" +
+      "<li>Validate DKIM key → Fortune Tede</li></ul>"
+    document.body.appendChild(host)
+    const range = document.createRange()
+    range.selectNodeContents(host)
+    expect(normalizeQuote(rangeToText(range))).toBe(
+      "All set — assigned:\n\nValidate SPF record → Fortune Tede\nValidate DKIM key → Fortune Tede",
+    )
+    host.remove()
+  })
+
+  it("keeps hard line breaks and separates table cells on one line", () => {
+    const host = document.createElement("div")
+    host.innerHTML =
+      "<p>one<br>two</p><table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>"
+    document.body.appendChild(host)
+    const range = document.createRange()
+    range.selectNodeContents(host)
+    // Rows are one newline apart (they are the rows of one block); the table
+    // itself is a blank line off the paragraph above it.
+    expect(normalizeQuote(rangeToText(range))).toBe("one\ntwo\n\na  b\nc  d")
+    host.remove()
   })
 
   it("keeps the selection alive across the button's own mousedown", () => {

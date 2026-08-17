@@ -7354,6 +7354,17 @@
     font-style: italic;
   }
 
+  /* A quoted passage, shown verbatim rather than re-rendered as markdown. The
+     text arrives already flattened out of a rendered answer, so its newlines
+     ARE its structure — `pre-wrap` is what keeps a quoted list a list instead
+     of the run-on paragraph markdown would collapse it into. Not monospaced:
+     it is prose that was lifted from prose. */
+  .bc-file-viewer-plain {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   /* Agent turn */
   .bc-agent-head {
     display: flex;

@@ -634,7 +634,19 @@ function AttachmentViewer({
   attachment,
   onClose,
 }: {
-  attachment: { name: string; content: string; key?: string | null; mime?: string | null }
+  attachment: {
+    name: string
+    content: string
+    key?: string | null
+    mime?: string | null
+    /** Render `content` VERBATIM instead of through markdown. Set by the
+     *  quoted-passage viewer, whose text was already lifted out of a rendered
+     *  answer — re-parsing it collapses every single newline into a space (a
+     *  quoted list came back as one run-on paragraph) and re-interprets any
+     *  stray `*`/`#`/`_` the passage happened to contain. A real file with
+     *  markdown in it still wants the renderer, so this is opt-in. */
+    plain?: boolean
+  }
   onClose: () => void
 }) {
   const [urls, setUrls] = useState<{ view_url: string; download_url: string; mime: string } | null>(null)
@@ -721,7 +733,13 @@ function AttachmentViewer({
             />
           ) : hasText ? (
             <>
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+              {attachment.plain ? (
+                <p className="bc-file-viewer-plain" data-testid="viewer-plain-text">
+                  {attachment.content}
+                </p>
+              ) : (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+              )}
               {urls && !isPdf && !isImage ? (
                 <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
               ) : null}
@@ -1204,7 +1222,7 @@ export function ChatScreen() {
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
-  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null; plain?: boolean } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -7470,6 +7488,7 @@ export function ChatScreen() {
                             ? () => setViewerAttachment({
                                 name: QUOTE_VIEWER_NAME,
                                 content: pendingSplit.quote!,
+                                plain: true,
                               })
                             : undefined,
                           name,

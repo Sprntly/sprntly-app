@@ -34,6 +34,74 @@ import styles from "./SelectionReplyToolbar.module.css"
  *  history-wrapped ladder all render inside it on every surface. */
 const DEFAULT_BODY_SELECTOR = ".bc-agent-body"
 
+/** Elements separated by a BLANK line — one paragraph from the next. */
+const PARA_TAGS = new Set([
+  "ADDRESS", "ARTICLE", "ASIDE", "BLOCKQUOTE", "DIV", "DL", "FIELDSET",
+  "FIGCAPTION", "FIGURE", "FOOTER", "FORM", "H1", "H2", "H3", "H4", "H5", "H6",
+  "HEADER", "HR", "MAIN", "NAV", "OL", "P", "PRE", "SECTION", "TABLE", "UL",
+])
+
+/** Elements separated by a SINGLE newline — the rows of one block. Keeping
+ *  these distinct from `PARA_TAGS` is what makes a quoted list read as a tight
+ *  list rather than as one blank-line-separated paragraph per bullet. */
+const LINE_TAGS = new Set(["LI", "TR", "DT", "DD"])
+
+/** Table cells separate on the SAME line, not onto new ones. */
+const CELL_TAGS = new Set(["TD", "TH"])
+
+/** Extend `out` to end in exactly `want` newlines — never more, and never any
+ *  at all while it is still empty (no leading blank lines). Adjacent blocks
+ *  each ask for their own separator, so without this every `</li><li>` pair
+ *  would contribute two. */
+function padNewlines(out: string, want: number): string {
+  if (!out) return out
+  let have = 0
+  for (let i = out.length - 1; i >= 0 && out[i] === "\n"; i--) have++
+  return have >= want ? out : out + "\n".repeat(want - have)
+}
+
+/**
+ * A selection's text WITH its line structure intact.
+ *
+ * `Selection.toString()` is not good enough here and the difference is visible
+ * in the product: an answer's bulleted list, or a run of one-per-line
+ * assignments, comes back as a single run-on paragraph, and the quote then
+ * reads as a wall of text that no longer resembles the passage the reader
+ * pointed at. So the selected DOM is cloned and walked instead, emitting a
+ * newline at every block boundary and at every `<br>`.
+ *
+ * `cloneContents()` on a partial selection yields partial elements (half a
+ * list, the tail of a paragraph), which is exactly what should be quoted —
+ * the walk makes no assumption that it is looking at whole nodes.
+ */
+export function rangeToText(range: Range): string {
+  let out = ""
+  const walk = (node: Node) => {
+    if (node.nodeType === 3 /* TEXT_NODE */) {
+      out += node.nodeValue ?? ""
+      return
+    }
+    if (node.nodeType !== 1 /* ELEMENT_NODE */) return
+    const tag = (node as Element).tagName.toUpperCase()
+    if (tag === "BR") {
+      out += "\n"
+      return
+    }
+    const want = PARA_TAGS.has(tag) ? 2 : LINE_TAGS.has(tag) ? 1 : 0
+    if (want) out = padNewlines(out, want)
+    node.childNodes.forEach(walk)
+    if (want) out = padNewlines(out, want)
+    else if (CELL_TAGS.has(tag)) out += "  "
+  }
+  try {
+    range.cloneContents().childNodes.forEach(walk)
+  } catch {
+    // A detached or cross-document range: fall back rather than lose the quote.
+    return range.toString()
+  }
+  return out
+}
+
 type Anchor = { top: number; left: number; text: string }
 
 export function SelectionReplyToolbar({
@@ -67,7 +135,9 @@ export function SelectionReplyToolbar({
     if (!el || !container.contains(el)) return clear()
     if (bodySelector && !el.closest(bodySelector)) return clear()
 
-    const text = normalizeQuote(sel.toString())
+    // `rangeToText`, not `sel.toString()` — see its note: the difference is a
+    // quoted list arriving as a list rather than as one run-on line.
+    const text = normalizeQuote(rangeToText(range))
     if (!text) return clear()
 
     // jsdom (and any engine mid-layout) can hand back nothing here; a toolbar

@@ -195,7 +195,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         // (`AttachmentViewer` with text and no storage key) rather than
         // inventing a second read-this-passage surface.
         onOpenQuote: quote
-          ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote })
+          ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote, plain: true })
           : undefined,
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,

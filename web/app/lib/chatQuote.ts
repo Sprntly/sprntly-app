@@ -44,6 +44,13 @@ export const QUOTE_VIEWER_NAME = "Quoted from the answer"
 export function normalizeQuote(raw: string): string {
   const text = raw
     .replace(/\r\n?/g, "\n")
+    // Per-line tidy-up BEFORE collapsing blank runs. A selection flattened from
+    // the DOM (`rangeToText`) carries the source markup's indentation and the
+    // whitespace between tags, so a line can be "   " and would otherwise
+    // survive as a blank line that no blank-run collapse can see.
+    .split("\n")
+    .map((line) => line.replace(/[ \t]+$/, "").replace(/^[ \t]+/, ""))
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim()
   if (!text) return ""
