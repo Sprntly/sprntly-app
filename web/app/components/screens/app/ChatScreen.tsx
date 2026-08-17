@@ -5864,6 +5864,55 @@ export function ChatScreen() {
     tabs, setContent, openContentPanel,
   ])
 
+  // ── A thread that produced a DOCUMENT opens on it ──────────────────────────
+  // The same requirement as the ticket-set probe directly above, for the one
+  // artifact that never had it. A chat-written document was reachable ONLY
+  // while the panel stayed open: `useThreadDocumentSync` (AppShell) re-attaches
+  // the pointer after a reload, but nothing opens the panel, and a document
+  // turn has no reply-footer button the way a ticket set does. So the ack said
+  // "it will open in the panel on the right", you reloaded, and the only route
+  // back to your leadership update was the Artifacts library.
+  //
+  // Deliberately the same shape as its sibling, including what it refuses to
+  // do: claim the tab BEFORE the fetch (this effect re-runs on unchanged-but-
+  // new deps, and an unclaimed probe would re-issue the request forever), never
+  // open over a tab the user has moved to, never fight a panel that is already
+  // open, and never auto-open a FAILED document — reopening a chat should not
+  // greet you with an error state you already dismissed. A failed document
+  // still shows in the library, which is where #1184 made it visible.
+  //
+  // `generating` DOES open, because that is the live state the panel exists to
+  // show: the tab polls the row to a terminal state on its own.
+  const documentAutoOpenedRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return
+    if (documentAutoOpenedRef.current.has(activeTabId)) return
+    const tabId = activeTabId
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab || tab.dbConvId == null) return
+    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
+    const convId = tab.dbConvId
+    documentAutoOpenedRef.current.add(tabId)
+    void (async () => {
+      try {
+        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
+        if (!docs.length) return
+        const newest = docs[0]
+        if (activeTabIdRef.current !== tabId) return
+        if (newest.status === "failed") return
+        if (contentPanelTabRef.current) return
+        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
+        openContentPanel("document")
+      } catch {
+        // A resume PROBE must never throw — it runs on every chat open and its
+        // only job is to surface an artifact that may not exist.
+      }
+    })()
+  }, [
+    activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
+    tabs, setContent, openContentPanel,
+  ])
+
   // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
   // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
   // PRD", and clicking the panel's PRD tab on an evidence tab — and it writes only

@@ -239,6 +239,48 @@ describe("a document written from a brand-new chat", () => {
   })
 })
 
+describe("returning to a thread brings its document back", () => {
+  it("reopens the panel on the thread's newest document", async () => {
+    // THE GAP. A chat-written document was reachable only while the panel
+    // stayed open: the pointer re-attaches after a reload but nothing opened
+    // the panel, and a document turn has no reply-footer button the way a
+    // ticket set does — so the ack promised "it will open in the panel on the
+    // right" and, after a reload, the only route back was the library.
+    listDocsForConversation.mockResolvedValue([
+      { id: 42, status: "ready", title: "Leadership update", kind: "leadership update" },
+    ])
+    resolveIntent.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "plain question", source: "llm", prd_id: null, prd_title: null,
+    })
+
+    await act(async () => { renderChat() })
+    await typeAndSend("what did we decide about the upgrade checks?")
+    await settle()
+
+    await waitFor(() => expect(docProbe()).toBe("42"))
+  })
+
+  it("does not greet the reader with a failed document", async () => {
+    // Same rule the ticket-set probe follows: a failure is recorded and
+    // visible in the library, but reopening a chat should not re-raise an
+    // error state the reader already dismissed.
+    listDocsForConversation.mockResolvedValue([
+      { id: 43, status: "failed", title: "Leadership update", kind: "leadership update" },
+    ])
+    resolveIntent.mockResolvedValue({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "plain question", source: "llm", prd_id: null, prd_title: null,
+    })
+
+    await act(async () => { renderChat() })
+    await typeAndSend("what did we decide?")
+    await settle()
+
+    expect(docProbe()).toBe("none")
+  })
+})
+
 describe("a document never lands on someone else's thread", () => {
   it("does not open into the panel if the user has moved to another chat", async () => {
     // The create + generate round trips leave a window for the user to move
