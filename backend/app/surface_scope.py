@@ -119,12 +119,15 @@ class SurfaceScope:
     capabilities: Optional[dict] = None
     multi_party: bool = False
     #: GROUP surface only: the in-band `edit_prd` tool's handler. Given the
-    #: tool's `{instruction}` input, it resolves the edit target server-side
-    #: and routes to the shared propose→confirm gate, returning
-    #: `(narration, pending_mutation | None)`. `None` for main/private (they
-    #: register no edit tool), so the sixth-branch tool loop only ever routes
-    #: an `edit_prd` call to a handler on the group surface — private/main
-    #: `answer()` result shape is unaffected.
+    #: tool's `{instruction}` input, it applies the edit DIRECTLY through the
+    #: shared editor against a target the handler closes over (the turn's
+    #: open-drawer PRD id — never a model-supplied one), returning
+    #: `(narration, None)`. The `Optional[dict]` second element is now
+    #: ALWAYS `None` — edits apply in-band, so there is no pending mutation
+    #: to ride out; the type is kept as-is for signature stability. `None`
+    #: for main/private (they register no edit tool), so the sixth-branch
+    #: tool loop only ever routes an `edit_prd` call to a handler on the
+    #: group surface — private/main `answer()` result shape is unaffected.
     edit_prd_handler: Optional[Callable[[dict], "tuple[str, Optional[dict]]"]] = None
 
     @property

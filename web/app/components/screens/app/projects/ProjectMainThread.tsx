@@ -40,15 +40,20 @@ export type ProjectMainThreadProps = {
    *  wired into the group side — that surface has no per-branch generate
    *  seam this ticket touches. */
   onArtifactsChanged?: () => void
+  /** The PRD open in the artifact drawer beside this thread — the explicit
+   *  chat-edit target both surfaces bind (parity with main chat's open-tab
+   *  `prd_id`). `null` when no PRD is open. Forwarded to BOTH sides of the
+   *  swap unchanged. */
+  openPrdId: number | null
 }
 
 /** Swaps the main pane between the group chat and the individual chat per
  *  `activeChat` — in place, no route change (AD-P14). Renders exactly one. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insightNote, onArtifactsChanged }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insightNote, onArtifactsChanged, openPrdId }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group">
-        <ProjectGroupChat projectId={projectId} onOpenArtifact={onOpenArtifact} />
+        <ProjectGroupChat projectId={projectId} onOpenArtifact={onOpenArtifact} openPrdId={openPrdId} />
       </div>
     )
   }
@@ -59,6 +64,7 @@ export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insig
         onOpenArtifact={onOpenArtifact}
         insightNote={insightNote}
         onArtifactsChanged={onArtifactsChanged}
+        openPrdId={openPrdId}
       />
     </div>
   )

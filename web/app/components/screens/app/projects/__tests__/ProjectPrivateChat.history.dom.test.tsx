@@ -129,7 +129,7 @@ describe("ProjectPrivateChat — loads history on open (AC5)", () => {
       { id: 2, role: "assistant", content: "Flat $49/mo, decided last week.", created_at: "2026-08-10T10:01:00Z" },
     ])
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
 
     expect(individualTurnsMock).toHaveBeenCalledWith(202)
     await waitFor(() => expect(screen.getAllByTestId("ic-history-you")).toHaveLength(1))
@@ -144,7 +144,7 @@ describe("ProjectPrivateChat — loads history on open (AC5)", () => {
     // ensureConversationId is only ever invoked lazily on a SEND — mounting
     // alone (no send) must load history without also creating a
     // conversation row.
-    render(React.createElement(ProjectPrivateChat, { projectId: 303 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 303, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(303))
     expect(individualChatMock).not.toHaveBeenCalled()
   })
@@ -156,7 +156,7 @@ describe("ProjectPrivateChat — standalone agent turn (AC6, the delegated-brief
       { id: 5, role: "assistant", content: "**Brief:** ship the onboarding flow by Friday.", created_at: "2026-08-11T09:00:00Z" },
     ])
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 404 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 404, openPrdId: null }))
 
     await waitFor(() => expect(screen.getAllByTestId("ic-history-agent")).toHaveLength(1))
     expect(screen.getByTestId("ic-history-agent").textContent).toContain("ship the onboarding flow by Friday")
@@ -172,7 +172,7 @@ describe("ProjectPrivateChat — send flow preserved (AC7)", () => {
     ])
     runAskGenerationMock.mockResolvedValue(reply("here's the answer"))
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(screen.getAllByTestId("ic-history-agent")).toHaveLength(1))
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -202,7 +202,7 @@ describe("ProjectPrivateChat — history fetch failure degrades (AC8)", () => {
     individualTurnsMock.mockRejectedValue(new Error("network blip"))
     runAskGenerationMock.mockResolvedValue(reply("still works"))
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
 
     // Degrades to the empty-state affordance (no history, no session turns yet).
@@ -221,7 +221,7 @@ describe("ProjectPrivateChat — history fetch failure degrades (AC8)", () => {
 
 describe("ProjectPrivateChat — empty state (AC9)", () => {
   it("renders the existing empty-state affordance when both persisted history and session turns are empty", async () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
     expect(screen.getByTestId("individual-chat-empty")).toBeTruthy()
   })
@@ -233,7 +233,7 @@ describe("ProjectPrivateChat — user head name + avatar via shared props (AC6/A
     individualTurnsMock.mockResolvedValue([
       { id: 1, role: "user", content: "what did we decide?", created_at: "2026-08-10T10:00:00Z" },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(screen.getByTestId("ic-history-you")).toBeTruthy())
     const name = document.querySelector(".bc-user-name")
     expect(name?.textContent).toBe("Babajide")
@@ -245,7 +245,7 @@ describe("ProjectPrivateChat — user head name + avatar via shared props (AC6/A
     individualTurnsMock.mockResolvedValue([
       { id: 1, role: "user", content: "what did we decide?", created_at: "2026-08-10T10:00:00Z" },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(screen.getByTestId("ic-history-you")).toBeTruthy())
     // The user-head avatar carries the "BO" monogram (not empty).
     const avatars = [...document.querySelectorAll(".bc-user-head .bc-avatar")]
@@ -256,7 +256,7 @@ describe("ProjectPrivateChat — user head name + avatar via shared props (AC6/A
     individualTurnsMock.mockResolvedValue([
       { id: 2, role: "assistant", content: "Flat $49/mo.", created_at: "2026-08-10T10:01:00Z" },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const agent = await screen.findByTestId("ic-history-agent")
     expect(agent.querySelector("[class*='agentTime']")).toBeNull()
   })
@@ -267,7 +267,7 @@ describe("ProjectPrivateChat — next-prompt pills in the dock (AC8/AC9)", () =>
     chatSuggestionsNextMock.mockResolvedValue({ suggestions: ["Ask about pricing", "Review the brief"] })
     runAskGenerationMock.mockResolvedValue(reply("here's the answer"))
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -290,7 +290,7 @@ describe("ProjectPrivateChat — next-prompt pills in the dock (AC8/AC9)", () =>
     chatSuggestionsNextMock.mockResolvedValue({ suggestions: [] })
     runAskGenerationMock.mockResolvedValue(reply("here's the answer"))
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -309,7 +309,7 @@ describe("ProjectPrivateChat — next-prompt pills in the dock (AC8/AC9)", () =>
     chatSuggestionsNextMock.mockResolvedValue({ suggestions: ["Ask about pricing"] })
     runAskGenerationMock.mockResolvedValue(reply("answer"))
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await waitFor(() => expect(individualTurnsMock).toHaveBeenCalled())
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -336,7 +336,7 @@ describe("ProjectPrivateChat — on-join greeting <!--more--> marker (AC6)", () 
       },
     ])
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 505 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 505, openPrdId: null }))
     const agent = await screen.findByTestId("ic-history-agent")
     // The greeting renders through the native ladder's AskReplyBody. With
     // `AgentTurnBody` gone, the whole content shows (no show-more toggle) and —
@@ -355,7 +355,7 @@ describe("ProjectPrivateChat — on-join greeting <!--more--> marker (AC6)", () 
     individualTurnsMock.mockResolvedValue([
       { id: 2, role: "assistant", content: "Flat $49/mo, decided last week.", created_at: "2026-08-10T10:01:00Z" },
     ])
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const agent = await screen.findByTestId("ic-history-agent")
     expect(agent.textContent).toContain("Flat $49/mo, decided last week.")
     expect(screen.queryByTestId("ic-agent-show-more")).toBeNull()

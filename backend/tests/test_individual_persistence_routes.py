@@ -30,10 +30,10 @@ from app.db.workspaces import ensure_default_workspace, upsert_workspace_member
 from tests import _fake_supabase
 from tests._project_helpers import seed_same_tenant_non_member
 
-# `_resolve_prd_id` walks `list_artifacts_for_project` -> `list_artifacts_for_
-# company`, which queries `prototypes` unconditionally — deliberately NOT in
-# conftest's shared fake schema (mirrors `test_projects_prd_chat_edit_route.
-# py`'s own trimmed copy).
+# The ★ cross-project gate's manifest read walks `list_artifacts_for_project`
+# -> `list_artifacts_for_company`, which queries `prototypes` unconditionally
+# — deliberately NOT in conftest's shared fake schema (mirrors
+# `test_projects_prd_chat_edit_route.py`'s own trimmed copy).
 _PROTOTYPE_DDL = """
 CREATE TABLE IF NOT EXISTS prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,10 +67,11 @@ import pytest  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _prototypes_table(isolated_settings):
-    """`_resolve_prd_id` (the PRD-edit route's target resolver) walks
-    `list_artifacts_for_project` -> `list_artifacts_for_company`, which
-    queries `prototypes` unconditionally — not in conftest's shared fake
-    schema (see that table's own NOTE comment)."""
+    """The ★ cross-project gate's manifest read (`assert_prd_on_project`,
+    inside `apply_chat_edit_scoped`) walks `list_artifacts_for_project` ->
+    `list_artifacts_for_company`, which queries `prototypes` unconditionally
+    — not in conftest's shared fake schema (see that table's own NOTE
+    comment)."""
     _fake_supabase.get_fake_db().executescript(_PROTOTYPE_DDL)
     yield
 
@@ -261,23 +262,18 @@ def test_prd_edit_route_persists_success_shape(tenant_client, isolated_settings,
         "summary": "Tightened requirements.",
     })
 
-    # Under the confirmation gate the edit route PROPOSES (no persist yet);
-    # the turn pair is persisted at CONFIRM, keyed by the same
-    # client_message_id the propose carried.
-    propose = t.client.post(
+    # Applies DIRECTLY through the shared editor — one call, no confirm step
+    # — against the explicit open-drawer `prd_id`; the turn pair persists on
+    # the APPLIED result, keyed by the same client_message_id the call sent.
+    resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
-        json={"instruction": "tighten requirements", "client_message_id": "edit-cmid-2"},
+        json={
+            "instruction": "tighten requirements", "prd_id": prd_id,
+            "client_message_id": "edit-cmid-2",
+        },
     )
-    assert propose.status_code == 200, propose.text
-    pbody = propose.json()
-    assert pbody["pending"] is True
-    token = pbody["mutation"]["token"]
-
-    confirm = t.client.post(
-        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
-    )
-    assert confirm.status_code == 200, confirm.text
-    assert confirm.json()["edited"] is True
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["edited"] is True
 
     from app.db import conversations as conversations_db
 

@@ -118,57 +118,28 @@ describe("ChatBubble in-flight signals as props", () => {
   })
 })
 
-describe("ChatBubble pendingMutation — the native confirm card", () => {
-  it("test_pending_mutation_renders_card_with_testids", () => {
-    const onConfirm = vi.fn()
-    const onCancel = vi.fn()
-    const { container, getByTestId } = render(
-      <ChatBubble
-        turnId="m1"
-        agentName="Sprntly"
-        reply={REPLY}
-        pendingMutation={{ summary: "Tighten the problem statement.", sectionsChanged: ["Problem"] }}
-        onConfirmMutation={onConfirm}
-        onCancelMutation={onCancel}
-      />,
+describe("ChatBubble — no mutation-confirm card renders (retired mechanism)", () => {
+  it("test_no_mutation_card_renders_when_prop_absent", () => {
+    // The confirm-card render path is fully retired (edits now apply
+    // directly, no propose/confirm step) — a plain turn with no mutation
+    // prop never produces the card, on either the built-in ladder OR the
+    // agentBodyNode escape-hatch path.
+    const { container, queryByTestId } = render(
+      <ChatBubble turnId="m1" agentName="Sprntly" reply={REPLY} />,
     )
-    expect(getByTestId("mutation-confirm-card")).toBeTruthy()
-    expect(getByTestId("mutation-summary").textContent).toBe("Tighten the problem statement.")
-    expect(container.textContent).toContain("Problem")
-    fireEvent.click(getByTestId("mutation-confirm"))
-    expect(onConfirm).toHaveBeenCalledTimes(1)
-    fireEvent.click(getByTestId("mutation-cancel"))
-    expect(onCancel).toHaveBeenCalledTimes(1)
-  })
+    expect(queryByTestId("mutation-confirm-card")).toBeNull()
+    expect(container.querySelector('[data-testid="mutation-confirm-card"]')).toBeNull()
+    cleanup()
 
-  it("test_pending_mutation_renders_independent_of_agentBodyNode", () => {
-    // A turn whose body arrives via the escape hatch (the project surfaces'
-    // renderAgentBody path) must STILL show the card — it is not gated behind
-    // the built-in ladder branch.
-    const { getByTestId } = render(
+    const withHostBody = render(
       <ChatBubble
         turnId="m2"
         agentName="Sprntly"
         agentBodyNode={<div data-testid="host-body">host-rendered body</div>}
-        pendingMutation={{ summary: "Proposed change." }}
       />,
     )
-    expect(getByTestId("host-body")).toBeTruthy()
-    expect(getByTestId("mutation-confirm-card")).toBeTruthy()
-    expect(getByTestId("mutation-summary").textContent).toBe("Proposed change.")
-  })
-
-  it("test_no_pending_mutation_dom_unchanged", () => {
-    // Unset and explicit-null both render byte-identical DOM to a bubble that
-    // never heard of the prop — the main chat passes none.
-    const withoutProp = render(<ChatBubble turnId="m3" agentName="Sprntly" reply={REPLY} />)
-    const withoutHtml = withoutProp.container.innerHTML
-    cleanup()
-    const withNull = render(
-      <ChatBubble turnId="m3" agentName="Sprntly" reply={REPLY} pendingMutation={null} />,
-    )
-    expect(withNull.container.innerHTML).toBe(withoutHtml)
-    expect(withNull.container.querySelector('[data-testid="mutation-confirm-card"]')).toBeNull()
+    expect(withHostBody.getByTestId("host-body")).toBeTruthy()
+    expect(withHostBody.queryByTestId("mutation-confirm-card")).toBeNull()
   })
 })
 

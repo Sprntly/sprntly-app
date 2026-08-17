@@ -163,8 +163,8 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-async function sendMessage(text: string) {
-  render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+async function sendMessage(text: string, openPrdId: number | null = null) {
+  render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId }))
   const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
   await act(async () => {
     fireEvent.change(textarea, { target: { value: text } })
@@ -432,7 +432,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     // never the old empty-opts call (`chatIntentApi.resolve(question, {})`)
     // that carried no target and triggered the `_NEEDS_PRD` downgrade.
     expect(resolveIntentMock).toHaveBeenCalledWith(
-      202, "what's the status?", { conversationId: 9001 },
+      202, "what's the status?", { conversationId: 9001, prdId: null },
     )
   })
 
@@ -445,7 +445,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
       answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
     })
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
     // Open the palette by typing `/`, then pin the loaded skill.
     await act(async () => { fireEvent.change(textarea, { target: { value: "/comp" } }) })
@@ -474,7 +474,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
       answer: "ok", key_points: [], citations: [], confidence: 1, unanswered: "",
     })
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement
     const file = new File(["the attached body text"], "notes.txt", { type: "text/plain" })
     await act(async () => { fireEvent.change(fileInput, { target: { files: [file] } }) })
@@ -510,5 +510,70 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     expect(q).toBe("what did we land on?")
     expect(opts.pinned_skill).toBeUndefined()
     expect(opts.attachments).toBeUndefined()
+  })
+
+  it("test_private_edit_reflects_sections_without_confirm", async () => {
+    // The direct-apply response shape — no confirm step. The answer reflects
+    // the applied edit immediately, and the retired confirm card never
+    // renders (it is gone from ChatBubble entirely).
+    resolveIntentMock.mockResolvedValue({
+      intent: "edit_prd", confidence: 0.9, task: null,
+      instruction: "tighten the problem statement", reason: "edit", source: "llm",
+      prd_id: 501, prd_title: null,
+    })
+    prdChatEditMock.mockResolvedValue({
+      edited: true, prd: { payload_md: "<p>tightened</p>" },
+      sections_changed: ["Problem"], summary: "Tightened the problem statement.",
+    })
+
+    await sendMessage("tighten the problem statement", 501)
+
+    await waitFor(() =>
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
+        "Tightened the problem statement.",
+      ),
+    )
+    expect(document.querySelector('[data-testid="mutation-confirm-card"]')).toBeNull()
+  })
+
+  it("test_private_edit_sends_open_drawer_prd_id", async () => {
+    // The sourcing-plumbing regression: with a PRD open in the drawer, the
+    // send carries its id as the 3rd `prdChatEdit` arg — NOT undefined.
+    resolveIntentMock.mockResolvedValue({
+      intent: "edit_prd", confidence: 0.9, task: null,
+      instruction: "tighten the problem statement", reason: "edit", source: "llm",
+      prd_id: 777, prd_title: null,
+    })
+    prdChatEditMock.mockResolvedValue({
+      edited: true, prd: { payload_md: "<p>tightened</p>" },
+      sections_changed: ["Problem"], summary: "Tightened the problem statement.",
+    })
+
+    await sendMessage("tighten the problem statement", 777)
+
+    await waitFor(() => expect(prdChatEditMock).toHaveBeenCalledTimes(1))
+    expect(prdChatEditMock).toHaveBeenCalledWith(
+      202, "tighten the problem statement", 777, expect.any(String),
+    )
+  })
+
+  it("test_private_edit_without_open_prd_id_yields_open_a_prd", async () => {
+    // No PRD open in the drawer: the classify route itself degrades to the
+    // simple clarify (mirrors the real backend's no-target-prd conversion) —
+    // the FE never invents a target, and no edit write is attempted.
+    resolveIntentMock.mockResolvedValue({
+      intent: "clarify", confidence: 0.9, task: null, instruction: null,
+      reason: "no target", source: "no_target_prd", prd_id: null, prd_title: null,
+      clarification: "Open a PRD beside this chat and I'll edit it.",
+    })
+
+    await sendMessage("tighten the problem statement", null)
+
+    await waitFor(() =>
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
+        "Open a PRD beside this chat and I'll edit it.",
+      ),
+    )
+    expect(prdChatEditMock).not.toHaveBeenCalled()
   })
 })

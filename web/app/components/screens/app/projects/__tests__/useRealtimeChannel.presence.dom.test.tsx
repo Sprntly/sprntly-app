@@ -344,7 +344,7 @@ describe("ProjectGroupChat — presence tracking (roster removed) + typing indic
 
   it("test_group_chat_still_tracks_presence_no_roster_renders_typing: self is tracked and a presence sync updates members, but the floating in-transcript roster no longer renders; a typing broadcast still shows the indicator", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
     expect(screen.queryByTestId("gc-presence")).toBeNull()
 
@@ -378,7 +378,7 @@ describe("ProjectGroupChat — presence tracking (roster removed) + typing indic
   it("test_typing_debounced_from_composer: rapid composer input sends at most one typing broadcast per throttle window", async () => {
     vi.useFakeTimers()
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -422,7 +422,7 @@ describe("ProjectGroupChat — degraded-absent, turn path unaffected (AC-6/AC-8)
       },
     ])
 
-    expect(() => render(React.createElement(ProjectGroupChat, { projectId: 101 }))).not.toThrow()
+    expect(() => render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))).not.toThrow()
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
 
     expect(await screen.findByText("hello team")).toBeTruthy()
@@ -433,7 +433,7 @@ describe("ProjectGroupChat — degraded-absent, turn path unaffected (AC-6/AC-8)
 
   it("test_turn_path_and_hook_core_unchanged: a turn.created broadcast still applies via applyTurns with the extended hook", async () => {
     groupTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+    render(React.createElement(ProjectGroupChat, { projectId: 101, openPrdId: null }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
     const channel = MockChannel.latest()
     await act(async () => channel.emitStatus("SUBSCRIBED"))

@@ -239,6 +239,11 @@ export function ProjectDetailView({
   // former rail sat), the body grid reflows to [ chat | drawer ], and the
   // chat column to the left stays fully interactive.
   const drawerOpen = openArtifact != null
+  // The edit target BOTH chat surfaces bind — parity with main chat's own
+  // open-tab `prd_id`. `null` when no PRD is open (or a non-PRD artifact is
+  // open beside the chat), in which case an edit-phrased message gets the
+  // "open a PRD" clarify rather than a guess.
+  const openPrdId = openArtifact?.type === "prd" ? Number(openArtifact.id) : null
 
   return (
     <div className={styles.shell}>
@@ -392,6 +397,7 @@ export function ProjectDetailView({
               onOpenArtifact={(c) => onOpenArtifacts(c.type)}
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}
+              openPrdId={openPrdId}
             />
           </div>
         </main>

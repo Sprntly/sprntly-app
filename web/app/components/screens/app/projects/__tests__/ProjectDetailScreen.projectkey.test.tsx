@@ -40,7 +40,7 @@ describe("Project-switch isolation (AC11)", () => {
   it("test_project_switch_remounts_thread_no_state_carry", () => {
     // The call-site pattern: the thread is keyed by projectId.
     const { rerender } = render(
-      React.createElement("div", null, React.createElement(ProjectMainThread, { key: 1, projectId: 1, activeChat: "individual" })),
+      React.createElement("div", null, React.createElement(ProjectMainThread, { key: 1, projectId: 1, activeChat: "individual", openPrdId: null })),
     )
     expect(screen.getByTestId("priv")).toBeTruthy()
     expect(mountCount).toBe(1)
@@ -48,7 +48,7 @@ describe("Project-switch isolation (AC11)", () => {
     // A project A→B change with a DIFFERENT key remounts the whole subtree — no
     // shell/engine/picker state carried over.
     rerender(
-      React.createElement("div", null, React.createElement(ProjectMainThread, { key: 2, projectId: 2, activeChat: "individual" })),
+      React.createElement("div", null, React.createElement(ProjectMainThread, { key: 2, projectId: 2, activeChat: "individual", openPrdId: null })),
     )
     expect(mountCount).toBe(2)
   })

@@ -40,14 +40,14 @@ afterEach(() => {
 describe("ProjectMainThread — swap", () => {
   it("renders exactly one of group/individual per activeChat", () => {
     const { rerender } = render(
-      React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group" }),
+      React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group", openPrdId: null }),
     )
     expect(screen.getByTestId("main-thread-group")).toBeTruthy()
     expect(screen.queryByTestId("main-thread-individual")).toBeNull()
     expect(groupChatMock).toHaveBeenCalledTimes(1)
     expect(privateChatMock).not.toHaveBeenCalled()
 
-    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual" }))
+    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual", openPrdId: null }))
     expect(screen.queryByTestId("main-thread-group")).toBeNull()
     expect(screen.getByTestId("main-thread-individual")).toBeTruthy()
     expect(privateChatMock).toHaveBeenCalledTimes(1)
@@ -63,7 +63,7 @@ describe("ProjectMainThread — swap", () => {
 
 describe("ProjectMainThread — neither side forks or imports the chat monolith (AD-P13)", () => {
   it("mounts the thin ProjectPrivateChat on the individual side, with the project id threaded through", () => {
-    render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual" }))
+    render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual", openPrdId: null }))
     const host = screen.getByTestId("main-thread-individual")
     expect(host.getAttribute("data-project-id")).toBe("202")
     expect(screen.getByTestId("real-private-chat")).toBeTruthy()
@@ -73,7 +73,7 @@ describe("ProjectMainThread — neither side forks or imports the chat monolith 
   it("group chat receives the project id + the artifact-open callback", () => {
     const onOpenArtifact = vi.fn()
     render(
-      React.createElement(ProjectMainThread, { projectId: 303, activeChat: "group", onOpenArtifact }),
+      React.createElement(ProjectMainThread, { projectId: 303, activeChat: "group", onOpenArtifact, openPrdId: null }),
     )
     expect(groupChatMock).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 303, onOpenArtifact }),
@@ -99,7 +99,7 @@ describe("ProjectMainThread — neither side forks or imports the chat monolith 
   it("passes the insightNote prop through to ProjectPrivateChat unchanged", () => {
     const insightNote = { by: "Shristi", text: "the pricing model changed" }
     render(
-      React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual", insightNote }),
+      React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual", insightNote, openPrdId: null }),
     )
     expect(privateChatMock).toHaveBeenCalledWith(expect.objectContaining({ insightNote }))
   })
@@ -107,7 +107,7 @@ describe("ProjectMainThread — neither side forks or imports the chat monolith 
 
 describe("ProjectMainThread — private host + surface-keyed toggle", () => {
   it("test_main_thread_mounts_private_chat_host (AC1/AC11): the private arm mounts ProjectPrivateChat and the AD-P13a monolith-import assertion holds for the host", () => {
-    render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual" }))
+    render(React.createElement(ProjectMainThread, { projectId: 202, activeChat: "individual", openPrdId: null }))
     // The private arm mounts the thin ProjectPrivateChat host with the id threaded.
     expect(screen.getByTestId("real-private-chat")).toBeTruthy()
     expect(privateChatMock).toHaveBeenCalledWith(expect.objectContaining({ projectId: 202 }))
@@ -118,17 +118,17 @@ describe("ProjectMainThread — private host + surface-keyed toggle", () => {
 
   it("test_private_group_toggle_surface_keyed_no_state_leak (AC9): toggling group→private→group remounts each side fresh, never reusing the subtree", () => {
     const { rerender } = render(
-      React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group" }),
+      React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group", openPrdId: null }),
     )
     expect(screen.getByTestId("main-thread-group")).toBeTruthy()
 
-    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual" }))
+    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "individual", openPrdId: null }))
     // Group unmounts; the private host mounts fresh (surface-keyed <ChatShell>).
     expect(screen.queryByTestId("main-thread-group")).toBeNull()
     expect(screen.getByTestId("main-thread-individual")).toBeTruthy()
     expect(privateChatMock).toHaveBeenCalledTimes(1)
 
-    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group" }))
+    rerender(React.createElement(ProjectMainThread, { projectId: 101, activeChat: "group", openPrdId: null }))
     // The private host unmounts; the group side mounts fresh again — two
     // distinct group mounts prove the subtree is not reused across the toggle,
     // so scroll/draft/focus cannot leak between the two chats.

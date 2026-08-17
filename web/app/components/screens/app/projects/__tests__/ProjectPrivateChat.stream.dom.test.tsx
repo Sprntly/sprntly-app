@@ -131,7 +131,7 @@ describe("ProjectPrivateChat — private streaming", () => {
       capturedOpts = opts
       return new Promise(() => {}) // never resolves in this test — asserting the pre-final state
     })
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await send("what's the rollout plan?")
 
     expect(typeof capturedOpts.onPartial).toBe("function")
@@ -174,7 +174,7 @@ describe("ProjectPrivateChat — settled reply citations never render as raw sou
       confidence: 1,
       unanswered: "",
     })
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await send("when does the rollout start?")
 
     // The private surface now renders agent turns through ChatBubble's native
@@ -209,7 +209,7 @@ describe("ProjectPrivateChat — Stop actively cancels the backend job", () => {
     // the job id only after the send starts (mocked wholesale here, so its
     // side effect doesn't happen — this is the equivalent client-visible
     // state at the moment the user hits Stop).
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await send("stop me mid-answer")
 
     expect(typeof capturedOpts.isStopped).toBe("function")
@@ -239,7 +239,7 @@ describe("ProjectPrivateChat — Stop actively cancels the backend job", () => {
     })
     getPendingAskMock.mockReturnValue(null)
 
-    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    render(React.createElement(ProjectPrivateChat, { projectId: 202, openPrdId: null }))
     await send("stop me mid-answer")
 
     await act(async () => {

@@ -189,13 +189,6 @@ export interface ShellTurn {
   /** Artifact-list rows riding an agent turn (the classify envelope's
    *  `artifact_list`) — `ChatBubble`'s native `ArtifactListCards`. */
   artifactList?: ChatArtifactItem[] | null
-  /** A proposed content mutation parked on this turn, awaiting the reader's
-   *  explicit confirm/cancel (the confirmation gate on project PRD edits).
-   *  The engine settles the turn with the proposal token + preview; the shell
-   *  maps it onto `ChatBubble`'s native confirm card and wires the token back
-   *  through `reply.onConfirmMutation`/`reply.onCancelMutation`. Project-only;
-   *  absent/null → nothing renders. */
-  pendingMutation?: { token: string; summary: string; sectionsChanged?: string[] } | null
 }
 
 // ── The descriptor ──────────────────────────────────────────────────────────
@@ -352,16 +345,6 @@ export interface ChatSurfaceDescriptor {
       status: AgentRunStatus | null,
       turn: ShellTurn | null,
     ) => ReactNode
-    /** Confirm a turn's `pendingMutation` — the host wires this to its
-     *  engine's confirm closure, which calls the confirm route with the
-     *  token and clears the parked proposal. Grouped here with the other
-     *  reply-lifecycle seams (NOT a top-level `ChatShellProps` callback like
-     *  `onPickOption`): the mappers destructure `reply` from the descriptor,
-     *  so the seam is in scope exactly where the mapped turn is built. */
-    onConfirmMutation?: (turnId: string, token: string) => void
-    /** Cancel a turn's `pendingMutation` — same contract as
-     *  `onConfirmMutation`; the engine drops the proposal without writing. */
-    onCancelMutation?: (turnId: string, token: string) => void
   }
 
   // ── Send ────────────────────────────────────────────────────────────────

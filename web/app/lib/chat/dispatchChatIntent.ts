@@ -33,10 +33,12 @@ import type { ChatIntentEnvelope } from "../api"
  *  (`prdChatEditFlow(instruction, tabId, prdId)`).
  *
  *  The project chat sets `hasEditTarget: true` UNCONDITIONALLY and
- *  `editTargetPrdId: null` — the project route resolves its OWN target
- *  SERVER-side (`_resolve_prd_id` over the project's own PRDs, never a
- *  client-supplied id) and degrades to a no-edit reply itself on 0/ambiguous
- *  PRDs, so there is nothing to pre-resolve on the client for that surface. */
+ *  `editTargetPrdId` to the PRD open in its own artifact drawer — resolved
+ *  SERVER-side from the open-drawer PRD (the explicit target the client
+ *  already sent on the classify call), never inferred across the project's
+ *  own PRDs. With no PRD open the classify route itself degrades to the
+ *  "open a PRD" clarify, so there is nothing further to pre-resolve on the
+ *  client for that surface. */
 export interface DispatchChatIntentContext {
   hasEditTarget: boolean
   editTargetPrdId: number | null
