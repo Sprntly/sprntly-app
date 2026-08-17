@@ -15,7 +15,7 @@
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -159,6 +159,40 @@ describe("ProjectPrivateChat — private streaming", () => {
     const src = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
     expect(src).not.toContain("onPartial")
     expect(src).not.toContain("onStreamDrop")
+  })
+})
+
+describe("ProjectPrivateChat — settled reply citations never render as raw source cards", () => {
+  it("renders NO citation cards when the ask reply carries citations (raw retrieval-source keys are storage identifiers, not user-facing names); the answer still renders", async () => {
+    runAskGenerationMock.mockResolvedValue({
+      answer: "The rollout starts next Monday.",
+      key_points: ["rollout Monday"],
+      citations: [
+        { source: "slack_channels", evidence: "…" },
+        { source: "communication/incident", evidence: "…" },
+      ],
+      confidence: 1,
+      unanswered: "",
+    })
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await send("when does the rollout start?")
+
+    // The private surface now renders agent turns through ChatBubble's native
+    // reply ladder (the shared shell path group already uses), so the settled
+    // answer lands in `.ai-bar-reply-answer` — the same contract the sibling
+    // ProjectPrivateChat suites assert — rather than the retired `ic-msg-agent`
+    // host body. Waiting on the answer text proves the reply settled, so the
+    // citation assertions below aren't vacuously green off a pending state.
+    await waitFor(() =>
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
+        "The rollout starts next Monday.",
+      ),
+    )
+    expect(document.querySelector(".ai-bar-reply-cite-src")).toBeNull()
+    expect(document.querySelector(".ai-bar-reply-cites")).toBeNull()
+    for (const raw of ["slack_channels", "communication/incident"]) {
+      expect(screen.queryByText(raw)).toBeNull()
+    }
   })
 })
 

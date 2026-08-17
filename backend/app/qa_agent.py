@@ -2060,6 +2060,14 @@ def answer(
                 and is_project_edit_request(routing_text, history)
             )
         )
+        # Yield to the connector interceptor path when the turn NAMES a live
+        # source: `_skip_project_connectors` returns True only when NO source is
+        # named (exactly when this project tool loop — connector-blind — should
+        # claim the turn) and False for a source-named turn, so a named-source
+        # question falls through to the SAME interceptors that predicate already
+        # admits. One predicate now governs both this gate and the connector
+        # skip → guaranteed symmetry.
+        and _skip_project_connectors(scope, routing_text, history)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
@@ -2301,9 +2309,17 @@ def answer(
     # transcripts are unavailable. Placed ahead of the digest, and deliberately
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
+    # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
+    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
+    # the "the index holds titles and dates, not transcripts" line — for a
+    # question that names one call and asks for its content. The single-call
+    # gate is the strict one (it requires a name, refuses a window, refuses a
+    # plural noun), so where both match, it is the one that is right.
     if (
         _regex_ladder
         and call_index.is_listing_request(routing_text)
+        and not call_index.is_single_call_request(routing_text, history)
         and not _names_live_source()
     ):
         try:

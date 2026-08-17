@@ -121,6 +121,7 @@ _GROUP_TURN_DTO_KEYS = (
 # completion.
 _group_reply_tasks: set[asyncio.Task] = set()
 
+
 def _run_group_reply_blocking(coro) -> None:
     """pytest-only: run the async group reply to COMPLETION synchronously so a
     TestClient request (and a direct-call unit test) returns only AFTER the
@@ -2012,6 +2013,16 @@ async def _respond_as_group_agent(
         # pre-classify fork. Every trigger kind runs the SAME unified-engine
         # reply below.
         classify_envelope: dict | None = None
+        # History is hoisted so it is ALWAYS defined and can be handed to the
+        # unified engine below (the router/connector interceptors need the prior
+        # turns to keep a source thread alive — mirrors the private surface).
+        # It stays [] on the trigger-less degenerate path so the answer call
+        # passes `history=None` and the transcript-as-question is not ALSO
+        # rendered as history (no double-count). The group question is now
+        # always the latest triggering message (the LT-8 input-shape toggle was
+        # retired in the surface-collapse refactor), so with a trigger present
+        # the prior turns live only in `history` and never double-count.
+        history: list[dict] = []
         if trigger is not None:
             history = [
                 {"role": t.get("role") or "user", "content": t.get("content") or ""}
@@ -2102,7 +2113,7 @@ async def _respond_as_group_agent(
         )
         result = qa_agent.answer(
             enterprise_id=ctx.company_id, question=question, dataset=dataset,
-            scope=scope, pinned_skill=pinned_skill,
+            scope=scope, pinned_skill=pinned_skill, history=history or None,
         )
         reply = (result or {}).get("answer", "")
         # Persist the FULL structured reply, not just the answer string:

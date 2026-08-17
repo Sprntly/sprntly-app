@@ -1306,9 +1306,28 @@ _GENERIC_CALL_WORDS = frozenset({
 })
 
 # A verb that means the caller wants THIS call's content, not a list.
+#
+# ASKING FOR THE TRANSCRIPT IS ASKING FOR THE CONTENT, and it was missing.
+# "find me the transcript of the Genworth call" carries no summary verb, so this
+# stood down, the question fell through to the listing leg, and the answer said
+# the transcripts "could not be loaded" — while "summarize the Genworth call",
+# the same call and the same data, read the transcript and answered in full.
+# Verified on staging 2026-08-16 against the same meeting, both ways.
+#
+# That is worse than a routing miss: the listing leg tells the model the index
+# holds titles and dates and NOT transcripts, so the answer states a limitation
+# the product does not have — and then offers a workaround ("ask me to check
+# Zoom") that does not route either.
+#
+# The transcript nouns are matched with or without a fetch verb, because the
+# bare noun phrase is how people ask ("transcript of the Genworth call"). They
+# are still subject to every gate below: a window word ("all the transcripts
+# from last week") still belongs to the digest, and something must still NAME a
+# call, so "find me the transcripts" alone stays with the listing.
 _SINGLE_SUMMARY_VERB = re.compile(
     r"\b(?:summari[sz]e|summary|recap|tell\s+me\s+about|what\s+(?:was|did|happened)|"
-    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through)\b",
+    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through|"
+    r"transcripts?|verbatim|what\s+(?:was|were)\s+said|read\s+me)\b",
     re.I,
 )
 
@@ -1336,6 +1355,28 @@ def _query_terms(question: str) -> list[str]:
         and w.lower() not in _GENERIC_CALL_WORDS
     ]
 
+
+# Request words stripped when deciding INTENT, and nowhere else.
+#
+# NOT added to `_ASK_WORDS`, which was the first attempt and is a real bug:
+# that set is shared with `resolve_calls`, so stripping "open" and "read" there
+# made "summarize the Open AI call" resolve to NO terms and answer "none of
+# their titles or accounts match this" — about a call sitting in the index under
+# exactly that name. A word that cannot NAME a call in a question can still be
+# half the name of one.
+#
+# Here the question is only "did this ask name anything at all?", so removing
+# fetch verbs and interrogatives is safe: they appear in every request.
+_INTENT_ONLY_STOPWORDS = frozenset({
+    "find", "fetch", "read", "open", "send", "which", "have", "has", "there",
+})
+
+# A PLURAL call noun means a set, and a set is the listing's or the digest's.
+# Without this, "send me the last 3 transcripts from Acme" matched the bare
+# `transcripts` noun, survived the window gate ("last 3" is not "last week"),
+# named an account — and was answered from exactly ONE call, which is the
+# overreach the name gate exists to prevent, arriving by a different door.
+_PLURAL_CALL_NOUN = re.compile(r"\b(?:transcripts|calls|meetings|recordings)\b", re.I)
 
 # A date the user typed, which names a call as surely as an account does. Same
 # form `select_from_candidates` already accepts when narrowing a disambiguation.
@@ -1433,10 +1474,14 @@ def is_single_call_request(question: str, history=None) -> bool:
     # A window word means they want the digest, not one call.
     if re.search(r"\b(?:last|this|past)\s+(?:week|month|quarter)\b|\ball\b", text, re.I):
         return False
+    # A set was asked for, not a call. See _PLURAL_CALL_NOUN.
+    if _PLURAL_CALL_NOUN.search(text):
+        return False
     # Something must NAME a call: an account or a distinctive title term (what
     # survives _query_terms), or a date. "our recent customer calls" survives
     # none of it — every word is a generic qualifier — and so stands down.
-    return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
+    named = [t for t in _query_terms(text) if t.lower() not in _INTENT_ONLY_STOPWORDS]
+    return bool(named) or bool(_DATE_REFERENCE.search(text))
 
 
 def fetch_transcript(
@@ -1604,14 +1649,37 @@ def render_transcript(raw: dict, *, max_chars: int = _TRANSCRIPT_CHAR_BUDGET) ->
 
 
 _SINGLE_CALL_SYSTEM = (
-    "You are summarizing ONE customer call for a product manager. You are given "
-    "the call's metadata and its transcript.\n\n"
-    "Lead with what a PM would act on: what the customer wants, what is "
-    "blocking them, commitments made, and open questions. Quote the customer "
-    "verbatim where a quote carries more than a paraphrase would.\n\n"
+    "You are answering a question about ONE customer call for a product "
+    "manager. You are given the call's metadata and its transcript.\n\n"
+    # THE ANSWER SHAPE FOLLOWS THE ASK. This prompt used to say "you are
+    # summarizing", full stop — so someone who asked for the TRANSCRIPT got a
+    # summary, and in one live case a paragraph explaining that the transcript
+    # carried no timestamp rather than any of its content. Fetching the right
+    # call and then declining to show it is the same failure as not finding it,
+    # from the user's side.
+    "ANSWER THE QUESTION THAT WAS ASKED.\n"
+    "  * Asked for the TRANSCRIPT, the recording, what was said, or a verbatim "
+    "record: reproduce the conversation itself, speaker by speaker, in the "
+    "order it happened. Do not replace it with a summary. If it is too long to "
+    "reproduce whole, give the substantive passages in full, in order, and say "
+    "plainly that you have abridged it and on what basis.\n"
+    "  * Asked to SUMMARIZE, recap, or for the details of the call: lead with "
+    "what a PM would act on — what the customer wants, what is blocking them, "
+    "commitments made, open questions.\n"
+    "  * Asked anything else about the call: answer that, from the "
+    "transcript.\n\n"
+    "Quote the customer verbatim where a quote carries more than a paraphrase "
+    "would.\n\n"
     "Ground every claim in the transcript. If something was not discussed, say "
     "so rather than inferring it — a confident invention about a real customer "
-    "conversation is worse than an admission of absence."
+    "conversation is worse than an admission of absence.\n\n"
+    # The metadata caveat, bounded. The live answer spent itself on the absence
+    # of a timestamp inside the transcript, which the caller already knows and
+    # did not ask about: the date and title come from the INDEX, not the
+    # transcript body, and are supplied above.
+    "The call's date and title are given to you as metadata; the transcript "
+    "body may carry no timestamps of its own. Do not treat that as a gap worth "
+    "reporting, and never let it displace the answer."
 )
 
 
@@ -1754,7 +1822,7 @@ def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -
         purpose="single_call_summary" if not plural else "multi_call_summary",
         system=_SINGLE_CALL_SYSTEM,
         input=f"{ask}{joined}\n\nQuestion: {question}",
-        prompt_version="call-index-single-v1",
+        prompt_version="call-index-single-v2",
         max_tokens=6000 if plural else 4000,
     )
     body = result.output if isinstance(result.output, str) else str(result.output)

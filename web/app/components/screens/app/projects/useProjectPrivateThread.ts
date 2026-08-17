@@ -1146,7 +1146,13 @@ export function useProjectPrivateThread(
         id: t.id,
         author: { kind: "self", name: callerName ?? undefined },
         content: t.question,
-        reply: t.reply,
+        // `citations` is STRIPPED before the reply reaches the render ladder:
+        // the engine's citations carry raw retrieval-source keys (storage
+        // identifiers, not user-facing names) that would render as source
+        // cards. Main chat's own in-thread replies carry `citations: []`, so
+        // suppressing them here is parity, not feature loss — key_points and
+        // the card data riding the turn are untouched.
+        reply: t.reply ? { ...t.reply, citations: [] } : t.reply,
         pending: t.pending,
         partial: t.partial ?? null,
         streamDropped: t.streamDropped,
