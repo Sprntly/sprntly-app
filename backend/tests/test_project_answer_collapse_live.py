@@ -95,7 +95,7 @@ def scene(sb):
     # The delegate-target NAME a real prompt would use ("delegate X to
     # Fortune"), never the raw uuid — the model resolves a free-text
     # assignee against the roster's real name
-    # (`_group_system_with_roster`'s own docstring), not an opaque id
+    # (`_group_scope_system_with_roster`'s own docstring), not an opaque id
     # string, so a delegate instruction naming the bare uuid has nothing
     # for it to match and never calls `delegate_task` at all.
     second_profile = (
@@ -292,7 +292,7 @@ def test_group_who_owes_answers_from_real_ledger_live(scene):
     authoritative preamble (`PROJECT_FACTS_AUTHORITATIVE_PREAMBLE`)."""
     from app.qa_agent import answer
     from app.surface_scope import Surface, SurfaceScope
-    from app.routes.projects import _ADDRESSING_NOTES, _group_system_with_roster
+    from app.routes.projects import _ADDRESSING_NOTES, _group_scope_system_with_roster
     from app import project_delegation, project_task_execution
     from app.db import projects as projects_db
     from app.project_group_context import assemble_group_agent_context, read_tools
@@ -303,7 +303,7 @@ def test_group_who_owes_answers_from_real_ledger_live(scene):
         enterprise_id=scene["company_id"],
         # Named by the real roster NAME, never the bare uuid — the model
         # resolves a free-text assignee against the roster
-        # (`_group_system_with_roster`'s own docstring); a raw id string
+        # (`_group_scope_system_with_roster`'s own docstring); a raw id string
         # has nothing in the roster to match and the model never calls
         # `delegate_task` at all, so no delegation fact gets written.
         question=f"Please delegate '{task_summary}' to {scene['second_user_name']}.",
@@ -341,7 +341,7 @@ def test_group_who_owes_answers_from_real_ledger_live(scene):
         scene["project_id"], scene["dataset"], scene["company_id"],
     )
     system_addendum = "\n\n".join([
-        _group_system_with_roster(roster), _ADDRESSING_NOTES["mention"],
+        _group_scope_system_with_roster(roster), _ADDRESSING_NOTES["mention"],
     ])
     group_scope = SurfaceScope(
         surface=Surface.project_group, project_id=scene["project_id"],

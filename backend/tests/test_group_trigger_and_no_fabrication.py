@@ -466,13 +466,31 @@ def test_fallback_edit_note_forbids_write_claim(tenant_client, isolated_settings
     assert "Do NOT say you added, updated, or changed anything" in system
 
 
-def test_system_prompt_has_no_prd_tool_rule():
-    system = projects_route._GROUP_AGENT_SYSTEM_PROMPT
-    assert "NO PRD-editing tool in THIS reply" in system
-    assert "NEVER claim you edited the document" in system
-
-    weak_prompt = "You are a helpful assistant."
-    assert "NO PRD-editing tool" not in weak_prompt
+def test_group_system_carries_shared_contract_and_edit_via_confirm():
+    """The group system base (`_GROUP_SCOPE_SYSTEM`) now carries the SAME
+    project-surface behavioral contract private carries — the read-tool /
+    retrieval / synthesis / tenancy framing it previously omitted — and the
+    group HAS an in-band edit tool, so the old "you have NO PRD-editing tool"
+    clause is gone in favour of the private-style edit-applies-via-confirm
+    framing. The retired symbol `_GROUP_AGENT_SYSTEM_PROMPT` no longer exists."""
+    system = projects_route._GROUP_SCOPE_SYSTEM
+    # Read-tool + retrieval + synthesis + tenancy framing (previously omitted).
+    assert "get_project_memory" in system
+    assert "list_project_artifacts" in system
+    assert "get_artifact_content" in system
+    assert "get_task_ledger" in system
+    assert "synthesize" in system
+    assert "THIS project only" in system
+    # No longer a retrieval-suppressing hard cap.
+    assert "a few sentences, not a document" not in system
+    # The group now HAS an edit tool; the old "no edit tool" contract is gone.
+    assert "NO PRD-editing tool" not in system
+    assert "edit_prd" in system
+    # Edit-applies-via-confirm framing (newline-insensitive).
+    assert "the team confirms it before it takes" in system
+    assert "proposed the change" in system
+    # The retired symbol is gone.
+    assert not hasattr(projects_route, "_GROUP_AGENT_SYSTEM_PROMPT")
 
 
 def test_done_narration_is_single_sourced():

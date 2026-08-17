@@ -121,17 +121,6 @@ _GROUP_TURN_DTO_KEYS = (
 # completion.
 _group_reply_tasks: set[asyncio.Task] = set()
 
-# LT-8 (genuinely open, spec §10.2/build-spec §Group): which shape the
-# group agent's reply call sees as `question` — the attributed transcript
-# itself, or just the latest triggering message (with the full transcript
-# still riding on `SurfaceScope.prerendered_transcript` either way, so the
-# model always sees the whole thread; see `_respond_as_group_agent`).
-# Defaulted to the conservative option so a missing live test never
-# silently changes router/interceptor behaviour (build-spec §Group);
-# pinned by the ship-gate LT-8 live test before merge.
-_GROUP_TRANSCRIPT_AS_QUESTION = False
-
-
 def _run_group_reply_blocking(coro) -> None:
     """pytest-only: run the async group reply to COMPLETION synchronously so a
     TestClient request (and a direct-call unit test) returns only AFTER the
@@ -298,49 +287,66 @@ def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dic
         )
 
 
-_GROUP_AGENT_SYSTEM_PROMPT = """\
+# The @Sprntly GROUP agent's system-prompt base — the SAME project-surface
+# behavioral contract the private surface carries (`ask_job_runner.
+# _PRIVATE_SCOPE_SYSTEM`): the read-tool + retrieval + synthesis + tenancy
+# framing, so the group model retrieves and grounds instead of narrating a
+# non-answer. What stays GROUP-specific is only the genuine multi-party
+# register (one voice in a shared thread) + the addressing note
+# (`_ADDRESSING_NOTES`, appended per turn) + the roster block. The edit
+# contract is the private-style edit-applies-via-confirm framing: the group
+# agent HAS an in-band `edit_prd` tool (routed to the shared confirm gate),
+# so the old "you have NO PRD-editing tool" clause is gone.
+_GROUP_SCOPE_SYSTEM = """\
 You are Sprntly, a project teammate embedded in this team's group chat.
 You were tagged with @Sprntly in the transcript below. Read the recent
 conversation (each line is "Name (job role): message" or "Sprntly: message"
-for your own prior turns) and reply helpfully and concisely to whoever
-tagged you, as one more voice in the thread — not a formal report.
-
-Rules:
-- Address the request that mentioned you; use the surrounding turns only
-  as context for who is asking and why.
-- Keep it conversational and short — a few sentences, not a document.
-- If the ask is unclear or out of scope, say so plainly rather than
-  guessing.
-- You have a delegate_task tool: when someone asks you to hand a specific
-  task to a teammate, call it (pick the assignee from the roster below).
-  Do not call it for a plain question, an FYI, or human-to-human chatter.
-- You have NO PRD-editing tool in THIS reply. A PRD edit, when it can be
-  made, is applied by a separate step BEFORE you are asked to reply — so
-  if you are being asked to reply here, no edit was applied on this turn.
-  Therefore you must NEVER claim you edited the document: do not say you
-  "added", "updated", "changed", "removed", or "appended" anything to the
-  PRD, and never report a change as "done". If the latest turn is asking
-  for a PRD change, either discuss it or say what you need to make it (for
-  example, which PRD to edit) — but do NOT state the change as already
-  made. Reporting an edit that did not happen misleads the team.
+for your own prior turns) and reply helpfully to whoever tagged you, as one
+more voice in the thread — not a formal report. Match the room's register:
+be conversational, but give the ask the depth it needs — retrieve and
+synthesize from the project's real data rather than deflecting or narrating
+a non-answer. If the ask is unclear or out of scope, say so plainly rather
+than guessing.
 
 You KNOW this project. The PROJECT CONTEXT block below gives you the
 project's shared memory, its members (the roster), its open tasks (the
 delegation ledger), and its artifacts (PRDs, prototypes, evidence,
 reports). Answer questions about any of these directly — never say you
-"can't see" the team's files, tasks, or members. For the FULL detail
-behind the summary, use your read tools: get_project_memory,
-list_project_artifacts, get_artifact_content (to read a specific PRD/
-report/evidence body), and get_task_ledger. Every one of these is scoped
-to THIS project only. When someone asks what a document says, call
-get_artifact_content and answer from the real content.
+"can't see" the team's files, tasks, or members, and never tell the room to
+connect a data source for something this block already holds. You have tools
+to read the project's shared memory, its artifact list, a specific artifact's
+content, and its task ledger — call them when the answer depends on project
+data rather than guessing: get_project_memory, list_project_artifacts,
+get_artifact_content (to read a specific PRD/report/evidence body), and
+get_task_ledger. When someone asks what a document says, call
+get_artifact_content and answer from the real content. When the ask is for
+the whole picture — "catch us up", "what's the why and goal here" — first
+read the project's shared memory (and its artifacts/ledger as needed), then
+synthesize the why, the goal, the current state, who's assigned to what, and
+prior work — grounded in what you read, never generic.
+
+You have a delegate_task tool: when someone asks you to hand a specific
+task to a teammate, call it (pick the assignee from the roster below). Do
+not call it for a plain question, an FYI, or human-to-human chatter.
+
+You can edit this project's PRD. When the latest turn asks for a PRD change,
+call the edit_prd tool with a plain-language instruction — you do NOT choose
+or pass a PRD id; the right PRD is resolved for you, and if the project has
+more than one PRD you will be asked which one to change. The edit is NOT
+written immediately: it is proposed and the team confirms it before it takes
+effect. So never claim you already changed, added, updated, removed, or
+appended anything — say you've proposed the change and it awaits the team's
+confirmation.
+
+Everything you can read or edit is scoped to THIS project only; never assume
+data from another project or company.
 
 {nudge}
 """.format(nudge=PROJECT_TOOL_NUDGE)
 
 
-def _group_system_with_roster(roster: list[dict]) -> str:
-    """`_GROUP_AGENT_SYSTEM_PROMPT` + a live `PROJECT ROSTER:` block (AD-P18
+def _group_scope_system_with_roster(roster: list[dict]) -> str:
+    """`_GROUP_SCOPE_SYSTEM` + a live `PROJECT ROSTER:` block (AD-P18
     model-arbitration seam) — first-name + job_role per member, no PII
     beyond that. Lets the model resolve a free-text assignee ("the
     designer") to a specific teammate before calling `delegate_task`, at
@@ -352,7 +358,7 @@ def _group_system_with_roster(roster: list[dict]) -> str:
         role = m.get("job_role") or "no role set"
         lines.append(f"- {first} — {role}")
     roster_block = "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
-    return f"{_GROUP_AGENT_SYSTEM_PROMPT}\n{roster_block}"
+    return f"{_GROUP_SCOPE_SYSTEM}\n{roster_block}"
 
 def _projects_enabled() -> bool:
     """Read PROJECTS_ENABLED at REQUEST TIME (never import time). Default-off;
@@ -2122,7 +2128,7 @@ async def _respond_as_group_agent(
             project_id, dataset, ctx.company_id
         )
         addressing = _ADDRESSING_NOTES.get(trigger_kind, _ADDRESSING_NOTES["mention"])
-        system_parts = [_group_system_with_roster(roster), addressing]
+        system_parts = [_group_scope_system_with_roster(roster), addressing]
         if edit_note:
             system_parts.append(edit_note)
         from app.project_group_context import _instructions_block
@@ -2135,14 +2141,10 @@ async def _respond_as_group_agent(
         if instr_block:
             system_parts.append(instr_block)
 
-        # LT-8 input-shape switch — `question` is either the full attributed
-        # transcript or just the latest triggering message;
+        # `question` is the latest triggering message;
         # `prerendered_transcript` ALWAYS carries the full attributed
-        # transcript either way (Invariant 4).
-        question = (
-            transcript if _GROUP_TRANSCRIPT_AS_QUESTION
-            else (trigger["content"] if trigger else transcript)
-        )
+        # transcript, so the model still sees the whole thread (Invariant 4).
+        question = trigger["content"] if trigger else transcript
         # The trigger turn's attachments ride the QUESTION only (mirrors the
         # private surface's attachment fold onto its ask) — never the
         # transcript/DTO, so file text stays out of the visible thread and
