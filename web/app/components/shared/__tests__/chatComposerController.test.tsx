@@ -201,3 +201,60 @@ describe("useChatComposerController — state", () => {
     expect(result.current.features).toBeUndefined()
   })
 })
+
+// ── Typed-`/` palette (AC16) ─────────────────────────────────────────────────
+
+describe("useChatComposerController — typed-slash palette (AC16)", () => {
+  const compSkill = { id: "s1", label: "Competitive intel", trigger: "/competitive", description: "compare us", category: "Custom" }
+  const draftSkill = { id: "s2", label: "Draft report", trigger: "/draft", description: "write a report", category: "Custom" }
+
+  it("test_typed_slash_opens_and_filters_palette", async () => {
+    skillsMock.mockResolvedValue({ skills: [compSkill, draftSkill] })
+    const { result } = renderHook(() =>
+      useChatComposerController({ scope, onCommand: vi.fn(), attachmentsEnabled: true, skillsEnabled: true }),
+    )
+    await waitFor(() => expect(skillsMock).toHaveBeenCalled())
+    // A leading `/` opens the palette AND filters it by the text after `/`.
+    act(() => result.current.onInput("/comp"))
+    const { container } = render(<>{result.current.slashMenu}</>)
+    const items = container.querySelectorAll(".chat-slash-item")
+    expect(items).toHaveLength(1)
+    expect(container.textContent).toContain("Competitive intel")
+    expect(container.textContent).not.toContain("Draft report")
+  })
+
+  it("test_non_slash_input_closes_palette", async () => {
+    skillsMock.mockResolvedValue({ skills: [compSkill] })
+    const { result } = renderHook(() =>
+      useChatComposerController({ scope, onCommand: vi.fn(), attachmentsEnabled: true, skillsEnabled: true }),
+    )
+    await waitFor(() => expect(skillsMock).toHaveBeenCalled())
+    act(() => result.current.onInput("/comp"))
+    expect(result.current.slashMenu).not.toBeNull()
+    // Deleting back below the leading `/` closes it.
+    act(() => result.current.onInput("hello"))
+    expect(result.current.slashMenu).toBeNull()
+  })
+
+  it("test_plus_menu_browse_skills_still_opens_same_palette", async () => {
+    skillsMock.mockResolvedValue({ skills: [compSkill, draftSkill] })
+    const { result } = renderHook(() =>
+      useChatComposerController({ scope, onCommand: vi.fn(), attachmentsEnabled: true, skillsEnabled: true }),
+    )
+    await waitFor(() => expect(skillsMock).toHaveBeenCalled())
+    // The `+`-menu Browse-skills path (index 1) opens the SAME palette,
+    // unfiltered — no second palette or slash-detection path exists.
+    act(() => result.current.features!.onMenuSelect(1))
+    const { container } = render(<>{result.current.slashMenu}</>)
+    expect(container.querySelectorAll(".chat-slash-item")).toHaveLength(2)
+  })
+
+  it("test_typed_slash_no_op_when_skills_disabled", () => {
+    const { result } = renderHook(() =>
+      useChatComposerController({ scope, onCommand: vi.fn(), attachmentsEnabled: true, skillsEnabled: false }),
+    )
+    // A skills-disabled surface's onInput is a harmless no-op (no palette).
+    act(() => result.current.onInput("/comp"))
+    expect(result.current.slashMenu).toBeNull()
+  })
+})

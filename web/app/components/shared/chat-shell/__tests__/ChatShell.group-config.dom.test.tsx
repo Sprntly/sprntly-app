@@ -99,16 +99,16 @@ describe("ChatShell group config", () => {
     expect(container.querySelectorAll("[data-turn-id]").length).toBe(3)
   })
 
-  it("test_group_self_bubble_light_fill_and_real_name — the viewer's own turn renders the LIGHT gcBubbleOther fill (no dark gcBubbleMe) and the author's real name, distinguished from peers by right-alignment only", () => {
+  it("test_group_self_bubble_light_fill_and_real_name — the viewer's own turn renders through the SHARED bc-user-bubble skin (no retired gcBubble* fill) and the author's real name, distinguished from peers by right-alignment only", () => {
     render(<ChatShell descriptor={groupDescriptor()} turns={[selfTurn, peerTurn]} />)
     const me = screen.getByTestId("gc-msg-me")
     // Right-aligned self lane is preserved…
     expect(me.className).toMatch(/gcMsgMe/)
-    // …but the bubble wears the SAME light treatment as peers (main/private
-    // parity: self is a light right-aligned bubble, not a dark colour-coded one).
-    const bubble = me.querySelector("[class*='gcBubble']")
+    // …and the bubble now draws its fill from the SINGLE shared `bc-user-bubble`
+    // skin (main/private parity), not the retired parallel `gcBubble*` system.
+    const bubble = me.querySelector(".bc-user-bubble")
     expect(bubble).toBeTruthy()
-    expect(bubble!.className).toMatch(/gcBubbleOther/)
+    expect(me.querySelector("[class*='gcBubbleOther']")).toBeNull()
     expect(me.querySelector("[class*='gcBubbleMe']")).toBeNull()
     // And the speaker label is the author's real name, not a hardcoded "You".
     expect(me.textContent).toContain("Ada")

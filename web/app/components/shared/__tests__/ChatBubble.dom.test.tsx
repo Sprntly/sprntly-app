@@ -229,15 +229,23 @@ describe("ChatBubble humanAlign — third-party turns in a multi-party thread", 
         user={{ initials: "FA", bodyNode: "Ship it Friday." }}
       />,
     )
-    // The right-aligned, 1:1-surface lane (bc-user-head/bc-user-bubble,
-    // globals.css align-self: flex-end) must be absent entirely — a
-    // teammate's turn is never rendered through it.
-    expect(container.querySelector(".bc-user-bubble")).toBeNull()
+    // The right-aligned 1:1 HEAD (`bc-user-head`, globals.css
+    // align-self: flex-end) must be absent — a teammate's turn is never
+    // rendered through the reader's own head layout.
     expect(container.querySelector(".bc-user-head")).toBeNull()
-    // The dedicated left/avatar-flanked row is present instead, and still
-    // carries the name (Invariant 4 attribution survives the new layout).
+    // The bubble FILL is now single-sourced from the shared `bc-user-bubble`
+    // skin (+ the `.otherBubble` left-lane geometry reset), so there is ONE
+    // bubble system across surfaces — the peer bubble carries `bc-user-bubble`
+    // but sits inside the left `otherRow` attribution layout, not the
+    // right-aligned own-turn lane.
+    const bubble = container.querySelector(".bc-user-bubble")
+    expect(bubble).not.toBeNull()
+    expect(bubble?.className).toMatch(/otherBubble/)
+    // The dedicated left/avatar-flanked row is present, and still carries the
+    // name (Invariant 4 attribution survives the single-sourced fill).
     const row = container.querySelector('[class*="otherRow"]')
     expect(row).not.toBeNull()
+    expect(row?.contains(bubble)).toBe(true)
     expect(row?.querySelector(".bc-avatar")?.textContent).toBe("FA")
     expect(row?.textContent).toContain("Fortune Adeyemi")
     expect(row?.textContent).toContain("Ship it Friday.")
