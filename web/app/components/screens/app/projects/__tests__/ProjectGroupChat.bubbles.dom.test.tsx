@@ -156,6 +156,58 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
   })
 })
 
+describe("ProjectGroupChat — persisted reply citations never render as raw source cards", () => {
+  it("test_group_agent_reply_citations_stripped — an agent turn whose persisted reply carries citations renders NO citation cards (raw retrieval-source keys are storage identifiers, not user-facing names); the answer and artifact-list cards still render", async () => {
+    groupTurnsMock.mockResolvedValue([
+      turn({
+        id: 1,
+        role: "assistant",
+        author_user_id: null,
+        author_name: "Sprntly",
+        author_job_role: null,
+        content: "Here's what the team discussed.",
+        reply: {
+          answer: "Here's what the team discussed.",
+          key_points: ["launch slipped a week"],
+          citations: [
+            { source: "slack_channels", evidence: "…" },
+            { source: "communication/finding", evidence: "…" },
+            { source: "communication/incident", evidence: "…" },
+          ],
+          confidence: 1,
+          unanswered: "",
+          artifact_list: [
+            {
+              type: "prd",
+              id: 12,
+              title: "Instant-quote flow",
+              status: "ready",
+              created_at: null,
+              brief_anchored: false,
+              source: {},
+            },
+          ],
+        } as never,
+      }),
+    ])
+    render(React.createElement(ProjectGroupChat, { projectId: 101 }))
+
+    const agent = await screen.findByTestId("gc-msg-agent")
+    // The reply settled (full answer text on screen) — so the assertion below
+    // isn't vacuously green off a still-streaming state.
+    expect(within(agent).getByText("Here's what the team discussed.")).toBeTruthy()
+    // NO citation source cards, and none of the raw storage keys as text.
+    expect(document.querySelector(".ai-bar-reply-cite-src")).toBeNull()
+    expect(document.querySelector(".ai-bar-reply-cites")).toBeNull()
+    for (const raw of ["slack_channels", "communication/finding", "communication/incident"]) {
+      expect(screen.queryByText(raw)).toBeNull()
+    }
+    // The card data riding the same persisted reply is intact.
+    const cards = within(agent).getByTestId("artifact-list-cards")
+    expect(within(cards).getByText("Instant-quote flow")).toBeTruthy()
+  })
+})
+
 describe("ProjectGroupChat — viewport pins to newest turn after history load (shell-owned scroll)", () => {
   it("scrolls the shell viewport to the bottom once the async history resolves, not on the empty first render", async () => {
     let resolveTurns: (v: GroupTurn[]) => void = () => {}
