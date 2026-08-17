@@ -329,3 +329,73 @@ def test_artifact_manifest_gate_is_load_bearing(monkeypatch):
         lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
     )
     assert "can't find that artifact" in _read_artifact("prd", 4242).lower()
+
+
+# ── the two surfaces assemble core facts through ONE shared assembler ──
+
+
+def _stub_core_facts(monkeypatch):
+    """Deterministic roster/ledger/manifest for both surfaces, so the shared
+    core-fact block is verifiable byte-for-byte."""
+    monkeypatch.setattr(
+        pgc.projects_db, "list_members",
+        lambda pid: [
+            {"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"},
+            {"user_id": "u2", "name": "Grace Hopper", "job_role": "Eng"},
+        ],
+    )
+    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
+    )
+
+
+def test_group_context_matches_shared_assembler(monkeypatch):
+    """AC4: group and private assemble their roster/ledger/artifacts through
+    the ONE shared `assemble_project_fact_core`, so a fixture yields the SAME
+    core fact strings on both surfaces — they cannot drift."""
+    _stub_core_facts(monkeypatch)
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "S"})
+    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)
+    import app.project_context as project_context_mod
+    monkeypatch.setattr(
+        project_context_mod, "assemble_project_context",
+        lambda project_id, user_id: "Project memory summary: base",
+    )
+
+    roster, ledger, manifest = pgc.assemble_project_fact_core(1, "acme", "c1")
+    group_block = pgc.assemble_group_agent_context(1, "acme", "c1")
+    private_block = pgc.assemble_private_project_context(1, "user-1", "acme", "c1")
+
+    # The identical core facts appear on BOTH surfaces (single-sourced).
+    for surface_block in (group_block, private_block):
+        assert roster in surface_block
+        assert ledger in surface_block
+        assert manifest in surface_block
+    # Both name the same members and the same artifact.
+    assert "Ada Lovelace" in roster and "Grace Hopper" in roster
+    assert "Our PRD" in manifest
+
+
+def test_private_context_block_byte_identical(monkeypatch):
+    """AC2: after the convergence the PRIVATE context block is byte-
+    identical to its captured form — the shared-core extraction changed the
+    plumbing, not a single byte of the private surface's assembled output."""
+    _stub_core_facts(monkeypatch)
+    import app.project_context as project_context_mod
+    monkeypatch.setattr(
+        project_context_mod, "assemble_project_context",
+        lambda project_id, user_id: "Project memory summary: base",
+    )
+
+    roster, ledger, manifest = pgc.assemble_project_fact_core(1, "acme", "c1")
+    expected = (
+        "Project memory summary: base"
+        "\n\n"
+        "This project only — never another company's data.\n"
+        f"Project roster (who is on this project):\n{roster}\n\n"
+        f"Task ledger (open delegations first):\n{ledger}\n\n"
+        f"Artifacts: {manifest}"
+    )
+    assert pgc.assemble_private_project_context(1, "user-1", "acme", "c1") == expected

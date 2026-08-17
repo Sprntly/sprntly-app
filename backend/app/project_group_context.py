@@ -154,6 +154,30 @@ def _instructions_block(instructions: str | None) -> str:
     return "PROJECT INSTRUCTIONS (set by the team — follow these):\n" + text
 
 
+def assemble_project_fact_core(
+    project_id: int, dataset: str, company_id: str, *, members: dict | None = None
+) -> tuple[str, str, str]:
+    """The SHARED core project-fact block BOTH project surfaces assemble from:
+    `(roster, ledger, manifest)` — the roster of members, the task-ledger
+    digest, and the artifact manifest. These are the facts that must be
+    IDENTICAL across the private and group surfaces; single-sourcing them here
+    is what stops the two surfaces from ever drifting on WHICH members/tasks/
+    artifacts they report.
+
+    Each surface still owns its own SURROUNDING format (private folds these
+    after the caller's own memory base; group prefixes them with the memory
+    summary + latest shared insight) — this function returns only the three
+    fact strings, so a surface's exact wrapper bytes are unchanged. `members`
+    may be passed to avoid a second `_members_by_id` read. Never raises — each
+    section degrades to a placeholder on a read failure (AD-P7)."""
+    if members is None:
+        members = _members_by_id(project_id)
+    roster = _roster_block(project_id)
+    ledger = _ledger_digest(project_id, members)
+    manifest = _artifact_manifest(project_id, dataset, company_id)
+    return roster, ledger, manifest
+
+
 def assemble_private_project_context(
     project_id: int, user_id: str, dataset: str, company_id: str
 ) -> str:
@@ -183,9 +207,11 @@ def assemble_private_project_context(
         parts.append(base)
 
     members = _members_by_id(project_id)
-    roster = _roster_block(project_id)
-    ledger = _ledger_digest(project_id, members)
-    manifest = _artifact_manifest(project_id, dataset, company_id)
+    # Core facts via the SHARED assembler — single-sourced with the group
+    # surface so the two can never drift on members/tasks/artifacts.
+    roster, ledger, manifest = assemble_project_fact_core(
+        project_id, dataset, company_id, members=members
+    )
 
     parts.append(
         "This project only — never another company's data.\n"
@@ -219,9 +245,11 @@ def assemble_group_agent_context(project_id: int, dataset: str, company_id: str)
     if insight_text and len(insight_text) > _INSIGHT_CHARS:
         insight_text = insight_text[:_INSIGHT_CHARS].rstrip() + "…"
 
-    roster = _roster_block(project_id)
-    ledger = _ledger_digest(project_id, members)
-    manifest = _artifact_manifest(project_id, dataset, company_id)
+    # Core facts via the SHARED assembler — single-sourced with the private
+    # surface so the two can never drift on members/tasks/artifacts.
+    roster, ledger, manifest = assemble_project_fact_core(
+        project_id, dataset, company_id, members=members
+    )
 
     block = [
         "PROJECT CONTEXT (this project only — never another company's data):",
