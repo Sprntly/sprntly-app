@@ -16,11 +16,12 @@
 // yet, so the canvas shows the selected artifact's real title/type/recency
 // plus a static two-chip version affordance (build spec §8 Phase 2+ for a
 // real version history endpoint). It never fabricates document content.
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useRouter } from "next/navigation"
 import { ApiError, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
+import { AddArtifactPanel } from "./AddArtifactModal"
 import styles from "./ArtifactsModal.module.css"
 
 type ArtifactFilter = "all" | ProjectArtifactType
@@ -141,86 +142,7 @@ function FolderGlyph({ cfg }: { cfg: { bg: string; color: string } }) {
   )
 }
 
-// ── Canvas (Preview/Spec, presentational) ──
-
-function ArtifactCanvas({ artifact, onOpen }: { artifact: ArtifactItem; onOpen: (a: ArtifactItem) => void }) {
-  const [tab, setTab] = useState<"preview" | "spec">("preview")
-  const cfg = badgeFor(artifact.type)
-  // In-place open handles every type except a standalone ticket set (no single
-  // document body to render beside the chat). The old `artifactHref` gate only
-  // covered prd/evidence/prototype; the drawer additionally renders reports.
-  const openable = artifact.type !== "ticket_set"
-  return (
-    <div className={styles.canvas} data-testid="artifact-canvas">
-      <div className={styles.canvasBar}>
-        <div className={styles.canvasTabs} role="tablist" aria-label="Preview or spec">
-          <button
-            type="button"
-            className={`${styles.canvasTab} ${tab === "preview" ? styles.canvasTabOn : ""}`}
-            role="tab"
-            aria-selected={tab === "preview"}
-            onClick={() => setTab("preview")}
-            data-testid="artifact-canvas-tab-preview"
-          >
-            Preview
-          </button>
-          <button
-            type="button"
-            className={`${styles.canvasTab} ${tab === "spec" ? styles.canvasTabOn : ""}`}
-            role="tab"
-            aria-selected={tab === "spec"}
-            onClick={() => setTab("spec")}
-            data-testid="artifact-canvas-tab-spec"
-          >
-            Spec
-          </button>
-        </div>
-        {/* Version history is a Phase 2+ endpoint (build spec §8) — these
-            two chips are a presentational placeholder, never fabricated
-            document content, so the canvas still satisfies "recent
-            versions at a glance" without claiming real history. */}
-        <div className={styles.canvasVers} title="Version history" data-testid="artifact-canvas-versions">
-          <span className={`${styles.vchip} ${styles.vchipOn}`}>v2</span>
-          <span className={styles.vchip}>v1</span>
-        </div>
-        <button
-          type="button"
-          className={styles.openBtn}
-          onClick={() => openable && onOpen(artifact)}
-          disabled={!openable}
-          title={openable ? "Open the full artifact beside the chat" : "Ticket sets open from the Tickets workspace"}
-          data-testid="artifact-canvas-open"
-        >
-          Open
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="M7 17 17 7M8 7h9v9" />
-          </svg>
-        </button>
-      </div>
-      <div className={styles.canvasTitle}>
-        <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
-          {cfg.label}
-        </span>
-        <b>{artifactTitle(artifact)}</b>
-        {artifact.created_at ? <span> · updated {relativeTime(artifact.created_at)}</span> : null}
-      </div>
-      <div className={styles.canvasBody}>
-        {tab === "preview" ? (
-          <div className={styles.pane} data-testid="artifact-canvas-preview">
-            <p>{sourceLine(artifact) || "No preview details available yet."}</p>
-          </div>
-        ) : (
-          <div className={styles.pane} data-testid="artifact-canvas-spec">
-            <p>{artifactTitle(artifact)}</p>
-            <p className={styles.paneMuted}>Open the full artifact to see its complete spec.</p>
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ── Presentational list + canvas ──
+// ── Presentational list ──
 
 export type ArtifactsModalViewProps = {
   open: boolean
@@ -228,14 +150,21 @@ export type ArtifactsModalViewProps = {
   artifacts: ArtifactItem[]
   filter: ArtifactFilter
   onFilterChange: (f: ArtifactFilter) => void
-  selected: ArtifactItem | null
-  onSelect: (a: ArtifactItem) => void
+  /** Opens an artifact in the drawer beside the chat AND closes this modal
+   *  (wired to a row click — there is no in-modal preview). */
   onOpen: (a: ArtifactItem) => void
   onClose: () => void
-  /** Opens the "Add existing artifact" company-library picker
-   *  (`AddArtifactModal`) — the trigger used to live in the top bar; this
-   *  ticket relocates it into the modal header, same handler underneath. */
-  onAddExisting: () => void
+  /** Which internal view the single modal shell is showing. "add" swaps the
+   *  body/foot to the folded `AddArtifactPanel` at the SAME size — no
+   *  close/reopen. */
+  view: "list" | "add"
+  /** List view → switch to the folded Add-artifact view. */
+  onShowAdd: () => void
+  /** Add view → "← Back" to the list view (within the same modal). */
+  onBackToList: () => void
+  /** The folded `AddArtifactPanel` node (its own `modal-body` + `modal-foot`),
+   *  rendered by the container so this view stays presentational. */
+  addPanel: ReactNode
 }
 
 export function ArtifactsModalView({
@@ -244,11 +173,12 @@ export function ArtifactsModalView({
   artifacts,
   filter,
   onFilterChange,
-  selected,
-  onSelect,
   onOpen,
   onClose,
-  onAddExisting,
+  view,
+  onShowAdd,
+  onBackToList,
+  addPanel,
 }: ArtifactsModalViewProps) {
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
@@ -316,32 +246,66 @@ export function ArtifactsModalView({
         aria-labelledby="artifacts-modal-title"
         onKeyDown={onKeyDown}
       >
-        <div className="modal-head">
-          <div className="modal-head-text">
-            <h2 className="modal-title" id="artifacts-modal-title" data-testid="artifacts-modal-title">
-              Artifacts <span className={styles.count}>{artifacts.length}</span>
-            </h2>
-            <p className="modal-sub">Everything this project has produced — click a row to preview it inline.</p>
-          </div>
-          <div className={styles.headActions}>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              onClick={onAddExisting}
-              data-testid="artifacts-modal-add-existing"
-            >
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              Add existing artifact
-            </button>
+        {view === "add" ? (
+          <div className="modal-head">
+            <div className={styles.addHead}>
+              {/* Icon-only back control — reuses the exact back-arrow glyph
+                  the top-bar "← All projects" button uses (BackArrowIcon in
+                  ProjectDetailScreen.tsx) for cross-product consistency. */}
+              <button
+                type="button"
+                className={styles.backBtn}
+                onClick={onBackToList}
+                aria-label="Back to artifacts"
+                title="Back to artifacts"
+                data-testid="artifacts-modal-back"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M15 6l-6 6 6 6" />
+                </svg>
+              </button>
+              <div className="modal-head-text">
+                <h2 className="modal-title" id="artifacts-modal-title" data-testid="artifacts-modal-title">
+                  Add existing artifact
+                </h2>
+                <p className="modal-sub">From your company&rsquo;s library — pick one or more to attach to this project.</p>
+              </div>
+            </div>
             <button type="button" className="modal-close" onClick={onClose} aria-label="Close" data-testid="artifacts-modal-close">
               <IconClose size={16} title="Close" />
             </button>
           </div>
-        </div>
+        ) : (
+          <div className="modal-head">
+            <div className="modal-head-text">
+              <h2 className="modal-title" id="artifacts-modal-title" data-testid="artifacts-modal-title">
+                Artifacts <span className={styles.count}>{artifacts.length}</span>
+              </h2>
+              <p className="modal-sub">Everything this project has produced — click a row to open it beside the chat.</p>
+            </div>
+            <div className={styles.headActions}>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onShowAdd}
+                data-testid="artifacts-modal-add-existing"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" aria-hidden="true">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                Add existing artifact
+              </button>
+              <button type="button" className="modal-close" onClick={onClose} aria-label="Close" data-testid="artifacts-modal-close">
+                <IconClose size={16} title="Close" />
+              </button>
+            </div>
+          </div>
+        )}
 
+        {view === "add" ? (
+          addPanel
+        ) : (
         <div className="modal-body" data-testid="artifacts-modal-body">
           {status === "loading" ? (
             <div className={styles.stateWrap} data-testid="artifacts-modal-loading" aria-busy="true">
@@ -382,46 +346,44 @@ export function ArtifactsModalView({
                   No artifacts yet — items this project produces will show up here.
                 </div>
               ) : (
-                <div className={styles.canvasGrid}>
-                  <div className={styles.list} data-testid="artifacts-modal-list">
-                    {filtered.map((a) => {
-                      const cfg = badgeFor(a.type)
-                      const isSel = selected != null && artifactKey(selected) === artifactKey(a)
-                      return (
-                        <div
-                          key={artifactKey(a)}
-                          role="button"
-                          tabIndex={0}
-                          className={`${styles.row} ${isSel ? styles.rowSel : ""}`}
-                          data-testid={`artifacts-row-${artifactKey(a)}`}
-                          data-artifact-type={a.type}
-                          data-active={isSel ? "true" : undefined}
-                          aria-current={isSel ? "true" : undefined}
-                          onClick={() => onSelect(a)}
-                          onKeyDown={(e) => {
-                            if (e.key === "Enter") onSelect(a)
-                          }}
-                        >
-                          <FolderGlyph cfg={cfg} />
-                          <div className={styles.rowMain}>
-                            <div className={styles.rowTitle}>{artifactTitle(a)}</div>
-                            <div className={styles.rowMeta}>
-                              <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
-                                {cfg.label}
-                              </span>
-                              <span className={styles.rowSrc}>{sourceLine(a)}</span>
-                            </div>
+                // Clicking a row opens the artifact in the drawer beside the
+                // chat (via `onOpen`) AND closes this modal in one step — no
+                // in-modal preview pane.
+                <div className={styles.list} data-testid="artifacts-modal-list">
+                  {filtered.map((a) => {
+                    const cfg = badgeFor(a.type)
+                    return (
+                      <div
+                        key={artifactKey(a)}
+                        role="button"
+                        tabIndex={0}
+                        className={styles.row}
+                        data-testid={`artifacts-row-${artifactKey(a)}`}
+                        data-artifact-type={a.type}
+                        onClick={() => onOpen(a)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") onOpen(a)
+                        }}
+                      >
+                        <FolderGlyph cfg={cfg} />
+                        <div className={styles.rowMain}>
+                          <div className={styles.rowTitle}>{artifactTitle(a)}</div>
+                          <div className={styles.rowMeta}>
+                            <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
+                              {cfg.label}
+                            </span>
+                            <span className={styles.rowSrc}>{sourceLine(a)}</span>
                           </div>
                         </div>
-                      )
-                    })}
-                  </div>
-                  {selected ? <ArtifactCanvas artifact={selected} onOpen={onOpen} /> : null}
+                      </div>
+                    )
+                  })}
                 </div>
               )}
             </>
           )}
         </div>
+        )}
       </div>
     </div>
   )
@@ -442,7 +404,7 @@ export function ArtifactsModal({
   initialFilter,
   onClose,
   onOpenInPlace,
-  onAddExisting,
+  onArtifactsChanged,
 }: {
   projectId: number | string
   open: boolean
@@ -453,23 +415,27 @@ export function ArtifactsModal({
    *  screen mounts a self-contained `ProjectArtifactDrawer` that renders the
    *  real body. Falls back to the deep-link navigation when absent. */
   onOpenInPlace?: (a: ArtifactItem) => void
-  /** Opens the "Add existing artifact" company-library picker — the caller
-   *  owns the actual modal swap (a mutually-exclusive `railModal` state on
-   *  `ProjectDetailScreen`), this container just forwards the trigger. */
-  onAddExisting: () => void
+  /** Fired after the folded Add-artifact view attaches artifact(s) — the
+   *  parent re-fetches so the top-bar "Artifacts(N)" count updates. The modal
+   *  refreshes its OWN list internally as well. */
+  onArtifactsChanged?: () => void
 }) {
   const router = useRouter()
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [filter, setFilter] = useState<ArtifactFilter>(initialFilter ?? "all")
-  const [selected, setSelected] = useState<ArtifactItem | null>(null)
+  // Which internal view the single modal shell shows. Always resets to "list"
+  // when the modal (re)opens.
+  const [view, setView] = useState<"list" | "add">("list")
 
-  // Prefer the in-place drawer (no route change). Only when no in-place handler
-  // is wired do we fall back to the app's deep-link viewer (navigates to `/`),
-  // and then only for types with a url-param entry point.
+  // A row click opens the artifact in the drawer beside the chat AND closes
+  // this modal in one step. Prefer the in-place drawer (no route change); only
+  // when no in-place handler is wired do we fall back to the app's deep-link
+  // viewer (navigates to `/`), and then only for types with a url-param entry.
   const handleOpen = useCallback(
     (a: ArtifactItem) => {
       if (onOpenInPlace) {
         onOpenInPlace(a)
+        onClose()
         return
       }
       const href = artifactHref(a)
@@ -480,10 +446,10 @@ export function ArtifactsModal({
     [router, onClose, onOpenInPlace],
   )
 
-  useEffect(() => {
-    if (!open) return
-    setFilter(initialFilter ?? "all")
-    setSelected(null)
+  // Reload ONLY the project's artifact list — used on open and after the
+  // folded add-view attaches rows, so the list view reflects the addition
+  // without a full modal re-mount.
+  const reload = useCallback(() => {
     setState({ status: "loading" })
     projectsApi
       .artifacts(projectId)
@@ -493,24 +459,52 @@ export function ArtifactsModal({
         else if (err instanceof ApiError && err.status === 404) setState({ status: "not_found" })
         else setState({ status: "error" })
       })
+  }, [projectId])
+
+  useEffect(() => {
+    if (!open) return
+    setFilter(initialFilter ?? "all")
+    setView("list")
+    reload()
     // `initialFilter` intentionally re-applies only when the modal (re)opens
     // — a change to the rail's last-clicked type while already open must
     // not yank the filter out from under someone browsing.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, projectId])
 
+  const artifacts = state.status === "ready" ? state.artifacts : []
+  // Rows already on this project — derived from the modal's OWN fetched list,
+  // so the folded add-view marks them "On this project" with no extra prop.
+  const existingKeys = useMemo(() => new Set(artifacts.map((a) => `${a.type}-${a.id}`)), [artifacts])
+
+  // Refetch own list + bubble to the parent (top-bar count) after an add.
+  const handleAdded = useCallback(() => {
+    reload()
+    onArtifactsChanged?.()
+  }, [reload, onArtifactsChanged])
+
   return (
     <ArtifactsModalView
       open={open}
       status={state.status}
-      artifacts={state.status === "ready" ? state.artifacts : []}
+      artifacts={artifacts}
       filter={filter}
       onFilterChange={setFilter}
-      selected={selected}
-      onSelect={setSelected}
       onOpen={handleOpen}
       onClose={onClose}
-      onAddExisting={onAddExisting}
+      view={view}
+      onShowAdd={() => setView("add")}
+      onBackToList={() => setView("list")}
+      addPanel={
+        <AddArtifactPanel
+          projectId={projectId}
+          active={open && view === "add"}
+          existingKeys={existingKeys}
+          onAdded={handleAdded}
+          onDone={() => setView("list")}
+          onCancel={() => setView("list")}
+        />
+      }
     />
   )
 }

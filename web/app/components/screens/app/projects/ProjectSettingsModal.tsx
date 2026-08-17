@@ -215,10 +215,6 @@ export function ProjectSettingsModal({
     () => project.members.filter((m): m is HumanMember => m.kind === "human"),
     [project.members],
   )
-  const agent = useMemo(
-    () => project.members.find((m): m is Extract<ProjectMember, { kind: "agent" }> => m.kind === "agent"),
-    [project.members],
-  )
   const filteredHumans = useMemo(() => {
     const q = membersQuery.trim().toLowerCase()
     if (!q) return humans
@@ -243,7 +239,7 @@ export function ProjectSettingsModal({
         <div className="modal-head">
           <div className="modal-head-text">
             <h2 className="modal-title" id="project-settings-modal-title" data-testid="project-settings-modal-title">
-              Project settings
+              Project Settings
             </h2>
             <p className="modal-sub">Instructions, memory, members, and invites for this project.</p>
           </div>
@@ -331,10 +327,10 @@ export function ProjectSettingsModal({
           ) : null}
 
           {tab === "members" ? (
-            <div role="tabpanel" aria-label="Members" data-testid="settings-panel-members">
+            <div role="tabpanel" aria-label="Members" className={styles.tabFill} data-testid="settings-panel-members">
               <div className={detailStyles.railSectionLabel}>
                 Members
-                <span className={detailStyles.railSectionCount}>{project.members.length}</span>
+                <span className={detailStyles.railSectionCount}>{humans.length}</span>
               </div>
               <input
                 type="text"
@@ -345,7 +341,7 @@ export function ProjectSettingsModal({
                 onChange={(e) => setMembersQuery(e.target.value)}
                 data-testid="settings-members-search"
               />
-              <div className={styles.scrollRegion} style={{ maxHeight: 320, overflowY: "auto" }} data-testid="settings-members-scroll">
+              <div className={styles.scrollRegion} data-testid="settings-members-scroll">
                 {filteredHumans.map((m) => {
                   // Removable-row rule — UNCHANGED from the old rail: never
                   // the project creator, never the caller themselves. The
@@ -376,34 +372,13 @@ export function ProjectSettingsModal({
                     </div>
                   )
                 })}
-                {agent ? (
-                  <div className={`${detailStyles.memberRow} ${detailStyles.memberRowAgent}`} data-testid="member-row-agent">
-                    <span className={detailStyles.agentAv} aria-hidden="true">
-                      s
-                    </span>
-                    <div className={detailStyles.memberMain}>
-                      <div className={detailStyles.memberName}>
-                        {agent.name} <span className={detailStyles.agentTag}>Agent</span>
-                      </div>
-                      <div className={detailStyles.memberRole}>{agent.role_label}</div>
-                    </div>
-                    <span
-                      className={detailStyles.workingPill}
-                      role="status"
-                      aria-label={`Sprntly — ${agent.status}`}
-                      data-testid="agent-working-status"
-                    >
-                      {agent.status}
-                    </span>
-                  </div>
-                ) : null}
               </div>
             </div>
           ) : null}
 
           {tab === "invite" ? (
-            <div role="tabpanel" aria-label="Invite" data-testid="settings-panel-invite">
-              <ProjectInviteBody projectId={projectId} onInvited={onInvited} />
+            <div role="tabpanel" aria-label="Invite" className={styles.tabFill} data-testid="settings-panel-invite">
+              <ProjectInviteBody projectId={projectId} onInvited={onInvited} listClassName={styles.scrollRegion} />
             </div>
           ) : null}
         </div>

@@ -96,6 +96,36 @@
   margin-left: 0;
 }
 
+/* "+" invite affordance next to the avatar stack — a BARE "+" glyph (no
+ * background/border chrome), matching the artifacts modal's icon-only back
+ * button: ink-2 → accent-ink on hover only. Opens settings on the Invite
+ * tab. Distinct class name from the existing `.inviteBtn` accent pill below
+ * (no collision). */
+.avInviteBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color 0.12s;
+  flex-shrink: 0;
+}
+
+.avInviteBtn:hover {
+  color: var(--accent-ink);
+}
+
+.avInviteBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 .topSpacer {
   flex: 1;
 }
