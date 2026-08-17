@@ -241,7 +241,7 @@ describe("ProjectGroupChat — viewport pins to newest turn after history load (
 })
 
 describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (AC2)", () => {
-  it("test_group_styled_nodes_not_bare — the presence roster and (via the engine) error/typing nodes carry their GroupChatExtras classes; the stay-out case renders the QUIET declined node", async () => {
+  it("test_group_styled_nodes_not_bare — the (engine-fed) error/typing/posting-wait nodes carry their GroupChatExtras classes; the stay-out case renders the QUIET declined node", async () => {
     groupTurnsMock.mockResolvedValue([
       // A SETTLED history turn (created well past the stay-out grace window)
       // — a fresh turn would rightly hold the note back while a reply may
@@ -261,11 +261,15 @@ describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (
     expect(document.querySelector("[class*='stayedOutDot']")).toBeNull()
     // The still-used CSS families remain in GroupChatExtras; the retired
     // trigger-badge rule (`.stateBadge`) was deleted along with the badge
-    // node itself.
+    // node itself. The floating in-transcript presence roster (`.roster`/
+    // `.rosterDot`) was ALSO removed — presence now folds into the top-bar
+    // member avatars — so those classes are gone from the module too.
     const extrasCss = readFileSync(join(__dirname, "../GroupChatExtras.module.css"), "utf8")
-    for (const cls of [".roster", ".rosterDot", ".typingIndicator", ".error", ".postingWait"]) {
+    for (const cls of [".typingIndicator", ".error", ".postingWait"]) {
       expect(extrasCss).toContain(cls)
     }
     expect(extrasCss).not.toContain(".stateBadge")
+    expect(extrasCss).not.toContain(".roster")
+    expect(extrasCss).not.toContain(".rosterDot")
   })
 })

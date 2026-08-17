@@ -2,10 +2,12 @@
 //
 // ArtifactsModal — the app-faithful artifacts library in a modal: the
 // filter-chip row + single-column row list reusing `ArtifactsScreen.tsx`'s
-// `ARTIFACT_FILTERS` order / `ARTIFACT_BADGE` palette (AC7), and the inline
-// Preview/Spec canvas a row click opens (AC8). Tests cover both the pure
-// `ArtifactsModalView` and the `ArtifactsModal` container's fetch wiring,
-// same View/Screen split posture as the sibling test files in this dir.
+// `ARTIFACT_FILTERS` order / `ARTIFACT_BADGE` palette (AC7). A row click now
+// opens the artifact in the drawer AND closes the modal (via `onOpen`) — the
+// old in-modal Preview/Spec canvas is gone (AC8). "Add existing artifact" is a
+// folded in-modal VIEW (list ⇆ add) rather than a separate modal. Tests cover
+// both the pure `ArtifactsModalView` and the `ArtifactsModal` container's fetch
+// wiring, same View/Screen split posture as the sibling test files in this dir.
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -15,6 +17,12 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 const artifactsMock = vi.fn()
+// The modal now folds `AddArtifactPanel` in as its in-modal "add" view; that
+// panel reads `artifactsApi.list(company)` for the company library and
+// `projectsApi.addArtifact` on confirm. A safe empty-list default keeps every
+// list-view test (which never enters the add view) unaffected.
+const artifactsListMock = vi.fn().mockResolvedValue([])
+const addArtifactMock = vi.fn()
 
 vi.mock("../../../../../lib/api", () => {
   class ApiError extends Error {
@@ -30,7 +38,10 @@ vi.mock("../../../../../lib/api", () => {
     ApiError,
     projectsApi: {
       artifacts: (...a: unknown[]) => artifactsMock(...a),
+      addArtifact: (...a: unknown[]) => addArtifactMock(...a),
     },
+    // Consumed by the folded `AddArtifactPanel` (in-modal add view).
+    artifactsApi: { list: (...a: unknown[]) => artifactsListMock(...a) },
     // Real implementation (no API call, no side effect) — mirrors
     // lib/api.ts's own five-value check, kept here rather than importing the
     // real module so this mock stays self-contained.
@@ -95,11 +106,16 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
     artifacts: ARTIFACTS,
     filter: "all",
     onFilterChange: noop,
-    selected: null,
-    onSelect: noop,
     onOpen: noop,
     onClose: noop,
-    onAddExisting: noop,
+    // The redesign replaced `selected`/`onSelect`/`onAddExisting` with an
+    // internal list ⇆ add view: `view` picks which internal view renders,
+    // `onShowAdd`/`onBackToList` swap between them, and `addPanel` is the
+    // folded AddArtifactPanel node the container passes in.
+    view: "list",
+    onShowAdd: noop,
+    onBackToList: noop,
+    addPanel: null,
     ...overrides,
   }
 }
@@ -107,6 +123,9 @@ function viewProps(overrides: Partial<ArtifactsModalViewProps> = {}): ArtifactsM
 afterEach(() => {
   cleanup()
   artifactsMock.mockReset()
+  artifactsListMock.mockReset()
+  artifactsListMock.mockResolvedValue([])
+  addArtifactMock.mockReset()
 })
 
 describe("ArtifactsModalView — app-faithful list (AC7)", () => {
@@ -144,8 +163,8 @@ describe("ArtifactsModalView — app-faithful list (AC7)", () => {
   })
 })
 
-describe("ArtifactsModalView — relocated add-existing trigger (header)", () => {
-  it("test_artifacts_modal_renders_add_existing_trigger — a header button with the relocated trigger's testid/label is present, including in loading/empty states", () => {
+describe("ArtifactsModalView — add-existing trigger (list-view header)", () => {
+  it("test_artifacts_modal_renders_add_existing_trigger — the list-view header button with the trigger's testid/label is present, including in loading/empty states", () => {
     const { unmount: unmountReady } = render(React.createElement(ArtifactsModalView, viewProps()))
     const trigger = screen.getByTestId("artifacts-modal-add-existing")
     expect(trigger.tagName).toBe("BUTTON")
@@ -160,45 +179,74 @@ describe("ArtifactsModalView — relocated add-existing trigger (header)", () =>
     expect(screen.getByTestId("artifacts-modal-add-existing")).toBeTruthy()
   })
 
-  it("test_artifacts_modal_add_existing_click_invokes_handler_only — clicking it calls onAddExisting exactly once and never onClose", () => {
-    const onAddExisting = vi.fn()
+  it("test_artifacts_modal_add_existing_click_shows_add_view — clicking it calls onShowAdd (swap to the in-modal add view) exactly once and never onClose", () => {
+    const onShowAdd = vi.fn()
     const onClose = vi.fn()
-    render(React.createElement(ArtifactsModalView, viewProps({ onAddExisting, onClose })))
+    render(React.createElement(ArtifactsModalView, viewProps({ onShowAdd, onClose })))
     fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
-    expect(onAddExisting).toHaveBeenCalledTimes(1)
+    expect(onShowAdd).toHaveBeenCalledTimes(1)
     expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it("test_artifacts_modal_add_view_renders_panel_and_back — view='add' renders the passed addPanel node behind an icon '← Back' control and swaps the header title, hiding the list-view add trigger", () => {
+    render(
+      React.createElement(
+        ArtifactsModalView,
+        viewProps({
+          view: "add",
+          addPanel: React.createElement("div", { "data-testid": "fake-add-panel" }, "add panel"),
+        }),
+      ),
+    )
+    // The folded panel node renders, behind the in-modal back control.
+    expect(screen.getByTestId("fake-add-panel")).toBeTruthy()
+    expect(screen.getByTestId("artifacts-modal-back")).toBeTruthy()
+    expect(screen.getByTestId("artifacts-modal-title").textContent).toContain("Add existing artifact")
+    // The list view (and its own add trigger + list) are not shown in add view.
+    expect(screen.queryByTestId("artifacts-modal-add-existing")).toBeNull()
+    expect(screen.queryByTestId("artifacts-modal-list")).toBeNull()
+  })
+
+  it("test_artifacts_modal_back_returns_to_list — clicking '← Back' in the add view calls onBackToList", () => {
+    const onBackToList = vi.fn()
+    render(
+      React.createElement(
+        ArtifactsModalView,
+        viewProps({ view: "add", onBackToList, addPanel: React.createElement("div", null, "panel") }),
+      ),
+    )
+    fireEvent.click(screen.getByTestId("artifacts-modal-back"))
+    expect(onBackToList).toHaveBeenCalledTimes(1)
   })
 })
 
-describe("ArtifactsModalView — inline Preview/Spec canvas (AC8)", () => {
-  it("clicking a row calls onSelect, and a selected artifact renders the canvas with Preview/Spec tabs + ≥2 version chips", () => {
-    const onSelect = vi.fn()
-    const { rerender } = render(React.createElement(ArtifactsModalView, viewProps({ onSelect })))
+describe("ArtifactsModalView — row click opens the artifact (no in-modal canvas) (AC8)", () => {
+  it("clicking a row calls onOpen with that artifact (the container opens the drawer AND closes the modal); no in-modal Preview/Spec canvas renders", () => {
+    const onOpen = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onOpen })))
     fireEvent.click(screen.getByTestId(`artifacts-row-${ARTIFACTS[0].type}-${ARTIFACTS[0].id}`))
-    expect(onSelect).toHaveBeenCalledWith(ARTIFACTS[0])
-
-    rerender(React.createElement(ArtifactsModalView, viewProps({ selected: ARTIFACTS[0], onSelect })))
-    expect(screen.getByTestId("artifact-canvas-tab-preview")).toBeTruthy()
-    expect(screen.getByTestId("artifact-canvas-tab-spec")).toBeTruthy()
-    const chips = within(screen.getByTestId("artifact-canvas-versions")).getAllByText(/^v\d/)
-    expect(chips.length).toBeGreaterThanOrEqual(2)
+    expect(onOpen).toHaveBeenCalledWith(ARTIFACTS[0])
+    // The inline Preview/Spec canvas was removed entirely — a row click routes
+    // straight to onOpen, never a selectable in-modal preview.
+    expect(screen.queryByTestId("artifact-canvas")).toBeNull()
+    expect(screen.queryByTestId("artifact-canvas-tab-preview")).toBeNull()
+    expect(screen.queryByTestId("artifact-canvas-tab-spec")).toBeNull()
   })
 
-  it("the selected row renders the app active state (data-active/aria-current)", () => {
-    render(React.createElement(ArtifactsModalView, viewProps({ selected: ARTIFACTS[1] })))
-    const row = screen.getByTestId(`artifacts-row-${ARTIFACTS[1].type}-${ARTIFACTS[1].id}`)
-    expect(row.getAttribute("data-active")).toBe("true")
-    expect(row.getAttribute("aria-current")).toBe("true")
-    const other = screen.getByTestId(`artifacts-row-${ARTIFACTS[0].type}-${ARTIFACTS[0].id}`)
-    expect(other.getAttribute("data-active")).toBeNull()
+  it("Enter on a focused row also calls onOpen (keyboard parity)", () => {
+    const onOpen = vi.fn()
+    render(React.createElement(ArtifactsModalView, viewProps({ onOpen })))
+    fireEvent.keyDown(screen.getByTestId(`artifacts-row-${ARTIFACTS[1].type}-${ARTIFACTS[1].id}`), { key: "Enter" })
+    expect(onOpen).toHaveBeenCalledWith(ARTIFACTS[1])
   })
 
-  it("Spec tab swaps the pane content", () => {
-    render(React.createElement(ArtifactsModalView, viewProps({ selected: ARTIFACTS[0] })))
-    expect(screen.getByTestId("artifact-canvas-preview")).toBeTruthy()
-    fireEvent.click(screen.getByTestId("artifact-canvas-tab-spec"))
-    expect(screen.getByTestId("artifact-canvas-spec")).toBeTruthy()
-    expect(screen.queryByTestId("artifact-canvas-preview")).toBeNull()
+  it("rows carry no selected/active state — the removed selection model leaves no data-active/aria-current on any row", () => {
+    render(React.createElement(ArtifactsModalView, viewProps()))
+    for (const a of ARTIFACTS) {
+      const row = screen.getByTestId(`artifacts-row-${a.type}-${a.id}`)
+      expect(row.getAttribute("data-active")).toBeNull()
+      expect(row.getAttribute("aria-current")).toBeNull()
+    }
   })
 })
 
@@ -291,14 +339,14 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("fetches artifacts from GET /projects/{id}/artifacts on open", async () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
     expect(artifactsMock).toHaveBeenCalledWith("101")
   })
 
   it("fetches nothing while closed", () => {
-    render(React.createElement(ArtifactsModal, { projectId: "101", open: false, onClose: noop, onAddExisting: noop }))
+    render(React.createElement(ArtifactsModal, { projectId: "101", open: false, onClose: noop }))
     expect(artifactsMock).not.toHaveBeenCalled()
   })
 
@@ -311,7 +359,6 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
           open: true,
           initialFilter: "prd",
           onClose: noop,
-          onAddExisting: noop,
         }),
       )
     })
@@ -322,7 +369,7 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
     artifactsMock.mockRejectedValue(new ApiError(403, "Not a member"))
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop, onAddExisting: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "101", open: true, onClose: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-forbidden")).toBeTruthy())
   })
@@ -330,26 +377,39 @@ describe("ArtifactsModal — data fetch (AC7, membership)", () => {
   it("renders a graceful 'not found' state on a 404, never a crash", async () => {
     artifactsMock.mockRejectedValue(new ApiError(404, "Not found"))
     await act(async () => {
-      render(React.createElement(ArtifactsModal, { projectId: "999", open: true, onClose: noop, onAddExisting: noop }))
+      render(React.createElement(ArtifactsModal, { projectId: "999", open: true, onClose: noop }))
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-not-found")).toBeTruthy())
   })
 
-  it("test_artifacts_modal_container_forwards_on_add_existing — the container forwards onAddExisting straight to the View, and clicking it invokes the exact spy passed in", async () => {
+  it("test_artifacts_modal_container_swaps_to_folded_add_view — clicking add-existing swaps the single modal to the folded AddArtifactPanel view (add-artifact-modal-body + ← Back), replacing the list, with no separate add-artifact dialog", async () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
-    const onAddExisting = vi.fn()
     await act(async () => {
       render(
         React.createElement(ArtifactsModal, {
           projectId: "101",
           open: true,
           onClose: noop,
-          onAddExisting,
         }),
       )
     })
     await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+
     fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
-    expect(onAddExisting).toHaveBeenCalledTimes(1)
+
+    // Same modal, internal view swap: the folded panel body + the in-modal
+    // back control render, the list is gone, and no standalone add-artifact
+    // dialog is mounted.
+    await waitFor(() => expect(screen.getByTestId("add-artifact-modal-body")).toBeTruthy())
+    expect(screen.getByTestId("artifacts-modal-back")).toBeTruthy()
+    expect(screen.queryByTestId("artifacts-modal-list")).toBeNull()
+    expect(screen.queryByTestId("add-artifact-modal")).toBeNull()
+    // The folded panel loaded the company library once it became active.
+    expect(artifactsListMock).toHaveBeenCalled()
+
+    // "← Back" returns to the list view within the same modal.
+    fireEvent.click(screen.getByTestId("artifacts-modal-back"))
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    expect(screen.queryByTestId("add-artifact-modal-body")).toBeNull()
   })
 })

@@ -118,6 +118,10 @@ function ChatIcon() {
  *  native, visible focus ring (AC12/AC8) without reinventing tab semantics. */
 function ProjectCard({ project, onOpen }: { project: ProjectListItem; onOpen: (id: number) => void }) {
   const nonEmptyTypes = TYPE_ORDER.filter((t) => (project.artifact_counts[t] ?? 0) > 0)
+  // Total artifacts on the project = sum of the per-type counts that also
+  // drive the type-count badges above (same `artifact_counts` source the
+  // top-bar "Artifacts(N)" reads). No dedicated count field on the list row.
+  const artifactCount = TYPE_ORDER.reduce((sum, t) => sum + (project.artifact_counts[t] ?? 0), 0)
   return (
     <button
       type="button"
@@ -157,9 +161,9 @@ function ProjectCard({ project, onOpen }: { project: ProjectListItem; onOpen: (i
             <ChatIcon />
             {project.has_group_chat ? "Group chat" : "No group chat yet"}
           </span>
-          <span className={styles.metaItem} title="Summarized project memory">
+          <span className={styles.metaItem} title="Artifacts on this project">
             <span className={styles.memDot} aria-hidden="true" />
-            {project.memory_count} insight{project.memory_count === 1 ? "" : "s"}
+            {artifactCount} artifact{artifactCount === 1 ? "" : "s"}
           </span>
           <span className={styles.metaItem}>{relativeTime(project.updated_at)}</span>
         </div>

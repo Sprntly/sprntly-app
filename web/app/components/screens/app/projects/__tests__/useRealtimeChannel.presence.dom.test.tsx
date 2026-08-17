@@ -335,14 +335,14 @@ vi.mock("../../../../../lib/auth", () => ({
 
 import { ProjectGroupChat } from "../ProjectGroupChat"
 
-describe("ProjectGroupChat — presence dots + typing indicator (AC-5)", () => {
+describe("ProjectGroupChat — presence tracking (roster removed) + typing indicator (AC-5)", () => {
   beforeEach(() => {
     groupTurnsMock.mockReset()
     postGroupTurnMock.mockReset()
     authState = { kind: "authed", user: { id: "u1" } }
   })
 
-  it("test_group_chat_renders_dots_and_typing: presence sync -> dots; a typing broadcast -> the indicator", async () => {
+  it("test_group_chat_still_tracks_presence_no_roster_renders_typing: self is tracked and a presence sync updates members, but the floating in-transcript roster no longer renders; a typing broadcast still shows the indicator", async () => {
     groupTurnsMock.mockResolvedValue([])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await waitFor(() => expect(groupTurnsMock).toHaveBeenCalledTimes(1))
@@ -350,7 +350,9 @@ describe("ProjectGroupChat — presence dots + typing indicator (AC-5)", () => {
 
     const channel = MockChannel.latest()
     await act(async () => channel.emitStatus("SUBSCRIBED"))
-    // Self was tracked on subscribe.
+    // Self is STILL tracked on subscribe — the presence transport is intact
+    // (kept available for the top-bar member-avatar lift); only the floating
+    // in-transcript roster node was removed.
     expect(channel.trackCalls).toEqual([{ userId: "u1", name: "You" }])
 
     await act(async () => {
@@ -359,8 +361,12 @@ describe("ProjectGroupChat — presence dots + typing indicator (AC-5)", () => {
         conn2: [{ userId: "u2", name: "Shristi" }],
       })
     })
-    expect(screen.getAllByTestId("gc-presence-member")).toHaveLength(2)
+    // The floating roster (`gc-presence` / `gc-presence-member`) is GONE even
+    // after a live presence sync — no in-transcript dots render anymore.
+    expect(screen.queryByTestId("gc-presence")).toBeNull()
+    expect(screen.queryAllByTestId("gc-presence-member")).toHaveLength(0)
 
+    // The typing indicator (a separate dock-above-composer node) is unaffected.
     expect(screen.queryByTestId("gc-typing")).toBeNull()
     await act(async () => {
       channel.emitBroadcast("typing", { userId: "u2", name: "Shristi" })

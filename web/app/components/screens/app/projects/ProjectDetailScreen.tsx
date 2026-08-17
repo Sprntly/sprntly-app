@@ -51,12 +51,12 @@ import {
 } from "../../../../lib/api"
 import { ProjectMainThread } from "./ProjectMainThread"
 import { ArtifactsModal } from "./ArtifactsModal"
-import { AddArtifactModal } from "./AddArtifactModal"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
+import { IconPlus } from "../../../shared/app-icons"
 import styles from "./ProjectDetailScreen.module.css"
 
 // Focus-gated FALLBACK poll interval for the unread badge (AD-P22) — same
@@ -143,15 +143,6 @@ function ClockIcon() {
   )
 }
 
-function ChecklistIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M9 11l3 3 8-8" />
-      <path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9" />
-    </svg>
-  )
-}
-
 // ── Presentational pieces ──
 
 type ActiveChat = "group" | "individual"
@@ -198,6 +189,10 @@ export type ProjectDetailViewProps = {
    *  `settingsTab` state and mounts the modal; navigating to a specific tab
    *  from there happens inside the modal itself (its own tab buttons). */
   onOpenSettings: () => void
+  /** Opens the project settings modal directly on the INVITE tab — wired to
+   *  the "+" invite affordance next to the top-bar member avatars. Same
+   *  modal/open mechanism the gear uses, just targeting a specific tab. */
+  onOpenInvite: () => void
   /** The cross-chat INSIGHT turn (design-spec AC7), fed from
    *  `GET /v1/projects/{id}/memory/insight` — `null` when the project has
    *  no agent-promoted memory entry yet, or the fetch failed (best-effort,
@@ -240,6 +235,7 @@ export function ProjectDetailView({
   onCloseArtifactDrawer,
   onOpenTasks,
   onOpenSettings,
+  onOpenInvite,
   insightNote,
   currentUserId: _currentUserId,
   onRemoveMember: _onRemoveMember,
@@ -280,8 +276,24 @@ export function ProjectDetailView({
           </span>
         ) : null}
 
-        {/* Group ⇆ Private chat switch (redesign: relocated from the
-            standing rail into the top bar — same testids/behaviour). */}
+        {/* "+" invite affordance — sits next to the member avatars and opens
+            the project settings modal directly on the Invite tab. */}
+        <button
+          type="button"
+          className={styles.avInviteBtn}
+          onClick={onOpenInvite}
+          aria-label="Invite members"
+          title="Invite members"
+          data-testid="topbar-invite"
+        >
+          <IconPlus size={14} />
+        </button>
+
+        <span className={styles.topSpacer} />
+
+        {/* Group ⇆ Private chat switch — sits in the RIGHT cluster (after the
+            spacer), immediately left of the Artifacts button. Same
+            testids/behaviour; placement-only move from the left cluster. */}
         <div className={styles.topChatToggle} role="tablist" aria-label="Chat" data-testid="topbar-chat-toggle">
           <button
             type="button"
@@ -316,21 +328,11 @@ export function ProjectDetailView({
           </button>
         </div>
 
-        <span className={styles.topSpacer} />
-
-        {/* Ambient task ledger — the only entry point back into the
-            TaskModal now that its rail card is un-mounted (task work moved
-            into chat via `get_task_ledger`). Entry point ONLY: no live
-            counts, no preview rows — see `TaskModal.tsx`. */}
-        <button
-          type="button"
-          className={styles.railToggle}
-          onClick={onOpenTasks}
-          data-testid="tasks-see-all"
-        >
-          <ChecklistIcon />
-          See all tasks
-        </button>
+        {/* Top-bar "See all tasks" affordance removed — the task ledger is
+            reached conversationally (backend `get_task_ledger`, rendered
+            inline in chat). The `onOpenTasks` → TaskModal open-state chain
+            below is deliberately retained (not orphaned) so the modal stays
+            mountable for a future/other trigger without a re-wire. */}
         <button
           type="button"
           className={styles.railToggle}
@@ -431,7 +433,6 @@ type LoadState =
 type OpenModal =
   | { kind: "artifacts"; type?: ProjectArtifactType }
   | { kind: "tasks" }
-  | { kind: "add-artifact" }
   | null
 
 export function ProjectDetailScreen({
@@ -693,14 +694,18 @@ export function ProjectDetailScreen({
   // Invite/Memory triggers (`onInvite`/`onOpenMemory`), both folded into
   // this one modal's tabs.
   const onOpenSettings = useCallback(() => setSettingsTab("instructions"), [])
+  // The "+" invite affordance opens the SAME settings modal directly on the
+  // Invite tab (vs the gear's default Instructions tab).
+  const onOpenInvite = useCallback(() => setSettingsTab("invite"), [])
   const onCloseSettings = useCallback(() => setSettingsTab(null), [])
-  // The artifacts/task/add-artifact modals below are this ticket's bodies
-  // for these top-bar triggers.
+  // The artifacts/task modals below are this ticket's bodies for these
+  // top-bar triggers. "Add existing artifact" is now a folded view INSIDE the
+  // artifacts modal (ArtifactsModal owns the list ⇆ add swap), so there is no
+  // separate add-artifact rail modal to open here.
   const onOpenArtifacts = useCallback((type?: ProjectArtifactType) => setRailModal({ kind: "artifacts", type }), [])
-  const onAddExistingArtifact = useCallback(() => setRailModal({ kind: "add-artifact" }), [])
   const onOpenTasks = useCallback(() => setRailModal({ kind: "tasks" }), [])
-  // Re-fetches ONLY the project's artifact list — the AddArtifactModal's
-  // `onAdded` callback (a pick just wrote `project_artifacts` rows
+  // Re-fetches ONLY the project's artifact list — the ArtifactsModal's
+  // `onArtifactsChanged` callback (a pick just wrote `project_artifacts` rows
   // server-side). Deliberately narrower than `load()` (which would flash the
   // whole shell back to "loading" and drop the active thread), mirroring
   // `refetchProject`'s own posture just above.
@@ -844,6 +849,7 @@ export function ProjectDetailScreen({
         onCloseArtifactDrawer={onCloseArtifactDrawer}
         onOpenTasks={onOpenTasks}
         onOpenSettings={onOpenSettings}
+        onOpenInvite={onOpenInvite}
         currentUserId={currentUserId}
         onRemoveMember={onRemoveMember}
         refetchArtifacts={refetchArtifacts}
@@ -876,20 +882,13 @@ export function ProjectDetailScreen({
         initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onClose={onCloseRailModal}
         onOpenInPlace={onOpenArtifactInPlace}
-        onAddExisting={onAddExistingArtifact}
+        onArtifactsChanged={refetchArtifacts}
       />
       <TaskModal
         open={railModal?.kind === "tasks"}
         projectId={projectId}
         onClose={onCloseRailModal}
         ledgerVersion={ledgerVersion}
-      />
-      <AddArtifactModal
-        projectId={projectId}
-        open={railModal?.kind === "add-artifact"}
-        existingKeys={new Set(state.artifacts.map((a) => `${a.type}-${a.id}`))}
-        onClose={onCloseRailModal}
-        onAdded={refetchArtifacts}
       />
     </AppLayout>
   )
