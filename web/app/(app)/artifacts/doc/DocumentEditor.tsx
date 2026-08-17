@@ -55,7 +55,13 @@ export function DocumentEditor({
    *  this is deliberately not throttled here, so the save layer owns the timing
    *  and can be tested without an editor (see lib/documentSave.ts).
    *
-   *  NOT FIRED FOR THE EDITOR'S OWN NORMALIZATION — see `interactedRef`. */
+   *  NOT FIRED UNTIL A USER EVENT HAS LANDED ON THIS COMPONENT — see
+   *  `interactedRef`. Stated as the real rule rather than the narrower "not
+   *  fired for the editor's own normalization", because it also covers
+   *  PROGRAMMATIC changes driven through the `Editor` handle this component
+   *  hands out via `onReady`: those render but are not reported, and a caller
+   *  adding, say, an "apply this suggestion" button outside the wrapper needs
+   *  to know that before wondering why nothing saved. */
   onChange?: (html: string) => void
   onBlur?: () => void
   onReady?: (editor: Editor) => void
@@ -92,7 +98,7 @@ export function DocumentEditor({
   //     first; it also silently drops a real edit that restores the original
   //     text.
   const interactedRef = useRef(false)
-  const markInteracted = useCallback(() => { interactedRef.current = true }, [])
+  const wrapperRef = useRef<HTMLDivElement | null>(null)
   const editor = useEditor({
     // Next renders this route on the server first; without this TipTap warns
     // about an SSR/client mismatch and re-mounts the document.
@@ -140,6 +146,39 @@ export function DocumentEditor({
     onBlur: () => onBlur?.(),
   })
 
+  // NATIVE listeners, not React's synthetic ones, and this list is the whole
+  // correctness argument — a path that is missing here is an edit that renders
+  // and is never saved, which is strictly worse than the spurious save this
+  // gate exists to stop.
+  //
+  // `beforeinput` is the load-bearing one: it is the single event that covers
+  // spellcheck corrections from the context menu, dictation, IME composition,
+  // and Android suggestion-strip insertions — none of which fire `keydown`.
+  // `cut` covers the context-menu Cut/Delete, which fires no `click` either
+  // (a secondary-button press produces mousedown/contextmenu/mouseup only).
+  // React's synthetic `onBeforeInput` is unreliable across browsers, which is
+  // why these are attached to the DOM node directly.
+  //
+  // Missing any of them is not a theoretical gap: a colleague who right-clicks
+  // a typo and picks the correction would watch the fix appear, close the tab,
+  // and find the typo still there — with the save indicator never leaving
+  // `idle`, so nothing warned them. It would also leave `bodyDirtyRef` false
+  // in both consumers, so a later "Keep mine" would discard those edits.
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    const mark = () => { interactedRef.current = true }
+    const EVENTS = [
+      "keydown", "beforeinput", "input", "paste", "cut",
+      "drop", "compositionstart", "click", "change",
+    ]
+    // Capture, so the mark lands before TipTap's own handler turns the event
+    // into a transaction — otherwise the resulting `onUpdate` would still read
+    // `interactedRef` as false and be swallowed.
+    EVENTS.forEach((e) => el.addEventListener(e, mark, true))
+    return () => EVENTS.forEach((e) => el.removeEventListener(e, mark, true))
+  }, [editor])
+
   useEffect(() => {
     if (editor && onReady) onReady(editor)
   }, [editor, onReady])
@@ -153,16 +192,7 @@ export function DocumentEditor({
   return (
     <div
       data-doc-editor
-      // CAPTURE, so the mark lands before TipTap's own handler turns the event
-      // into a transaction — otherwise the resulting `onUpdate` would still see
-      // `interactedRef` false and be swallowed. Every user path is here:
-      // typing and shortcuts (keydown), pasting, dropping, a toolbar button
-      // (click) and a toolbar select (change).
-      onKeyDownCapture={markInteracted}
-      onPasteCapture={markInteracted}
-      onDropCapture={markInteracted}
-      onClickCapture={markInteracted}
-      onChangeCapture={markInteracted}
+      ref={wrapperRef}
     >
       {editable && <Toolbar editor={editor} />}
       <EditorContent editor={editor} />
