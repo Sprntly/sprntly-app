@@ -1121,7 +1121,10 @@ def test_no_interjection_toggle_request_field():
     # No field that would let a client toggle whether/how the agent interjects.
     assert not (fields & {"mode", "interjection_mode", "auto_reply", "respond", "always_respond"})
     # Only the allowlisted plumbing fields are added beyond `content`.
-    assert fields <= {"content", "client_message_id", "pinned_skill", "attachments"}
+    # `prd_id` names WHICH PRD an in-chat edit targets — routing plumbing of the
+    # same kind as `pinned_skill`, and still not a knob over the gate, which is
+    # the only thing this allowlist exists to keep out.
+    assert fields <= {"content", "client_message_id", "pinned_skill", "attachments", "prd_id"}
 
 
 # ── Real-LLM / real-DB live tier ─────────────────────────────────────────
