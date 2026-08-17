@@ -193,6 +193,17 @@ export interface ChatBubbleProps {
    *  node (a static insight card, a "loading conversation…" skeleton). */
   agentBodyNode?: ReactNode
 
+  /** A proposed content mutation awaiting the reader's explicit confirm or
+   *  cancel. Renders a confirm card in the agent block, INDEPENDENT of the
+   *  `agentBodyNode`-vs-built-in-ladder branch — a turn whose body arrives via
+   *  the escape hatch still shows it. Unset (every existing caller) renders
+   *  nothing, so the DOM stays byte-identical. */
+  pendingMutation?: { summary: string; sectionsChanged?: string[] } | null
+  /** Confirm the pending mutation — the caller closes over its own turn/token. */
+  onConfirmMutation?: () => void
+  /** Cancel the pending mutation — same closure contract. */
+  onCancelMutation?: () => void
+
   /** Rendered after both blocks, inside the turn wrapper — an artifact
    *  action row, a "save as artifact" button. Turn-scoped, caller-composed. */
   footer?: ReactNode
@@ -273,6 +284,9 @@ export function ChatBubble(props: ChatBubbleProps) {
     onOpenArtifactItem,
     artifactsDisabled,
     agentBodyNode,
+    pendingMutation,
+    onConfirmMutation,
+    onCancelMutation,
     footer,
     afterNode,
   } = props
@@ -483,6 +497,31 @@ export function ChatBubble(props: ChatBubbleProps) {
                 </>
               )}
             </div>
+            {/* The pending-mutation confirm card — a SIBLING of the agent
+                body (positioned like `footer`), deliberately OUTSIDE the
+                `agentBodyNode`-vs-ladder branch above so a turn rendered via
+                the escape hatch still shows it. Unset → renders nothing, so
+                every existing caller's DOM is byte-identical. */}
+            {pendingMutation ? (
+              <div className="bc-mutation-confirm" data-testid="mutation-confirm-card">
+                <div data-testid="mutation-summary">{pendingMutation.summary}</div>
+                {pendingMutation.sectionsChanged?.length ? (
+                  <div className="bc-mutation-sections">
+                    {pendingMutation.sectionsChanged.map((s) => (
+                      <span key={s} className="bc-mutation-section">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <button type="button" data-testid="mutation-confirm" onClick={onConfirmMutation}>
+                  Confirm
+                </button>
+                <button type="button" data-testid="mutation-cancel" onClick={onCancelMutation}>
+                  Cancel
+                </button>
+              </div>
+            ) : null}
           </>
         ) : null}
 

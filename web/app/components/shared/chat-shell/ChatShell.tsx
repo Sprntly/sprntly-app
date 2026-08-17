@@ -278,6 +278,18 @@ function ChatShellInner(
                 onOpenCandidate: transcript.onOpenCandidate,
                 onOpenArtifactItem: transcript.onOpenArtifactItem,
               }),
+          // The confirmation gate's parked proposal — ChatBubble's native
+          // confirm card, wired back through the descriptor's reply seams
+          // with this turn's own token. Additive: unset renders nothing.
+          pendingMutation: turn.pendingMutation
+            ? { summary: turn.pendingMutation.summary, sectionsChanged: turn.pendingMutation.sectionsChanged }
+            : null,
+          onConfirmMutation: turn.pendingMutation
+            ? () => reply.onConfirmMutation?.(turn.id, turn.pendingMutation!.token)
+            : undefined,
+          onCancelMutation: turn.pendingMutation
+            ? () => reply.onCancelMutation?.(turn.id, turn.pendingMutation!.token)
+            : undefined,
           footer: transcript.turnFooter?.(turn) ?? undefined,
         }
       }
@@ -386,6 +398,19 @@ function ChatShellInner(
             }
           : undefined,
         agentBodyNode,
+        // The confirmation gate's parked proposal — same additive mapping as
+        // the multi-party path; the card renders INDEPENDENT of the
+        // `agentBodyNode` escape hatch above (private turns use
+        // `renderAgentBody` and still need it).
+        pendingMutation: turn.pendingMutation
+          ? { summary: turn.pendingMutation.summary, sectionsChanged: turn.pendingMutation.sectionsChanged }
+          : null,
+        onConfirmMutation: turn.pendingMutation
+          ? () => reply.onConfirmMutation?.(turn.id, turn.pendingMutation!.token)
+          : undefined,
+        onCancelMutation: turn.pendingMutation
+          ? () => reply.onCancelMutation?.(turn.id, turn.pendingMutation!.token)
+          : undefined,
         footer: transcript.turnFooter?.(turn) ?? undefined,
       }
     }

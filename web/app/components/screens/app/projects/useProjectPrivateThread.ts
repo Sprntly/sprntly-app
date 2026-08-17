@@ -121,6 +121,11 @@ type SessionTurn = {
   /** Artifact-list rows riding this turn (the classify envelope's
    *  `artifact_list`) — same live-affordance contract. */
   artifactList?: ChatArtifactItem[]
+  /** A proposed PRD edit parked on this turn by the confirmation gate: the
+   *  single-use token + preview the confirm/cancel closures act on. Session-
+   *  only, cleared on confirm/cancel; MUST be forwarded through the per-field
+   *  session→ShellTurn mapping below or the confirm card never renders. */
+  pendingMutation?: { token: string; summary: string; sectionsChanged?: string[] }
 }
 
 /** What the private surface's insight banner needs — a note surfaced from the
@@ -154,6 +159,14 @@ export type UseProjectPrivateThread = {
   /** "Generate now" — skips the structured generation-clarify gate and
    *  generates with the original, unfolded task. */
   skipClarify: (turnId: string) => void
+  /** Confirm a turn's parked PRD-edit proposal: calls the confirm route with
+   *  the token, then settles the turn with the applied (or soft-refused)
+   *  answer and clears `pendingMutation`. */
+  confirmMutation: (turnId: string, token: string) => void
+  /** Cancel a turn's parked PRD-edit proposal: fire-and-forget the cancel
+   *  route and clear `pendingMutation` (the proposal-summary reply stays as
+   *  the record). */
+  cancelMutation: (turnId: string, token: string) => void
   /** True while an ask is in flight (a session turn is pending). */
   busy: boolean
   /** True while a mount-time resume is settling. */
@@ -771,7 +784,35 @@ export function useProjectPrivateThread(
         try {
           const res = await projectsApi.prdChatEdit(projectId, instruction, undefined, clientMessageId)
           if (!res.edited) {
-            settleReply(reply(res.answer))
+            // `pending` exists only on the proposal arm of the union, so a
+            // bare `res.pending` dot-access is a type error — narrow with the
+            // `in` operator.
+            if ("pending" in res && res.pending) {
+              // The gate PROPOSED an edit: nothing has written yet. Park the
+              // token + preview on the turn (the confirm card's data) with a
+              // reply of the proposal summary — no PRD-write text.
+              if (stoppedRef.current) return
+              settleTurn(id, {
+                reply: reply(res.mutation.summary),
+                pending: false,
+                pendingMutation: {
+                  token: res.mutation.token,
+                  summary: res.mutation.summary,
+                  sectionsChanged: res.mutation.sections_changed,
+                },
+              })
+              setBusy(false)
+            } else if ("answer" in res) {
+              // Terminal no-edit reply (flag off / unresolved target /
+              // refusal / no-op instruction). Narrowed with its own `in`
+              // check: the compiler does not re-narrow the union in the
+              // negative branch of the compound condition above.
+              settleReply(reply(res.answer))
+            } else {
+              // Malformed response (neither arm) — fail closed rather than
+              // leaving the turn pending forever.
+              settleError("That edit didn't come through. Try again.")
+            }
             return
           }
           settleReply(reply(res.summary || "Updated the PRD."))
@@ -868,19 +909,53 @@ export function useProjectPrivateThread(
       projectsApi
         .prdChatEdit(projectId, instruction, prdId, pickId)
         .then((res) => {
-          const answer = res.edited ? res.summary || "Updated the PRD." : res.answer
-          setSessionTurns((prev) =>
-            prev.map((t) =>
-              t.id === pickId
-                ? {
-                    ...t,
-                    reply: { answer, key_points: [], citations: [], confidence: 1, unanswered: "" },
-                    pending: false,
-                    createdAt: Date.now(),
-                  }
-                : t,
-            ),
-          )
+          const settlePick = (answer: string, patch: Partial<SessionTurn> = {}) => {
+            setSessionTurns((prev) =>
+              prev.map((t) =>
+                t.id === pickId
+                  ? {
+                      ...t,
+                      reply: { answer, key_points: [], citations: [], confidence: 1, unanswered: "" },
+                      pending: false,
+                      createdAt: Date.now(),
+                      ...patch,
+                    }
+                  : t,
+              ),
+            )
+          }
+          if (!res.edited) {
+            // The re-issue path also runs through the confirmation gate now:
+            // a resolvable pick returns the proposal arm (narrowed with the
+            // `in` operator — `pending` is absent on the plain-answer arm),
+            // parked on the pick turn for the confirm card. The plain-answer
+            // arm stays the terminal no-edit reply — narrowed with its own
+            // `in` check, since the compiler does not re-narrow the union in
+            // the negative branch of the compound condition.
+            if ("pending" in res && res.pending) {
+              settlePick(res.mutation.summary, {
+                pendingMutation: {
+                  token: res.mutation.token,
+                  summary: res.mutation.summary,
+                  sectionsChanged: res.mutation.sections_changed,
+                },
+              })
+            } else if ("answer" in res) {
+              settlePick(res.answer)
+            } else {
+              // Malformed response (neither arm) — fail closed rather than
+              // leaving the pick turn pending forever.
+              setSessionTurns((prev) =>
+                prev.map((t) =>
+                  t.id === pickId
+                    ? { ...t, pending: false, error: "That edit didn't come through. Try again.", createdAt: Date.now() }
+                    : t,
+                ),
+              )
+            }
+            return
+          }
+          settlePick(res.summary || "Updated the PRD.")
         })
         .catch(() => {
           setSessionTurns((prev) =>
@@ -892,6 +967,42 @@ export function useProjectPrivateThread(
         .finally(() => setBusy(false))
     },
     [projectId],
+  )
+
+  // Confirm a parked PRD-edit proposal: the ONLY path that writes. The token
+  // is single-use and the IDOR gates re-run server-side; a stale/denied token
+  // degrades to the soft-refuse `{edited: false}` arm, never an error. Either
+  // way the proposal is spent, so `pendingMutation` clears on both arms; a
+  // transport failure leaves the card in place so the click can be retried.
+  const confirmMutation = useCallback(
+    (turnId: string, token: string) => {
+      projectsApi
+        .prdChatEditConfirm(projectId, token)
+        .then((res) => {
+          const answer = res.edited ? res.summary || "Updated the PRD." : res.answer
+          settleTurn(turnId, {
+            reply: { answer, key_points: [], citations: [], confidence: 1, unanswered: "" },
+            pendingMutation: undefined,
+          })
+        })
+        .catch(() => {
+          /* card stays; the user can confirm again */
+        })
+    },
+    [projectId, settleTurn],
+  )
+
+  // Cancel a parked proposal: drop it server-side (fire-and-forget — the
+  // token can never apply after a local clear regardless of the call's fate,
+  // since confirm requires the user clicking a card that no longer exists)
+  // and clear `pendingMutation` at once, leaving the proposal-summary reply
+  // as the record of what was offered.
+  const cancelMutation = useCallback(
+    (turnId: string, token: string) => {
+      projectsApi.prdChatEditCancel(projectId, token).catch(() => {})
+      settleTurn(turnId, { pendingMutation: undefined })
+    },
+    [projectId, settleTurn],
   )
 
   // Closes the structured generation-clarify gate (§D) — the SAME turn the
@@ -1032,12 +1143,16 @@ export function useProjectPrivateThread(
           : undefined,
         openCandidates: t.openCandidates,
         artifactList: t.artifactList,
+        // Per-field mapping (NOT a spread) — the confirmation gate's parked
+        // proposal must be forwarded explicitly or the shell never sees it.
+        pendingMutation: t.pendingMutation,
       }))
 
     return [...historyTurns, ...session]
   }, [history, sessionTurns, delegationsByTurn, callerName])
 
   return {
-    turns, send, stop, pickOption, submitClarify, skipClarify, busy, resuming, emitDelegation, callerName,
+    turns, send, stop, pickOption, submitClarify, skipClarify, confirmMutation, cancelMutation,
+    busy, resuming, emitDelegation, callerName,
   }
 }

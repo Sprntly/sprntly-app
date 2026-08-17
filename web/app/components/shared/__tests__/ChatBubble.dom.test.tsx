@@ -7,7 +7,7 @@
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { cleanup, render } from "@testing-library/react"
+import { cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -115,6 +115,60 @@ describe("ChatBubble in-flight signals as props", () => {
       />,
     )
     expect(container.querySelector(".bc-user-name")?.textContent).toBe("Devon Blake")
+  })
+})
+
+describe("ChatBubble pendingMutation — the native confirm card", () => {
+  it("test_pending_mutation_renders_card_with_testids", () => {
+    const onConfirm = vi.fn()
+    const onCancel = vi.fn()
+    const { container, getByTestId } = render(
+      <ChatBubble
+        turnId="m1"
+        agentName="Sprntly"
+        reply={REPLY}
+        pendingMutation={{ summary: "Tighten the problem statement.", sectionsChanged: ["Problem"] }}
+        onConfirmMutation={onConfirm}
+        onCancelMutation={onCancel}
+      />,
+    )
+    expect(getByTestId("mutation-confirm-card")).toBeTruthy()
+    expect(getByTestId("mutation-summary").textContent).toBe("Tighten the problem statement.")
+    expect(container.textContent).toContain("Problem")
+    fireEvent.click(getByTestId("mutation-confirm"))
+    expect(onConfirm).toHaveBeenCalledTimes(1)
+    fireEvent.click(getByTestId("mutation-cancel"))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_pending_mutation_renders_independent_of_agentBodyNode", () => {
+    // A turn whose body arrives via the escape hatch (the project surfaces'
+    // renderAgentBody path) must STILL show the card — it is not gated behind
+    // the built-in ladder branch.
+    const { getByTestId } = render(
+      <ChatBubble
+        turnId="m2"
+        agentName="Sprntly"
+        agentBodyNode={<div data-testid="host-body">host-rendered body</div>}
+        pendingMutation={{ summary: "Proposed change." }}
+      />,
+    )
+    expect(getByTestId("host-body")).toBeTruthy()
+    expect(getByTestId("mutation-confirm-card")).toBeTruthy()
+    expect(getByTestId("mutation-summary").textContent).toBe("Proposed change.")
+  })
+
+  it("test_no_pending_mutation_dom_unchanged", () => {
+    // Unset and explicit-null both render byte-identical DOM to a bubble that
+    // never heard of the prop — the main chat passes none.
+    const withoutProp = render(<ChatBubble turnId="m3" agentName="Sprntly" reply={REPLY} />)
+    const withoutHtml = withoutProp.container.innerHTML
+    cleanup()
+    const withNull = render(
+      <ChatBubble turnId="m3" agentName="Sprntly" reply={REPLY} pendingMutation={null} />,
+    )
+    expect(withNull.container.innerHTML).toBe(withoutHtml)
+    expect(withNull.container.querySelector('[data-testid="mutation-confirm-card"]')).toBeNull()
   })
 })
 
