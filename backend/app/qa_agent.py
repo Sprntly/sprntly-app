@@ -86,6 +86,7 @@ from app.skill_router import (
     is_data_analysis_request,
     is_jira_lookup,
     is_project_content_request,
+    is_project_edit_request,
     is_project_tool_request,
     is_ticket_update,
     is_voc_report_request,
@@ -1779,6 +1780,13 @@ def _try_scoped_tool_answer(
     identity = scope.assigner_identity or {}
     assigner_user_id = identity.get("assigner_user_id")
     roster = list(scope.roster)
+    # Side-effect sink for the GROUP-only `edit_prd` tool: the handler writes
+    # the proposed edit's token/summary here, and it is lifted onto the
+    # returned payload's `pending_mutation` AFTER the loop so the group turn's
+    # persistence can stamp `reply.pending_mutation` (net-new plumbing). Stays
+    # empty for main/private (no edit tool / no handler), so their `answer()`
+    # result shape is unaffected.
+    pending_mutation: dict = {}
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1789,6 +1797,16 @@ def _try_scoped_tool_answer(
         )
         if read is not None:
             return read
+        if name == "edit_prd" and scope.edit_prd_handler is not None:
+            # GROUP-only in-band PRD edit → the shared propose→confirm gate.
+            # The handler resolves the target server-side (never a model id)
+            # and returns `(narration, pending | None)`; the pending proposal
+            # rides the sink out to the group turn's `reply.pending_mutation`.
+            narration, pending = scope.edit_prd_handler(tool_input)
+            if pending is not None:
+                pending_mutation.clear()
+                pending_mutation.update(pending)
+            return narration
         if name == "delegate_task":
             from app import project_delegation
 
@@ -1875,7 +1893,13 @@ def _try_scoped_tool_answer(
         model=meta.get("model") or DEFAULT_MODEL,
         mode="individual" if scope.surface == Surface.project_private else "group",
     )
-    return {"answer": text, "citations": []}
+    result: dict = {"answer": text, "citations": []}
+    # GROUP only, and only when the `edit_prd` tool actually proposed an edit:
+    # carry the proposal out so the group turn stamps `reply.pending_mutation`.
+    # Empty for main/private → key absent → their result shape is unchanged.
+    if pending_mutation:
+        result["pending_mutation"] = dict(pending_mutation)
+    return result
 
 
 def _fold_project_context(
@@ -1894,7 +1918,7 @@ def _fold_project_context(
 
     Also where the accept-with-nudge instruction reaches a plain-Q&A turn
     on BOTH surfaces: `scope.system_addendum` carries the nudge sentence
-    (see `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_AGENT_SYSTEM_PROMPT`), so a
+    (see `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`), so a
     delegation-phrased ask the sixth-branch gate MISSED still tells the
     user to phrase it explicitly rather than silently doing nothing.
 
@@ -2026,6 +2050,15 @@ def answer(
         and (
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
+            # An edit-intent turn must REACH the tool loop so the model can call
+            # the in-band `edit_prd` tool. GUARDED on `edit_prd_handler` — only
+            # the GROUP surface registers one, so this disjunct is always False
+            # for main/private (`edit_prd_handler is None`) and their routing is
+            # provably unchanged.
+            or (
+                scope.edit_prd_handler is not None
+                and is_project_edit_request(routing_text, history)
+            )
         )
     ):
         scoped_result = _try_scoped_tool_answer(

@@ -750,15 +750,13 @@ def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_set
     turns = conversations_db.list_individual_turns(conv["id"], "greeted-user")
     assert len(turns) == 1 and turns[0]["role"] == "assistant"
 
-    # `_classify_and_maybe_edit_group_prd` still runs before the reply on
-    # every trigger kind (the IDOR gate itself is proven end-to-end in
-    # test_group_chat_prd_edit.py) — here: structural wiring only.
+    # `_classify_group_envelope` (card enrichment only — the edit is now an
+    # in-band tool, proven end-to-end in test_group_chat_prd_edit.py) runs
+    # before the reply on every trigger kind — here: structural wiring only.
     classify_calls = []
     monkeypatch.setattr(
-        projects_route, "_classify_and_maybe_edit_group_prd",
-        lambda *a, **kw: classify_calls.append(1) or projects_route._GroupEditOutcome(
-            applied_turn=None, was_edit_request=False, refusal=None,
-        ),
+        projects_route, "_classify_group_envelope",
+        lambda *a, **kw: classify_calls.append(1) or {"intent": "answer"},
     )
     monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "ok", "citations": []})
     resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})

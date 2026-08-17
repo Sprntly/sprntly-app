@@ -34,10 +34,8 @@ def _seed_project(t) -> int:
 
 def _stub_classify(monkeypatch):
     monkeypatch.setattr(
-        projects_route, "_classify_and_maybe_edit_group_prd",
-        lambda *a, **kw: projects_route._GroupEditOutcome(
-            applied_turn=None, was_edit_request=False, refusal=None,
-        ),
+        projects_route, "_classify_group_envelope",
+        lambda *a, **kw: {"intent": "answer"},
     )
 
 

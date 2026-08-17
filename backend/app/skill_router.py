@@ -1971,7 +1971,7 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
     declines falls through to the composer, not to a refusal, so a false
     negative costs an un-actioned request rather than a wrong answer (see
     the accept-with-nudge addendum this gate's decline path relies on to
-    close that gap, `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_AGENT_SYSTEM_PROMPT`).
+    close that gap, `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`).
 
     `history` is accepted for signature parity with its sibling gates (every
     ladder predicate above `route()` takes it) but is not consulted for
@@ -2008,6 +2008,45 @@ _PROJECT_CONTENT_NOUN = re.compile(
     r"\bowe[sd]?\b|\bowed\b|\boutstanding\b|\bwho\s+owes\b",
     re.I,
 )
+
+
+#: PROJECT-EDIT verb — an instruction to change the project's document. Kept
+#: distinct from the read/delegate/execute gates: these phrasings ask to
+#: MUTATE the PRD, which the group surface handles via its in-band `edit_prd`
+#: tool. Anchored to an edit verb (below) AND an edit-target NOUN so plain
+#: chatter never matches.
+_PROJECT_EDIT_VERB = re.compile(
+    r"\b(?:edit|update|updating|change|changing|revise|rewrite|reword|modify|"
+    r"amend|append|tighten|expand|shorten|delete|remove|drop|insert|replace|"
+    r"add|adjust)\b",
+    re.I,
+)
+
+#: PROJECT-EDIT target NOUN — what the edit is aimed at. The group agent can
+#: only edit the project's PRD, so the anchor set is the PRD / document family.
+_PROJECT_EDIT_NOUN = re.compile(
+    r"\bprds?\b|\bdocs?\b|\bdocument\b|\bspec\b|\brequirements?\b|\bsection\b",
+    re.I,
+)
+
+
+def is_project_edit_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks to MUTATE the project's PRD — an edit verb
+    plus an edit-target noun (the PRD / document family). Sibling of
+    `is_project_tool_request`/`is_project_content_request`: cheap regex on
+    `routing_text`, noun-anchored so plain chatter or a bare interrogative
+    never matches.
+
+    Unlocks the sixth-branch tool loop for a group turn so the model can call
+    the in-band `edit_prd` tool — but ONLY on the group surface, which is the
+    only one that registers an edit tool/handler (`qa_agent.answer` guards this
+    gate on `scope.edit_prd_handler`, so it can never widen main/private
+    routing). `history` is accepted for signature parity with every other
+    ladder predicate but not consulted in v1."""
+    q = question or ""
+    if not q.strip():
+        return False
+    return bool(_PROJECT_EDIT_VERB.search(q) and _PROJECT_EDIT_NOUN.search(q))
 
 
 def is_project_content_request(question: str, history: list[dict] | None = None) -> bool:

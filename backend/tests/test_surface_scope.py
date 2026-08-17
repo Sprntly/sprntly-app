@@ -75,6 +75,27 @@ def test_surface_scope_project_private_carries_six_extra_tools():
         *read_tools(),
     )]
     assert names == expected
+    # AC9 no-leak: the GROUP-only `edit_prd` tool is NOT on the private scope,
+    # and private registers no edit handler — so its `answer()` result shape
+    # is unaffected by the group's in-band edit tool.
+    assert "edit_prd" not in names
+    assert scope.edit_prd_handler is None
+
+
+def test_private_system_addendum_byte_identical():
+    """AC2: `_build_private_scope(...).system_addendum` is byte-identical to
+    the composed `_PRIVATE_SCOPE_SYSTEM` + roster block — the group prompt/
+    context/edit-tool convergence changed NOTHING about the private surface's
+    assembled system text (option (b): `_PRIVATE_SCOPE_SYSTEM` untouched)."""
+    from app.ask_job_runner import (
+        _PRIVATE_SCOPE_SYSTEM, _build_private_scope, _private_roster_block,
+    )
+
+    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    # project 9 has no members / no instructions in this unit context, so the
+    # composition is exactly the base system + the empty-roster block.
+    expected = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block([])}"
+    assert scope.system_addendum == expected
 
 
 # ── byte-identity: scope=None vs SurfaceScope(main) vs omitted (AC1) ───────
