@@ -114,6 +114,32 @@ def test_content_gate_still_rejects_non_project_interrogative():
         assert is_project_content_request(q) is False, q
 
 
+def test_content_gate_matches_open_and_context_phrasings():
+    # "open"/"give me" are read-shaped, and the project's own generated
+    # artifacts (PRD, report) plus "context" are project-content nouns —
+    # this is the project's OWN linked content, not a company-wide search.
+    for q in (
+        "open the PRD",
+        "open PRD",
+        "give me the context",
+        "give me context on this project",
+        "open the report",
+    ):
+        assert is_project_content_request(q) is True, q
+
+
+def test_content_gate_open_and_context_do_not_overbroaden():
+    # Guard against the noun/verb additions pulling plain out-of-domain
+    # chatter into the project-tool loop.
+    for q in (
+        "what's the weather",
+        "who won the game",
+        "open the door",
+        "give me a break",
+    ):
+        assert is_project_content_request(q) is False, q
+
+
 def test_is_project_tool_request_unchanged():
     # Regression guard: the parallel positive gate must not perturb the
     # existing delegate/execute gate's match/veto outcomes.
