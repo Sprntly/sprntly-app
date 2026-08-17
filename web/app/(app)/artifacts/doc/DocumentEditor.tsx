@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
 import Underline from "@tiptap/extension-underline"
@@ -53,11 +53,52 @@ export function DocumentEditor({
   editable?: boolean
   /** Fired on every change with the serialized document. The caller debounces —
    *  this is deliberately not throttled here, so the save layer owns the timing
-   *  and can be tested without an editor (see lib/documentSave.ts). */
+   *  and can be tested without an editor (see lib/documentSave.ts).
+   *
+   *  NOT FIRED UNTIL A USER EVENT HAS LANDED ON THIS COMPONENT — see
+   *  `interactedRef`. Stated as the real rule rather than the narrower "not
+   *  fired for the editor's own normalization", because it also covers
+   *  PROGRAMMATIC changes driven through the `Editor` handle this component
+   *  hands out via `onReady`: those render but are not reported, and a caller
+   *  adding, say, an "apply this suggestion" button outside the wrapper needs
+   *  to know that before wondering why nothing saved. */
   onChange?: (html: string) => void
   onBlur?: () => void
   onReady?: (editor: Editor) => void
 }) {
+  // Has a person actually touched this editor yet?
+  //
+  // OPENING A DOCUMENT WAS SAVING IT. TipTap parses `initialHtml` into its
+  // schema and re-serializes it, and that round trip is not byte-identical to
+  // what the server stored (the stored HTML came from the sanitizer, which
+  // makes different — equally valid — choices about attributes and spacing).
+  // The resulting `onUpdate` looked exactly like a keystroke, so every open
+  // scheduled a body save: on staging, opening document 9 twice took it from
+  // version 3 to version 5 without anyone typing a character.
+  //
+  // In a SHARED library that is three separate harms. The row reads "Edited
+  // just now" by whoever merely read it; `updated_by` names them; and the
+  // version bump makes the next save by the colleague who is genuinely typing
+  // fail its compare-and-set — a "someone else saved this document" banner
+  // raised by a reader.
+  //
+  // AN UPDATE THAT FOLLOWS NO USER EVENT IS NOT A USER EDIT. Set by the
+  // capture handlers on the wrapper below — every way a person can change this
+  // document goes through one of them (typing, paste, a toolbar click, a
+  // toolbar select, a drop), and the editor's own start-up normalization goes
+  // through none.
+  //
+  // Two other instruments were tried and are worse:
+  //   * TipTap's `onFocus` — does not fire for `chain().focus()` under jsdom,
+  //     so it suppressed seven REAL toolbar edits in this component's own
+  //     tests. A gate that drops genuine writing is worse than the save it
+  //     prevents.
+  //   * comparing serialized output against a baseline — needs a baseline
+  //     captured before the first update, and `onCreate` does not reliably run
+  //     first; it also silently drops a real edit that restores the original
+  //     text.
+  const interactedRef = useRef(false)
+  const wrapperRef = useRef<HTMLDivElement | null>(null)
   const editor = useEditor({
     // Next renders this route on the server first; without this TipTap warns
     // about an SSR/client mismatch and re-mounts the document.
@@ -98,9 +139,45 @@ export function DocumentEditor({
       }),
     ],
     content: initialHtml || "",
-    onUpdate: ({ editor: ed }) => onChange?.(ed.getHTML()),
+    onUpdate: ({ editor: ed }) => {
+      if (!interactedRef.current) return
+      onChange?.(ed.getHTML())
+    },
     onBlur: () => onBlur?.(),
   })
+
+  // NATIVE listeners, not React's synthetic ones, and this list is the whole
+  // correctness argument — a path that is missing here is an edit that renders
+  // and is never saved, which is strictly worse than the spurious save this
+  // gate exists to stop.
+  //
+  // `beforeinput` is the load-bearing one: it is the single event that covers
+  // spellcheck corrections from the context menu, dictation, IME composition,
+  // and Android suggestion-strip insertions — none of which fire `keydown`.
+  // `cut` covers the context-menu Cut/Delete, which fires no `click` either
+  // (a secondary-button press produces mousedown/contextmenu/mouseup only).
+  // React's synthetic `onBeforeInput` is unreliable across browsers, which is
+  // why these are attached to the DOM node directly.
+  //
+  // Missing any of them is not a theoretical gap: a colleague who right-clicks
+  // a typo and picks the correction would watch the fix appear, close the tab,
+  // and find the typo still there — with the save indicator never leaving
+  // `idle`, so nothing warned them. It would also leave `bodyDirtyRef` false
+  // in both consumers, so a later "Keep mine" would discard those edits.
+  useEffect(() => {
+    const el = wrapperRef.current
+    if (!el) return
+    const mark = () => { interactedRef.current = true }
+    const EVENTS = [
+      "keydown", "beforeinput", "input", "paste", "cut",
+      "drop", "compositionstart", "click", "change",
+    ]
+    // Capture, so the mark lands before TipTap's own handler turns the event
+    // into a transaction — otherwise the resulting `onUpdate` would still read
+    // `interactedRef` as false and be swallowed.
+    EVENTS.forEach((e) => el.addEventListener(e, mark, true))
+    return () => EVENTS.forEach((e) => el.removeEventListener(e, mark, true))
+  }, [editor])
 
   useEffect(() => {
     if (editor && onReady) onReady(editor)
@@ -113,7 +190,10 @@ export function DocumentEditor({
   if (!editor) return null
 
   return (
-    <div data-doc-editor>
+    <div
+      data-doc-editor
+      ref={wrapperRef}
+    >
       {editable && <Toolbar editor={editor} />}
       <EditorContent editor={editor} />
       <style>{`

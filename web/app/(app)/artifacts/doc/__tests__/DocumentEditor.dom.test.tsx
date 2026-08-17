@@ -41,7 +41,12 @@ async function mount(props: Partial<React.ComponentProps<typeof DocumentEditor>>
   // events jsdom does not produce, so a Range-based "selection" leaves the
   // editor's own selection empty and every toolbar command applies to nothing.
   // That reads as "bold is broken" when bold is fine.
-  let editor: { commands: { setTextSelection: (r: { from: number; to: number }) => void } } | null = null
+  let editor: {
+    commands: {
+      setTextSelection: (r: { from: number; to: number }) => void
+      insertContentAt: (pos: number, content: string) => void
+    }
+  } | null = null
   const utils = render(
     <DocumentEditor
       initialHtml={props.initialHtml ?? "<p>hello</p>"}
@@ -60,7 +65,7 @@ async function mount(props: Partial<React.ComponentProps<typeof DocumentEditor>>
     const len = (pm.textContent ?? "").length
     editor!.commands.setTextSelection({ from: 1, to: len + 1 })
   }
-  return { ...utils, onChange, selectAll, setCaret }
+  return { ...utils, onChange, selectAll, setCaret, getEditor: () => editor! }
 }
 
 describe("the editor renders the document it is given", () => {
@@ -96,6 +101,72 @@ describe("the editor renders the document it is given", () => {
     // gates the PROPERTY (`color`) and only rejects values that fetch or
     // execute.
     expect(out).toMatch(/#b42318|rgb\(\s*180,\s*35,\s*24\s*\)/)
+  })
+})
+
+describe("opening a document is not editing it", () => {
+  it("emits nothing for its own normalization of the stored HTML", async () => {
+    // THE DEFECT, measured on staging: opening document 9 twice took it from
+    // version 3 to version 5 with nobody typing. TipTap re-serializes the
+    // stored HTML into its schema, and that round trip is not byte-identical
+    // to what the sanitizer wrote — so the resulting update looked exactly
+    // like a keystroke and the save layer wrote it.
+    //
+    // In a SHARED library that is three harms at once: the row says "Edited
+    // just now" by whoever merely READ it, `updated_by` names them, and the
+    // version bump makes the next save by the colleague who is genuinely
+    // typing fail its compare-and-set.
+    const { onChange } = await mount({
+      // Deliberately in a shape TipTap will re-serialize differently.
+      initialHtml: "<h1>Title</h1><p>body</p><hr>",
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it("still emits for a real edit that only changes formatting", async () => {
+    // The other half: the gate must not swallow a genuine edit. A toolbar
+    // click is one user path; the seven toolbar cases below are the same
+    // property at more angles.
+    const { onChange, container, selectAll } = await mount({
+      initialHtml: "<p>hello</p>",
+    })
+    onChange.mockClear()
+    selectAll()
+    fireEvent.click(container.querySelector('[data-doc-toolbar] button')!)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain("<strong>")
+  })
+
+  // ── The edit paths that fire NEITHER keydown NOR click ────────────────────
+  //
+  // Found by review, and they are the ones that make a too-narrow gate
+  // dangerous: the user watches their edit appear, and it is never saved. The
+  // save indicator stays `idle`, so nothing warns them — and because these
+  // paths also leave `bodyDirtyRef` false in both consumers, a later "Keep
+  // mine" on a conflict would discard the edits too.
+  it.each([
+    // Right-click a red-underlined word and pick the correction; dictation; an
+    // Android suggestion-strip insertion. All arrive as beforeinput/input.
+    ["a spellcheck correction or dictation", "beforeinput"],
+    // Right-click -> Cut (or Delete). A secondary-button press fires
+    // mousedown/contextmenu/mouseup — never `click`.
+    ["a context-menu cut", "cut"],
+    // IME composition, which fires no keydown for the composed text.
+    ["an IME composition", "compositionstart"],
+  ])("saves %s", async (_label, eventName) => {
+    const { onChange, container, getEditor } = await mount({ initialHtml: "<p>hello</p>" })
+    onChange.mockClear()
+    const pm = container.querySelector(".tiptap") as HTMLElement
+
+    // ONLY this event marks interaction — the edit itself is applied through
+    // the editor's own command, exactly as the browser would after the event.
+    // Driving it with a toolbar click instead would mark interaction via
+    // `click` and the test would pass with the listener removed.
+    pm.dispatchEvent(new Event(eventName, { bubbles: true }))
+    getEditor().commands.insertContentAt(1, "X")
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
   })
 })
 
