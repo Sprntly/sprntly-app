@@ -2029,6 +2029,16 @@ async def _respond_as_group_agent(
         # else falls through to the SAME unified-engine reply below.
         edit_note = ""
         classify_envelope: dict | None = None
+        # History is hoisted so it is ALWAYS defined and can be handed to the
+        # unified engine below (the router/connector interceptors need the prior
+        # turns to keep a source thread alive — mirrors the private surface).
+        # It stays [] on the trigger-less degenerate path so the answer call
+        # passes `history=None` and the transcript-as-question is not ALSO
+        # rendered as history (no double-count). NOTE: if
+        # `_GROUP_TRANSCRIPT_AS_QUESTION` is ever flipped True (question = full
+        # transcript), this history must be dropped or the question narrowed, or
+        # the composer path double-counts the conversation.
+        history: list[dict] = []
         if trigger is not None:
             history = [
                 {"role": t.get("role") or "user", "content": t.get("content") or ""}
@@ -2137,7 +2147,7 @@ async def _respond_as_group_agent(
         )
         result = qa_agent.answer(
             enterprise_id=ctx.company_id, question=question, dataset=dataset,
-            scope=scope,
+            scope=scope, history=history or None,
         )
         reply = (result or {}).get("answer", "")
         # Persist the FULL structured reply, not just the answer string:
