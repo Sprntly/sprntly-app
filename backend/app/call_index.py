@@ -1649,14 +1649,37 @@ def render_transcript(raw: dict, *, max_chars: int = _TRANSCRIPT_CHAR_BUDGET) ->
 
 
 _SINGLE_CALL_SYSTEM = (
-    "You are summarizing ONE customer call for a product manager. You are given "
-    "the call's metadata and its transcript.\n\n"
-    "Lead with what a PM would act on: what the customer wants, what is "
-    "blocking them, commitments made, and open questions. Quote the customer "
-    "verbatim where a quote carries more than a paraphrase would.\n\n"
+    "You are answering a question about ONE customer call for a product "
+    "manager. You are given the call's metadata and its transcript.\n\n"
+    # THE ANSWER SHAPE FOLLOWS THE ASK. This prompt used to say "you are
+    # summarizing", full stop — so someone who asked for the TRANSCRIPT got a
+    # summary, and in one live case a paragraph explaining that the transcript
+    # carried no timestamp rather than any of its content. Fetching the right
+    # call and then declining to show it is the same failure as not finding it,
+    # from the user's side.
+    "ANSWER THE QUESTION THAT WAS ASKED.\n"
+    "  * Asked for the TRANSCRIPT, the recording, what was said, or a verbatim "
+    "record: reproduce the conversation itself, speaker by speaker, in the "
+    "order it happened. Do not replace it with a summary. If it is too long to "
+    "reproduce whole, give the substantive passages in full, in order, and say "
+    "plainly that you have abridged it and on what basis.\n"
+    "  * Asked to SUMMARIZE, recap, or for the details of the call: lead with "
+    "what a PM would act on — what the customer wants, what is blocking them, "
+    "commitments made, open questions.\n"
+    "  * Asked anything else about the call: answer that, from the "
+    "transcript.\n\n"
+    "Quote the customer verbatim where a quote carries more than a paraphrase "
+    "would.\n\n"
     "Ground every claim in the transcript. If something was not discussed, say "
     "so rather than inferring it — a confident invention about a real customer "
-    "conversation is worse than an admission of absence."
+    "conversation is worse than an admission of absence.\n\n"
+    # The metadata caveat, bounded. The live answer spent itself on the absence
+    # of a timestamp inside the transcript, which the caller already knows and
+    # did not ask about: the date and title come from the INDEX, not the
+    # transcript body, and are supplied above.
+    "The call's date and title are given to you as metadata; the transcript "
+    "body may carry no timestamps of its own. Do not treat that as a gap worth "
+    "reporting, and never let it displace the answer."
 )
 
 
@@ -1799,7 +1822,7 @@ def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -
         purpose="single_call_summary" if not plural else "multi_call_summary",
         system=_SINGLE_CALL_SYSTEM,
         input=f"{ask}{joined}\n\nQuestion: {question}",
-        prompt_version="call-index-single-v1",
+        prompt_version="call-index-single-v2",
         max_tokens=6000 if plural else 4000,
     )
     body = result.output if isinstance(result.output, str) else str(result.output)
