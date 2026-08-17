@@ -161,6 +161,33 @@ describe("ProjectPrivateChat — private streaming", () => {
   })
 })
 
+describe("ProjectPrivateChat — settled reply citations never render as raw source cards", () => {
+  it("renders NO citation cards when the ask reply carries citations (raw retrieval-source keys are storage identifiers, not user-facing names); the answer still renders", async () => {
+    runAskGenerationMock.mockResolvedValue({
+      answer: "The rollout starts next Monday.",
+      key_points: ["rollout Monday"],
+      citations: [
+        { source: "slack_channels", evidence: "…" },
+        { source: "communication/incident", evidence: "…" },
+      ],
+      confidence: 1,
+      unanswered: "",
+    })
+    render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
+    await send("when does the rollout start?")
+
+    const agent = await screen.findByTestId("ic-msg-agent")
+    // The reply settled (full answer on screen) — the citation assertions
+    // below aren't vacuously green off a pending/streaming state.
+    expect(agent.textContent).toContain("The rollout starts next Monday.")
+    expect(document.querySelector(".ai-bar-reply-cite-src")).toBeNull()
+    expect(document.querySelector(".ai-bar-reply-cites")).toBeNull()
+    for (const raw of ["slack_channels", "communication/incident"]) {
+      expect(screen.queryByText(raw)).toBeNull()
+    }
+  })
+})
+
 describe("ProjectPrivateChat — Stop actively cancels the backend job", () => {
   it("flips the local isStopped signal AND calls the cancel endpoint with the resolved ask id", async () => {
     let capturedOpts: AskOpts = {}

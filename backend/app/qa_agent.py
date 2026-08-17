@@ -2027,6 +2027,14 @@ def answer(
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
         )
+        # Yield to the connector interceptor path when the turn NAMES a live
+        # source: `_skip_project_connectors` returns True only when NO source is
+        # named (exactly when this project tool loop — connector-blind — should
+        # claim the turn) and False for a source-named turn, so a named-source
+        # question falls through to the SAME interceptors that predicate already
+        # admits. One predicate now governs both this gate and the connector
+        # skip → guaranteed symmetry.
+        and _skip_project_connectors(scope, routing_text, history)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,

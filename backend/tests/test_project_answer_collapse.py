@@ -697,15 +697,32 @@ def test_group_gate_forced_true_one_turn(tenant_client, isolated_settings, monke
 
 
 def test_group_transcript_not_reflattened(tenant_client, isolated_settings, monkeypatch):
+    """RETARGETED — authorized invariant change. The old contract asserted
+    `history is None` unconditionally ("never re-flattened"). That was WRONG
+    for the connector-thread case: the group surface must now hand the prior
+    turns to `answer()` as `history` (recent-minus-trigger) so the router /
+    connector interceptors can keep a source thread alive — exactly what the
+    private surface already does. The prerendered transcript is STILL the
+    speaker-tagged full thread (Invariant 4 unchanged); history is a SEPARATE
+    signal channel, not a re-flattening of the transcript into the composer.
+
+    New contract (mirrors AC2): `history == recent-minus-trigger` when a human
+    trigger exists, and `history is None` on the trigger-less degenerate path
+    (so a transcript-as-question is not ALSO rendered as history)."""
     from app.db import conversations as conversations_db
 
+    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
+
+    # ── Trigger PRESENT: a prior assistant turn + a human mention. ──────────
     t = tenant_client.make(slug="acme")
     project = t.client.post("/v1/projects", json={"name": "Transcript preserved"}).json()
     project_id = project["id"]
     conv = conversations_db.create_group_chat(project_id, t.user_id)
-    conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly what's the status?")
+    conversations_db.post_group_turn(
+        conv["id"], None, "The Q3 launch slipped a week.", role="assistant",
+    )
+    conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly what did they say?")
 
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
     captured = {}
 
     def _fake_answer(**kw):
@@ -722,14 +739,42 @@ def test_group_transcript_not_reflattened(tenant_client, isolated_settings, monk
         )
     )
 
-    assert captured.get("history") is None  # never re-flattened through answer()'s history param
+    # history = recent EXCLUDING the trigger turn — the prior assistant turn only.
+    assert captured.get("history") == [
+        {"role": "assistant", "content": "The Q3 launch slipped a week."}
+    ]
     transcript = captured["scope"].prerendered_transcript
     assert transcript is not None
-    assert "@Sprntly what's the status?" in transcript
+    assert "@Sprntly what did they say?" in transcript
     # `render_group_transcript`'s speaker-tagged shape ("Name: message" /
     # "Name (job role): message"), never the private surface's flattened
     # "User: .../Sprntly: ..." rendering.
     assert not transcript.startswith("User:")
+
+    # ── Trigger-LESS degenerate path: an assistant-only thread (no human turn
+    # with an author) → history stays [] → `history or None` → None, so the
+    # transcript-as-question is not double-rendered as history. ─────────────
+    t2 = tenant_client.make(slug="beta")
+    project2 = t2.client.post("/v1/projects", json={"name": "Triggerless"}).json()
+    project2_id = project2["id"]
+    conv2 = conversations_db.create_group_chat(project2_id, t2.user_id)
+    conversations_db.post_group_turn(
+        conv2["id"], None, "System note: standup at 10.", role="assistant",
+    )
+    captured2 = {}
+
+    def _fake_answer2(**kw):
+        captured2.update(kw)
+        return {"answer": "ok", "citations": []}
+
+    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer2)
+    ctx2 = _ctx(t2.company_id, ensure_default_workspace(t2.company_id)["id"], t2.user_id)
+    asyncio.run(
+        projects_route._respond_as_group_agent(
+            project2_id, conv2["id"], ctx2, "mention", job_id=2, run_id="r2",
+        )
+    )
+    assert captured2.get("history") is None  # trigger-less → None (no double-render)
 
 
 def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_settings, monkeypatch):
@@ -1112,3 +1157,127 @@ def test_is_for_agent_decision_is_named_seam():
     # future queue could collect yes-verdicts from this exact call shape.
     src = inspect.getsource(projects_route.post_group_turn_route)
     assert "should_respond(" in src
+
+
+# ── Sixth-branch gate yields to a NAMED live source (connector parity) ──────
+# The project-only tool loop (`_try_scoped_tool_answer`, no connector reader)
+# must NOT claim a turn that names a live source, or a source-named follow-up
+# collapses into the connector-blind loop and fabricates a "no readable
+# channels" denial. The gate now ANDs in the EXISTING `_skip_project_
+# connectors` predicate (True only when NO source is named — exactly when the
+# project loop should claim the turn; False for a named source, so it falls
+# through to the connector interceptors). No new helper (a `_names_live_
+# source` module-level extraction would collide with the nested closure of
+# that name inside `answer()` and `UnboundLocalError` on every project turn).
+
+
+class _GateSentinel(Exception):
+    """Raised in place of the decline-path fold so we can assert the gate
+    DECLINED (fell through) without running the real interceptor/LLM tail."""
+
+
+def test_sixth_branch_declines_named_source_project_surface(monkeypatch):
+    """AC4/AC6 + MUTATION. A project-surface question that NAMES a live source
+    ("what did slack say…") must NOT be claimed by the project tool loop — the
+    gate's `and _skip_project_connectors(...)` clause makes it fall through to
+    the connector interceptor path. Mutation (clause removed → predicate forced
+    True) → the sixth branch STEALS the named-source turn (the bug) = RED."""
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    named_source_q = "what did slack say about the launch?"
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "STOLEN by the connector-blind project loop", "citations": []}
+
+    # Force the FIRST disjunct True so the NEW clause is the sole decider
+    # (mirrors `test_gate_removed_plainqa_routes_to_loop_is_red`'s forcing).
+    monkeypatch.setattr(qa, "is_project_tool_request", lambda *a, **kw: True)
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    # Halt right after the gate declines — the real decline tail (interceptors
+    # + LLM) is out of scope for this deterministic unit.
+    def _sentinel(*a, **kw):
+        raise _GateSentinel
+    monkeypatch.setattr(qa, "_fold_project_context", _sentinel)
+
+    # GREEN (clause present): real `_skip_project_connectors` → False for a
+    # named source → gate DECLINES → `_try_scoped_tool_answer` never called →
+    # execution reaches the decline-path fold (our sentinel).
+    with pytest.raises(_GateSentinel):
+        qa.answer(enterprise_id="c1", question=named_source_q, dataset="d", scope=scope)
+    assert calls["scoped"] == 0  # the project loop did NOT claim the named source
+
+    # RED (clause removed): force the predicate True — the exact truth value the
+    # gate would carry WITHOUT the `and _skip_project_connectors(...)` clause →
+    # the sixth branch fires and steals the named-source turn.
+    monkeypatch.setattr(qa, "_skip_project_connectors", lambda *a, **kw: True)
+    out = qa.answer(enterprise_id="c1", question=named_source_q, dataset="d", scope=scope)
+    assert calls["scoped"] == 1
+    assert out["answer"].startswith("STOLEN")  # mutation reproduces the bug
+
+
+def test_sixth_branch_still_claims_unnamed_project_noun(monkeypatch):
+    """AC5 regression. An UNNAMED project-noun ("what tasks are open?", "who's
+    on this project?") on BOTH group and private still satisfies the gate
+    (`_skip_project_connectors` → True, no source named) → the project tool
+    loop claims it → project-ledger facts, NOT a connector deflection."""
+    private = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    group = dataclasses.replace(private, surface=Surface.project_group)
+
+    def _spy_scoped(**kw):
+        return {"answer": "project ledger facts", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    for scope in (private, group):
+        for q in ("what tasks are open?", "who's on this project?"):
+            out = qa.answer(enterprise_id="c1", question=q, dataset="d", scope=scope)
+            assert out["answer"] == "project ledger facts", (scope.surface, q)
+
+
+def test_sixth_branch_gate_and_connector_skip_use_same_predicate():
+    """AC7 symmetry. The sixth-branch gate AND the connector-interceptor skip
+    both consult the SINGLE `_skip_project_connectors` predicate — a turn can
+    never be both claimed by the project loop and admitted to the connectors.
+    Guaranteed by reuse of ONE predicate (source-level proof)."""
+    src = inspect.getsource(qa.answer)
+    # The gate ANDs the predicate in (claim only when it returns True)…
+    assert "and _skip_project_connectors(scope, routing_text, history)" in src
+    # …and the interceptor guards negate the SAME predicate (skip when True).
+    assert "not _skip_project_connectors(" in src
+    # One predicate, ≥2 call sites (gate + at least one interceptor guard).
+    assert src.count("_skip_project_connectors(") >= 2
+
+
+def test_main_scope_none_gate_unchanged(monkeypatch):
+    """AC8 byte-identity. For `scope=None` / `Surface.main` the sixth-branch
+    gate never fires (short-circuits on `scope is not None`) and `_skip_
+    project_connectors` short-circuits False — main routing/output unchanged."""
+    # `_skip_project_connectors` is inert for main-family scopes.
+    assert qa._skip_project_connectors(None, "what tasks are open?", None) is False
+    assert qa._skip_project_connectors(
+        SurfaceScope(surface=Surface.main), "what did slack say?", None
+    ) is False
+
+    # The gate predicates are NEVER consulted on the main path (scope=None):
+    def _raise(*a, **kw):
+        raise AssertionError("gate must not be consulted on the main-chat path")
+
+    monkeypatch.setattr(qa, "is_project_tool_request", _raise)
+    monkeypatch.setattr(qa, "is_project_content_request", _raise)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("streamed")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    deltas = []
+    out = qa.answer(
+        enterprise_id="c1", question="what tasks are open?", dataset="d",
+        scope=None, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == ["streamed"]  # main streams via the untouched composer
+    assert out["answer"] == "ok"

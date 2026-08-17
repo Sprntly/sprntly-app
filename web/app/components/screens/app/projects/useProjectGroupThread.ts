@@ -538,7 +538,14 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
           // rides alongside — the persisted reply's `artifact_list` and
           // nested `open.candidates`, falling back to the legacy
           // `open_candidates` turn field.
-          reply: isAgent ? (turn.reply ?? contentAsReply(turn.content)) : undefined,
+          //
+          // `citations` is STRIPPED: the persisted reply carries the engine's
+          // raw retrieval-source keys (storage identifiers, not user-facing
+          // names), which the reply ladder would render as source cards.
+          // Main chat's own in-thread replies carry `citations: []`, so
+          // suppressing them here is parity, not feature loss — the
+          // key_points/artifact_list/open card data all still ride through.
+          reply: isAgent ? { ...(turn.reply ?? contentAsReply(turn.content)), citations: [] } : undefined,
           openCandidates: isAgent
             ? (turn.reply?.open?.candidates ?? turn.open_candidates ?? [])
             : undefined,
