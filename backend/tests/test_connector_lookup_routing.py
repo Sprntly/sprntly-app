@@ -359,6 +359,36 @@ def test_a_followup_with_no_prior_source_is_not_intercepted():
     assert is_connector_lookup("more details on that", thread) is None
 
 
+def test_a_bare_context_ask_does_not_stick_to_a_stale_source_mention():
+    """A project-scoped "give me the context" must not be misread as "keep
+    pulling from the connector we mentioned earlier". Reported from a project
+    chat: the thread had named Slack a few turns back, and a later bare
+    "give me the context" was swallowed as a Slack follow-up instead of
+    reaching the project's own context."""
+    thread = [
+        {"role": "user", "content": "check slack for the pricing discussion"},
+        {"role": "assistant", "content": "In #product-eng, Ada said pricing v2 ships Friday."},
+    ]
+    # Deliberately excludes phrasings like "more context" — "more" on its own
+    # is a tracker-detail word (`_TRACKER_DETAIL`) unrelated to this fix, and
+    # stays sticky by design; this test is scoped to the bare word "context".
+    for question in ["give me the context", "give me some context"]:
+        assert is_connector_lookup(question, thread) is None, question
+
+
+def test_a_genuine_connector_context_followup_still_sticks():
+    """The narrowing above must not cost a REAL connector follow-up. Naming
+    the source in the same message still wins outright, and the other
+    follow-up nouns ("full", "rest", "thread") still carry a bare mention."""
+    thread = [
+        {"role": "user", "content": "check slack for the pricing discussion"},
+        {"role": "assistant", "content": "In #product-eng, Ada said pricing v2 ships Friday."},
+    ]
+    assert is_connector_lookup("give me the full context from slack", thread) == {"slack"}
+    assert is_connector_lookup("the rest of that slack thread", thread) == {"slack"}
+    assert is_connector_lookup("give me the full context", thread) == {"slack"}
+
+
 # ── no cross-talk with the tracker path ──────────────────────────────────────
 
 def test_slack_questions_do_not_trip_the_tracker_path():

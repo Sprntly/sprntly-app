@@ -1540,10 +1540,24 @@ _CONNECTOR_WRITE_VETO = re.compile(
 
 # What a follow-up inside a connector thread asks FOR. The tracker's equivalent
 # (_TRACKER_DETAIL) is issue-shaped ("assignee", "priority"); these are the nouns
-# of a conversation or a document — "what's the full thread", "any more context".
+# of a conversation or a document — "what's the full thread", "send the rest of
+# that transcript".
+#
+# Deliberately WITHOUT a bare "context" alternative. A project surface's own
+# content (its PRD/artifacts) is itself reached by asking for "the context" —
+# that is `is_project_content_request`'s job, one layer up — and a stale
+# connector mention earlier in the thread must not outrank it. With "context"
+# in this list, "give me the context" right after any Slack mention in the
+# last _TRACKER_THREAD_WINDOW turns read as "keep pulling from Slack" and
+# vetoed the project branch entirely, even though the message named no source
+# at all. A genuine connector follow-up that reaches for "context" as its own
+# word still routes correctly: it either NAMES the source in the same message
+# ("the full context from Slack" — caught by `_named_connector_providers`
+# before this pattern even runs) or it carries one of the words still in this
+# list ("full", "rest", "thread").
 _CONNECTOR_FOLLOWUP_DETAIL = re.compile(
     r"\b(threads?|messages?|channels?|conversation|quotes?|verbatim|transcript|"
-    r"full|rest|context|commits?|diff|files?)\b",
+    r"full|rest|commits?|diff|files?)\b",
     re.I,
 )
 
