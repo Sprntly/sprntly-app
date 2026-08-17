@@ -15,7 +15,7 @@
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -135,15 +135,16 @@ describe("ProjectPrivateChat — private streaming", () => {
     await send("what's the rollout plan?")
 
     expect(typeof capturedOpts.onPartial).toBe("function")
-    // Nothing streamed yet — the plain wait state, no streaming testid.
-    expect(screen.getByTestId("ic-msg-pending")).toBeTruthy()
-    expect(screen.queryByTestId("ic-msg-streaming")).toBeNull()
+    // Nothing streamed yet — the shared ladder's plain busy state (aria-busy),
+    // no streaming partial node yet.
+    expect(document.querySelector("[aria-busy]")).toBeTruthy()
+    expect(screen.queryByTestId("ask-streaming-partial")).toBeNull()
 
     await act(async () => {
       capturedOpts.onPartial!("The rollout starts")
     })
-    expect(screen.queryByTestId("ic-msg-pending")).toBeNull()
-    const streaming = screen.getByTestId("ic-msg-streaming")
+    // The shared ladder's streaming node now renders the partial.
+    const streaming = screen.getByTestId("ask-streaming-partial")
     expect(streaming.textContent).toContain("The rollout starts")
 
     // A second delta REPLACES the rendered text (assigned, not appended) —
@@ -151,7 +152,7 @@ describe("ProjectPrivateChat — private streaming", () => {
     await act(async () => {
       capturedOpts.onPartial!("The rollout starts next Monday.")
     })
-    expect(screen.getByTestId("ic-msg-streaming").textContent).toContain("The rollout starts next Monday.")
+    expect(screen.getByTestId("ask-streaming-partial").textContent).toContain("The rollout starts next Monday.")
   })
 
   it("does not add group token streaming — ProjectGroupChat's send path takes no onPartial/onStreamDrop", () => {
@@ -176,10 +177,17 @@ describe("ProjectPrivateChat — settled reply citations never render as raw sou
     render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     await send("when does the rollout start?")
 
-    const agent = await screen.findByTestId("ic-msg-agent")
-    // The reply settled (full answer on screen) — the citation assertions
-    // below aren't vacuously green off a pending/streaming state.
-    expect(agent.textContent).toContain("The rollout starts next Monday.")
+    // The private surface now renders agent turns through ChatBubble's native
+    // reply ladder (the shared shell path group already uses), so the settled
+    // answer lands in `.ai-bar-reply-answer` — the same contract the sibling
+    // ProjectPrivateChat suites assert — rather than the retired `ic-msg-agent`
+    // host body. Waiting on the answer text proves the reply settled, so the
+    // citation assertions below aren't vacuously green off a pending state.
+    await waitFor(() =>
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
+        "The rollout starts next Monday.",
+      ),
+    )
     expect(document.querySelector(".ai-bar-reply-cite-src")).toBeNull()
     expect(document.querySelector(".ai-bar-reply-cites")).toBeNull()
     for (const raw of ["slack_channels", "communication/incident"]) {

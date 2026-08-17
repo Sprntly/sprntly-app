@@ -29,7 +29,7 @@ import os
 import re
 import sys
 import uuid
-from typing import Literal, NamedTuple
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -121,16 +121,6 @@ _GROUP_TURN_DTO_KEYS = (
 # completion.
 _group_reply_tasks: set[asyncio.Task] = set()
 
-# LT-8 (genuinely open, spec §10.2/build-spec §Group): which shape the
-# group agent's reply call sees as `question` — the attributed transcript
-# itself, or just the latest triggering message (with the full transcript
-# still riding on `SurfaceScope.prerendered_transcript` either way, so the
-# model always sees the whole thread; see `_respond_as_group_agent`).
-# Defaulted to the conservative option so a missing live test never
-# silently changes router/interceptor behaviour (build-spec §Group);
-# pinned by the ship-gate LT-8 live test before merge.
-_GROUP_TRANSCRIPT_AS_QUESTION = False
-
 
 def _run_group_reply_blocking(coro) -> None:
     """pytest-only: run the async group reply to COMPLETION synchronously so a
@@ -166,6 +156,7 @@ def _schedule_group_reply(
     client_message_id: str | None = None,
     job_id: int | None = None,
     run_id: str | None = None,
+    pinned_skill: str | None = None,
 ) -> None:
     """Mint the run's execution identity + persist a `generating` `ask_jobs`
     row SYNCHRONOUSLY (so a crash before the background thread starts leaves a
@@ -213,8 +204,18 @@ def _schedule_group_reply(
                 )
                 return
             raise
+    # Resolve the FINAL pinned-skill id HERE — this function has `source_turn_id`
+    # in scope on ALL paths (fresh mention/solo/gate/continuation AND retry), so
+    # the pin is keyed to the ORIGINATING turn. The FE-sent id wins; absent (a
+    # retry sends none), fall back to re-parsing that exact turn's spliced
+    # trigger. Threaded to the reply below so the engine skips routing on a
+    # deterministic pin, exactly like main/private.
+    resolved_pinned_skill = pinned_skill or _pin_from_source_turn(
+        conversation_id, source_turn_id, ctx.company_id
+    )
     coro = _respond_as_group_agent(
         project_id, conversation_id, ctx, trigger_kind, job_id=job_id, run_id=run_id,
+        pinned_skill=resolved_pinned_skill,
     )
     if "pytest" in sys.modules:
         _run_group_reply_blocking(coro)
@@ -222,6 +223,29 @@ def _schedule_group_reply(
     task = asyncio.create_task(coro)
     _group_reply_tasks.add(task)
     task.add_done_callback(_group_reply_tasks.discard)
+
+
+def _pin_from_source_turn(
+    conversation_id: int, source_turn_id: int | None, enterprise_id: str | None
+) -> str | None:
+    """Recover the pinned-skill id from a source turn's OWN spliced trigger.
+
+    The FE only sends `pinned_skill` on the original post, not on a retry — so
+    when the wire id is absent, re-derive it from the source turn's content by
+    the engine's own slash parse (`qa_agent`'s `/trigger` fast-path idiom),
+    keyed to THIS turn (`source_turn_id`), never the latest turn in the thread.
+    A retry with intervening messages therefore still fires the skill the
+    original turn named. Returns None when the turn has no routable slash
+    trigger."""
+    if source_turn_id is None:
+        return None
+    turn = _get_group_turn(conversation_id, source_turn_id)
+    content = (turn or {}).get("content") or ""
+    if content.startswith("/"):
+        token = content[1:].split(None, 1)[0].lower()
+        if qa_agent._routable(token, enterprise_id):
+            return token
+    return None
 
 
 def _get_group_turn(conversation_id: int, turn_id: int | None) -> dict | None:
@@ -264,49 +288,66 @@ def _publish_group_turn_created(project_id: int, conversation_id: int, turn: dic
         )
 
 
-_GROUP_AGENT_SYSTEM_PROMPT = """\
+# The @Sprntly GROUP agent's system-prompt base — the SAME project-surface
+# behavioral contract the private surface carries (`ask_job_runner.
+# _PRIVATE_SCOPE_SYSTEM`): the read-tool + retrieval + synthesis + tenancy
+# framing, so the group model retrieves and grounds instead of narrating a
+# non-answer. What stays GROUP-specific is only the genuine multi-party
+# register (one voice in a shared thread) + the addressing note
+# (`_ADDRESSING_NOTES`, appended per turn) + the roster block. The edit
+# contract is the private-style edit-applies-via-confirm framing: the group
+# agent HAS an in-band `edit_prd` tool (routed to the shared confirm gate),
+# so the old "you have NO PRD-editing tool" clause is gone.
+_GROUP_SCOPE_SYSTEM = """\
 You are Sprntly, a project teammate embedded in this team's group chat.
 You were tagged with @Sprntly in the transcript below. Read the recent
 conversation (each line is "Name (job role): message" or "Sprntly: message"
-for your own prior turns) and reply helpfully and concisely to whoever
-tagged you, as one more voice in the thread — not a formal report.
-
-Rules:
-- Address the request that mentioned you; use the surrounding turns only
-  as context for who is asking and why.
-- Keep it conversational and short — a few sentences, not a document.
-- If the ask is unclear or out of scope, say so plainly rather than
-  guessing.
-- You have a delegate_task tool: when someone asks you to hand a specific
-  task to a teammate, call it (pick the assignee from the roster below).
-  Do not call it for a plain question, an FYI, or human-to-human chatter.
-- You have NO PRD-editing tool in THIS reply. A PRD edit, when it can be
-  made, is applied by a separate step BEFORE you are asked to reply — so
-  if you are being asked to reply here, no edit was applied on this turn.
-  Therefore you must NEVER claim you edited the document: do not say you
-  "added", "updated", "changed", "removed", or "appended" anything to the
-  PRD, and never report a change as "done". If the latest turn is asking
-  for a PRD change, either discuss it or say what you need to make it (for
-  example, which PRD to edit) — but do NOT state the change as already
-  made. Reporting an edit that did not happen misleads the team.
+for your own prior turns) and reply helpfully to whoever tagged you, as one
+more voice in the thread — not a formal report. Match the room's register:
+be conversational, but give the ask the depth it needs — retrieve and
+synthesize from the project's real data rather than deflecting or narrating
+a non-answer. If the ask is unclear or out of scope, say so plainly rather
+than guessing.
 
 You KNOW this project. The PROJECT CONTEXT block below gives you the
 project's shared memory, its members (the roster), its open tasks (the
 delegation ledger), and its artifacts (PRDs, prototypes, evidence,
 reports). Answer questions about any of these directly — never say you
-"can't see" the team's files, tasks, or members. For the FULL detail
-behind the summary, use your read tools: get_project_memory,
-list_project_artifacts, get_artifact_content (to read a specific PRD/
-report/evidence body), and get_task_ledger. Every one of these is scoped
-to THIS project only. When someone asks what a document says, call
-get_artifact_content and answer from the real content.
+"can't see" the team's files, tasks, or members, and never tell the room to
+connect a data source for something this block already holds. You have tools
+to read the project's shared memory, its artifact list, a specific artifact's
+content, and its task ledger — call them when the answer depends on project
+data rather than guessing: get_project_memory, list_project_artifacts,
+get_artifact_content (to read a specific PRD/report/evidence body), and
+get_task_ledger. When someone asks what a document says, call
+get_artifact_content and answer from the real content. When the ask is for
+the whole picture — "catch us up", "what's the why and goal here" — first
+read the project's shared memory (and its artifacts/ledger as needed), then
+synthesize the why, the goal, the current state, who's assigned to what, and
+prior work — grounded in what you read, never generic.
+
+You have a delegate_task tool: when someone asks you to hand a specific
+task to a teammate, call it (pick the assignee from the roster below). Do
+not call it for a plain question, an FYI, or human-to-human chatter.
+
+You can edit this project's PRD. When the latest turn asks for a PRD change,
+call the edit_prd tool with a plain-language instruction — you do NOT choose
+or pass a PRD id; the right PRD is resolved for you, and if the project has
+more than one PRD you will be asked which one to change. The edit is NOT
+written immediately: it is proposed and the team confirms it before it takes
+effect. So never claim you already changed, added, updated, removed, or
+appended anything — say you've proposed the change and it awaits the team's
+confirmation.
+
+Everything you can read or edit is scoped to THIS project only; never assume
+data from another project or company.
 
 {nudge}
 """.format(nudge=PROJECT_TOOL_NUDGE)
 
 
-def _group_system_with_roster(roster: list[dict]) -> str:
-    """`_GROUP_AGENT_SYSTEM_PROMPT` + a live `PROJECT ROSTER:` block (AD-P18
+def _group_scope_system_with_roster(roster: list[dict]) -> str:
+    """`_GROUP_SCOPE_SYSTEM` + a live `PROJECT ROSTER:` block (AD-P18
     model-arbitration seam) — first-name + job_role per member, no PII
     beyond that. Lets the model resolve a free-text assignee ("the
     designer") to a specific teammate before calling `delegate_task`, at
@@ -318,7 +359,7 @@ def _group_system_with_roster(roster: list[dict]) -> str:
         role = m.get("job_role") or "no role set"
         lines.append(f"- {first} — {role}")
     roster_block = "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
-    return f"{_GROUP_AGENT_SYSTEM_PROMPT}\n{roster_block}"
+    return f"{_GROUP_SCOPE_SYSTEM}\n{roster_block}"
 
 def _projects_enabled() -> bool:
     """Read PROJECTS_ENABLED at REQUEST TIME (never import time). Default-off;
@@ -409,10 +450,12 @@ class PostGroupTurnRequest(BaseModel):
     # `conversation_turns.attachments` column, whitelist-stripped from every
     # group read/broadcast) and folded into the agent reply's question —
     # mirroring the private surface's attachment ride.
-    # `pinned_skill` names the FE's pick on the wire; the skill itself rides
-    # the SPLICED trigger in `content` (the one splice rule every surface
-    # uses — the engine's slash-trigger routing reads it from the text), so
-    # this field is informational, not a second routing input.
+    # `pinned_skill` names the FE's pick on the wire as `{id, trigger, label}`.
+    # Its `id` is now threaded through the group reply chain as an EXPLICIT
+    # routing input to `qa_agent.answer(pinned_skill=…)` — a deterministic pin
+    # that skips routing, exactly like main/private. (The skill also still rides
+    # the spliced trigger in `content`; on a retry, where the FE resends no id,
+    # the pin is recovered from that source turn's own trigger text.)
     client_message_id: str | None = None
     pinned_skill: dict | None = None
     attachments: list | None = None
@@ -1559,6 +1602,10 @@ async def post_group_turn_route(
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
     _publish_group_turn_created(project_id, conversation["id"], turn)
+    # The FE names its skill pick on the wire as `{id, trigger, label}`; the id
+    # is the explicit routing input threaded to the reply (the skill also rides
+    # the spliced trigger in `content`, but an explicit id skips routing).
+    pinned_skill_id = (payload.pinned_skill or {}).get("id")
     if _MENTION_RE.search(payload.content):
         if turn:
             conversations_db.set_group_turn_trigger_kind(turn["id"], "mention")
@@ -1566,6 +1613,7 @@ async def post_group_turn_route(
             project_id, conversation["id"], ctx, trigger_kind="mention",
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
+            pinned_skill=pinned_skill_id,
         )
     elif _is_solo_project(project_id):
         # Solo project (exactly ONE human member + the virtual Sprntly agent):
@@ -1582,6 +1630,7 @@ async def post_group_turn_route(
             project_id, conversation["id"], ctx, trigger_kind="solo",
             source_turn_id=turn["id"] if turn else None,
             client_message_id=payload.client_message_id,
+            pinned_skill=pinned_skill_id,
         )
     else:
         recent = conversations_db.list_group_turns(conversation["id"])[-_GROUP_CONTEXT_TURNS:]
@@ -1607,6 +1656,7 @@ async def post_group_turn_route(
                 project_id, conversation["id"], ctx, trigger_kind=trigger_kind,
                 source_turn_id=turn["id"] if turn else None,
                 client_message_id=payload.client_message_id,
+                pinned_skill=pinned_skill_id,
             )
         elif turn:
             # No reply scheduled — the stay-out decision has no agent turn
@@ -1705,9 +1755,8 @@ def project_chat_intent(
 ):
     """The PRIVATE project chat's classify decision — the project-scoped
     counterpart to `POST /v1/chat/intent` (`routes/chat.py`), giving the
-    private surface the same server-side target resolution the GROUP
-    surface already has via `_classify_and_maybe_edit_group_prd` below —
-    both now share ONE resolve+classify sequence, `resolve_project_chat_
+    private surface server-side target resolution via ONE resolve+classify
+    sequence, `resolve_project_chat_
     intent` (single-sourced so the two surfaces can never drift on how a
     project's edit target is found).
 
@@ -1779,173 +1828,107 @@ def resolve_project_chat_intent(
     with that target threaded in (`resolve_chat_intent(..., prd_id=prd_id)`)
     so an `edit_prd` verdict survives the `_NEEDS_PRD` downgrade whenever a
     target actually resolves. Returns `(envelope, prd_id, refusal)` —
-    callers decide what to do with each (the private route echoes envelope+
-    prd_id onto the response; the group classifier gates its own edit-apply
-    on prd_id and threads refusal into its no-fabrication fallback note).
-
-    Extracted from what was, pre-refactor, duplicated inline in both the
-    private route above and `_classify_and_maybe_edit_group_prd` below —
-    this is the ONE place either surface's target resolution can live, so
-    they cannot silently diverge.
+    the private route echoes envelope+prd_id onto its `/chat/intent` response.
+    (The group surface no longer classifies to edit — it edits in-band via the
+    `edit_prd` tool, which resolves its OWN target via `_resolve_prd_id`; see
+    `_propose_group_prd_edit`.)
 
     `refusal` is `_resolve_prd_id`'s human-readable reason a target did NOT
     resolve (no PRD / more than one PRD on the project) — `None` when a
-    target resolved. The group caller uses it to tell an UN-applied edit
-    request apart from a plain answer so its fallback reply can ask which
+    target resolved. The private route uses it to surface a genuine 2+-PRD
+    ambiguity as a `clarify` envelope so the caller can ask which
     PRD instead of silently generating a confirmation it never made."""
     prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
     envelope = resolve_chat_intent(ctx.company_id, message, history, prd_id=prd_id)
     return envelope, prd_id, refusal
 
 
-class _GroupEditOutcome(NamedTuple):
-    """What one classify-then-maybe-edit pass produced, so the caller can
-    tell three cases apart WITHOUT re-classifying or forking a second reply
-    path (the single classify-and-edit path stays authoritative for every
-    trigger kind — mention, continuation, gate):
-
-    - `applied_turn` not None → the classify pass PROPOSED an edit (via
-      `propose_chat_edit_scoped`) and its assistant turn is already
-      posted/broadcast: either a proposal turn carrying `reply.pending_mutation`
-      (an edit was found, awaiting confirmation — nothing written to `prds`
-      yet), or a plain 'nothing to change' turn. The field name is kept
-      (rather than renamed to `proposed_turn`) so the caller's early-return
-      contract is unchanged; the caller returns immediately either way and
-      never reaches the unified-engine reply. The actual `prds` write happens
-      later, only when the confirm route commits the stored proposal.
-    - `applied_turn` None AND `was_edit_request` True → the latest turn WAS
-      an edit request but nothing was written (flag off, or the target
-      would not resolve — zero/ambiguous PRD, `refusal` says which when
-      set). The caller falls through to the unified-engine reply and MUST NOT let
-      the reply claim an edit happened; `refusal`, when set, lets it ask
-      which PRD instead.
-    - `applied_turn` None AND `was_edit_request` False → not an edit at all
-      (answer/discussion); ordinary unified-engine reply.
-
-    `needs_prd_clarify` — a SEPARATE, content-derived signal, NOT a
-    restatement of `refusal` truthiness: True only when THIS turn's own
-    classify came back downgraded-for-no-target (`envelope.get("source") ==
-    "no_target_prd"` — the model classified a PRD-target intent) AND the
-    project genuinely has 2+ PRDs to choose from. `refusal` alone depends
-    only on the project's PRD COUNT, not on what the message said, so keying
-    the "which PRD?" question off `refusal` truthiness would ask it on every
-    ordinary message in any 2+-PRD project — this field exists precisely to
-    avoid that over-fire while still surfacing the genuine ambiguity."""
-    applied_turn: dict | None
-    was_edit_request: bool
-    refusal: str | None
-    needs_prd_clarify: bool = False
-    # The classify envelope this pass produced (enriched in place with the
-    # shared render-data legs — artifact_list / nested open.candidates), so
-    # the caller's reply persist can carry the card data onto the assistant
-    # turn's structured `reply`. None on the applied-edit path (that path
-    # posts its own turn and never reaches the reply persist).
-    envelope: dict | None = None
-
-
-def _classify_and_maybe_edit_group_prd(
+def _classify_group_envelope(
     project_id: int,
-    conversation_id: int,
     ctx: WorkspaceContext,
     message: str,
     history: list[dict],
     dataset: str,
-) -> _GroupEditOutcome:
-    """Classify one group turn via `resolve_chat_intent` (reused verbatim,
-    spec §Composition — group) and, when the envelope comes back `edit_prd`
-    with `PROJECT_PRD_EDIT_ENABLED` on AND a target actually resolves, apply
-    the edit through the SAME `apply_chat_edit_scoped` the private surface
-    calls (`project_chat_edit` route) — the ★ IDOR gate (`assert_prd_on_project`
-    then `require_owned_prd`) fires exactly as it does there. On success,
-    persists the result as an assistant turn, broadcasts it via
-    `_publish_group_turn_created`, and returns a `_GroupEditOutcome` with
-    `applied_turn` set.
+) -> dict:
+    """Classify one group turn for CARD ENRICHMENT only — the shared
+    render-data legs `/v1/chat/intent` attaches (`artifact_list` /
+    `artifact_counts` / the nested `open` lookup), stamped onto THIS turn's
+    classify envelope in place so the group turn's persisted `reply` renders
+    the same cards a reload does (a no-op unless the intent is an open/list
+    ask). The listing legs are scoped to THIS project's artifacts, so the
+    group surface's cards/counts agree with its project-scoped prose.
 
-    Returns a `_GroupEditOutcome` with `applied_turn=None` for every
-    outcome that should fall through to the existing unified-engine reply
-    instead — a non-`edit_prd` envelope, the flag off, or an
-    unresolved/ambiguous target (`_resolve_prd_id` — NEVER a client/model-
-    supplied id — over THIS project's own artifacts) — but ALWAYS reports
-    `was_edit_request` truthfully (the latest turn's own intent, independent
-    of why nothing got written) so the caller's fallback reply can tell a
-    genuine non-edit turn apart from a requested-but-unwritten edit and
-    never fabricate a completed change for the latter (B2 no-fabrication).
-
-    `ProjectPrdWriteDenied` (cross-project) and the cross-tenant
-    `HTTPException(404)` (from `require_owned_prd`, inside
-    `apply_chat_edit_scoped`) PROPAGATE — this function makes ZERO writes on
-    either refusal, fail-closed by construction same as the gate itself. The
-    caller (`_respond_as_group_agent`) is the one wrapping this in a
-    best-effort try/except (AD-P7); this function itself does not swallow."""
-    allow_prd_edit = project_prd_edit_enabled()
-    envelope, prd_id, refusal = resolve_project_chat_intent(
-        project_id, message, history, dataset, ctx
-    )
-    # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
-    # conversation stamps, artifact rows/counts), stamped onto THIS turn's
-    # classify envelope in place — a no-op unless the intent is an
-    # open/list ask, so the edit path below pays nothing for it. The
-    # listing legs are scoped to THIS project's artifacts, so the group
-    # surface's cards/counts agree with its project-scoped prose.
+    The PRD-EDIT decision is NO longer made here: group edits are an
+    in-band `edit_prd` tool routed to the shared confirm gate — so this pass
+    never resolves an edit target, never proposes, and never steers a
+    no-fabrication note. It classifies for cards and nothing else. Returns the
+    enriched envelope."""
+    envelope = resolve_chat_intent(ctx.company_id, message, history)
     enrich_chat_envelope(envelope, ctx, dataset, project_id=project_id)
-    # Content-derived clarify signal — computed from THIS turn's own classify
-    # outcome, never from `refusal` truthiness (which depends only on the
-    # project's PRD count, not on what was asked — see `_GroupEditOutcome`'s
-    # docstring). `_project_prd_ids` is only read on the branch where the
-    # downgrade actually fired, so a plain non-edit message never pays for
-    # a manifest read it doesn't need.
-    needs_prd_clarify = False
-    if envelope.get("source") == "no_target_prd":
-        needs_prd_clarify = len(_project_prd_ids(project_id, dataset, ctx.company_id)) >= 2
-    was_edit_request = envelope["intent"] == "edit_prd"
-    if not was_edit_request or not allow_prd_edit or prd_id is None:
-        # Nothing is written on this pass. Report WHETHER the latest turn
-        # WAS an edit request (regardless of WHY it didn't apply) so the
-        # caller's unified-engine fallback can ask/answer honestly rather
-        # than fabricate a "done" (B2 no-fabrication).
-        return _GroupEditOutcome(
-            applied_turn=None, was_edit_request=was_edit_request, refusal=refusal,
-            needs_prd_clarify=needs_prd_clarify, envelope=envelope,
-        )
+    return envelope
 
+
+def _propose_group_prd_edit(
+    project_id: int,
+    conversation_id: int,
+    ctx: WorkspaceContext,
+    dataset: str,
+    instruction: str,
+) -> tuple[str, dict | None]:
+    """The @Sprntly group agent's in-band `edit_prd` tool handler —
+    the group half of the shared propose→confirm gate. Returns
+    `(narration, pending_mutation | None)`:
+
+    - flag off → a plain "not turned on" narration, no pending, no write;
+    - no target / an ambiguous 2+-PRD target → the server-resolved refusal as
+      the narration (so the model ASKS which PRD, `needs_prd_clarify`), no
+      pending, no write;
+    - the editor found nothing to change → a plain narration, no pending;
+    - an edit is ready → the proposal narration + the pending mutation
+      (token/summary/prd_id) the group turn stamps onto `reply.pending_mutation`
+      so the FE confirm card fires.
+
+    ★ SECURITY: the target is resolved SERVER-SIDE via
+    `_resolve_prd_id({}, ...)` — a HARD-CODED EMPTY DICT, exactly as the
+    retired pre-step did — never a model-supplied id (the `edit_prd` tool
+    schema exposes NO `prd_id`). Confirm gate preserved: this routes to the
+    SAME `propose_chat_edit_scoped` (propose writes NOTHING to `prds`); the
+    existing confirm route applies exactly the stored patch (applied ==
+    proposed). The two IDOR gates re-run on the CALLER inside
+    `propose_chat_edit_scoped`; `ProjectPrdWriteDenied` (cross-project) and
+    the cross-tenant `HTTPException(404)` PROPAGATE — ZERO write on either
+    refusal, fail-closed by construction, same as the retired pre-step."""
+    if not project_prd_edit_enabled():
+        return ("PRD editing from chat isn't turned on for this project yet.", None)
+    prd_id, refusal = _resolve_prd_id({}, project_id, dataset, ctx.company_id)
+    if prd_id is None:
+        # No PRD, or 2+ PRDs (`refusal` lists them) — the model relays this to
+        # ask which PRD; nothing is proposed and nothing is written.
+        return (refusal or "I couldn't work out which PRD to edit.", None)
     proposal = propose_chat_edit_scoped(
-        prd_id, envelope["instruction"], ctx,
+        prd_id, instruction, ctx,
         project_id=project_id, dataset=dataset,
         conversation_id=conversation_id, surface="group",
     )
-    # NOTHING was written to `prds` here — the edit is PROPOSED, not applied.
-    # Word the assistant turn as a PROPOSAL that invites confirmation ONLY
-    # when the editor actually found something to change (`proposed`);
-    # otherwise say plainly that nothing needs changing rather than claiming a
-    # pending edit (B2 no-fabrication). `summary` is the editor's own one-line
-    # description of WHAT would change.
     summary = (proposal.get("summary") or "").strip()
     if not proposal.get("proposed"):
-        narration = summary or "I didn't find anything in the PRD to change for that."
-        assistant_turn = conversations_db.post_group_turn(
-            conversation_id, None, narration, role="assistant"
-        )
-        _publish_group_turn_created(project_id, conversation_id, assistant_turn)
-        return _GroupEditOutcome(applied_turn=assistant_turn, was_edit_request=True, refusal=None)
-
-    # An edit is READY but UNWRITTEN. Narrate the proposal and stamp the
-    # pending mutation onto the turn's structured `reply` so the client can
-    # offer a confirm/cancel affordance; the write happens only when the
-    # confirm route commits the stored patch (applied == proposed).
-    narration = f"I'd like to update the PRD: {summary} Confirm to apply.".strip() if summary \
+        # The editor judged the instruction wasn't an edit — nothing to
+        # confirm, no token, no pending mutation (B2 no-fabrication).
+        return (summary or "I didn't find anything in the PRD to change for that.", None)
+    # An edit is READY but UNWRITTEN. Narrate the proposal and hand back the
+    # pending mutation so the group turn stamps `reply.pending_mutation` and
+    # the FE confirm card fires; the write happens only when the confirm route
+    # commits the stored patch (applied == proposed).
+    narration = (
+        f"I'd like to update the PRD: {summary} Confirm to apply." if summary
         else "I'd like to update the PRD. Confirm to apply."
-    pending_reply = {
-        "pending_mutation": {
-            "token": proposal["token"],
-            "summary": proposal["summary"],
-            "prd_id": proposal["prd_id"],
-        }
-    }
-    assistant_turn = conversations_db.post_group_turn(
-        conversation_id, None, narration, role="assistant", reply=pending_reply,
     )
-    _publish_group_turn_created(project_id, conversation_id, assistant_turn)
-    return _GroupEditOutcome(applied_turn=assistant_turn, was_edit_request=True, refusal=None)
+    pending = {
+        "token": proposal["token"],
+        "summary": proposal["summary"],
+        "prd_id": proposal["prd_id"],
+    }
+    return (narration, pending)
 
 
 # Addressing notes appended to the group agent's reply system prompt, keyed
@@ -1986,27 +1969,28 @@ _ADDRESSING_NOTES = {
 async def _respond_as_group_agent(
     project_id: int, conversation_id: int, ctx: WorkspaceContext,
     trigger_kind: str = "mention", *, job_id: int, run_id: str,
+    pinned_skill: str | None = None,
 ) -> None:
     """Produce the group agent's reply THROUGH the shared execution
     lifecycle primitive (`run_execution_job`), so the group surface *inherits*
     the same heartbeat / terminal-once / `error_class` envelope main and
     private already run — not a wrapper around a status column.
 
-    The reply WORK is the `body` closure below: run the SAME single
-    classify-and-edit path first regardless of `trigger_kind`
-    (`_classify_and_maybe_edit_group_prd` — a real edit applies in place and
-    the run completes; a requested-but-unwritten edit steers the fallback with
-    an `edit_note` so it never fabricates a completed change, B2), then
-    assemble the recent speaker-attributed group context and produce ONE
+    The reply WORK is the `body` closure below: classify the trigger for CARD
+    ENRICHMENT only (`_classify_group_envelope`, regardless of `trigger_kind`),
+    then assemble the recent speaker-attributed group context and produce ONE
     assistant turn via the unified engine (`qa_agent.answer`, scoped to this
-    project). On a forced failure the primitive writes `status='error'` +
-    `error_class` and NO assistant turn is fabricated — the old
-    `except`-that-only-logs is GONE, the primitive owns failure.
+    project) — with the GROUP-only in-band `edit_prd` tool in scope, so a PRD
+    change asked for on this turn is proposed mid-answer and rides back as
+    `reply.pending_mutation` (no pre-classify edit fork). On a forced failure
+    the primitive writes `status='error'` + `error_class` and NO assistant turn
+    is fabricated — the old `except`-that-only-logs is GONE, the primitive owns
+    failure.
 
     Group inherits report/promote/ingest via the primitive's `on_committed`
     hook, reusing the SAME project-gated calls main/private use
-    (`capture_report`, `maybe_promote_turn`, `maybe_ingest_status`) — run on a
-    produced reply, not the edit-applied path (which posted its own turn).
+    (`capture_report`, `maybe_promote_turn`, `maybe_ingest_status`) — run on
+    the one produced reply (every turn now takes the unified-engine path).
     Group opts OUT of cancel (`is_cancelled=lambda: False`) — a backgrounded,
     multi-party run has no Stop this wave (matches `capabilities.cancel=False`
     on the group scope); recorded in the opt-out ledger, not silently
@@ -2024,20 +2008,20 @@ async def _respond_as_group_agent(
     trigger_content = trigger["content"] if trigger else transcript
 
     def _body() -> ExecutionOutcome:
-        # Every trigger kind runs the ONE classify-then-edit path first — an
-        # applicable edit is applied in place and the run completes; anything
-        # else falls through to the SAME unified-engine reply below.
-        edit_note = ""
+        # Classify the trigger for CARD ENRICHMENT only — the PRD-edit
+        # decision is now an in-band tool the model calls mid-answer, not a
+        # pre-classify fork. Every trigger kind runs the SAME unified-engine
+        # reply below.
         classify_envelope: dict | None = None
         # History is hoisted so it is ALWAYS defined and can be handed to the
         # unified engine below (the router/connector interceptors need the prior
         # turns to keep a source thread alive — mirrors the private surface).
         # It stays [] on the trigger-less degenerate path so the answer call
         # passes `history=None` and the transcript-as-question is not ALSO
-        # rendered as history (no double-count). NOTE: if
-        # `_GROUP_TRANSCRIPT_AS_QUESTION` is ever flipped True (question = full
-        # transcript), this history must be dropped or the question narrowed, or
-        # the composer path double-counts the conversation.
+        # rendered as history (no double-count). The group question is now
+        # always the latest triggering message (the LT-8 input-shape toggle was
+        # retired in the surface-collapse refactor), so with a trigger present
+        # the prior turns live only in `history` and never double-count.
         history: list[dict] = []
         if trigger is not None:
             history = [
@@ -2045,52 +2029,21 @@ async def _respond_as_group_agent(
                 for t in recent
                 if t is not trigger
             ]
-            edit = _classify_and_maybe_edit_group_prd(
-                project_id, conversation_id, ctx, trigger["content"], history, dataset,
+            classify_envelope = _classify_group_envelope(
+                project_id, ctx, trigger["content"], history, dataset,
             )
-            classify_envelope = edit.envelope
-            if edit.applied_turn is not None:
-                # The edit posted its own assistant turn; the run is a success.
-                # `edit_applied` in side_effects tells `_on_committed` to skip
-                # promote/ingest (faithful to the pre-primitive edit path).
-                return ExecutionOutcome(
-                    status="ready",
-                    response={"answer": (edit.applied_turn.get("content") or "")},
-                    side_effects=["edit_applied"],
-                )
-            if edit.needs_prd_clarify:
-                # Content-derived signal (NOT `edit.refusal` truthiness — see
-                # `_GroupEditOutcome`'s docstring): this turn asked to edit the
-                # PRD and the project genuinely has 2+ PRDs. Ask which one.
-                listing = (edit.refusal or "more than one PRD exists on this project").rstrip(".")
-                edit_note = (
-                    "EDIT STATUS: The latest turn asked to change the PRD, but "
-                    f"{listing}. You cannot edit the PRD in this reply. Do NOT "
-                    "say you added, updated, or changed anything. Ask which "
-                    "PRD is meant before doing anything else."
-                )
-            elif edit.was_edit_request:
-                # An edit was asked for but NOT written for some OTHER reason.
-                reason = (edit.refusal or "the edit could not be applied").rstrip(".")
-                edit_note = (
-                    "EDIT STATUS: The latest turn asked to change the PRD, but "
-                    f"NO edit was made on this turn ({reason}). You cannot edit "
-                    "the PRD in this reply. Do NOT say you added, updated, or "
-                    "changed anything. Explain briefly what's needed."
-                )
 
         roster = projects_db.list_members(project_id)
 
-        # Bounded project-context block + the six project tools (4 read +
-        # delegate/execute), exactly the private surface's set — both project
-        # surfaces stay single-sourced on the unified engine's tool set.
+        # Bounded project-context block + the six shared project tools (4 read +
+        # delegate/execute) exactly like the private surface, PLUS the GROUP-only
+        # in-band `edit_prd` tool (added to `extra_tools` below, never to the
+        # shared `read_tools()`, so private's tool set is unchanged).
         context_block = project_group_context.assemble_group_agent_context(
             project_id, dataset, ctx.company_id
         )
         addressing = _ADDRESSING_NOTES.get(trigger_kind, _ADDRESSING_NOTES["mention"])
-        system_parts = [_group_system_with_roster(roster), addressing]
-        if edit_note:
-            system_parts.append(edit_note)
+        system_parts = [_group_scope_system_with_roster(roster), addressing]
         from app.project_group_context import _instructions_block
 
         try:
@@ -2101,14 +2054,10 @@ async def _respond_as_group_agent(
         if instr_block:
             system_parts.append(instr_block)
 
-        # LT-8 input-shape switch — `question` is either the full attributed
-        # transcript or just the latest triggering message;
+        # `question` is the latest triggering message;
         # `prerendered_transcript` ALWAYS carries the full attributed
-        # transcript either way (Invariant 4).
-        question = (
-            transcript if _GROUP_TRANSCRIPT_AS_QUESTION
-            else (trigger["content"] if trigger else transcript)
-        )
+        # transcript, so the model still sees the whole thread (Invariant 4).
+        question = trigger["content"] if trigger else transcript
         # The trigger turn's attachments ride the QUESTION only (mirrors the
         # private surface's attachment fold onto its ask) — never the
         # transcript/DTO, so file text stays out of the visible thread and
@@ -2122,6 +2071,18 @@ async def _respond_as_group_agent(
                     if isinstance(a, dict)
                 )
                 question = f"{question}{folded[:100_000]}"
+
+        def _edit_prd_handler(tool_input: dict) -> tuple[str, dict | None]:
+            """GROUP-only `edit_prd` tool handler bound to this turn. Resolves
+            the target SERVER-SIDE (never a model id) and routes to the shared
+            propose→confirm gate via `_propose_group_prd_edit`."""
+            instruction = (tool_input.get("instruction") or "").strip()
+            if not instruction:
+                return ("I need to know what change to make to the PRD.", None)
+            return _propose_group_prd_edit(
+                project_id, conversation_id, ctx, dataset, instruction,
+            )
+
         scope = SurfaceScope(
             surface=Surface.project_group,
             project_id=project_id,
@@ -2131,7 +2092,12 @@ async def _respond_as_group_agent(
                 project_delegation.DELEGATE_TASK_TOOL,
                 project_task_execution.EXECUTE_TASK_TOOL,
                 *project_group_context.read_tools(),
+                # GROUP-only in-band PRD edit — NOT in the shared `read_tools()`,
+                # so private's `extra_tools` (and its `answer()` result) stay
+                # byte-identical.
+                project_group_context.EDIT_PRD_TOOL,
             ),
+            edit_prd_handler=_edit_prd_handler,
             roster=tuple(roster),
             assigner_identity={
                 "assigner_user_id": assigner_user_id,
@@ -2147,7 +2113,7 @@ async def _respond_as_group_agent(
         )
         result = qa_agent.answer(
             enterprise_id=ctx.company_id, question=question, dataset=dataset,
-            scope=scope, history=history or None,
+            scope=scope, pinned_skill=pinned_skill, history=history or None,
         )
         reply = (result or {}).get("answer", "")
         # Persist the FULL structured reply, not just the answer string:
@@ -2155,7 +2121,9 @@ async def _respond_as_group_agent(
         # classify envelope's card data (artifact_list / counts / the nested
         # open lookup) — so a reload renders the same cards the live turn
         # does. `content` keeps the plain answer text as the fallback every
-        # pre-column consumer still reads.
+        # pre-column consumer still reads. When the in-band `edit_prd` tool
+        # proposed an edit, `result` carries `pending_mutation` — `dict(result)` lifts it onto `reply_payload` here, so the
+        # FE confirm card fires and the existing confirm route applies it.
         reply_payload: dict = dict(result or {"answer": reply})
         if classify_envelope:
             for key in ("artifact_list", "artifact_counts", "open"):
@@ -2169,11 +2137,10 @@ async def _respond_as_group_agent(
 
     def _on_committed(outcome: ExecutionOutcome) -> None:
         # Report/promote/ingest inheritance — the SAME project-gated calls
-        # `_run_sync`'s `on_committed` uses. Skipped on the edit-applied path
-        # (no produced reply to capture/promote), faithful to the pre-primitive
-        # behaviour where only the answer path promoted.
-        if "edit_applied" in outcome.side_effects:
-            return
+        # `_run_sync`'s `on_committed` uses. Every group turn now takes the one
+        # unified-engine reply path (the edit-applied early-return is gone —
+        # edits are proposed in-band and the proposal IS the answer turn), so
+        # this runs on the produced reply exactly as the answer path always did.
         capture_report(
             outcome.response,
             company_id=ctx.company_id,
@@ -2247,16 +2214,16 @@ def emit_delegation_event_route(
 
     Nothing is written unless all four pass — `record_event` is the last
     line before the return."""
-    _require_project_member(project_id, ctx)                                   # GATE 1
+    _require_project_member(project_id, ctx)  # GATE 1
     deleg = delegation_events_db.load_delegation_for_authz(delegation_id)
-    if deleg is None or deleg["project_id"] != project_id:                     # GATE 2
+    if deleg is None or deleg["project_id"] != project_id:  # GATE 2
         raise HTTPException(404, "Delegation not found")
-    party = delegation_events_db.EVENT_PARTY.get(payload.event)                # GATE 3
+    party = delegation_events_db.EVENT_PARTY.get(payload.event)  # GATE 3
     if party is None:
         raise HTTPException(422, "Unknown or non-emittable event")
     if deleg[f"{party}_user_id"] != ctx.user_id:
         raise HTTPException(403, "Not the correct party for this event")
-    current = delegation_events_db.current_status(delegation_id)               # GATE 4
+    current = delegation_events_db.current_status(delegation_id)  # GATE 4
     if not delegation_events_db.is_legal_transition(current, payload.event):
         raise HTTPException(409, "Illegal transition")
     delegation_events_db.record_event(

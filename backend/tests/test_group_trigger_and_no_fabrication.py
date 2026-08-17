@@ -2,14 +2,13 @@
 
   - `agent_spoke_last` + `trigger_kind` derivation in
     `post_group_turn_route` (AC3)
-  - `resolve_project_chat_intent`'s 3-tuple return, both callers unpacking
-    it, and no stray 2-tuple unpack (AC4)
-  - `_GroupEditOutcome`'s three cases (AC5)
+  - `resolve_project_chat_intent`'s 3-tuple return, the PRIVATE route
+    unpacking it, and no stray 2-tuple unpack (AC4)
+  - the in-band `edit_prd` tool handler `_propose_group_prd_edit`'s cases —
+    proposed / unresolved-target / flag-off (AC7/AC8)
   - the B2 narration guard — a completed "Done" claim only on a real
-    `sections_changed` write (AC6)
-  - the `run_tool_loop` fallback `edit_note` + the group system prompt's
-    "no PRD-editing tool" rule, and that the "Done" literal is single-
-    sourced (AC7)
+    `sections_changed` write, and that the "Done" literal is single-sourced
+    to the confirm route (AC6/AC8)
   - `_ADDRESSING_NOTES` semantics + `trigger_kind`-based selection (AC8)
   - DRY source-scans: one classify-and-edit path, one resolver, shared by
     both surfaces (AC9)
@@ -236,37 +235,30 @@ def test_resolve_project_chat_intent_returns_triple(tenant_client, isolated_sett
     assert refusal2 is None
 
 
-def test_both_resolver_callers_unpack_triple():
-    """Both callers of `resolve_project_chat_intent` unpack all three
-    values; a source-scan proves NO 2-tuple unpack remains anywhere.
-
-    UPDATED for the clarify fix: the private route no longer discards
-    `refusal` (`_refusal`) — it now surfaces the >1-PRD disambiguation as a
-    real `clarify` envelope, so BOTH callers bind the same `refusal` name."""
+def test_private_resolver_caller_unpacks_triple():
+    """The PRIVATE route unpacks all three values from
+    `resolve_project_chat_intent`; a source-scan proves NO 2-tuple unpack
+    remains. The GROUP surface no longer calls this helper (it edits
+    in-band via the `edit_prd` tool, resolving its own target), so there is
+    now exactly ONE call site (the private route) + the `def`."""
     src = PROJECTS_ROUTE_SRC
-    assert src.count("envelope, prd_id, refusal = resolve_project_chat_intent(") == 2
+    assert src.count("envelope, prd_id, refusal = resolve_project_chat_intent(") == 1
     assert "envelope, prd_id, _refusal = resolve_project_chat_intent(" not in src
     assert "envelope, prd_id = resolve_project_chat_intent(" not in src
-    assert src.count("resolve_project_chat_intent(") == 3  # def + 2 call sites
+    assert src.count("resolve_project_chat_intent(") == 2  # def + 1 call site (private)
 
 
-# ── _GroupEditOutcome three cases (AC5) ────────────────────────────────────
+# ── The in-band `edit_prd` tool handler `_propose_group_prd_edit` (AC7/AC8) ──
 
 
-def test_group_edit_outcome_real_edit(tenant_client, isolated_settings, monkeypatch):
+def test_edit_tool_proposes_and_hands_back_pending(tenant_client, isolated_settings, monkeypatch):
+    """A found edit → a PROPOSAL narration (not a completed 'Done') plus the
+    pending mutation the group turn stamps onto `reply.pending_mutation`."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
-    )
-    # Under the confirmation gate the classify pass PROPOSES via
-    # `propose_chat_edit_scoped` (no immediate write); mock its result.
+    monkeypatch.setattr(projects_route, "_resolve_prd_id", lambda *a, **kw: (42, None))
     monkeypatch.setattr(
         projects_route, "propose_chat_edit_scoped",
         lambda *a, **kw: {
@@ -274,123 +266,64 @@ def test_group_edit_outcome_real_edit(tenant_client, isolated_settings, monkeypa
             "sections_changed": ["X"], "prd_id": 42,
         },
     )
-
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "please update the PRD", [], t.slug,
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "please update the PRD",
     )
-    assert outcome.applied_turn is not None
-    assert outcome.was_edit_request is True
-    assert outcome.refusal is None
-    # The turn narrates a PROPOSAL (not a completed 'Done') and carries the
-    # pending mutation for the client to confirm/cancel.
-    assert outcome.applied_turn["content"].startswith("I'd like to update the PRD:")
-    assert "Confirm to apply." in outcome.applied_turn["content"]
-    assert outcome.applied_turn["reply"]["pending_mutation"] == {
-        "token": "tok-1", "summary": "Updated X.", "prd_id": 42,
-    }
+    assert narration.startswith("I'd like to update the PRD:")
+    assert "Confirm to apply." in narration
+    assert pending == {"token": "tok-1", "summary": "Updated X.", "prd_id": 42}
 
 
-def test_group_edit_outcome_requested_not_written(tenant_client, isolated_settings, monkeypatch):
+def test_edit_tool_unresolved_target_asks_no_write(tenant_client, isolated_settings, monkeypatch):
+    """No target resolves (no/ambiguous PRD) → the server-resolved refusal is
+    the narration (the model relays it to ask which PRD); nothing proposed."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: (
-            {"intent": "edit_prd", "instruction": "do it"}, None,
-            "This project has no PRD to edit.",
-        ),
+        projects_route, "_resolve_prd_id",
+        lambda *a, **kw: (None, "This project has no PRD to edit."),
     )
-    scoped_calls: list[int] = []
+    proposed: list[int] = []
     monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped", lambda *a, **kw: scoped_calls.append(1),  # noqa: ARG005
+        projects_route, "propose_chat_edit_scoped", lambda *a, **kw: proposed.append(1),  # noqa: ARG005
     )
-
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "please update the PRD", [], t.slug,
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "please update the PRD",
     )
-    assert outcome.applied_turn is None
-    assert outcome.was_edit_request is True
-    assert outcome.refusal == "This project has no PRD to edit."
-    assert scoped_calls == []
+    assert narration == "This project has no PRD to edit."
+    assert pending is None
+    assert proposed == []
 
 
-def test_group_edit_outcome_flag_off_still_reports_was_edit_request(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """The flag-off case is ALSO a 'requested but not written' outcome —
-    `was_edit_request` stays True (regardless of WHY nothing got written)
-    so the fallback reply never silently treats a real edit request as an
-    ordinary answer and risks implying it happened."""
+def test_edit_tool_flag_off_no_propose(tenant_client, isolated_settings, monkeypatch):
+    """Flag off → a plain 'not turned on' narration, no propose, no write."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
 
     monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
+    proposed: list[int] = []
     monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
+        projects_route, "propose_chat_edit_scoped", lambda *a, **kw: proposed.append(1),  # noqa: ARG005
     )
-    scoped_calls: list[int] = []
-    monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped", lambda *a, **kw: scoped_calls.append(1),  # noqa: ARG005
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "please update the PRD",
     )
-
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "please update the PRD", [], t.slug,
-    )
-    assert outcome.applied_turn is None
-    assert outcome.was_edit_request is True
-    assert scoped_calls == []
+    assert "isn't turned on" in narration
+    assert pending is None
+    assert proposed == []
 
 
-def test_group_edit_outcome_not_an_edit(tenant_client, isolated_settings, monkeypatch):
+# ── B2 narration guard (AC6/AC8) ──────────────────────────────────────────
+
+
+def test_narration_proposal_names_summary(tenant_client, isolated_settings, monkeypatch):
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "answer"}, 42, None),
-    )
-    scoped_calls: list[int] = []
-    monkeypatch.setattr(
-        projects_route, "apply_chat_edit_scoped", lambda *a, **kw: scoped_calls.append(1),  # noqa: ARG005
-    )
-
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "what's the status?", [], t.slug,
-    )
-    assert outcome.applied_turn is None
-    assert outcome.was_edit_request is False
-    assert outcome.refusal is None
-    assert scoped_calls == []
-
-
-# ── B2 narration guard (AC6) ────────────────────────────────────────────
-
-
-def test_narration_done_only_on_sections_changed(tenant_client, isolated_settings, monkeypatch):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
-
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
-    )
+    monkeypatch.setattr(projects_route, "_resolve_prd_id", lambda *a, **kw: (42, None))
     monkeypatch.setattr(
         projects_route, "propose_chat_edit_scoped",
         lambda *a, **kw: {
@@ -398,123 +331,106 @@ def test_narration_done_only_on_sections_changed(tenant_client, isolated_setting
             "sections_changed": ["Requirements"], "prd_id": 42,
         },
     )
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "tighten it", [], t.slug,
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "tighten it",
     )
-    content = outcome.applied_turn["content"]
     # A found edit narrates a PROPOSAL that names the summary and invites
     # confirmation — not a completed past-tense claim (B2 no-fabrication).
-    assert content.startswith("I'd like to update the PRD:")
-    assert "Tightened it." in content
-    assert "Confirm to apply." in content
-    assert outcome.applied_turn["reply"]["pending_mutation"]["token"] == "tok-2"
+    assert narration.startswith("I'd like to update the PRD:")
+    assert "Tightened it." in narration
+    assert "Confirm to apply." in narration
+    assert pending["token"] == "tok-2"
 
 
 def test_narration_no_change_when_sections_empty(tenant_client, isolated_settings, monkeypatch):
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_project_chat_intent",
-        lambda *a, **kw: ({"intent": "edit_prd", "instruction": "do it"}, 42, None),
-    )
+    monkeypatch.setattr(projects_route, "_resolve_prd_id", lambda *a, **kw: (42, None))
     # The editor found nothing to change: `propose_chat_edit_scoped` returns
     # `proposed=False` — no token, nothing to confirm.
     monkeypatch.setattr(
         projects_route, "propose_chat_edit_scoped",
         lambda *a, **kw: {"proposed": False, "summary": "", "sections_changed": []},
     )
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "tighten it", [], t.slug,
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "tighten it",
     )
-    content = outcome.applied_turn["content"]
     for claim in ("Done", "updated", "changed", "added"):
-        assert claim not in content
-    assert content == "I didn't find anything in the PRD to change for that."
+        assert claim not in narration
+    assert narration == "I didn't find anything in the PRD to change for that."
     # A no-op proposes nothing, so the turn carries NO pending mutation.
-    assert (outcome.applied_turn.get("reply") or {}).get("pending_mutation") is None
+    assert pending is None
 
 
-# ── B2 fallback edit_note + system prompt rule (AC7) ───────────────────────
-
-
-def test_fallback_edit_note_forbids_write_claim(tenant_client, isolated_settings, monkeypatch):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)  # no PRD -> requested-but-unresolved
-
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: {"intent": "edit_prd", "instruction": "do it"},
-    )
-    systems: list[str] = []
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_loop_capturing(systems))
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly please update the PRD"},
-    )
-    assert r.status_code == 200, r.text
-    assert len(systems) == 1
-    system = systems[0]
-    assert "EDIT STATUS" in system
-    assert "NO edit was made on this turn" in system
-    assert "Do NOT say you added, updated, or changed anything" in system
-
-
-def test_system_prompt_has_no_prd_tool_rule():
-    system = projects_route._GROUP_AGENT_SYSTEM_PROMPT
-    assert "NO PRD-editing tool in THIS reply" in system
-    assert "NEVER claim you edited the document" in system
-
-    weak_prompt = "You are a helpful assistant."
-    assert "NO PRD-editing tool" not in weak_prompt
+def test_group_system_carries_shared_contract_and_edit_via_confirm():
+    """The group system base (`_GROUP_SCOPE_SYSTEM`) now carries the SAME
+    project-surface behavioral contract private carries — the read-tool /
+    retrieval / synthesis / tenancy framing it previously omitted — and the
+    group HAS an in-band edit tool, so the old "you have NO PRD-editing tool"
+    clause is gone in favour of the private-style edit-applies-via-confirm
+    framing. The retired symbol `_GROUP_AGENT_SYSTEM_PROMPT` no longer exists."""
+    system = projects_route._GROUP_SCOPE_SYSTEM
+    # Read-tool + retrieval + synthesis + tenancy framing (previously omitted).
+    assert "get_project_memory" in system
+    assert "list_project_artifacts" in system
+    assert "get_artifact_content" in system
+    assert "get_task_ledger" in system
+    assert "synthesize" in system
+    assert "THIS project only" in system
+    # No longer a retrieval-suppressing hard cap.
+    assert "a few sentences, not a document" not in system
+    # The group now HAS an edit tool; the old "no edit tool" contract is gone.
+    assert "NO PRD-editing tool" not in system
+    assert "edit_prd" in system
+    # Edit-applies-via-confirm framing (newline-insensitive).
+    assert "the team confirms it before it takes" in system
+    assert "proposed the change" in system
+    # The retired symbol is gone.
+    assert not hasattr(projects_route, "_GROUP_AGENT_SYSTEM_PROMPT")
 
 
 def test_done_narration_is_single_sourced():
     """Under the confirmation gate the completed-edit 'Done — I've updated the
-    PRD' literal moves to the CONFIRM route (where the write actually
-    commits). The classify/propose function now narrates a PROPOSAL
-    ("I'd like to update the PRD") and never the completed claim; and the
-    unified-engine fallback reply carries NEITHER literal — it only ever gets
-    an `edit_note` steering it AWAY from claiming a write.
+    PRD' literal lives ONLY in the CONFIRM route (where the write actually
+    commits). The in-band edit tool handler (`_propose_group_prd_edit`)
+    narrates a PROPOSAL ("I'd like to update the PRD") and never the completed
+    claim; and the unified-engine reply body (`_respond_as_group_agent`)
+    carries NEITHER literal — it only stamps whatever the tool proposed.
 
     This keeps each narration single-sourced at exactly the point the state it
     describes is true: a proposal at propose time, a 'Done' only at confirm."""
     src = PROJECTS_ROUTE_SRC
     confirm_start = src.index("def project_chat_edit_confirm(")
     cancel_start = src.index("def project_chat_edit_cancel(")
-    classify_start = src.index("def _classify_and_maybe_edit_group_prd(")
+    propose_start = src.index("def _propose_group_prd_edit(")
     respond_start = src.index("def _respond_as_group_agent(")
-    assert confirm_start < classify_start < respond_start
+    assert confirm_start < propose_start < respond_start
 
     confirm_body = src[confirm_start:cancel_start]
-    classify_body = src[classify_start:respond_start]
-    fallback_body = src[respond_start:]
+    propose_body = src[propose_start:respond_start]
+    reply_body = src[respond_start:]
 
     # The completed 'Done' narration lives in (and only in) the confirm route.
     assert "Done — I've updated the PRD" in confirm_body
-    assert "Done — I've updated the PRD" not in classify_body, (
-        "the classify/propose path must not claim a completed edit — the write "
+    assert "Done — I've updated the PRD" not in propose_body, (
+        "the propose path must not claim a completed edit — the write "
         "hasn't happened yet at propose time"
     )
-    assert "Done — I've updated the PRD" not in fallback_body, (
-        "the unified-engine fallback path must never carry the completed-"
+    assert "Done — I've updated the PRD" not in reply_body, (
+        "the unified-engine reply path must never carry the completed-"
         "edit narration literal — a second producer there would let the "
         "reply fabricate a completed edit claim"
     )
 
-    # The PROPOSAL narration is single-sourced in the classify/propose path and
-    # guarded by the `proposed` flag; the fallback never carries it either.
-    assert classify_body.count("I'd like to update the PRD") >= 1, (
-        "expected the proposal narration literal inside the classify/propose function"
+    # The PROPOSAL narration is single-sourced in the tool handler and guarded
+    # by the `proposed` flag; the reply body never carries it either.
+    assert propose_body.count("I'd like to update the PRD") >= 1, (
+        "expected the proposal narration literal inside `_propose_group_prd_edit`"
     )
-    assert 'proposal.get("proposed")' in classify_body
-    assert "I'd like to update the PRD" not in fallback_body
+    assert 'proposal.get("proposed")' in propose_body
+    assert "I'd like to update the PRD" not in reply_body
 
 
 # ── _ADDRESSING_NOTES (AC8) ─────────────────────────────────────────────
@@ -583,34 +499,40 @@ def test_respond_selects_addressing_note_by_trigger_kind(
 # ── DRY (AC9, Gate-1 check) ─────────────────────────────────────────────
 
 
-def test_single_classify_edit_path_no_fork():
-    """Every trigger kind runs the SAME `_classify_and_maybe_edit_group_
-    prd` call inside `_respond_as_group_agent` — a source-scan proves
-    exactly one call site (plus its one `def`), not a per-trigger-kind
-    duplicate classify/edit path, and that every kind falls through to the
-    SAME unified-engine call (`qa_agent.answer`, RELOCATED from the former
-    `run_tool_loop` call this ticket replaces — post-collapse the literal
-    call is gone from this file; historical references survive only in
-    prose docstrings, not in any executable line)."""
+def test_single_reply_path_no_fork():
+    """Every trigger kind falls through to the SAME unified-engine call
+    (`qa_agent.answer`) — a source-scan proves ONE shared reply call, no
+    per-trigger-kind fork. The pre-classify edit fork is retired (the edit is
+    an in-band tool now): `_classify_and_maybe_edit_group_prd`/`_GroupEditOutcome`
+    are gone, and `_classify_group_envelope` (card enrichment only) has exactly
+    one call site (plus its `def`)."""
     src = PROJECTS_ROUTE_SRC
-    assert src.count("_classify_and_maybe_edit_group_prd(") == 2  # def + 1 call site
+    assert "_classify_and_maybe_edit_group_prd(" not in src
+    assert "_GroupEditOutcome" not in src
+    assert src.count("_classify_group_envelope(") == 2  # def + 1 call site
     assert src.count("result = qa_agent.answer(") == 1  # one shared reply call, no fork
     assert "reply = run_tool_loop(" not in src
     assert "import run_tool_loop" not in src
 
 
-def test_one_resolver_shared_by_both_surfaces():
-    """Both project chat surfaces call the SAME `resolve_project_chat_
-    intent` — no second resolver or duplicate inline resolve+classify
-    pair."""
+def test_group_edit_is_in_band_tool_not_a_resolver_fork():
+    """The GROUP surface no longer classifies-to-edit through `resolve_project_
+    chat_intent` (that helper is now the PRIVATE route's alone). The group
+    edits in-band via the `edit_prd` tool handler `_propose_group_prd_edit`,
+    which resolves its OWN target via `_resolve_prd_id` and routes to the
+    shared `propose_chat_edit_scoped` gate."""
     src = PROJECTS_ROUTE_SRC
     assert src.count("def resolve_project_chat_intent(") == 1
     intent_route_body = src[
         src.index("def project_chat_intent("):src.index("def resolve_project_chat_intent(")
     ]
-    classify_body = src[src.index("def _classify_and_maybe_edit_group_prd("):]
-    assert "resolve_project_chat_intent(" in intent_route_body
-    assert "resolve_project_chat_intent(" in classify_body
+    assert "resolve_project_chat_intent(" in intent_route_body  # private route uses it
+    # The group edit tool handler resolves server-side + routes to the gate.
+    propose_body = src[
+        src.index("def _propose_group_prd_edit("):src.index("def _respond_as_group_agent(")
+    ]
+    assert "_resolve_prd_id({}" in propose_body
+    assert "propose_chat_edit_scoped(" in propose_body
     # The mention gate reuses the existing deterministic regex, not a
     # second matcher.
     assert src.count("_MENTION_RE = re.compile(") == 1
@@ -637,24 +559,19 @@ def test_gate_logs_decision_and_reason_no_content(tenant_client, isolated_settin
     assert secret not in joined
 
 
-# ── Group PRD-edit clarify — the SAME content-derived signal the private ────
-# route uses, driven through the REAL classify path (not a fabricated
-# tuple): `resolve_project_chat_intent`/`_resolve_prd_id` run for real over
-# actually-seeded project PRDs; only `resolve_chat_intent` (the LLM
-# classify call) is mocked, mirroring the REAL `_NEEDS_PRD` downgrade
-# (chat_intent.py) for `prd_id=None`.
+# ── Group PRD-edit clarify — the in-band tool asks which PRD via the REAL ────
+# server-side `_resolve_prd_id` over actually-seeded project PRDs (no mocked
+# resolution). The tool schema omits `prd_id`, so a 2-PRD project can only ask
+# — never auto-pick — mirroring the private route's own clarify posture.
 
 
-def test_group_asks_which_prd_on_two_prds_via_real_classify(
+def test_group_edit_asks_which_prd_on_two_prds_via_real_resolver(
     tenant_client, isolated_settings, monkeypatch, _prototypes_table,
 ):
-    """An edit-phrased group turn on a genuinely 2-PRD project sets
-    `_GroupEditOutcome.needs_prd_clarify=True` and steers the fallback
-    reply's EDIT STATUS note to ask which PRD, via the single-sourced
-    `_project_prd_ids`/refusal listing — end to end through the real HTTP
-    route + the real `_resolve_prd_id`. On the UNFIXED route `was_edit_
-    request` is False (the downgrade rewrote `edit_prd` -> `answer`) so no
-    `edit_note` is produced at all (the red)."""
+    """An edit request on a genuinely 2-PRD project → the tool handler's real
+    `_resolve_prd_id({})` returns the "more than one PRD" refusal, which the
+    handler narrates (asking which one) and proposes NOTHING. No write, no
+    proposal row — server-resolved, never auto-picked (AC7a)."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
     from app.db import projects as projects_db
@@ -665,70 +582,30 @@ def test_group_asks_which_prd_on_two_prds_via_real_classify(
     projects_db.add_artifact(project_id, "prd", prd_b)
 
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        # The REAL `_NEEDS_PRD` downgrade's shape: an edit-phrased turn
-        # whose target failed to resolve (prd_id=None, from the REAL
-        # `_resolve_prd_id` over the 2 seeded PRDs) comes back rewritten to
-        # `answer`, `source="no_target_prd"`; a resolved target keeps
-        # `edit_prd`.
-        if prd_id is None:
-            return {"intent": "answer", "source": "no_target_prd", "instruction": None}
-        return {"intent": "edit_prd", "instruction": "do it", "source": "llm"}
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-    systems: list[str] = []
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_loop_capturing(systems))
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly please update the PRD"},
-    )
-    assert r.status_code == 200, r.text
-    assert len(systems) == 1
-    system = systems[0]
-    assert "EDIT STATUS" in system
-    assert "more than one PRD" in system
-    assert "Do NOT say you added, updated, or changed anything" in system
-
-
-def test_group_plain_message_two_prds_no_clarify(
-    tenant_client, isolated_settings, monkeypatch, _prototypes_table,
-):
-    """NEGATIVE regression (group equivalent of AC6, the over-fire guard):
-    a PLAIN non-edit group message on a genuinely 2-PRD project has
-    `source != "no_target_prd"` (the real classifier never downgrades a
-    non-edit turn) -> `needs_prd_clarify=False` -> no "which PRD" edit_note.
-    Keying the signal off `edit.refusal` truthiness instead (which is
-    non-None on THIS project for EVERY message, since `_resolve_prd_id`
-    depends only on PRD count) would make this test RED — that is exactly
-    the over-fire regression this ticket must not reintroduce."""
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-
-    prd_a = _seed_prd(isolated_settings["db"], dataset=t.slug)
-    prd_b = _seed_prd(isolated_settings["db"], dataset=t.slug)
-    projects_db.add_artifact(project_id, "prd", prd_a)
-    projects_db.add_artifact(project_id, "prd", prd_b)
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
-
-    # A plain question — the real classifier's own `intent`/`source` never
-    # downgrade a non-edit turn, regardless of the project's PRD count.
+    proposed: list[int] = []
     monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda company_id, message, history, *, prd_id=None, **kw: {
-            "intent": "answer", "source": "llm", "instruction": None,
-        },
+        projects_route, "propose_chat_edit_scoped", lambda *a, **kw: proposed.append(1),  # noqa: ARG005
     )
 
-    outcome = projects_route._classify_and_maybe_edit_group_prd(
-        project_id, conv["id"], _ctx(t), "what's the status?", [], t.slug,
+    narration, pending = projects_route._propose_group_prd_edit(
+        project_id, 1, _ctx(t), t.slug, "please update the PRD",
     )
-    # Proves the over-fire trap is real: `refusal` IS set on this 2-PRD
-    # project (PRD-count-derived, content-independent) — but the content-
-    # derived signal correctly stays False.
-    assert outcome.refusal is not None
-    assert outcome.needs_prd_clarify is False
-    assert outcome.was_edit_request is False
+    assert "more than one PRD" in narration  # asks which one
+    assert str(prd_a) in narration and str(prd_b) in narration
+    assert pending is None
+    assert proposed == []  # never auto-picks / writes
+
+
+def test_group_plain_message_never_reaches_the_edit_tool():
+    """NEGATIVE regression (the over-fire guard, restated for ): a PLAIN
+    non-edit message does NOT pass the `is_project_edit_request` gate, so it
+    can never reach the in-band `edit_prd` tool — the over-fire the old
+    `needs_prd_clarify` signal guarded against is now structurally impossible
+    (the tool only runs when the model calls it on an edit-gated turn)."""
+    from app.skill_router import is_project_edit_request
+
+    assert is_project_edit_request("what's the status?") is False
+    assert is_project_edit_request("who is on this project?") is False
+    assert is_project_edit_request("thanks team!") is False
+    # An actual edit request still passes.
+    assert is_project_edit_request("update the PRD to add a section") is True

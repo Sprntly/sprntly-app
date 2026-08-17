@@ -10,6 +10,10 @@ import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceCont
 import { useAuth } from "../../../lib/auth"
 import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
+import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
+import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
+import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
+import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
 import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import {
   providerNoticeFromEnvelope,
@@ -72,7 +76,6 @@ import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
-import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
 import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
@@ -740,6 +743,14 @@ export const BUSY_ENTER_HINT_TAIL = " to interrupt."
 /** How long the busy-Enter hint stays before clearing itself. */
 const BUSY_HINT_MS = 6000
 
+// Main's next-prompt fetch: the shared endpoint keyed by the settled
+// conversation id. A stable module const so the shared hook's fetch-after-settle
+// callback keeps a stable identity across renders.
+const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
+  fetchSuggestions: (conversationId, opts) =>
+    chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
+}
+
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
@@ -747,138 +758,6 @@ const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
 ]
 
-// The chat surface's artifact action row — EXACTLY two buttons. The first opens
-// the first available artifact (View Evidence when the insight has evidence, else
-// Generate/View PRD); the second is the Generate/View Prototype trigger, disabled
-// until a PRD exists (a prototype is always built FROM a PRD). Shared by the
-// insight-card row and the reply-footer row so the two never drift.
-//
-// The prototype button follows BriefChat's pattern: the shared GeneratePrototypeCTA
-// with `skipExistenceCheck` (the batch prototype map — chatInsightState — is the
-// existence source of truth, so no redundant per-tab getByPrd), driving Generate
-// (open the modal) vs View (navigate) from `prototypeReady`.
-export function ChatArtifactActions({
-  evidenceExists,
-  prdExists,
-  prdWaiting,
-  prdGenerating,
-  prdLoading,
-  onViewEvidence,
-  onOpenPrd,
-  prototypePrdId,
-  prototypeReady,
-  onViewPrototype,
-  onPrototypeSettled,
-}: {
-  evidenceExists: boolean
-  prdExists: boolean
-  prdWaiting: boolean
-  prdGenerating: boolean
-  prdLoading?: boolean
-  onViewEvidence: () => void
-  onOpenPrd: () => void
-  prototypePrdId: number | null
-  prototypeReady: boolean
-  onViewPrototype: () => void
-  /** A chat-kicked prototype build finished (success or failure) — the host
-   *  posts the artifact chat summary from here. */
-  onPrototypeSettled?: (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => void
-}) {
-  // Order matters: GENERATING (a document is being written) outranks LOADING
-  // (one exists and is being fetched), which outranks the settled View/Generate
-  // choice. Loading covers both fetching a known PRD and not yet knowing whether
-  // one exists — in neither case is anything being authored, so neither may say
-  // "Generating".
-  const first = evidenceExists
-    ? { label: "View Evidence", onClick: onViewEvidence, disabled: false }
-    : {
-        label: prdGenerating
-          ? "Generating PRD…"
-          : prdLoading || prdWaiting ? "Loading PRD…"
-          : prdExists ? "View PRD" : "Generate PRD",
-        onClick: onOpenPrd,
-        disabled: prdGenerating || prdLoading || prdWaiting,
-      }
-  const canPrototype = prototypePrdId != null
-  return (
-    <div className="bc-actions">
-      <button
-        type="button"
-        className="bc-action-btn bc-action-btn--primary"
-        disabled={first.disabled}
-        onClick={first.onClick}
-      >
-        {first.label}
-      </button>
-      <GeneratePrototypeCTA
-        prdId={prototypePrdId}
-        skipExistenceCheck
-        // Safe: this row shows ONE prototype trigger for the insight's current
-        // PRD at a time (mirrors ContentPanel's TicketsBottomBar), so the
-        // unscoped da:generating signal can't mislabel a different PRD's run.
-        listenForCrossSurfaceGenerating
-        onGenerationSettled={onPrototypeSettled}
-        render={({ onClick, cta, label }) => (
-          <button
-            type="button"
-            className="bc-action-btn"
-            data-testid="chat-prototype-cta"
-            disabled={!canPrototype}
-            title={canPrototype ? undefined : "Generate a PRD first"}
-            onClick={
-              cta !== "generating" && canPrototype && prototypeReady
-                ? onViewPrototype
-                : onClick
-            }
-          >
-            {cta === "generating"
-              ? label
-              : canPrototype && prototypeReady
-                ? "View Prototype"
-                : "Generate Prototype"}
-          </button>
-        )}
-      />
-    </div>
-  )
-}
-
-/** The reply-footer action row for a chat whose artifact is a STANDALONE TICKET
- *  SET — one button, not two.
- *
- *  `ChatArtifactActions` above can't serve this: it is hard-wired to an insight
- *  card's evidence/PRD pair, and a chat with no PRD has neither. The prototype
- *  button is deliberately absent rather than disabled — a prototype is built
- *  FROM a PRD, so on this surface it is not a thing the user could enable, and
- *  a permanently-dead button reads as a bug. Same classes as the two-button
- *  row, so the two never drift visually. */
-export function ChatTicketSetActions({
-  state,
-  onClick,
-}: {
-  /** running → the run owns the button; failed → it offers the re-run; ready
-   *  (and any settled state with a set behind it) → it reopens the panel. */
-  state: "running" | "ready" | "failed"
-  onClick: () => void
-}) {
-  const label =
-    state === "running" ? "Writing tickets…"
-    : state === "failed" ? "Retry tickets"
-    : "View Tickets"
-  return (
-    <div className="bc-actions">
-      <button
-        type="button"
-        className="bc-action-btn bc-action-btn--primary"
-        data-testid="chat-ticket-set-cta"
-        disabled={state === "running"}
-        onClick={onClick}
-      >
-        {label}
-      </button>
-    </div>
-  )
-}
 
 /** The acknowledgment a ticket command writes on the SAME commit as the send.
  *  The pointer sentence is load-bearing twice over: it tells the reader how to
@@ -1266,10 +1145,9 @@ export function ChatScreen() {
   // background tab's suggestions never appear under another tab's thread, and
   // cleared the moment that tab sends again — stale chips proposing the
   // conversation the user has already moved past are worse than none.
-  const [suggestionsByTab, setSuggestionsByTab] = useState<Record<string, string[]>>({})
-  const clearSuggestions = useCallback((tabId: string) => {
-    setSuggestionsByTab((prev) => (prev[tabId]?.length ? { ...prev, [tabId]: [] } : prev))
-  }, [])
+  // Next-prompt suggestions are owned by the shared host hook (state + retire +
+  // fetch-after-settle); ChatScreen keys by tab id and injects the main fetch.
+  const nextPrompts = useNextPrompts(MAIN_NEXT_PROMPTS_ADAPTER)
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
@@ -4446,105 +4324,115 @@ export function ChatScreen() {
    *  passes none — it is direct manipulation of the panel, not another message,
    *  so it must not put words in the user's mouth or spend an ask. */
   const openArtifactInPanel = useCallback(
-    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
-      if (candidate.type === "evidence") {
-        if (candidate.brief_id == null || candidate.insight_index == null) return false
-        // The SAME binding guard the PRD branch uses. Pinning the active tab
-        // unconditionally let an evidence open hijack a tab already holding a
-        // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
-        // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
-        // the panel renders B's evidence beside A's document and the tab is
-        // flagged evidence-only while holding a prd id. `reusableActiveTab`
-        // declines exactly that tab, and the open gets a chat of its own.
-        const inTab = reusableActiveTab()
-        const req: LocalPrdTabRequest = {
-          title: candidate.title || "Evidence",
-          ...(seedQuery ? { seedQuery } : {}),
-          ...(inTab ? { inTabId: inTab.id } : {}),
-          source: {
-            kind: "evidence",
-            meta: { briefId: candidate.brief_id, insightIndex: candidate.insight_index },
-            detail: null,
+    (candidate: OpenArtifactCandidate, seedQuery?: string): boolean =>
+      // The evidence-vs-PRD branch, resume-conversation-first, reuse-by-prd-id
+      // and null-id guards are the shared `openArtifactDestination` decision;
+      // ChatScreen supplies the PANEL terminal actions (its exact current
+      // bodies) as the adapter, so the routing is byte-identical. Project
+      // surfaces open the artifacts MODAL instead — the sanctioned, ledgered
+      // `open.destination` divergence — and do NOT route through this decision.
+      openArtifactDestination(
+        candidate,
+        {
+          openEvidence: (c, sq) => {
+            // The SAME binding guard the PRD branch uses. Pinning the active tab
+            // unconditionally let an evidence open hijack a tab already holding a
+            // PRD: openPrdInTab's evidence branch writes `evidenceOnly` +
+            // `evidenceDetail` for insight B onto a tab whose prdId is still A, so
+            // the panel renders B's evidence beside A's document and the tab is
+            // flagged evidence-only while holding a prd id. `reusableActiveTab`
+            // declines exactly that tab, and the open gets a chat of its own.
+            const inTab = reusableActiveTab()
+            const req: LocalPrdTabRequest = {
+              title: c.title || "Evidence",
+              ...(sq ? { seedQuery: sq } : {}),
+              ...(inTab ? { inTabId: inTab.id } : {}),
+              source: {
+                kind: "evidence",
+                meta: { briefId: c.brief_id!, insightIndex: c.insight_index! },
+                detail: null,
+              },
+            }
+            const tabId = openPrdInTab(req)
+            seedCommandTurn(req, tabId)
+            return true
           },
-        }
-        const tabId = openPrdInTab(req)
-        seedCommandTurn(req, tabId)
-        return true
-      }
-      const prdId = candidate.prd_id ?? candidate.id
-      if (prdId == null) return false
-      // The PRD's own THREAD outranks a panel-beside-this-chat open (owner
-      // decision, 2026-08-14): when the conversation that produced the
-      // document survives, "open the PRD" means going back to that chat —
-      // history restored, PRD panel over it — exactly like clicking the same
-      // row on the Artifacts screen. Both halves must be present (a
-      // title-less id means the chat row is gone), and an uploaded or
-      // brief-generated PRD carries neither, so it keeps today's panel-only
-      // open — never a fake history.
-      if (candidate.conversation_id != null && candidate.conversation_title) {
-        try {
-          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
-            dbId: candidate.conversation_id,
-            title: candidate.conversation_title,
-            fallbackTurns: [],
-            prdId,
-          }))
-          checkResume()
-          return true
-        } catch { /* storage unavailable → the panel-only open below */ }
-      }
-      // Reuse BY PRD ID, never by title. A tab already holding this document
-      // wins over the tab the user is typing in, so opening a PRD that is
-      // already open focuses it instead of spawning a second tab for the same
-      // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
-      // this path would otherwise reintroduce from a different entry point (the
-      // titles here are real document titles, so a title match would look like
-      // it works right up until two documents share a name).
-      const holder = tabsRef.current.find(
-        (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
-      )
-      // Otherwise: the CHAT the user is in, so the panel opens beside the
-      // conversation that asked for it (the stated requirement) rather than in
-      // a tab of its own. `reusableActiveTab` declines a tab already bound to a
-      // different PRD/insight, which must not be repointed.
-      const inTab = holder ?? reusableActiveTab()
-      // Is the document ALREADY cached on the tab we're about to open into? Then
-      // openPrdInTab returns straight from that cache and never reaches the
-      // async block, so the acknowledgment has to ride the seed turn instead of
-      // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
-      // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
-      // returns tabs with no PRD by definition.
-      const ackInline = holder?.prd?.prd_id === prdId
-      const req: LocalPrdTabRequest = {
-        title: candidate.title ? `PRD · ${candidate.title}` : "PRD",
-        ...(seedQuery ? { seedQuery } : {}),
-        ...(inTab ? { inTabId: inTab.id } : {}),
-        ...(ackInline ? { ackInline: true } : {}),
-        source: {
-          kind: "load",
-          prdId,
-          // The finding this PRD came from, so the panel's Evidence tab has
-          // something to load (it reads `content.prdMeta` and fetches by
-          // (briefId, insightIndex) — with null meta that tab is simply dead,
-          // while the SAME document opened from Artifacts worked).
-          //
-          // Only when the backend says the pair is real: a chat / ideation /
-          // uploaded PRD carries insight_index 0 as a storage sentinel, and
-          // passing that would load the brief's first finding under a document
-          // that has nothing to do with it. Those PRDs genuinely have no
-          // insight, so null is the correct answer for them, not a limitation.
-          meta:
-            candidate.brief_anchored &&
-            candidate.brief_id != null &&
-            candidate.insight_index != null
-              ? { briefId: candidate.brief_id, insightIndex: candidate.insight_index }
-              : null,
+          resumeConversation: ({ conversationId, conversationTitle, prdId }) => {
+            // The PRD's own THREAD outranks a panel-beside-this-chat open (owner
+            // decision, 2026-08-14): when the conversation that produced the
+            // document survives, "open the PRD" means going back to that chat —
+            // history restored, PRD panel over it — exactly like clicking the same
+            // row on the Artifacts screen. Storage unavailable → false, and the
+            // decision falls through to the panel-only open.
+            try {
+              localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+                dbId: conversationId,
+                title: conversationTitle,
+                fallbackTurns: [],
+                prdId,
+              }))
+              checkResume()
+              return true
+            } catch {
+              return false
+            }
+          },
+          openPrd: (c, prdId, sq) => {
+            // Reuse BY PRD ID, never by title. A tab already holding this document
+            // wins over the tab the user is typing in, so opening a PRD that is
+            // already open focuses it instead of spawning a second tab for the same
+            // id — the duplicate-tab bug #1039 fixed for `?prd=` deep links, which
+            // this path would otherwise reintroduce from a different entry point (the
+            // titles here are real document titles, so a title match would look like
+            // it works right up until two documents share a name).
+            const holder = tabsRef.current.find(
+              (t) => t.prdId === prdId || t.prd?.prd_id === prdId,
+            )
+            // Otherwise: the CHAT the user is in, so the panel opens beside the
+            // conversation that asked for it (the stated requirement) rather than in
+            // a tab of its own. `reusableActiveTab` declines a tab already bound to a
+            // different PRD/insight, which must not be repointed.
+            const inTab = holder ?? reusableActiveTab()
+            // Is the document ALREADY cached on the tab we're about to open into? Then
+            // openPrdInTab returns straight from that cache and never reaches the
+            // async block, so the acknowledgment has to ride the seed turn instead of
+            // being deferred — see LocalPrdTabRequest.ackInline for what goes wrong
+            // when the two disagree. Only `holder` can satisfy this: `reusableActiveTab`
+            // returns tabs with no PRD by definition.
+            const ackInline = holder?.prd?.prd_id === prdId
+            const req: LocalPrdTabRequest = {
+              title: c.title ? `PRD · ${c.title}` : "PRD",
+              ...(sq ? { seedQuery: sq } : {}),
+              ...(inTab ? { inTabId: inTab.id } : {}),
+              ...(ackInline ? { ackInline: true } : {}),
+              source: {
+                kind: "load",
+                prdId,
+                // The finding this PRD came from, so the panel's Evidence tab has
+                // something to load (it reads `content.prdMeta` and fetches by
+                // (briefId, insightIndex) — with null meta that tab is simply dead,
+                // while the SAME document opened from Artifacts worked).
+                //
+                // Only when the backend says the pair is real: a chat / ideation /
+                // uploaded PRD carries insight_index 0 as a storage sentinel, and
+                // passing that would load the brief's first finding under a document
+                // that has nothing to do with it. Those PRDs genuinely have no
+                // insight, so null is the correct answer for them, not a limitation.
+                meta:
+                  c.brief_anchored &&
+                  c.brief_id != null &&
+                  c.insight_index != null
+                    ? { briefId: c.brief_id, insightIndex: c.insight_index }
+                    : null,
+              },
+            }
+            const tabId = openPrdInTab(req)
+            seedCommandTurn(req, tabId)
+            return true
+          },
         },
-      }
-      const tabId = openPrdInTab(req)
-      seedCommandTurn(req, tabId)
-      return true
-    },
+        seedQuery,
+      ),
     [openPrdInTab, reusableActiveTab, seedCommandTurn, checkResume],
   )
 
@@ -4831,7 +4719,7 @@ export function ChatScreen() {
       // no suggestions to clear. Synchronous and unconditional — the instant
       // anything is sent, suggestions about the previous turn are stale, and
       // there is no branch where keeping them is right.
-      if (activeTabId) clearSuggestions(activeTabId)
+      if (activeTabId) nextPrompts.retire(activeTabId)
       // Show the user's message NOW — before the dispatch decision, which is a
       // network round-trip away. `settlePendingSend()` retires it at every exit
       // below; the branch that wins renders its own real turn in the same commit.
@@ -5040,7 +4928,11 @@ export function ChatScreen() {
               editTargetPrdId: targetPrdId,
               ticketsTarget,
             },
-            {
+            // The intent→executor WIRING is the shared
+            // `useChatIntentExecutors` half; ChatScreen injects today's exact
+            // flow bodies + tab guards as the adapter, so dispatch behaviour is
+            // byte-identical to the inline object it replaces.
+            useChatIntentExecutors({
               onGenerateTickets: (env) => {
                 if (docFile) {
                   setAttachments([])
@@ -5159,7 +5051,7 @@ export function ChatScreen() {
               // already runs unconditionally whenever `result.handled` is
               // false.
               onAnswer: () => {},
-            },
+            }),
           )
           if (result.handled) return
         }
@@ -5449,21 +5341,19 @@ export function ChatScreen() {
           if (askConvId != null) {
             const convId = askConvId
             const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
-            try {
-              void Promise.resolve(persisted)
-                .then(() => chatSuggestionsApi.next(convId, { prdId }))
-                .then(({ suggestions }) => {
-                  // Late arrival guards: the screen may have unmounted, the tab
-                  // closed, or the user already sent the NEXT message (which
-                  // cleared the strip and left an ask in flight). In that last
-                  // case these chips belong to a superseded turn — drop them.
-                  if (!mountedRef.current || !suggestions?.length) return
-                  if (!tabsRef.current.some((t) => t.id === tabId)) return
-                  if (askingTabsRef.current.has(tabId)) return
-                  setSuggestionsByTab((prev) => ({ ...prev, [tabId]: suggestions }))
-                })
-                .catch(() => { /* silence is the designed fallback */ })
-            } catch { /* same fallback, for a synchronous throw */ }
+            // Fetch-after-settle via the shared hook: waits on `persisted`,
+            // fetches through the main adapter, and publishes only if the
+            // late-arrival guard still holds (screen mounted, tab still open,
+            // no newer send in flight — else these chips belong to a superseded
+            // turn). Every fault degrades to the empty state.
+            nextPrompts.onSettled(tabId, convId, {
+              prdId,
+              ready: persisted,
+              shouldApply: () =>
+                mountedRef.current &&
+                tabsRef.current.some((t) => t.id === tabId) &&
+                !askingTabsRef.current.has(tabId),
+            })
           }
         },
         onError: (tabId, e) => {
@@ -5550,7 +5440,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, clearSuggestions, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -7568,11 +7458,11 @@ export function ChatScreen() {
                     container, no reserved height — so a thread Sprntly has
                     nothing to add to looks exactly as it did before this
                     feature, and a late response never shifts the composer
-                    under the user's cursor. Active tab only: `suggestionsByTab`
-                    is keyed by tab so a background answer's chips stay with
-                    their own thread. */}
+                    under the user's cursor. Active tab only: the shared hook
+                    keys suggestions by tab so a background answer's chips stay
+                    with their own thread. */}
                 <NextPromptSuggestions
-                  suggestions={(activeTabId && suggestionsByTab[activeTabId]) || []}
+                  suggestions={nextPrompts.suggestionsFor(activeTabId)}
                   disabled={busy}
                   onPick={(prompt) => { void submitAsk(prompt) }}
                 />

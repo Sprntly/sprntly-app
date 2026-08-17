@@ -52,12 +52,10 @@ function privateDescriptor(over: Partial<ChatSurfaceDescriptor> = {}): ChatSurfa
       timestamps: "fromTurn",
       userHead: "named",
       renderUserBody: (t) => <div data-testid="ic-msg-you">{t.content}</div>,
-      renderAgentBody: (t) =>
-        t.author.kind === "agent" ? (
-          <div>{t.content}</div>
-        ) : (
-          <div data-testid="ic-msg-agent">{t.reply?.answer ?? t.content}</div>
-        ),
+      // NO base `renderAgentBody`: agent turns render through ChatBubble's
+      // NATIVE ladder (the new default). Individual tests below that exercise
+      // the retained escape-hatch branch pass their OWN `renderAgentBody`
+      // override.
       ...(over.transcript ?? {}),
     },
     composer: { busyMode: "block-while-asking", ...(over.composer ?? {}) },
@@ -103,7 +101,9 @@ describe("ChatShell project_private — author-kind + state-flag mapping (AC3)",
     expect(container.querySelector(".bc-user-name")?.textContent).toBe("Ada")
     expect(container.querySelector(".bc-user-bubble")).toBeTruthy()
     expect(screen.getByTestId("ic-msg-you").textContent).toContain("what's the plan?")
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("here's the plan")
+    // The self turn's reply renders through the native ladder's AskReplyBody
+    // (the first `.ai-bar-reply-answer`); the history agent turn is the second.
+    expect(container.querySelectorAll(".ai-bar-reply-answer")[0]?.textContent).toContain("here's the plan")
 
     // timestamps:"fromTurn" — the agent head shows the turn's own clock.
     const expected = new Date(1_700_000_000_000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
@@ -114,7 +114,7 @@ describe("ChatShell project_private — author-kind + state-flag mapping (AC3)",
   })
 })
 
-describe("ChatShell project_private — pickOptions in the agent footer (AC6)", () => {
+describe("ChatShell project_private — pickOptions via the native ChatBubble prop (AC4)", () => {
   it("test_shell_project_private_renders_pickOptions_in_agent_footer", () => {
     const onPickOption = vi.fn()
     const turn: ShellTurn = {
@@ -124,20 +124,65 @@ describe("ChatShell project_private — pickOptions in the agent footer (AC6)", 
         { id: "502", title: "Billing", instruction: "tighten the problem statement" },
       ],
     }
-    render(<ChatShell descriptor={privateDescriptor()} turns={[turn]} onPickOption={onPickOption} />)
+    const { container } = render(
+      <ChatShell descriptor={privateDescriptor()} turns={[turn]} onPickOption={onPickOption} />,
+    )
 
-    // Rendered in the agent-body footer position, with the ic-prefixed testids.
-    const options = screen.getByTestId("ic-clarify-options")
+    // Rendered via ChatBubble's UNCONDITIONAL native pick prop — native testids
+    // (`mutation-pick-option-<id>`), NOT the retired shell-owned `ic-clarify-*`.
+    const options = screen.getByTestId("mutation-pick-options")
     expect(options).toBeTruthy()
-    const agentBody = screen.getByTestId("ic-msg-agent")
-    // The pick options sit alongside the agent body inside the same agent block.
-    expect(agentBody.closest(".bc-agent-body")?.contains(options)).toBe(true)
+    // The pick card sits inside the same turn as the agent reply, positioned
+    // like the pending-mutation card (a sibling of `.bc-agent-body`).
+    const turnEl = container.querySelector('[data-turn-id="s1"]')!
+    expect(turnEl.contains(options)).toBe(true)
+    expect(container.querySelector(".ai-bar-reply-answer")?.textContent).toContain("which PRD?")
 
-    fireEvent.click(screen.getByTestId("ic-clarify-option-502"))
+    fireEvent.click(screen.getByTestId("mutation-pick-option-502"))
     expect(onPickOption).toHaveBeenCalledWith(
       "s1",
       expect.objectContaining({ id: "502", title: "Billing", instruction: "tighten the problem statement" }),
     )
+  })
+})
+
+describe("ChatShell project_private — reply cards via the native ladder (AC2)", () => {
+  it("test_private_reply_cards_via_ladder", () => {
+    // A seeded `openCandidates`/`artifactList` on a private agent turn renders
+    // OpenArtifactChips / ArtifactListCards through ChatBubble's NATIVE ladder
+    // (same as group), with no host `renderAgentBody` — the reply body renders
+    // via AskReplyBody in the same block.
+    const onOpenCandidate = vi.fn()
+    const onOpenArtifactItem = vi.fn()
+    const turn: ShellTurn = {
+      ...selfTurn("s1", "open the checkout PRD", "I found a couple — pick one."),
+      openCandidates: [
+        { type: "prd", id: 501, title: "Checkout v1", status: "ready", prd_id: 501, brief_id: null, insight_index: null, brief_anchored: false, week_label: null },
+      ] as ShellTurn["openCandidates"],
+      artifactList: [
+        { type: "prd", id: 777, title: "Dark mode", status: "ready", created_at: "2026-08-15T00:00:00Z", brief_anchored: false, source: {}, open: { prd_id: 777 } },
+      ] as ShellTurn["artifactList"],
+    }
+    const { container } = render(
+      <ChatShell
+        descriptor={privateDescriptor({
+          transcript: {
+            agentName: AGENT,
+            timestamps: "fromTurn",
+            userHead: "named",
+            renderUserBody: (t) => <div data-testid="ic-msg-you">{t.content}</div>,
+            onOpenCandidate,
+            onOpenArtifactItem,
+          },
+        })}
+        turns={[turn]}
+      />,
+    )
+    expect(screen.getByTestId("open-artifact-chips")).toBeTruthy()
+    expect(screen.getByTestId("artifact-list-cards")).toBeTruthy()
+    expect(container.querySelector(".ai-bar-reply-answer")?.textContent).toContain("I found a couple")
+    fireEvent.click(screen.getAllByTestId("open-artifact-chip")[0])
+    expect(onOpenCandidate).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -242,6 +287,6 @@ describe("ChatShell project_private — main no-op re-proof (AC10)", () => {
     const b = withStray.container.querySelector("main.od-center")!.outerHTML
     expect(b).toBe(a)
     // No project-private artifacts leak onto the main path.
-    expect(withStray.container.querySelector('[data-testid="ic-clarify-options"]')).toBeNull()
+    expect(withStray.container.querySelector('[data-testid="mutation-pick-options"]')).toBeNull()
   })
 })

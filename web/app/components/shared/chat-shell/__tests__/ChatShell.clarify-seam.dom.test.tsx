@@ -45,7 +45,9 @@ function privateDescriptor(over: Partial<ChatSurfaceDescriptor> = {}): ChatSurfa
       timestamps: "fromTurn",
       userHead: "named",
       renderUserBody: (t) => <div data-testid="ic-msg-you">{t.content}</div>,
-      renderAgentBody: (t) => (t.reply ? <div data-testid="ic-msg-agent">{t.reply.answer}</div> : null),
+      // NO `renderAgentBody`: the agent reply + the clarify card render through
+      // ChatBubble's NATIVE ladder (the new default), which is where the native
+      // clarify props live — an escape-hatch body would suppress them.
       ...(over.transcript ?? {}),
     },
     composer: { busyMode: "block-while-asking", ...(over.composer ?? {}) },
@@ -135,9 +137,9 @@ describe("ChatShell clarify seam — pickOptions stays separate (AC4)", () => {
       createdAt: 1_700_000_000_000,
     }
     render(<ChatShell descriptor={privateDescriptor()} turns={[turn]} onPickOption={onPickOption} />)
-    expect(screen.getByTestId("ic-clarify-options")).toBeTruthy()
+    expect(screen.getByTestId("mutation-pick-options")).toBeTruthy()
     expect(screen.queryByTestId("clarify-questions")).toBeNull()
-    fireEvent.click(screen.getByTestId("ic-clarify-option-501"))
+    fireEvent.click(screen.getByTestId("mutation-pick-option-501"))
     expect(onPickOption).toHaveBeenCalledWith("t2", expect.objectContaining({ id: "501" }))
   })
 
@@ -151,6 +153,6 @@ describe("ChatShell clarify seam — pickOptions stays separate (AC4)", () => {
     }
     render(<ChatShell descriptor={privateDescriptor()} turns={[turn]} />)
     expect(screen.queryByTestId("clarify-questions")).toBeNull()
-    expect(screen.queryByTestId("ic-clarify-options")).toBeNull()
+    expect(screen.queryByTestId("mutation-pick-options")).toBeNull()
   })
 })

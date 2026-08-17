@@ -20,6 +20,7 @@
  */
 
 import type { ChangeEvent, CSSProperties, MutableRefObject, ReactNode, Ref, RefObject } from "react"
+import type { ChatIntentExecutors } from "../../../lib/chat/dispatchChatIntent"
 import type { ChatTranscriptTurn } from "../ChatTranscript"
 import type { ClarifyAnswer, ClarifyQuestion, ClarifyResolution } from "../ClarifyQuestionsCard"
 import type { PinnedSkill } from "../ChatComposer"
@@ -34,6 +35,16 @@ import type {
 // ── Identity vocab ──────────────────────────────────────────────────────────
 
 export type ChatSurfaceKind = "main" | "project_private" | "project_group"
+
+/** The on-join greeting's short/expandable-body split marker — mirrors
+ *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an inert
+ *  HTML comment). It rides persisted greeting `content`; the shell's
+ *  single-party mapper strips it when wrapping history content into a reply so
+ *  it never renders as literal text (`AskReplyBody` runs react-markdown WITHOUT
+ *  rehype-raw, so a raw comment would leak). Lives here — the shared contract
+ *  module both the private engine and the shell already depend on — so exactly
+ *  ONE copy of the string exists on the front end. */
+export const MORE_MARKER = "<!--more-->"
 
 /** The agent run-status vocabulary. Contract-only in the current wave — the
  *  surfaces that feed real statuses land in a later run-status wave; today only
@@ -361,6 +372,22 @@ export interface ChatSurfaceDescriptor {
   dock?: { aboveComposer?: ReactNode }
   overlays?: { attachmentViewer?: boolean }
 }
+
+// ── Shared chat-intent executor adapter ─────────────────────────────────────
+
+/**
+ * The SURFACE-SPECIFIC half of the shared chat-intent executor wiring: the flow
+ * bodies a surface injects into `useChatIntentExecutors`. Every slot is OPTIONAL
+ * — a surface provides only the intents it implements, and any omitted slot
+ * falls to the surface's `onAnswer` no-op inside the hook (the subset-allowed
+ * contract). Reuses the existing `ChatIntentExecutors` shape (from
+ * `dispatchChatIntent`) rather than re-declaring it.
+ *
+ * `onClarify` is intentionally excluded: it is a turn-state callback composed at
+ * the call site via object spread, never a command-flow body (see
+ * `useChatIntentExecutors`).
+ */
+export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onClarify">>
 
 // ── Main turn-mapping dependency bag ────────────────────────────────────────
 

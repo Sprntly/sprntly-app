@@ -15,23 +15,18 @@
 // AD-P13a (never fork the monolith): this host imports no chat-monolith
 // container; the project-genuine dispatch primitive (`dispatchChatIntent`)
 // lives in the engine hook.
-import { useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { ChatShell } from "../../../shared/chat-shell/ChatShell"
 import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
 import type { ChatSurfaceDescriptor, ShellTurn } from "../../../shared/chat-shell/types"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
-import { AskReplyBody } from "../../../shared/AskReplyBody"
 import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
-import { AssistantWaitState, WaitStoppedState } from "../../../shared/AssistantWaitState"
-import { ArtifactListCards } from "../../../shared/ArtifactListCards"
-import { OpenArtifactChips } from "../../../shared/OpenArtifactChips"
 import { artifactItemAsCandidate } from "./artifactCandidates"
 import { AGENT_BADGE, AGENT_NAME } from "../../../../lib/agent"
-import type { AskResponse, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
+import type { ChatArtifactItem, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
 import { DelegationActions } from "./DelegationActions"
-import { useProjectPrivateThread, MORE_MARKER } from "./useProjectPrivateThread"
+import { useProjectPrivateThread } from "./useProjectPrivateThread"
 import extras from "./project-chat-extras.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
@@ -51,33 +46,6 @@ export type ProjectPrivateChatProps = {
    *  refreshes the host's artifacts list + count immediately, without
    *  waiting on the realtime `artifact.added` echo. */
   onArtifactsChanged?: () => void
-}
-
-/** An assistant turn's body: with `MORE_MARKER` present, renders the lead
- *  inline plus the rest behind a Show more/less toggle; without it, renders
- *  the same `ReactMarkdown`+`remarkGfm` call every other assistant turn uses. */
-function AgentTurnBody({ content }: { content: string }) {
-  const [expanded, setExpanded] = useState(false)
-  const idx = content.indexOf(MORE_MARKER)
-  if (idx === -1) {
-    return <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
-  }
-  const lead = content.slice(0, idx)
-  const rest = content.slice(idx + MORE_MARKER.length)
-  return (
-    <>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{lead}</ReactMarkdown>
-      {expanded ? <ReactMarkdown remarkPlugins={[remarkGfm]}>{rest}</ReactMarkdown> : null}
-      <button
-        type="button"
-        className={extras.showMore}
-        onClick={() => setExpanded((v) => !v)}
-        data-testid="ic-agent-show-more"
-      >
-        {expanded ? "Show less" : "Show more"}
-      </button>
-    </>
-  )
 }
 
 /** The insight banner's location phrase — derived from the ACTUAL source
@@ -112,82 +80,6 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content ?? ""}</ReactMarkdown>
     </div>
   )
-
-  const agentTurnBodyWithShowMore = (turn: ShellTurn) => {
-    // Persisted history assistant turn (a delivered brief / on-join greeting):
-    // markdown body with the MORE_MARKER show-more toggle. The `ic-history-agent`
-    // testid rides the turn WRAPPER (set by the shell for agent-authored turns)
-    // so the inline delegation footer reads as contained within it.
-    if (turn.author.kind === "agent" && turn.content != null) {
-      return <AgentTurnBody content={turn.content} />
-    }
-    // Current-session agent states — the shell drives these off the turn's
-    // state flags; the visual composites (with their `ic-*` testids) live here.
-    if (turn.pending) {
-      if (turn.partial) {
-        return (
-          <div data-testid="ic-msg-streaming">
-            <AssistantWaitState compact streaming streamDropped={turn.streamDropped}>
-              <AskReplyBody
-                reply={{
-                  answer: turn.partial,
-                  key_points: [],
-                  citations: [],
-                  confidence: 0,
-                  unanswered: "",
-                } as unknown as AskResponse}
-              />
-            </AssistantWaitState>
-          </div>
-        )
-      }
-      return (
-        <div data-testid="ic-msg-pending">
-          <AssistantWaitState compact />
-        </div>
-      )
-    }
-    if (turn.stopped) {
-      // Reuses the SAME shared stopped-state/"Ask again" component main
-      // renders (`ChatBubble`'s built-in ladder) instead of a bespoke plain
-      // div with no retry. A session (current-turn) `ShellTurn`'s `content`
-      // IS the original question (the turns mapping sets `content: t.question`
-      // for private's combined-Q&A session turns above) — resending it
-      // mirrors main's own `handleAskAgain`, which resubmits `turn.query`.
-      const question = turn.content?.trim()
-      return (
-        <div data-testid="ic-msg-stopped">
-          <WaitStoppedState onAskAgain={question ? () => engine.send(question) : undefined} />
-        </div>
-      )
-    }
-    if (turn.error) {
-      return (
-        <div role="alert" data-testid="ic-msg-error">
-          {turn.error}
-        </div>
-      )
-    }
-    if (turn.reply) {
-      // The SAME shared card primitives the main chat's reply ladder renders
-      // (`OpenArtifactChips` / `ArtifactListCards`), fed from the classify
-      // envelope's card data riding the turn — click routes to the project's
-      // artifacts modal (this surface's open destination).
-      return (
-        <div data-testid="ic-msg-agent">
-          <AskReplyBody reply={turn.reply} />
-          <OpenArtifactChips candidates={turn.openCandidates ?? []} onOpen={(c) => onOpenArtifact?.(c)} />
-          {turn.artifactList?.length ? (
-            <ArtifactListCards
-              items={turn.artifactList}
-              onOpen={(item) => onOpenArtifact?.(artifactItemAsCandidate(item))}
-            />
-          ) : null}
-        </div>
-      )
-    }
-    return null
-  }
 
   const delegationActionsFor = (turn: ShellTurn) => {
     const delegation = turn.footerData as DelegationLedgerRow | null | undefined
@@ -241,7 +133,13 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       timestamps: "fromTurn",
       userHead: "named",
       renderUserBody: markdownUserBody,
-      renderAgentBody: agentTurnBodyWithShowMore,
+      // NO `renderAgentBody` override: private agent turns now render through
+      // `ChatBubble`'s native reply ladder (the shared consume-not-reimplement
+      // path group already uses), fed by the engine's `ShellTurn` state +
+      // `reply`/`openCandidates`/`artifactList`. Open-destinations route to
+      // this project's artifacts modal, same contract as group.
+      onOpenCandidate: (c: OpenArtifactCandidate) => onOpenArtifact?.(c),
+      onOpenArtifactItem: (item: ChatArtifactItem) => onOpenArtifact?.(artifactItemAsCandidate(item)),
       turnFooter: delegationActionsFor,
       leading: leadingNode,
       trailing: trailingNode,

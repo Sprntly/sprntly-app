@@ -120,21 +120,29 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe("ProjectPrivateChat — AD-P13 reuse (source scan)", () => {
-  it("the host composes the shared presentation primitives, defines no bespoke implementation, and mounts the shared shell (not a bespoke composer)", () => {
-    // Post-fold: the host owns the per-turn render closures over the shared
-    // presentation primitives; the ChatComposer is mounted by the shared
-    // ChatShell, not by the host.
+  it("the host mounts the shared shell, defines no bespoke implementation, and does NOT fork the agent reply ladder (test_private_descriptor_has_no_renderAgentBody)", () => {
+    // The host no longer imports or re-implements the agent-reply ladder
+    // primitives (AskReplyBody / AssistantWaitState / OpenArtifactChips /
+    // ArtifactListCards) — those are consumed through `ChatBubble`'s NATIVE
+    // ladder in the shared shell. The host keeps only the user-body markdown
+    // (react-markdown/remark-gfm) and the resuming skeleton, and its descriptor
+    // sets NO `renderAgentBody` (the named duplication removed here).
     const src = readFileSync(join(__dirname, "../ProjectPrivateChat.tsx"), "utf8")
-    expect(src).toContain('from "../../../shared/AskReplyBody"')
     expect(src).toContain('from "react-markdown"')
     expect(src).toContain('from "remark-gfm"')
     expect(src).toContain('from "../../../shared/AssistantThinkingSkeleton"')
-    expect(src).toContain('from "../../../shared/AssistantWaitState"')
-    expect(src).toContain('from "../../../shared/OpenArtifactChips"')
     expect(src).toContain('from "../../../shared/chat-shell/ChatShell"')
+    // The agent-ladder primitives are no longer imported by the host.
+    expect(src).not.toContain('from "../../../shared/AskReplyBody"')
+    expect(src).not.toContain('from "../../../shared/AssistantWaitState"')
+    expect(src).not.toContain('from "../../../shared/OpenArtifactChips"')
+    expect(src).not.toContain('from "../../../shared/ArtifactListCards"')
+    // No bespoke re-implementations, and — the inheritance invariant — no
+    // renderAgentBody fork of the shared ladder.
     expect(src).not.toMatch(/function\s+AskReplyBody/)
-    expect(src).not.toMatch(/function\s+OpenArtifactChips/)
+    expect(src).not.toMatch(/function\s+AgentTurnBody/)
     expect(src).not.toMatch(/function\s+ChatComposer/)
+    expect(src).not.toMatch(/\brenderAgentBody\s*:/)
   })
 
   it("the engine consumes the shared dispatch + ask primitives, forbids the chat monolith container (AD-P13a)", () => {
@@ -218,14 +226,16 @@ describe("ProjectPrivateChat — send + poll + render", () => {
       expect.objectContaining({ project_id: 202, conversation_id: 9001 }),
     )
     expect(screen.getByTestId("ic-msg-you").textContent).toContain("what did the team decide on pricing?")
-    expect(screen.getByTestId("ic-msg-pending")).toBeTruthy()
+    // The pending turn renders the shared ladder's busy state (aria-busy on the
+    // turn, no streaming partial yet) — not the removed `ic-msg-pending` div.
+    expect(document.querySelector("[aria-busy]")).toBeTruthy()
 
     await act(async () => {
       resolveAsk(reply("Flat $49/mo, decided last week."))
     })
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Flat $49/mo, decided last week.")
-    expect(screen.queryByTestId("ic-msg-pending")).toBeNull()
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("Flat $49/mo, decided last week.")
+    expect(document.querySelector("[aria-busy]")).toBeNull()
   })
 
   it("get-or-creates the individual conversation ONCE and reuses it across sends on the same mount", async () => {
@@ -271,7 +281,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
       "project-individual-202",
       expect.objectContaining({ project_id: 202, conversation_id: undefined }),
     )
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
   })
 
   it("Stop marks the turn stopped and does not render an error", async () => {
@@ -295,8 +305,8 @@ describe("ProjectPrivateChat — send + poll + render", () => {
     await act(async () => {
       rejectAsk(new AskStoppedError("stopped"))
     })
-    await waitFor(() => expect(screen.getByTestId("ic-msg-stopped")).toBeTruthy())
-    expect(screen.queryByTestId("ic-msg-error")).toBeNull()
+    await waitFor(() => expect(document.querySelector(".cw-stopped")).toBeTruthy())
+    expect(document.querySelector(".cw-err")).toBeNull()
   })
 
   it("a stopped turn renders the SHARED stopped state with an enabled 'Ask again', and clicking it re-sends the original question", async () => {
@@ -319,7 +329,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
     await act(async () => {
       rejectAsk(new AskStoppedError("stopped"))
     })
-    await waitFor(() => expect(screen.getByTestId("ic-msg-stopped")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".cw-stopped")).toBeTruthy())
 
     // Renders the SAME `WaitStoppedState` component main's `ChatBubble`
     // reply ladder uses (`cw-btn`), not a bespoke dead-end div.
@@ -332,7 +342,7 @@ describe("ProjectPrivateChat — send + poll + render", () => {
 
     await waitFor(() => expect(runAskGenerationMock).toHaveBeenCalledTimes(2))
     expect(runAskGenerationMock.mock.calls[1][0]).toBe("a question worth stopping")
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
   })
 
   it("a timeout renders the honest 'still running' message, not a generic failure", async () => {
@@ -353,7 +363,10 @@ describe("ProjectPrivateChat — send + poll + render", () => {
     await act(async () => {
       rejectAsk(new AskTimeoutError("timed out"))
     })
-    await waitFor(() => expect(screen.getByTestId("ic-msg-error").textContent).toContain("still running"))
+    // A timeout is the ladder's distinct timed-out state (not a generic
+    // failure) — the shared `WaitTimedOutState` carries the "still running" copy.
+    await waitFor(() => expect(screen.getByTestId("turn-timed-out").textContent).toContain("still running"))
+    expect(document.querySelector(".cw-err")).toBeNull()
   })
 })
 
@@ -363,9 +376,9 @@ describe("ProjectPrivateChat — resume on mount", () => {
     resumeAskGenerationMock.mockResolvedValue(reply("resumed answer"))
     render(React.createElement(ProjectPrivateChat, { projectId: 202 }))
     expect(screen.getByTestId("ic-resuming")).toBeTruthy()
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
     expect(resumeAskGenerationMock).toHaveBeenCalledWith(555, "acme", "project-individual-202")
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("resumed answer")
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("resumed answer")
   })
 
   it("no pending job — no resuming state, straight to the empty hint", () => {

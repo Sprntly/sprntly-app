@@ -12,6 +12,23 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+// A settled turn now renders its reply through the shared ladder's
+// `AskReplyBody`, which reads `window.matchMedia` — stub it for jsdom (the
+// sibling shell dom suites do the same).
+if (typeof window !== "undefined" && !window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    }) as unknown as MediaQueryList
+}
+
 import { ChatShell } from "../ChatShell"
 import type { ChatSurfaceDescriptor, ShellTurn } from "../types"
 

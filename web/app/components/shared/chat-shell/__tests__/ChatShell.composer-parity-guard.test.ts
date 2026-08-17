@@ -11,15 +11,18 @@
 // would fail this on day one. The mutation self-check (AC8) proves the guard
 // actually discriminates, entirely via a synthetic input (no product-source
 // mutation).
-import { readFileSync } from "node:fs"
+import { readdirSync, readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { dirname, join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
   auditComposerParity,
+  auditRenderInheritance,
   PROJECT_CAPABILITY_MANIFEST,
+  PROJECT_CHAT_SURFACE_SOURCES,
   type ComposerParityInput,
   type ComposerPropWiring,
+  type RenderInheritanceInput,
 } from "../parity-guard"
 import { PARITY_OPT_OUTS } from "../parity-ledger"
 import type { ChatSurfaceKind } from "../types"
@@ -299,6 +302,375 @@ describe("composer parity guard — opt-out ledger completeness (AC10)", () => {
       expect(entry.owner).toBe("projects-chat")
       expect(entry.reason.length).toBeGreaterThan(0)
     }
+  })
+})
+
+// ── Render-inheritance guard ─────────────────────────────────────────────────
+
+// ── Render-inheritance fork detectors (consume-not-reimplement) ──────────────
+// Each is a POSITION-AGNOSTIC `(src: string) => boolean` run over the
+// CONCATENATION of a surface's whole source set (host `.tsx` + engine `.ts`,
+// from `PROJECT_CHAT_SURFACE_SOURCES`). A fork can no longer hide in the host
+// when the detector historically only read the engine (or vice-versa). Real
+// code returns false for every surface (private consumes; group is a
+// server-classified non-consumer, ledgered — never a fork).
+
+/** Does a surface's source set the `renderAgentBody:` key for the agent reply?
+ *  Naive key probe (mirrors `hasComposerFeatures` above) — a comment that
+ *  merely NAMES the field ("NO `renderAgentBody` override") never matches the
+ *  key form `renderAgentBody:`. */
+function hasAgentReplyFork(src: string): boolean {
+  return /\brenderAgentBody\s*:/.test(src)
+}
+
+/** Executors: a source that calls `dispatchChatIntent(` with an inline
+ *  executor object instead of routing through `useChatIntentExecutors`. */
+function reimplementsExecutors(src: string): boolean {
+  const callsDispatch = /\bdispatchChatIntent\s*\(/.test(src)
+  const consumesHook = /\buseChatIntentExecutors\b/.test(src)
+  return callsDispatch && !consumesHook
+}
+
+/** Action rows: a source that DEFINES its own artifact-action row component
+ *  instead of importing the shared `ChatArtifactActions`/`ChatTicketSetActions`. */
+function reimplementsActionRows(src: string): boolean {
+  return /function\s+ChatArtifactActions\b|function\s+ChatTicketSetActions\b/.test(src)
+}
+
+/** Next-prompts: a source that drives the next-prompt fetch/state locally
+ *  (its own `chatSuggestionsApi.next` call or `suggestionsBy…` state) without
+ *  consuming `useNextPrompts`. */
+function reimplementsNextPrompts(src: string): boolean {
+  const local = /chatSuggestionsApi\.next\b|suggestionsBy\w+\s*[=,]/.test(src)
+  const consumesHook = /\buseNextPrompts\b/.test(src)
+  return local && !consumesHook
+}
+
+/** Inline cards: a source that composes main's inline insight/PRD cards locally
+ *  (references `insightCardNode`/`prdQuestionsNode`) rather than the shared
+ *  `turnAfterNode` service. */
+function reimplementsInlineCards(src: string): boolean {
+  const local = /\binsightCardNode\b|\bprdQuestionsNode\b/.test(src)
+  const consumesShared = /\bturnAfterNode\b/.test(src) && /chat-shell\/turnAfterNode/.test(src)
+  return local && !consumesShared
+}
+
+/** Open-destination: a source that re-implements the PANEL open decision
+ *  locally (the resume-first stash `sprntly_resume_conv`) instead of opening
+ *  the artifacts modal (the ledgered divergence) or the shared decision. */
+function reimplementsOpenDest(src: string): boolean {
+  return /sprntly_resume_conv/.test(src)
+}
+
+/** Run a position-agnostic detector over the CONCATENATION of each surface's
+ *  whole source set (from `PROJECT_CHAT_SURFACE_SOURCES`), returning the
+ *  surfaces it flags. Because the union of host + engine is scanned, a fork is
+ *  caught wherever it is placed — closing the host↔engine placement blind
+ *  spot that the old one-file-per-detector wiring left open. */
+function surfaceForks(detector: (src: string) => boolean): ChatSurfaceKind[] {
+  const forks: ChatSurfaceKind[] = []
+  for (const { surface, files } of PROJECT_CHAT_SURFACE_SOURCES) {
+    const combined = files.map((f) => read(projectsDir, f)).join("\n")
+    if (detector(combined)) forks.push(surface)
+  }
+  return forks
+}
+
+/** Source-parse the projects dir for every `*.tsx` that mounts `<ChatShell>`
+ *  with a `surface: "project_` literal — the guard's discovered set of project
+ *  chat hosts. Non-recursive (the `__tests__` subdir is not walked); returns
+ *  sorted basenames. Compared against the registry to derive
+ *  `unregisteredChatHosts`. */
+function discoverProjectChatHosts(): string[] {
+  return readdirSync(projectsDir)
+    .filter((name) => name.endsWith(".tsx"))
+    .filter((name) => {
+      const src = read(projectsDir, name)
+      return src.includes("<ChatShell") && /surface:\s*"project_/.test(src)
+    })
+    .sort()
+}
+
+/** The sanctioned project↔main render/context divergences the guard tracks —
+ *  each MUST be present in `PARITY_OPT_OUTS`. Kept OUT of the pure audit
+ *  (mirrors `surfacesWithoutFeatures`), enumerated from the source-of-truth
+ *  opt-out ledger. */
+const RENDER_DIVERGENCES: { capability: string; surface: ChatSurfaceKind }[] = [
+  { capability: "render.landing", surface: "project_private" },
+  { capability: "render.landing", surface: "project_group" },
+  { capability: "open.destination", surface: "project_private" },
+  { capability: "open.destination", surface: "project_group" },
+  { capability: "respond.gate", surface: "project_group" },
+  { capability: "context.multiParty", surface: "project_group" },
+  { capability: "membership.roster", surface: "project_private" },
+  { capability: "membership.roster", surface: "project_group" },
+  { capability: "mutation.confirmGate", surface: "project_private" },
+  { capability: "mutation.confirmGate", surface: "project_group" },
+]
+
+function realRenderInput(): RenderInheritanceInput {
+  const registeredFiles = new Set(PROJECT_CHAT_SURFACE_SOURCES.flatMap((s) => s.files))
+  return {
+    // Every render-inheritance fork detector now runs over the CONCATENATION of
+    // a surface's whole source set (host `.tsx` + engine `.ts`), so a fork is
+    // caught wherever placed. All empty on real code: private consumes the
+    // shared services; neither surface forks any host service; group is a
+    // server-classified non-consumer (ledgered), not a fork.
+    agentReplyForks: surfaceForks(hasAgentReplyFork),
+    executorForks: surfaceForks(reimplementsExecutors),
+    actionRowForks: surfaceForks(reimplementsActionRows),
+    nextPromptForks: surfaceForks(reimplementsNextPrompts),
+    inlineCardForks: surfaceForks(reimplementsInlineCards),
+    openDestForks: surfaceForks(reimplementsOpenDest),
+    renderDivergences: RENDER_DIVERGENCES,
+    ledger: PARITY_OPT_OUTS,
+    // Every discovered project chat host that the registry does not cover — the
+    // guard fails closed on a surface it does not know about. Empty on real
+    // code (both discovered hosts are registered).
+    unregisteredChatHosts: discoverProjectChatHosts().filter((host) => !registeredFiles.has(host)),
+  }
+}
+
+describe("render-inheritance guard — real input (AC9)", () => {
+  it("test_render_inheritance_clean_on_real_code", () => {
+    const input = realRenderInput()
+    // Sanity: today's real code forks NEITHER surface anywhere in its widened
+    // whole-source-set scan — both consume the shared services and neither host
+    // is unregistered. An all-empty forks state is the whole point of the
+    // inheritance rule, not a vacuous pass, so we assert each arm explicitly.
+    expect(input.agentReplyForks).toEqual([])
+    expect(input.executorForks).toEqual([])
+    expect(input.actionRowForks).toEqual([])
+    expect(input.nextPromptForks).toEqual([])
+    expect(input.inlineCardForks).toEqual([])
+    expect(input.openDestForks).toEqual([])
+    expect(input.unregisteredChatHosts).toEqual([])
+    expect(auditRenderInheritance(input)).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — surface source registry (AC1)", () => {
+  it("test_project_chat_surface_sources_names_both_surfaces_with_file_sets", () => {
+    expect(PROJECT_CHAT_SURFACE_SOURCES).toEqual([
+      { surface: "project_private", files: ["ProjectPrivateChat.tsx", "useProjectPrivateThread.ts"] },
+      { surface: "project_group", files: ["ProjectGroupChat.tsx", "useProjectGroupThread.ts"] },
+    ])
+  })
+
+  it("test_project_chat_surface_sources_all_files_exist", () => {
+    for (const { files } of PROJECT_CHAT_SURFACE_SOURCES) {
+      for (const f of files) {
+        // A rename that de-syncs the registry throws here (fail-closed).
+        expect(() => read(projectsDir, f), `registry file ${f} must exist`).not.toThrow()
+      }
+    }
+  })
+})
+
+describe("render-inheritance guard — whole source-set scan (AC2)", () => {
+  it("test_render_detectors_scan_whole_surface_set", () => {
+    // surfaceForks reads >=2 files per surface (host + engine).
+    for (const { files } of PROJECT_CHAT_SURFACE_SOURCES) {
+      expect(files.length).toBeGreaterThanOrEqual(2)
+    }
+    // The SWAP proves the closed blind-spot, not merely "detector works on a
+    // joined string": a combined source with a HOST-placed `dispatchChatIntent(`
+    // and NO `useChatIntentExecutors` trips reimplementsExecutors — the host
+    // placement previously escaped this formerly ENGINE-only detector.
+    const hostForkedExecutorUnion = [
+      "function ProjectSomethingChat() { dispatchChatIntent({ create_prd: () => {} }) }",
+      "// engine half — no shared hook imported here",
+    ].join("\n")
+    expect(reimplementsExecutors(hostForkedExecutorUnion)).toBe(true)
+    // And a combined source with an ENGINE-placed `function ChatArtifactActions`
+    // trips reimplementsActionRows — the engine placement previously escaped
+    // this formerly HOST-only detector.
+    const engineForkedActionRowUnion = [
+      "// host half — no local action-row component",
+      "function ChatArtifactActions() { return null }",
+    ].join("\n")
+    expect(reimplementsActionRows(engineForkedActionRowUnion)).toBe(true)
+  })
+})
+
+describe("render-inheritance guard — unregistered host fail-closed (AC4)", () => {
+  it("test_render_guard_flags_unregistered_chat_host", () => {
+    const base = realRenderInput()
+    const withUnknown: RenderInheritanceInput = {
+      ...base,
+      unregisteredChatHosts: ["ProjectSomethingChat.tsx"],
+    }
+    const violations = auditRenderInheritance(withUnknown)
+    expect(
+      violations.some(
+        (v) =>
+          v.capability === "render.unregisteredSurface" &&
+          v.reason.includes("ProjectSomethingChat.tsx"),
+      ),
+    ).toBe(true)
+    // GREEN again once the field is cleared — mutation-proof RED→GREEN.
+    expect(auditRenderInheritance({ ...base, unregisteredChatHosts: [] })).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — discovery matches registry (AC5)", () => {
+  it("test_discovered_project_chat_hosts_match_registry", () => {
+    const discovered = discoverProjectChatHosts()
+    expect(discovered).toEqual(["ProjectGroupChat.tsx", "ProjectPrivateChat.tsx"])
+    const registered = new Set(PROJECT_CHAT_SURFACE_SOURCES.flatMap((s) => s.files))
+    const unregistered = discovered.filter((h) => !registered.has(h))
+    expect(unregistered).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — lane execution self-check (AC6)", () => {
+  it("test_guard_test_file_is_not_skipped", () => {
+    const selfSrc = read(fileURLToPath(import.meta.url))
+    // Built from fragments so the assertion never matches its own source — the
+    // guard must execute in the collected lane, not be shelved.
+    const skipMarkers = ["describe" + ".skip", "it" + ".skip", "describe" + ".todo(", "it" + ".todo("]
+    for (const marker of skipMarkers) {
+      expect(selfSrc.includes(marker), `guard test must not contain ${marker}`).toBe(false)
+    }
+  })
+})
+
+describe("render-inheritance guard — fail-closed (AC9)", () => {
+  it("test_red_on_agentbodynode_fork", () => {
+    const base = realRenderInput()
+    const forked: RenderInheritanceInput = { ...base, agentReplyForks: ["project_private"] }
+    const violations = auditRenderInheritance(forked)
+    expect(
+      violations.some((v) => v.capability === "render.agentReplyLadder" && v.surface === "project_private"),
+    ).toBe(true)
+    // GREEN again once the fork is removed.
+    expect(auditRenderInheritance({ ...forked, agentReplyForks: [] })).toEqual([])
+  })
+
+  it("test_red_on_unledgered_render_divergence", () => {
+    const base = realRenderInput()
+    const withUnledgered: RenderInheritanceInput = {
+      ...base,
+      renderDivergences: [
+        ...base.renderDivergences,
+        { capability: "render.syntheticUnledgered", surface: "project_group" },
+      ],
+    }
+    const violations = auditRenderInheritance(withUnledgered)
+    expect(
+      violations.some(
+        (v) => v.capability === "render.syntheticUnledgered" && v.surface === "project_group",
+      ),
+    ).toBe(true)
+    // GREEN once that divergence is ledgered.
+    const ledgered: RenderInheritanceInput = {
+      ...withUnledgered,
+      ledger: [
+        ...base.ledger,
+        {
+          capability: "render.syntheticUnledgered",
+          surface: "project_group",
+          reason: "test-only synthetic render divergence proving the ledger silences a matched violation.",
+          owner: "projects-chat",
+        },
+      ],
+    }
+    expect(auditRenderInheritance(ledgered)).toEqual([])
+  })
+})
+
+describe("render-inheritance guard — net-new ledger entries (AC9)", () => {
+  it("test_net_new_ledger_entries_have_reason_and_owner", () => {
+    for (const e of RENDER_DIVERGENCES) {
+      const entry = PARITY_OPT_OUTS.find((o) => o.capability === e.capability && o.surface === e.surface)
+      expect(entry, `missing ledger entry for ${e.capability}/${e.surface}`).toBeTruthy()
+      expect(entry!.reason.length).toBeGreaterThan(10)
+      expect(entry!.owner).toBe("projects-chat")
+    }
+  })
+
+  it("test_no_duplicate_reply_streaming_or_multitab", () => {
+    // The plan's `reply.streaming` reconciles onto the existing `composer.stop`
+    // entry and `render.multiTab` onto `tabs.multiConversation` — NEITHER new
+    // capability is added to the ledger (no re-fork of an already-tracked
+    // divergence).
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "reply.streaming")).toBe(false)
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "render.multiTab")).toBe(false)
+    // The reconciliation targets DO exist.
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "composer.stop")).toBe(true)
+    expect(PARITY_OPT_OUTS.some((o) => o.capability === "tabs.multiConversation")).toBe(true)
+  })
+})
+
+describe("render-inheritance guard — five per-service fork arms (AC17/AC18)", () => {
+  const FORK_FIELDS = [
+    "executorForks",
+    "actionRowForks",
+    "nextPromptForks",
+    "inlineCardForks",
+    "openDestForks",
+  ] as const
+
+  it("test_auditRenderInheritance_clean_after_extraction", () => {
+    const input = realRenderInput()
+    // Sanity: NO surface re-implements any of the five host services — all five
+    // fork arrays are empty (private consumes the shared services; group is a
+    // ledgered server-classified non-consumer). An empty forks list is the
+    // whole point of consume-not-reimplement, so assert it explicitly.
+    for (const field of FORK_FIELDS) {
+      expect(input[field], `${field} must be empty on real code`).toEqual([])
+    }
+    expect(auditRenderInheritance(input)).toEqual([])
+  })
+
+  it("test_auditRenderInheritance_flags_local_executor_reimplementation", () => {
+    const base = realRenderInput()
+    const forked: RenderInheritanceInput = { ...base, executorForks: ["project_private"] }
+    const violations = auditRenderInheritance(forked)
+    expect(
+      violations.some((v) => v.capability === "hostService.executors" && v.surface === "project_private"),
+    ).toBe(true)
+    // GREEN again once the fork is cleared.
+    expect(auditRenderInheritance({ ...forked, executorForks: [] })).toEqual([])
+  })
+
+  it("test_auditRenderInheritance_flags_each_of_five_service_forks", () => {
+    const base = realRenderInput()
+    const expectedCapability: Record<(typeof FORK_FIELDS)[number], string> = {
+      executorForks: "hostService.executors",
+      actionRowForks: "hostService.actionRows",
+      nextPromptForks: "hostService.nextPrompts",
+      inlineCardForks: "hostService.inlineCards",
+      openDestForks: "hostService.openDestination",
+    }
+    for (const field of FORK_FIELDS) {
+      const forked: RenderInheritanceInput = { ...base, [field]: ["project_group"] }
+      const violations = auditRenderInheritance(forked)
+      expect(
+        violations.some(
+          (v) => v.capability === expectedCapability[field] && v.surface === "project_group",
+        ),
+        `${field} did not flag`,
+      ).toBe(true)
+      // Clearing that one field restores clean.
+      expect(auditRenderInheritance({ ...forked, [field]: [] })).toEqual([])
+    }
+  })
+
+  it("test_parity_ledger_no_duplicate_open_destination", () => {
+    // No duplicate capability×surface anywhere in the ledger, and specifically
+    // exactly one open.destination entry per surface (the open-destination
+    // extraction did NOT re-add the already-sanctioned modal divergence).
+    const seen = new Set<string>()
+    for (const o of PARITY_OPT_OUTS) {
+      const key = `${o.capability}::${o.surface}`
+      expect(seen.has(key), `duplicate ledger entry ${key}`).toBe(false)
+      seen.add(key)
+      expect(o.reason.length).toBeGreaterThan(0)
+      expect(o.owner).toBe("projects-chat")
+    }
+    const openDest = PARITY_OPT_OUTS.filter((o) => o.capability === "open.destination")
+    expect(openDest.map((o) => o.surface).sort()).toEqual(["project_group", "project_private"])
   })
 })
 

@@ -164,7 +164,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     )
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     await waitFor(() =>
-      expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Tightened the problem statement."),
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("Tightened the problem statement."),
     )
   })
 
@@ -183,7 +183,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     expect(generateFromInsightMock).toHaveBeenCalledWith("break this into work items", null)
     expect(addArtifactMock).toHaveBeenCalledWith(202, "ticket_set", 7)
     expect(runAskGenerationMock).not.toHaveBeenCalled()
-    await waitFor(() => expect(screen.getByTestId("ic-msg-agent")).toBeTruthy())
+    await waitFor(() => expect(document.querySelector(".ai-bar-reply-answer")).toBeTruthy())
     // No dedicated chat route for this branch — it persists via the owned
     // turn-pair route at settle time (§H/AC2).
     await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
@@ -263,7 +263,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
 
     await waitFor(() => expect(screen.getByTestId("artifact-list-cards")).toBeTruthy())
     expect(screen.getAllByTestId("artifact-list-card")).toHaveLength(2)
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("2 newest PRDs")
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("2 newest PRDs")
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     // Prose persists via the owned turn-pair route; the cards are a live
     // affordance riding the session turn (main's persist-the-prose contract).
@@ -296,7 +296,7 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
 
     await waitFor(() => expect(screen.getByTestId("open-artifact-chips")).toBeTruthy())
     expect(screen.getAllByTestId("open-artifact-chip")).toHaveLength(2)
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("more than one PRD")
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("more than one PRD")
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     await waitFor(() => expect(persistIndividualTurnsMock).toHaveBeenCalledTimes(1))
   })
@@ -330,11 +330,11 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     await sendMessage("tighten the problem statement")
 
     await waitFor(() =>
-      expect(screen.getByTestId("ic-msg-agent").textContent).toContain(
+      expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain(
         "tell me which to edit by id",
       ),
     )
-    expect(screen.getByTestId("ic-msg-agent").textContent).toContain("Onboarding [id 501]")
+    expect(document.querySelector(".ai-bar-reply-answer")?.textContent).toContain("Onboarding [id 501]")
     expect(runAskGenerationMock).not.toHaveBeenCalled()
     expect(prdChatEditMock).not.toHaveBeenCalled()
   })
@@ -357,10 +357,12 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     })
 
     await sendMessage("tighten the problem statement")
-    await waitFor(() => expect(screen.getByTestId("ic-clarify-options")).toBeTruthy())
+    // The edit-target pick renders via ChatBubble's NATIVE pick prop
+    // (`mutation-pick-*`), not the retired shell-owned inline `ic-clarify-*`.
+    await waitFor(() => expect(screen.getByTestId("mutation-pick-options")).toBeTruthy())
 
     await act(async () => {
-      fireEvent.click(screen.getByTestId("ic-clarify-option-502"))
+      fireEvent.click(screen.getByTestId("mutation-pick-option-502"))
     })
 
     // The SAME original instruction re-issued with the CHOSEN id attached —
@@ -373,13 +375,13 @@ describe("ProjectPrivateChat — classify→dispatch (flag on)", () => {
     )
     expect(resolveIntentMock).toHaveBeenCalledTimes(1)
     await waitFor(() =>
-      expect(screen.getAllByTestId("ic-msg-agent").at(-1)?.textContent).toContain(
-        "Tightened the problem statement.",
-      ),
+      expect(
+        [...document.querySelectorAll(".ai-bar-reply-answer")].at(-1)?.textContent,
+      ).toContain("Tightened the problem statement."),
     )
     // Clicked once — the options are cleared off the source turn, so a
     // second click has nothing left to fire (no double-apply surface).
-    expect(screen.queryByTestId("ic-clarify-options")).toBeNull()
+    expect(screen.queryByTestId("mutation-pick-options")).toBeNull()
   })
 
   it("send classifies via the project-scoped resolver, not chatIntentApi.resolve(_, {})", async () => {

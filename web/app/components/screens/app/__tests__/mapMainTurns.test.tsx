@@ -11,7 +11,7 @@ import * as React from "react"
 import { describe, expect, it, vi } from "vitest"
 import { mapMainTurns } from "../mapMainTurns"
 import type { ThreadTurn } from "../ChatScreen"
-import { ChatArtifactActions, ChatTicketSetActions } from "../ChatScreen"
+import { ChatArtifactActions, ChatTicketSetActions } from "../../../shared/chat-shell/ChatArtifactActions"
 import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
 import type { AskResponse } from "../../../../lib/api"
 

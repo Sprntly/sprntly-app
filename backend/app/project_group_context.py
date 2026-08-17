@@ -154,6 +154,30 @@ def _instructions_block(instructions: str | None) -> str:
     return "PROJECT INSTRUCTIONS (set by the team — follow these):\n" + text
 
 
+def assemble_project_fact_core(
+    project_id: int, dataset: str, company_id: str, *, members: dict | None = None
+) -> tuple[str, str, str]:
+    """The SHARED core project-fact block BOTH project surfaces assemble from:
+    `(roster, ledger, manifest)` — the roster of members, the task-ledger
+    digest, and the artifact manifest. These are the facts that must be
+    IDENTICAL across the private and group surfaces; single-sourcing them here
+    is what stops the two surfaces from ever drifting on WHICH members/tasks/
+    artifacts they report.
+
+    Each surface still owns its own SURROUNDING format (private folds these
+    after the caller's own memory base; group prefixes them with the memory
+    summary + latest shared insight) — this function returns only the three
+    fact strings, so a surface's exact wrapper bytes are unchanged. `members`
+    may be passed to avoid a second `_members_by_id` read. Never raises — each
+    section degrades to a placeholder on a read failure (AD-P7)."""
+    if members is None:
+        members = _members_by_id(project_id)
+    roster = _roster_block(project_id)
+    ledger = _ledger_digest(project_id, members)
+    manifest = _artifact_manifest(project_id, dataset, company_id)
+    return roster, ledger, manifest
+
+
 def assemble_private_project_context(
     project_id: int, user_id: str, dataset: str, company_id: str
 ) -> str:
@@ -183,9 +207,11 @@ def assemble_private_project_context(
         parts.append(base)
 
     members = _members_by_id(project_id)
-    roster = _roster_block(project_id)
-    ledger = _ledger_digest(project_id, members)
-    manifest = _artifact_manifest(project_id, dataset, company_id)
+    # Core facts via the SHARED assembler — single-sourced with the group
+    # surface so the two can never drift on members/tasks/artifacts.
+    roster, ledger, manifest = assemble_project_fact_core(
+        project_id, dataset, company_id, members=members
+    )
 
     parts.append(
         "This project only — never another company's data.\n"
@@ -219,9 +245,11 @@ def assemble_group_agent_context(project_id: int, dataset: str, company_id: str)
     if insight_text and len(insight_text) > _INSIGHT_CHARS:
         insight_text = insight_text[:_INSIGHT_CHARS].rstrip() + "…"
 
-    roster = _roster_block(project_id)
-    ledger = _ledger_digest(project_id, members)
-    manifest = _artifact_manifest(project_id, dataset, company_id)
+    # Core facts via the SHARED assembler — single-sourced with the private
+    # surface so the two can never drift on members/tasks/artifacts.
+    roster, ledger, manifest = assemble_project_fact_core(
+        project_id, dataset, company_id, members=members
+    )
 
     block = [
         "PROJECT CONTEXT (this project only — never another company's data):",
@@ -302,6 +330,46 @@ def read_tools() -> list[dict]:
         GET_ARTIFACT_CONTENT_TOOL,
         GET_TASK_LEDGER_TOOL,
     ]
+
+
+# ── In-band PRD edit (GROUP surface only) ───────────────────────────────────
+# The @Sprntly group agent's `edit_prd` tool. GROUP-only: it is added to the
+# GROUP scope's `extra_tools`, NEVER to the shared `read_tools()`, so the
+# private surface's tool set (and its `answer()` result shape) is unchanged.
+#
+# ★ SECURITY: the schema exposes an `instruction` param ONLY — NO
+# `prd_id`. The edit target is resolved SERVER-SIDE by the handler
+# (`_resolve_prd_id({}, ...)`, an empty dict, exactly as the retired group
+# pre-step did), so a model-supplied id can NEVER redirect the edit target, and
+# a multi-PRD project still asks which PRD (`needs_prd_clarify`) rather than
+# auto-picking. The handler routes to the shared `propose_chat_edit_scoped`
+# confirm gate — propose writes nothing; the existing confirm route
+# applies exactly the stored patch.
+EDIT_PRD_TOOL = {
+    "name": "edit_prd",
+    "description": (
+        "Propose an edit to THIS project's PRD. Call this when the latest turn "
+        "asks to change, add to, update, remove from, tighten, or rewrite part "
+        "of the project's PRD. Pass a plain-language `instruction` describing "
+        "the change in the team's own words. You do NOT choose or pass a PRD id "
+        "— the right PRD is resolved for you, and if the project has more than "
+        "one PRD you will be told to ask which one. The edit is NOT applied "
+        "immediately: it is proposed and the team confirms it before it takes "
+        "effect. After calling this, tell the team you've proposed the change "
+        "and it awaits their confirmation — never claim it is already done."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "instruction": {
+                "type": "string",
+                "description": "the change to make to the PRD, in plain language",
+            },
+        },
+        "required": ["instruction"],
+        "additionalProperties": False,
+    },
+}
 
 
 _READ_TOOL_NAMES = frozenset(t["name"] for t in read_tools())

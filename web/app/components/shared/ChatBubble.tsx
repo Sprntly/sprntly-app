@@ -204,6 +204,16 @@ export interface ChatBubbleProps {
   /** Cancel the pending mutation — same closure contract. */
   onCancelMutation?: () => void
 
+  /** An edit-target disambiguation pick (the private surface's "which PRD did
+   *  you mean?" options). Rendered as a card in the agent block, positioned
+   *  like `pendingMutation` and INDEPENDENT of the `agentBodyNode`-vs-ladder
+   *  branch. Unset/`null`/empty (every existing caller incl. main) renders
+   *  nothing, so the DOM stays byte-identical. */
+  pickOptions?: { id: string; title: string; instruction?: string }[] | null
+  /** Fired when a `pickOptions` choice is clicked — the caller closes over its
+   *  own turn id. */
+  onPickOption?: (option: { id: string; title: string; instruction?: string }) => void
+
   /** Rendered after both blocks, inside the turn wrapper — an artifact
    *  action row, a "save as artifact" button. Turn-scoped, caller-composed. */
   footer?: ReactNode
@@ -287,6 +297,8 @@ export function ChatBubble(props: ChatBubbleProps) {
     pendingMutation,
     onConfirmMutation,
     onCancelMutation,
+    pickOptions,
+    onPickOption,
     footer,
     afterNode,
   } = props
@@ -520,6 +532,26 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <button type="button" data-testid="mutation-cancel" onClick={onCancelMutation}>
                   Cancel
                 </button>
+              </div>
+            ) : null}
+            {/* The edit-target pick — a SIBLING of the agent body positioned
+                like the confirm card above, deliberately OUTSIDE the
+                `agentBodyNode`-vs-ladder branch. Native testids
+                (`mutation-pick-option-<id>`) replace the retired shell-owned
+                inline `ic-clarify-*` ids. Unset/empty → renders nothing, so
+                every existing caller's DOM is byte-identical. */}
+            {pickOptions?.length ? (
+              <div className="bc-mutation-pick" data-testid="mutation-pick-options">
+                {pickOptions.map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    data-testid={`mutation-pick-option-${opt.id}`}
+                    onClick={() => onPickOption?.(opt)}
+                  >
+                    {opt.title}
+                  </button>
+                ))}
               </div>
             ) : null}
           </>
