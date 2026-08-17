@@ -292,10 +292,19 @@ def _make_dispatch(
                     "(lookup time budget reached — no more fetches. Answer from "
                     "what you already read, and say it may be incomplete.)"
                 )
-            return cap_text(
-                kg_module().dispatch(enterprise_id or "", name, inp),
-                limit=DEFAULT_RESULT_CHARS,
-            )
+            try:
+                out = kg_module().dispatch(enterprise_id or "", name, inp)
+            except Exception:  # noqa: BLE001 — a KG read must not break the loop
+                logger.warning(
+                    "connector-lookup: KG tool dispatch failed for %s",
+                    enterprise_id, exc_info=True,
+                )
+                return (
+                    "(the knowledge graph could not be read just now. This is NOT "
+                    "a no-results answer — do not tell the user the graph holds "
+                    "nothing.)"
+                )
+            return cap_text(out, limit=DEFAULT_RESULT_CHARS)
         pair = owner.get(name)
         if pair is None:
             return f"(unknown tool {name})"
@@ -371,12 +380,15 @@ def answer(
     of stacking two.
 
     `include_knowledge_graph` adds Sprntly's own extracted knowledge as a further
-    tool (connector_lookup/knowledge_graph.py). OFF by default, and deliberately
-    so: a question that NAMES a source is asking about that source, and the
-    adapters that pass their own `system_text` (Jira) would otherwise be handed a
-    tool their prompt never mentions. The document-intent path turns it on,
-    because a question that names no source at all has no way to say which of the
-    two readers it meant.
+    tool (connector_lookup/knowledge_graph.py). OFF by default, so a caller that
+    leaves it False is byte-identical to before. When ON it does two things beyond
+    offering the tool: (1) it composes the KG system block onto a verbatim
+    `system_text` (so an adapter with a tuned prompt — Jira — is TOLD the tool
+    exists before it is handed one); and (2) it turns the nothing-connected branch
+    into a KG-ONLY tool loop instead of the connect copy, because the connector
+    sync keeps that same data live in the graph — so a tracker question answers
+    from what is actually synced rather than false-denying. The document-intent
+    path and the tracker/Jira paths turn it on; every other caller leaves it off.
 
     Never raises — a chat answer degrades, it does not error.
     """
@@ -387,7 +399,12 @@ def answer(
             [p for p, _ in connected] or providers
         )) + " lookup"
     )
-    if not connected:
+    # Nothing live to read. With the knowledge graph enabled, that is no longer a
+    # dead end: the connector sync keeps the same data fresh in the graph, so we
+    # fall through to a KG-only tool loop (built below with connected == []) rather
+    # than returning the connect copy. With the flag OFF — every caller but the
+    # tracker/Jira paths — this is byte-identical to the pre-existing short-circuit.
+    if not connected and not include_knowledge_graph:
         return plain_payload(
             not_connected_text or not_connected_message(missing or providers, enterprise_id),
             skill_source=skill_source, skill_action=action,
@@ -410,27 +427,45 @@ def answer(
     tools: list[dict] = []
     for provider, _session in connected:
         tools.extend(provider.tools())
-    # An adapter passing verbatim `system_text` (Jira) has a prompt that predates
-    # this tool and never mentions it, so it does not get it — offering a tool the
-    # system block does not describe is how a loop wastes an iteration.
-    kg_on = include_knowledge_graph and not system_text
+    # The knowledge graph is offered whenever the caller asks for it — including
+    # alongside a verbatim `system_text` (Jira). A prompt that predates the tool
+    # cannot mention it, so when `system_text` is passed we also append the KG
+    # system block below, so the model is told the tool exists before it is
+    # handed one.
+    kg_on = include_knowledge_graph
     if kg_on:
         tools.extend(kg_module().TOOLS)
-    # Same rule as the KG tool and for the same reason: a verbatim system prompt
-    # cannot explain a block it was written before.
+    # A verbatim system prompt cannot explain a primed cross-source digest it was
+    # written before, so Jira still never receives one (unchanged).
     primed = primed_context if (primed_context and not system_text) else ""
+    if system_text:
+        system_prompt = system_text
+        if kg_on:
+            system_prompt = (
+                system_text + "\n## Sprntly knowledge graph\n" + kg_module().SYSTEM
+            )
+    else:
+        system_prompt = _build_system(
+            connected,
+            # A KG-only fallback (connected == []) answers purely from the graph;
+            # naming every requested source as "not available" there would push
+            # the model toward the very connect-a-source deflection this path
+            # exists to avoid, so the unavailable note is added only when a live
+            # source WAS read.
+            unavailable=(
+                _unavailable_display_names(missing, unavailable_names)
+                if connected else None
+            ),
+            knowledge_graph=kg_on,
+            primed=bool(primed),
+        )
     max_iters = min(
         MAX_ITERS + ITERS_PER_EXTRA_PROVIDER * max(len(connected) - 1, 0),
         MAX_ITERS_CEILING,
     )
     try:
         text = loop(
-            system=system_text or _build_system(
-                connected,
-                unavailable=_unavailable_display_names(missing, unavailable_names),
-                knowledge_graph=kg_on,
-                primed=bool(primed),
-            ),
+            system=system_prompt,
             user=(
                 _render_history(history)
                 + (f"{primed}\n\n---\n\n" if primed else "")
@@ -447,7 +482,9 @@ def answer(
             meta_out=meta,
         )
     except Exception:  # noqa: BLE001 — never break the chat
-        names = " / ".join(p.display_name for p, _ in connected)
+        # On the KG-only fallback `connected` is empty; name the graph so the
+        # degraded copy still reads sensibly.
+        names = " / ".join(p.display_name for p, _ in connected) or "the knowledge graph"
         logger.exception(
             "connector-lookup: tool loop failed for %s (%s)", enterprise_id, names
         )
@@ -465,7 +502,7 @@ def answer(
     else:
         _log(enterprise_id, meta, [p.provider for p, _ in connected])
     if not text.strip():
-        names = " / ".join(p.display_name for p, _ in connected)
+        names = " / ".join(p.display_name for p, _ in connected) or "the knowledge graph"
         return plain_payload(
             empty_text or (
                 f"I looked in {names} but couldn't find what your question refers "

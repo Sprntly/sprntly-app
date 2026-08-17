@@ -6,6 +6,11 @@
  * same exception `ProjectDetailScreen.module.css` already documents). */
 
 .panel {
+  /* Fixed, standard modal size — does NOT grow/shrink with content. Both
+   * internal views (Artifacts list ⇆ Add artifact) share this one shell, so
+   * switching between them never resizes the dialog. Shrinks only on short
+   * viewports (the max-height cap). */
+  height: 720px;
   max-height: calc(100vh - 96px);
   display: flex;
   flex-direction: column;
@@ -23,7 +28,47 @@
 }
 
 .panel :global(.modal-body) {
+  /* Fill the fixed-height panel and scroll internally on overflow, so the
+   * outer dialog size stays constant regardless of how many artifacts. */
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+
+/* Add-artifact view header left cluster: "← Back" + the title block. */
+.addHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Icon-only back control in the Add-artifact view header — returns to the
+ * list view within the SAME modal (no close/reopen). Mirrors the top-bar
+ * "← All projects" back button's ghost treatment (ink-2 → accent-ink on
+ * hover, focus ring) so the back affordance reads the same product-wide.
+ * Token-only. */
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: var(--ink-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.backBtn:hover {
+  color: var(--accent-ink);
+}
+
+.backBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .count {
@@ -84,26 +129,11 @@
   color: var(--ink-4);
 }
 
-/* ── List + canvas grid ── */
-
-.canvasGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-
-@media (max-width: 780px) {
-  .canvasGrid {
-    grid-template-columns: 1fr;
-  }
-}
+/* ── Artifact list (full-width; the fixed-height modal body scrolls) ── */
 
 .list {
   display: flex;
   flex-direction: column;
-  max-height: 62vh;
-  overflow-y: auto;
 }
 
 .row {
@@ -118,11 +148,6 @@
 
 .row:hover {
   background: var(--surface-3);
-}
-
-.rowSel {
-  background: var(--accent-alpha-10);
-  box-shadow: inset 0 0 0 1px var(--accent-alpha-18);
 }
 
 .icon {
@@ -169,137 +194,4 @@
 .rowSrc {
   font-size: 11.5px;
   color: var(--ink-3);
-}
-
-/* ── Preview/Spec canvas ── */
-
-.canvas {
-  position: sticky;
-  top: 0;
-  border: 1px solid var(--line-strong);
-  border-radius: 14px;
-  background: var(--surface-2);
-  box-shadow: var(--shadow-md);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-
-.canvasBar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--line);
-  background: var(--surface);
-}
-
-.canvasTabs {
-  display: inline-flex;
-  gap: 2px;
-  background: var(--surface-3);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-}
-
-.canvasTab {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--ink-2);
-  padding: 5px 11px;
-  border-radius: 7px;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-}
-
-.canvasTabOn {
-  background: var(--surface-2);
-  color: var(--ink);
-  box-shadow: var(--shadow-sm);
-}
-
-.canvasVers {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-inline-start: auto;
-}
-
-/* Open-in-workspace affordance — hands off to the app's real drawer via the
- * deep-link URL `useArtifactUrlSync` handles. Tokens-only, matching the
- * accent-chip look of the active version pill above. */
-.openBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #fff;
-  background: var(--accent);
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: 5px 11px;
-  cursor: pointer;
-  transition: opacity 0.12s, background 0.12s;
-}
-
-.openBtn:hover:not(:disabled) {
-  background: var(--accent-ink);
-  border-color: var(--accent-ink);
-}
-
-.openBtn:disabled {
-  cursor: default;
-  color: var(--ink-4);
-  background: var(--surface-3);
-  border-color: var(--line);
-}
-
-.vchip {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--ink-3);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 3px 9px;
-  font-family: var(--font-mono);
-}
-
-.vchipOn {
-  border-color: var(--accent);
-  background: var(--accent-muted);
-  color: var(--accent-ink);
-}
-
-.canvasTitle {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
-  border-bottom: 1px solid var(--line);
-  font-size: 12px;
-  color: var(--ink-2);
-}
-
-.canvasTitle b {
-  color: var(--ink);
-  font-weight: 650;
-}
-
-.canvasBody {
-  padding: 16px;
-  min-height: 220px;
-  background: var(--surface-3);
-}
-
-.pane {
-  font-size: 12.5px;
-  color: var(--ink-2);
-  line-height: 1.6;
-}
-
-.paneMuted {
-  color: var(--ink-4);
 }

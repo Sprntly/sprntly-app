@@ -8,6 +8,8 @@
 // (the old rail's Members section) — nothing from that surface is lost, it
 // just now renders inside this modal's Members tab.
 import * as React from "react"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -159,21 +161,23 @@ describe("ProjectSettingsModal — creation / tabs", () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
-  it("test_settings_modal_title_reads_project_settings — the modal heading reads 'Project settings' (migrated intent from the old rail-section label)", () => {
+  it("test_settings_modal_title_reads_project_settings — the modal heading reads 'Project Settings' (title-cased for product consistency)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps()))
-    expect(screen.getByTestId("project-settings-modal-title").textContent?.trim()).toBe("Project settings")
+    expect(screen.getByTestId("project-settings-modal-title").textContent?.trim()).toBe("Project Settings")
   })
 })
 
 describe("ProjectSettingsModal — Members tab", () => {
-  it("test_settings_members_lists_humans_and_agent — all human rows + the pinned member-row-agent row render (AC6)", () => {
+  it("test_settings_members_lists_humans_only — human rows render and the Sprntly agent row is no longer shown; the count reflects humans only (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
     expect(screen.getAllByTestId("member-row-human")).toHaveLength(2)
-    const agentRow = screen.getByTestId("member-row-agent")
-    expect(agentRow.textContent).toContain("Sprntly")
-    expect(within(agentRow).getByText("Agent")).toBeTruthy()
-    expect(within(agentRow).getByText("Agent coworker · dispatches tasks")).toBeTruthy()
-    expect(within(agentRow).getByText("working")).toBeTruthy()
+    // The Members list is human-only now — the pinned Sprntly agent row was
+    // removed, and the section count is `humans.length` (2), not
+    // `members.length` (3, which would include the agent).
+    expect(screen.queryByTestId("member-row-agent")).toBeNull()
+    const panel = screen.getByTestId("settings-panel-members")
+    expect(panel.textContent).toMatch(/Members\s*2/)
+    expect(panel.textContent).not.toMatch(/Members\s*3/)
   })
 
   it("test_settings_members_human_rows_carry_job_role — each member-row-human shows its name + job_role label (AC6)", () => {
@@ -185,37 +189,39 @@ describe("ProjectSettingsModal — Members tab", () => {
     expect(within(rows[1]).getByText("Design")).toBeTruthy()
   })
 
-  it("test_settings_members_agent_pill_has_status_role — the agent-working-status pill has role=status and an accessible name containing Sprntly + the status string (AC6)", () => {
+  it("test_settings_members_no_agent_working_pill — the agent-working-status pill is no longer rendered anywhere in the Members tab (agent row removed) (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
-    const pill = screen.getByTestId("agent-working-status")
-    expect(pill.getAttribute("role")).toBe("status")
-    const accessibleName = pill.getAttribute("aria-label") ?? pill.textContent ?? ""
-    expect(accessibleName).toContain("Sprntly")
-    expect(accessibleName).toContain("working")
+    expect(screen.queryByTestId("agent-working-status")).toBeNull()
+    expect(screen.queryByTestId("member-row-agent")).toBeNull()
   })
 
-  it("test_settings_members_agent_pill_shows_backend_status_string — the pill text equals the virtual member's status constant, unmodified (AC6)", () => {
+  it("test_settings_members_no_agent_labels — the Members panel shows none of the removed agent affordances (the 'Agent' tag, the role label, the 'working' status) (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
-    expect(screen.getByTestId("agent-working-status").textContent).toBe("working")
+    const panel = screen.getByTestId("settings-panel-members")
+    expect(within(panel).queryByText("Agent")).toBeNull()
+    expect(within(panel).queryByText("Agent coworker · dispatches tasks")).toBeNull()
+    expect(within(panel).queryByText("working")).toBeNull()
   })
 
-  it("test_settings_members_working_pill_only_for_agent — no member-row-human renders the agent-working-status pill; exactly one renders overall (AC6)", () => {
+  it("test_settings_members_no_working_pill_on_any_row — no member-row-human renders the agent-working-status pill, and none renders overall (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
     const humanRows = screen.getAllByTestId("member-row-human")
     for (const row of humanRows) {
       expect(within(row).queryByTestId("agent-working-status")).toBeNull()
     }
-    expect(screen.getAllByTestId("agent-working-status")).toHaveLength(1)
+    expect(screen.queryAllByTestId("agent-working-status")).toHaveLength(0)
   })
 
-  it("test_settings_members_search_filters_by_name_or_role — typing a name OR job_role substring hides non-matching human rows and keeps the agent row (AC6)", () => {
+  it("test_settings_members_search_filters_by_name_or_role — typing a name OR job_role substring hides non-matching human rows (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
 
     fireEvent.change(screen.getByTestId("settings-members-search"), { target: { value: "shristi" } })
     let rows = screen.getAllByTestId("member-row-human")
     expect(rows).toHaveLength(1)
     expect(rows[0].textContent).toContain("Shristi")
-    expect(screen.getByTestId("member-row-agent")).toBeTruthy()
+    // (The pinned agent row that used to remain visible through the filter is
+    // gone — the list is human-only now.)
+    expect(screen.queryByTestId("member-row-agent")).toBeNull()
 
     // Role-substring match ("Design" is Shristi's job_role, not her name).
     fireEvent.change(screen.getByTestId("settings-members-search"), { target: { value: "design" } })
@@ -224,12 +230,21 @@ describe("ProjectSettingsModal — Members tab", () => {
     expect(rows[0].textContent).toContain("Shristi")
   })
 
-  it("test_settings_members_scroll_region_is_fixed_height — settings-members-scroll has a max-height + overflow-y: auto (AC6)", () => {
+  it("test_settings_members_scroll_region_is_full_height_card — settings-members-scroll carries the module scroll-region class, which the CSS module makes a full-height, internally-scrolling card (flex:1 + min-height:0 + overflow-y:auto) inside the .tabFill column (AC6)", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members" })))
     const region = screen.getByTestId("settings-members-scroll")
-    const computed = getComputedStyle(region)
-    expect(computed.overflowY).toBe("auto")
-    expect(parseInt(computed.maxHeight, 10)).toBeGreaterThan(0)
+    // The old inline `max-height`/`overflow-y` was replaced by the module's
+    // `.scrollRegion` class so the card fills the fixed-height modal instead
+    // of floating content-sized. jsdom doesn't apply CSS-module stylesheets,
+    // so the class presence + the module rule are asserted directly.
+    expect(region.className).toMatch(/scrollRegion/)
+    const css = readFileSync(join(__dirname, "../ProjectSettingsModal.module.css"), "utf8")
+    // `.scrollRegion` fills its flex parent and scrolls internally.
+    expect(css).toMatch(/\.scrollRegion\s*\{[^}]*flex:\s*1/)
+    expect(css).toMatch(/\.scrollRegion\s*\{[^}]*min-height:\s*0/)
+    expect(css).toMatch(/\.scrollRegion\s*\{[^}]*overflow-y:\s*auto/)
+    // `.tabFill` is the full-height flex column the Members/Invite tabs use.
+    expect(css).toMatch(/\.tabFill\s*\{[^}]*flex:\s*1/)
   })
 
   it("test_settings_members_remove_visible_for_removable — a member who is not creator/caller/agent renders member-remove and it calls onRemoveMember with that member (AC7)", () => {
@@ -248,7 +263,9 @@ describe("ProjectSettingsModal — Members tab", () => {
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "members", currentUserId: "u2" })))
     expect(screen.queryAllByTestId("member-remove")).toHaveLength(0)
     expect(screen.queryByTestId("member-remove")).toBeNull()
-    expect(within(screen.getByTestId("member-row-agent")).queryByTestId("member-remove")).toBeNull()
+    // (The agent row that previously also had to be checked here is gone — the
+    // Members list is human-only now.)
+    expect(screen.queryByTestId("member-row-agent")).toBeNull()
   })
 })
 

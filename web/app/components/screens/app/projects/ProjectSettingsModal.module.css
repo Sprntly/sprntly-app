@@ -4,6 +4,34 @@
  * palette (TICKET_STANDARD.md Check 25). */
 
 .panel {
+  /* Fixed, standard modal size — matches the Artifacts modal (#6) so the
+   * project modals feel uniform. Height does NOT grow/shrink with content,
+   * so switching Instructions/Memory/Members/Invite tabs (very different
+   * content lengths) never resizes the dialog. Shrinks only on short
+   * viewports (the max-height cap). */
+  height: 720px;
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* The tab body fills the fixed-height panel and scrolls internally on
+ * overflow, keeping the outer dialog size constant across tabs. Flex column
+ * so a tab can opt into filling the body height (Members/Invite cards). */
+.panel :global(.modal-body) {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+/* A tab panel that fills the modal body height (Members/Invite) — a flex
+ * column whose fixed header rows (label + search) sit above a list card
+ * that takes the remaining height. */
+.tabFill {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -72,6 +100,12 @@
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface-2);
+  /* Fill the tab's remaining height (see .tabFill) and scroll the list
+   * internally on overflow, so the card occupies the full tab area instead
+   * of floating content-sized in a tall modal. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* ── Instructions tab — persists via GET/PUT, folds into agent context

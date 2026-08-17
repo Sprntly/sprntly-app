@@ -10,10 +10,15 @@
 // VERBATIM, the same documented exception `ArtifactsModal.tsx`/
 // `ProjectDetailScreen.tsx`'s own local badge copies already take
 // (`ArtifactsScreen.tsx` is not a declared Deliverable for this ticket).
-// The modal chrome (`modal-overlay`/`modal`/`modal-head`/`modal-foot`/
-// `btn btn-ghost`/`btn btn-primary`) reuses the SAME global classes every
-// other project modal (`ArtifactsModal`, `CreateProjectModal`) already
-// renders with — no bespoke dialog shell.
+//
+// Structure: the picker's data + render live in `AddArtifactPanel` (the
+// `modal-body` + `modal-foot` only — NO dialog shell). `ArtifactsModal` folds
+// this panel in as a second internal VIEW (list ⇆ add, one modal, one size);
+// the standalone `AddArtifactModal` wrapper below keeps the same picker
+// available as its own dialog for any caller that wants it. The modal chrome
+// (`modal-overlay`/`modal`/`modal-head`/`modal-foot`/`btn btn-ghost`/
+// `btn btn-primary`) reuses the SAME global classes every other project modal
+// (`ArtifactsModal`, `CreateProjectModal`) already renders with.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
@@ -55,6 +60,235 @@ function artifactTitle(a: ProjectableArtifactItem): string {
   return a.type === "ticket_set" ? (a.title.trim() || "Tickets from this conversation") : a.title
 }
 
+// ── AddArtifactPanel — the picker body + foot (NO dialog shell) ──
+//
+// Owns its own state/fetch/multi-select/confirm. Rendered inside a host modal
+// shell (`ArtifactsModal`'s add-view, or the standalone `AddArtifactModal`
+// wrapper below). The host owns the overlay/head/close + focus/tab-trap.
+
+export type AddArtifactPanelProps = {
+  projectId: number | string
+  /** Whether the host modal is currently showing this panel — gates the
+   *  library fetch + state resets so it (re)loads each time the add view is
+   *  entered, matching the old open-driven fetch. */
+  active: boolean
+  /** `${type}-${id}` keys already on the project — those rows render disabled
+   *  ("On this project") and cannot be selected/added. */
+  existingKeys: Set<string>
+  /** Fired after ANY successful write (full or partial) so the caller
+   *  re-fetches the project's artifact list. Does NOT navigate. */
+  onAdded: () => void
+  /** Fired only when EVERY pick landed — safe to leave the panel (the caller
+   *  returns to the list view, or closes). */
+  onDone: () => void
+  /** The foot "Cancel" / abandon-add action (back to list, or close). */
+  onCancel: () => void
+}
+
+export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onDone, onCancel }: AddArtifactPanelProps) {
+  const { activeCompany } = useCompany()
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
+  const [artifacts, setArtifacts] = useState<ProjectableArtifactItem[]>([])
+  const [filter, setFilter] = useState<ArtifactFilter>("all")
+  const [query, setQuery] = useState("")
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!active) return
+    setStatus("loading")
+    setSelected(new Set())
+    setQuery("")
+    setFilter("all")
+    setSaveError(null)
+    artifactsApi
+      .list(activeCompany)
+      .then((rows) => {
+        // A project cannot hold a custom_artifact row yet (see
+        // ProjectableArtifactItem's own doc) — excluded here, at the one
+        // place the company's full library enters this panel.
+        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => r.type !== "custom_artifact"))
+        setStatus("ready")
+      })
+      .catch(() => setStatus("error"))
+  }, [active, activeCompany])
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return artifacts.filter((a) => {
+      if (filter !== "all" && a.type !== filter) return false
+      if (!q) return true
+      return artifactTitle(a).toLowerCase().includes(q)
+    })
+  }, [artifacts, filter, query])
+
+  const toggle = useCallback(
+    (a: ProjectableArtifactItem) => {
+      const key = artifactKey(a)
+      if (existingKeys.has(key)) return // already on this project — non-toggleable
+      setSelected((prev) => {
+        const next = new Set(prev)
+        if (next.has(key)) next.delete(key)
+        else next.add(key)
+        return next
+      })
+    },
+    [existingKeys],
+  )
+
+  const onConfirm = useCallback(() => {
+    if (selected.size === 0 || saving) return
+    setSaving(true)
+    setSaveError(null)
+    const picks = artifacts.filter((a) => selected.has(artifactKey(a)))
+    Promise.allSettled(picks.map((a) => projectsApi.addArtifact(projectId, a.type, a.id))).then((results) => {
+      setSaving(false)
+      const failedKeys = new Set<string>()
+      let anySuccess = false
+      results.forEach((r, i) => {
+        if (r.status === "rejected") failedKeys.add(artifactKey(picks[i]))
+        else anySuccess = true
+      })
+      if (failedKeys.size === 0) {
+        onAdded() // refetch (data changed)
+        onDone() // all landed — leave the panel (host returns to list / closes)
+        return
+      }
+      if (anySuccess) {
+        // Some picks landed — refetch so those rows flip to "on this project"
+        // (existingKeys) even while the panel stays open on the failed rest.
+        onAdded()
+      }
+      setSelected(failedKeys)
+      setSaveError(
+        anySuccess
+          ? "Some artifacts couldn't be added — the rest were attached."
+          : "Couldn't add those artifacts. Try again.",
+      )
+    })
+  }, [selected, saving, artifacts, projectId, onAdded, onDone])
+
+  const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
+  for (const a of artifacts) counts[a.type] = (counts[a.type] ?? 0) + 1
+
+  return (
+    <>
+      <div className="modal-body" data-testid="add-artifact-modal-body">
+        {status === "loading" ? (
+          <div className={styles.stateWrap} data-testid="add-artifact-modal-loading" aria-busy="true">
+            Loading…
+          </div>
+        ) : status === "error" ? (
+          <div className={styles.stateWrap} data-testid="add-artifact-modal-error">
+            Couldn&rsquo;t load your company&rsquo;s artifacts. Try again.
+          </div>
+        ) : (
+          <>
+            <input
+              className={styles.search}
+              placeholder="Search artifacts…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              aria-label="Search artifacts"
+              data-testid="add-artifact-search"
+            />
+            <div className={styles.chips} role="tablist" aria-label="Filter artifacts by type">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === f.id}
+                  className={`${styles.chip} ${filter === f.id ? styles.chipOn : ""}`}
+                  onClick={() => setFilter(f.id)}
+                  data-testid={`add-artifact-filter-${f.id}`}
+                >
+                  {f.label} <span className={styles.chipN}>{counts[f.id] ?? 0}</span>
+                </button>
+              ))}
+            </div>
+
+            {filtered.length === 0 ? (
+              <div className={styles.stateWrap} data-testid="add-artifact-modal-empty">
+                No artifacts match.
+              </div>
+            ) : (
+              <div className={styles.list} data-testid="add-artifact-modal-list">
+                {filtered.map((a) => {
+                  const key = artifactKey(a)
+                  const cfg = BADGE[a.type]
+                  const isExisting = existingKeys.has(key)
+                  const isSelected = selected.has(key)
+                  return (
+                    <button
+                      type="button"
+                      key={key}
+                      className={`${styles.row} ${isSelected ? styles.rowSel : ""} ${isExisting ? styles.rowExisting : ""}`}
+                      onClick={() => toggle(a)}
+                      disabled={isExisting}
+                      aria-pressed={isSelected}
+                      aria-disabled={isExisting}
+                      data-testid={`add-artifact-row-${key}`}
+                      data-existing={isExisting ? "true" : undefined}
+                    >
+                      <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
+                      <div className={styles.rowMain}>
+                        <div className={styles.rowTitle}>{artifactTitle(a)}</div>
+                        <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
+                          {cfg.label}
+                        </span>
+                      </div>
+                      {isExisting ? (
+                        <span className={styles.onProject} data-testid={`add-artifact-existing-${key}`}>
+                          On this project
+                        </span>
+                      ) : (
+                        <span
+                          className={styles.checkbox}
+                          aria-hidden="true"
+                          data-checked={isSelected ? "true" : undefined}
+                        />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+
+            {saveError ? (
+              <div className={styles.error} role="alert" data-testid="add-artifact-modal-save-error">
+                {saveError}
+              </div>
+            ) : null}
+          </>
+        )}
+      </div>
+
+      <div className="modal-foot">
+        <button type="button" className="btn btn-ghost" onClick={onCancel} data-testid="add-artifact-modal-cancel">
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary"
+          onClick={onConfirm}
+          disabled={selected.size === 0 || saving}
+          data-testid="add-artifact-modal-confirm"
+        >
+          {saving
+            ? "Adding…"
+            : selected.size > 0
+              ? `Add ${selected.size} artifact${selected.size === 1 ? "" : "s"}`
+              : "Add"}
+        </button>
+      </div>
+    </>
+  )
+}
+
+// ── AddArtifactModal — standalone dialog wrapper around the panel ──
+
 export type AddArtifactModalProps = {
   projectId: number | string
   open: boolean
@@ -68,40 +302,9 @@ export type AddArtifactModalProps = {
   onAdded: () => void
 }
 
-type LoadState = "loading" | "ready" | "error"
-
 export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdded }: AddArtifactModalProps) {
-  const { activeCompany } = useCompany()
-  const [status, setStatus] = useState<LoadState>("loading")
-  const [artifacts, setArtifacts] = useState<ProjectableArtifactItem[]>([])
-  const [filter, setFilter] = useState<ArtifactFilter>("all")
-  const [query, setQuery] = useState("")
-  const [selected, setSelected] = useState<Set<string>>(new Set())
-  const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
-
   const dialogRef = useRef<HTMLDivElement>(null)
   const openerRef = useRef<Element | null>(null)
-
-  useEffect(() => {
-    if (!open) return
-    setStatus("loading")
-    setSelected(new Set())
-    setQuery("")
-    setFilter("all")
-    setSaveError(null)
-    artifactsApi
-      .list(activeCompany)
-      .then((rows) => {
-        // A project cannot hold a custom_artifact row yet (see
-        // ProjectableArtifactItem's own doc) — excluded here, at the one
-        // place the company's full library enters this modal, rather than
-        // leaking the wider type into every filter/badge/toggle below.
-        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => r.type !== "custom_artifact"))
-        setStatus("ready")
-      })
-      .catch(() => setStatus("error"))
-  }, [open, activeCompany])
 
   useEffect(() => {
     if (!open) return
@@ -140,68 +343,7 @@ export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdd
     }
   }, [])
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    return artifacts.filter((a) => {
-      if (filter !== "all" && a.type !== filter) return false
-      if (!q) return true
-      return artifactTitle(a).toLowerCase().includes(q)
-    })
-  }, [artifacts, filter, query])
-
-  const toggle = useCallback(
-    (a: ProjectableArtifactItem) => {
-      const key = artifactKey(a)
-      if (existingKeys.has(key)) return // already on this project — non-toggleable
-      setSelected((prev) => {
-        const next = new Set(prev)
-        if (next.has(key)) next.delete(key)
-        else next.add(key)
-        return next
-      })
-    },
-    [existingKeys],
-  )
-
-  const onConfirm = useCallback(() => {
-    if (selected.size === 0 || saving) return
-    setSaving(true)
-    setSaveError(null)
-    const picks = artifacts.filter((a) => selected.has(artifactKey(a)))
-    Promise.allSettled(picks.map((a) => projectsApi.addArtifact(projectId, a.type, a.id))).then(
-      (results) => {
-        setSaving(false)
-        const failedKeys = new Set<string>()
-        let anySuccess = false
-        results.forEach((r, i) => {
-          if (r.status === "rejected") failedKeys.add(artifactKey(picks[i]))
-          else anySuccess = true
-        })
-        if (failedKeys.size === 0) {
-          onAdded()
-          onClose()
-          return
-        }
-        if (anySuccess) {
-          // Some picks landed — refetch so those rows flip to "on this
-          // project" (existingKeys) even while the modal stays open on the
-          // failed rest.
-          onAdded()
-        }
-        setSelected(failedKeys)
-        setSaveError(
-          anySuccess
-            ? "Some artifacts couldn't be added — the rest were attached."
-            : "Couldn't add those artifacts. Try again.",
-        )
-      },
-    )
-  }, [selected, saving, artifacts, projectId, onAdded, onClose])
-
   if (!open) return null
-
-  const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
-  for (const a of artifacts) counts[a.type] = (counts[a.type] ?? 0) + 1
 
   return (
     <div className="modal-overlay open" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -232,115 +374,14 @@ export function AddArtifactModal({ projectId, open, existingKeys, onClose, onAdd
           </button>
         </div>
 
-        <div className="modal-body" data-testid="add-artifact-modal-body">
-          {status === "loading" ? (
-            <div className={styles.stateWrap} data-testid="add-artifact-modal-loading" aria-busy="true">
-              Loading…
-            </div>
-          ) : status === "error" ? (
-            <div className={styles.stateWrap} data-testid="add-artifact-modal-error">
-              Couldn&rsquo;t load your company&rsquo;s artifacts. Try again.
-            </div>
-          ) : (
-            <>
-              <input
-                className={styles.search}
-                placeholder="Search artifacts…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                aria-label="Search artifacts"
-                data-testid="add-artifact-search"
-              />
-              <div className={styles.chips} role="tablist" aria-label="Filter artifacts by type">
-                {FILTERS.map((f) => (
-                  <button
-                    key={f.id}
-                    type="button"
-                    role="tab"
-                    aria-selected={filter === f.id}
-                    className={`${styles.chip} ${filter === f.id ? styles.chipOn : ""}`}
-                    onClick={() => setFilter(f.id)}
-                    data-testid={`add-artifact-filter-${f.id}`}
-                  >
-                    {f.label} <span className={styles.chipN}>{counts[f.id] ?? 0}</span>
-                  </button>
-                ))}
-              </div>
-
-              {filtered.length === 0 ? (
-                <div className={styles.stateWrap} data-testid="add-artifact-modal-empty">
-                  No artifacts match.
-                </div>
-              ) : (
-                <div className={styles.list} data-testid="add-artifact-modal-list">
-                  {filtered.map((a) => {
-                    const key = artifactKey(a)
-                    const cfg = BADGE[a.type]
-                    const isExisting = existingKeys.has(key)
-                    const isSelected = selected.has(key)
-                    return (
-                      <button
-                        type="button"
-                        key={key}
-                        className={`${styles.row} ${isSelected ? styles.rowSel : ""} ${isExisting ? styles.rowExisting : ""}`}
-                        onClick={() => toggle(a)}
-                        disabled={isExisting}
-                        aria-pressed={isSelected}
-                        aria-disabled={isExisting}
-                        data-testid={`add-artifact-row-${key}`}
-                        data-existing={isExisting ? "true" : undefined}
-                      >
-                        <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
-                        <div className={styles.rowMain}>
-                          <div className={styles.rowTitle}>{artifactTitle(a)}</div>
-                          <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
-                            {cfg.label}
-                          </span>
-                        </div>
-                        {isExisting ? (
-                          <span className={styles.onProject} data-testid={`add-artifact-existing-${key}`}>
-                            On this project
-                          </span>
-                        ) : (
-                          <span
-                            className={styles.checkbox}
-                            aria-hidden="true"
-                            data-checked={isSelected ? "true" : undefined}
-                          />
-                        )}
-                      </button>
-                    )
-                  })}
-                </div>
-              )}
-
-              {saveError ? (
-                <div className={styles.error} role="alert" data-testid="add-artifact-modal-save-error">
-                  {saveError}
-                </div>
-              ) : null}
-            </>
-          )}
-        </div>
-
-        <div className="modal-foot">
-          <button type="button" className="btn btn-ghost" onClick={onClose} data-testid="add-artifact-modal-cancel">
-            Cancel
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={onConfirm}
-            disabled={selected.size === 0 || saving}
-            data-testid="add-artifact-modal-confirm"
-          >
-            {saving
-              ? "Adding…"
-              : selected.size > 0
-                ? `Add ${selected.size} artifact${selected.size === 1 ? "" : "s"}`
-                : "Add"}
-          </button>
-        </div>
+        <AddArtifactPanel
+          projectId={projectId}
+          active={open}
+          existingKeys={existingKeys}
+          onAdded={onAdded}
+          onDone={onClose}
+          onCancel={onClose}
+        />
       </div>
     </div>
   )

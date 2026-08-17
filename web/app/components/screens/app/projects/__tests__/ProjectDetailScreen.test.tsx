@@ -26,10 +26,11 @@ const markIndividualReadMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
 const emitDelegationEventMock = vi.fn()
-// The container mounts the real `AddArtifactModal` (unmocked); its
-// company-library fetch effect only fires once `railModal` reaches
-// `"add-artifact"` — a safe empty-list default keeps every other test in
-// this file, which never opens that state, unaffected.
+// The container mounts the real `ArtifactsModal` (unmocked), which folds the
+// real `AddArtifactPanel` in as its in-modal "add" view; the panel's
+// company-library fetch effect only fires once that add view becomes active
+// (Artifacts modal open + list→add swap) — a safe empty-list default keeps
+// every other test in this file, which never opens that state, unaffected.
 const artifactsListMock = vi.fn()
 const addArtifactMock = vi.fn()
 // The invite modal (mounted, unmocked) now fetches on open — default to an
@@ -266,6 +267,7 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     onCloseArtifactDrawer: noop,
     onOpenTasks: noop,
     onOpenSettings: noop,
+    onOpenInvite: noop,
     currentUserId: "current-viewer",
     onRemoveMember: noop,
     refetchArtifacts: noop,
@@ -381,20 +383,24 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
   })
 })
 
-describe("ProjectDetailView — see-all-tasks trigger (AC7, AC8, AC9)", () => {
-  it("test_see_all_tasks_trigger_in_topbar — tasks-see-all renders in the top bar, no numeric count", () => {
+describe("ProjectDetailView — top-bar tasks trigger removed", () => {
+  it("test_no_see_all_tasks_trigger_in_topbar — the top-bar 'See all tasks' affordance is gone (the ledger is reached conversationally now)", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
-    const trigger = screen.getByTestId("tasks-see-all")
-    expect(trigger).toBeTruthy()
-    // Entry point only — no numeric task count rendered on the trigger.
-    expect(trigger.textContent).not.toMatch(/\d/)
+    // The tasks entry point was removed from the top bar — no trigger, no copy.
+    expect(screen.queryByTestId("tasks-see-all")).toBeNull()
+    expect(screen.queryByText("See all tasks")).toBeNull()
   })
+})
 
-  it("test_see_all_tasks_opens_task_modal — clicking tasks-see-all opens TaskModal", () => {
-    const onOpenTasks = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onOpenTasks })))
-    fireEvent.click(screen.getByTestId("tasks-see-all"))
-    expect(onOpenTasks).toHaveBeenCalledTimes(1)
+describe("ProjectDetailView — top-bar invite affordance", () => {
+  it("test_topbar_invite_renders_and_calls_on_open_invite — the bare '+' invite icon renders next to the avatars and calls onOpenInvite", () => {
+    const onOpenInvite = vi.fn()
+    render(React.createElement(ProjectDetailView, viewProps({ onOpenInvite })))
+    const invite = screen.getByTestId("topbar-invite")
+    expect(invite.tagName).toBe("BUTTON")
+    expect(invite.getAttribute("aria-label")).toBe("Invite members")
+    fireEvent.click(invite)
+    expect(onOpenInvite).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -479,12 +485,15 @@ describe("ProjectDetailView — state", () => {
 })
 
 describe("ProjectDetailView — accessibility", () => {
-  it("test_topbar_controls_interactive_with_labels — project-settings-gear/topbar-artifacts/tasks-see-all/chat-row-* are BUTTONs with accessible names", () => {
+  it("test_topbar_controls_interactive_with_labels — project-settings-gear/topbar-artifacts/topbar-invite/chat-row-* are BUTTONs with accessible names", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
     expect(screen.getByTestId("project-settings-gear").tagName).toBe("BUTTON")
     expect(screen.getByLabelText("Project settings")).toBeTruthy()
     expect(screen.getByTestId("topbar-artifacts").tagName).toBe("BUTTON")
-    expect(screen.getByTestId("tasks-see-all").tagName).toBe("BUTTON")
+    // The top-bar tasks trigger was removed; the invite affordance replaces it
+    // as the newest labeled top-bar control.
+    expect(screen.getByTestId("topbar-invite").tagName).toBe("BUTTON")
+    expect(screen.getByLabelText("Invite members")).toBeTruthy()
     expect(screen.getByTestId("chat-row-group").tagName).toBe("BUTTON")
     expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
   })
@@ -627,7 +636,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     expect(memoryInsightMock).toHaveBeenCalledWith("101")
   })
 
-  it("test_detail_in_modal_add_existing_opens_add_artifact_modal — clicking the in-modal trigger inside the open Artifacts modal opens AddArtifactModal and closes the Artifacts modal's list", async () => {
+  it("test_detail_in_modal_add_existing_swaps_to_add_view — clicking the in-modal trigger inside the open Artifacts modal swaps to the folded add-artifact VIEW (same modal), not a separate modal; the list is replaced by the add panel + a back control", async () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
@@ -643,10 +652,18 @@ describe("ProjectDetailScreen — data fetch", () => {
 
     fireEvent.click(screen.getByTestId("artifacts-modal-add-existing"))
 
-    // railModal flips {kind:"artifacts"} → {kind:"add-artifact"} in one
-    // update: the browse modal's list is gone and the picker is open.
-    await waitFor(() => expect(screen.getByTestId("add-artifact-modal")).toBeTruthy())
+    // The single Artifacts modal swaps its internal view list → add: the
+    // folded AddArtifactPanel body renders with an in-modal "← Back" control,
+    // the list view is gone, and NO separate add-artifact dialog is mounted.
+    await waitFor(() => expect(screen.getByTestId("add-artifact-modal-body")).toBeTruthy())
+    expect(screen.getByTestId("artifacts-modal-back")).toBeTruthy()
     expect(screen.queryByTestId("artifacts-modal-list")).toBeNull()
+    expect(screen.queryByTestId("add-artifact-modal")).toBeNull()
+
+    // "← Back" returns to the list view within the same modal.
+    fireEvent.click(screen.getByTestId("artifacts-modal-back"))
+    await waitFor(() => expect(screen.getByTestId("artifacts-modal-list")).toBeTruthy())
+    expect(screen.queryByTestId("add-artifact-modal-body")).toBeNull()
   })
 
   it("renders a graceful 'not a member' state on a 403, never a crash", async () => {
@@ -692,6 +709,30 @@ describe("ProjectDetailScreen — data fetch", () => {
     // The project-scoped picker body renders inside the settings modal...
     await waitFor(() => expect(screen.getByTestId("project-invite-search")).toBeTruthy())
     // ...and the global mock modal mechanics are never touched.
+    expect(openModalMock).not.toHaveBeenCalled()
+  })
+
+  it("the top-bar '+' invite affordance opens the settings modal directly on the Invite tab", async () => {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue(ARTIFACTS)
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    candidateSearchMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    })
+    await waitFor(() => expect(screen.getByTestId("topbar-invite")).toBeTruthy())
+    // Modal is closed until the affordance is clicked.
+    expect(screen.queryByTestId("project-settings-modal")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("topbar-invite"))
+
+    // The SAME settings modal the gear opens, but landing on the Invite tab
+    // (onOpenInvite → settingsTab "invite"), not the gear's default
+    // Instructions tab.
+    expect(screen.getByTestId("project-settings-modal")).toBeTruthy()
+    await waitFor(() => expect(screen.getByTestId("project-invite-search")).toBeTruthy())
+    expect(screen.getByTestId("settings-panel-invite")).toBeTruthy()
     expect(openModalMock).not.toHaveBeenCalled()
   })
 

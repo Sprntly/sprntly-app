@@ -30,17 +30,10 @@ import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkel
 import { AGENT_BADGE, AGENT_NAME } from "../../../../lib/agent"
 import { type ChatArtifactItem, type OpenArtifactCandidate } from "../../../../lib/api"
 import { artifactItemAsCandidate } from "./artifactCandidates"
-import { personAvatarStyle } from "./avatarColor"
 import { useProjectGroupThread } from "./useProjectGroupThread"
 import { useMentionPicker, MentionBubble } from "./useMentionPicker"
-import extras from "./GroupChatExtras.module.css"
 
 const COMPOSER_PLACEHOLDER = "Message the team, or @Sprntly to hand it a task…"
-
-function initials(name: string | null | undefined): string {
-  if (!name) return "?"
-  return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
-}
 
 export type ProjectGroupChatProps = {
   projectId: number | string
@@ -87,24 +80,6 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     }
   }
 
-  const rosterNode =
-    engine.presenceMembers.length > 0 ? (
-      <div className={extras.roster} data-testid="gc-presence">
-        {engine.presenceMembers.map((member) => (
-          <span
-            key={member.userId}
-            className={extras.rosterMember}
-            data-testid="gc-presence-member"
-            title={member.name}
-            style={personAvatarStyle(member.userId, member.name)}
-          >
-            <span className={extras.rosterDot} aria-hidden="true" />
-            {initials(member.name)}
-          </span>
-        ))}
-      </div>
-    ) : null
-
   const descriptor: ChatSurfaceDescriptor = {
     surface: "project_group",
     projectId: Number(projectId),
@@ -112,7 +87,9 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
     frame: {
       mode: "thread",
       viewportClassName: shellCss.standaloneViewport,
-      aboveViewport: rosterNode,
+      // Floating in-transcript presence roster removed — presence is intended
+      // to fold into the top-bar member avatar list (see ProjectDetailScreen).
+      // `engine.presenceMembers` remains available for that future lift.
       loading: engine.loading,
       loadingNode: <AssistantThinkingSkeleton phase="Loading the group chat…" />,
     },

@@ -105,6 +105,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 188px;
   padding: 20px;
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -137,9 +138,19 @@
   font-family: var(--font-serif);
   font-weight: 400;
   font-size: 19px;
+  line-height: 1.3;
   letter-spacing: -0.01em;
   margin: 0;
   color: var(--ink);
+  /* Reserve a consistent two-line title area so a 1-line title occupies the
+   * same vertical space as a wrapping 2-line title — keeps every card's body
+   * (badges + footer) at the same start position. Overflow clamps with an
+   * ellipsis past two lines. */
+  min-height: 2.6em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .autoBadge {
@@ -176,7 +187,9 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 2px;
+  /* Pin the footer to the bottom of the card regardless of how much body
+   * content sits above it, so footers line up across the grid row. */
+  margin-top: auto;
   padding-top: 14px;
   border-top: 1px solid var(--line);
 }

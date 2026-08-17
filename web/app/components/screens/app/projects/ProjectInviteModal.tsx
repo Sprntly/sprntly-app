@@ -48,6 +48,12 @@ export type ProjectInviteBodyProps = {
   /** Fired after a successful add/invite so the caller re-fetches the roster
    *  (`refetchProject`) and the new member shows in the members list. */
   onInvited: () => void
+  /** Optional class for the candidate-list container. When provided (the
+   *  Settings › Invite tab passes its Members-tab card class), the list
+   *  renders as a full-height card that fills its flex parent and scrolls
+   *  internally — matching the Members tab. Omitted by the standalone modal,
+   *  which keeps the original fixed-height inline scroll. */
+  listClassName?: string
 }
 
 /** The candidate-picker body — extracted so the layout redesign's Settings ›
@@ -57,7 +63,7 @@ export type ProjectInviteBodyProps = {
  *  mount this component while visible, so a fresh instance — and fresh local
  *  state — appears on every open; no separate `open` prop or reset effect
  *  needed here. */
-export function ProjectInviteBody({ projectId, onInvited }: ProjectInviteBodyProps) {
+export function ProjectInviteBody({ projectId, onInvited, listClassName }: ProjectInviteBodyProps) {
   const [query, setQuery] = useState("")
   const [candidates, setCandidates] = useState<CandidateRow[]>([])
   const [candLoading, setCandLoading] = useState(false)
@@ -184,7 +190,11 @@ export function ProjectInviteBody({ projectId, onInvited }: ProjectInviteBodyPro
         // Fixed-height, independently-scrolling list region — same pattern
         // the Settings › Members tab uses (search-first + fixed-height
         // scroll for a long candidate list).
-        <div style={{ marginTop: 10, maxHeight: 296, overflowY: "auto" }} data-testid="project-invite-results">
+        <div
+          className={listClassName}
+          style={listClassName ? { marginTop: 10 } : { marginTop: 10, maxHeight: 296, overflowY: "auto" }}
+          data-testid="project-invite-results"
+        >
           {/* Empty query (on open): the primary "add someone" picker —
               workspace non-members only, a member already on the project
               never appears. Non-empty query: the typeahead over the full

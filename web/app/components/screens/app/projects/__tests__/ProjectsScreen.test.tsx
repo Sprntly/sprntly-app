@@ -139,18 +139,23 @@ describe("ProjectsView — card content", () => {
     expect(html).not.toContain("634AB0")
   })
 
-  it("renders the avatar stack, memory indicator, and chats indicator", () => {
+  it("renders the avatar stack, artifact indicator, and chats indicator", () => {
     render(React.createElement(ProjectsView, viewProps()))
     const cards = screen.getAllByTestId("project-card")
     expect(cards).toHaveLength(2)
     const manualCard = within(cards[0])
     expect(manualCard.getByTestId("av-stack").getAttribute("aria-label")).toBe("4 members")
-    expect(manualCard.getByText(/24 insights/)).toBeTruthy()
+    // Footer meta now shows total artifacts on the project (sum of the per-type
+    // `artifact_counts`), not the old "N insights" memory count:
+    // MANUAL = prd 2 + ticket_set 14 + prototype 3 + evidence 6 = 25.
+    expect(manualCard.getByText(/25 artifacts/)).toBeTruthy()
+    expect(manualCard.queryByText(/insight/)).toBeNull()
     expect(manualCard.getByText("Group chat")).toBeTruthy()
 
     const autoCard = within(cards[1])
     expect(autoCard.getByTestId("av-stack").getAttribute("aria-label")).toBe("2 members")
-    expect(autoCard.getByText(/11 insights/)).toBeTruthy()
+    // AUTO = prd 1 + ticket_set 9 + prototype 1 = 11 artifacts.
+    expect(autoCard.getByText(/11 artifacts/)).toBeTruthy()
     expect(autoCard.getByText("No group chat yet")).toBeTruthy()
   })
 
