@@ -1780,6 +1780,32 @@ def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> s
     return "\n".join(lines)
 
 
+def _is_bare_send_to_roster_member(
+    routing_text: str, scope: "Optional[SurfaceScope]",
+) -> bool:
+    """True when `routing_text` is a bare send/assign/hand/route directed at
+    a named PROJECT ROSTER member with no pronoun object — "send to Jay to
+    prioritize the roadmap" — closing the gap where
+    `is_project_tool_request`'s `_PROJECT_TOOL_DELEGATE_VERB` requires an
+    object between the verb and "to" ("send THIS to X") and a bare "send to
+    X" never entered the sixth branch at all. See
+    `app.project_delegation.is_bare_send_to_member` for the roster-matching
+    contract; this is only the call-site wrapper, matching
+    `_skip_project_connectors`'s best-effort-degrade shape so a detector
+    failure here can never break an otherwise-answerable turn.
+
+    A no-op for `scope is None`/main or an empty roster — same guard shape
+    as every other sixth-branch predicate above it."""
+    if scope is None or scope.surface == Surface.main or not scope.roster:
+        return False
+    try:
+        from app.project_delegation import is_bare_send_to_member
+
+        return is_bare_send_to_member(routing_text, scope.roster)
+    except Exception:  # noqa: BLE001 — never break the answer over a routing hint
+        return False
+
+
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
     enterprise_id: str, dataset: str,
@@ -2074,6 +2100,13 @@ def answer(
         and (
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
+            # A bare "send/assign/hand/route to <roster member>" — no
+            # pronoun object — is a delegation signal `is_project_tool_
+            # request` alone declines (its `_PROJECT_TOOL_DELEGATE_VERB`
+            # requires an object: "send THIS to X"). Roster-scoped so it
+            # never fires on a non-member destination — see
+            # `_is_bare_send_to_roster_member`'s docstring.
+            or _is_bare_send_to_roster_member(routing_text, scope)
             # An edit-intent turn must REACH the tool loop so the model can call
             # the in-band `edit_prd` tool. GUARDED on `edit_prd_handler` — only
             # the GROUP surface registers one, so this disjunct is always False

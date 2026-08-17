@@ -246,6 +246,58 @@ def test_build_brief_without_source_content_is_backward_compatible(isolated_sett
     assert "actually about" not in calls[0]["user"].lower()
 
 
+# ── Bare "send to <roster member>" entry-gate detector ───────────────────
+
+
+_DETECTOR_ROSTER = [
+    {"user_id": "u1", "name": "Fortune Adeyemi", "job_role": "Designer"},
+    {"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"},
+]
+
+
+def test_bare_send_to_roster_member_matches_without_pronoun():
+    # The gap this closes: no "this/that/it" object between the verb and
+    # "to" — David's habitual phrasing.
+    for q in (
+        "send to Jay to prioritize the roadmap",
+        "send to Jay",
+        "assign to the designer",
+        "hand off to Fortune",
+        "route this task to Jay",
+        "send to jay",
+        "assign to @Jay",
+        "please send to Fortune Adeyemi asap",
+    ):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is True, q
+
+
+def test_bare_send_still_matches_pronoun_object_phrasing():
+    # Must not regress the existing "send this to X" shape — same detector,
+    # additive OR at the call site (see qa_agent._is_bare_send_to_roster_member).
+    for q in ("send it to Jay", "send this to Jay to review"):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is True, q
+
+
+def test_bare_send_does_not_misfire_on_non_member_destination():
+    # A destination that isn't a project member/role must never trip this —
+    # the ONE thing a pure-regex widen could not guarantee.
+    for q in (
+        "send the email to the printer",
+        "send the report to accounting",
+        "can you send this quarter to marketing",
+        "send to Ada to prioritize the roadmap",  # Ada is not on this roster
+        "send this to Ada",  # named person, but not a project member
+    ):
+        assert project_delegation.is_bare_send_to_member(q, _DETECTOR_ROSTER) is False, q
+
+
+def test_bare_send_empty_roster_and_empty_question_decline():
+    assert project_delegation.is_bare_send_to_member("send to Jay", []) is False
+    assert project_delegation.is_bare_send_to_member("send to Jay", ()) is False
+    assert project_delegation.is_bare_send_to_member("", _DETECTOR_ROSTER) is False
+    assert project_delegation.is_bare_send_to_member(None, _DETECTOR_ROSTER) is False
+
+
 # ── Authorization / IDOR (mutation-proofed — AC3) ────────────────────────
 
 

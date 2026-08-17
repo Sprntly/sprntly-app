@@ -26,6 +26,7 @@ turn behind it.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 
@@ -38,7 +39,7 @@ from app.db.conversations import (
 from app.db.delegation_events import record_event, status_dto
 from app.db.delegation_followups import upsert_followup
 from app.db.project_delegations import record_delegation
-from app.db.projects import is_project_member, resolve_member
+from app.db.projects import _match_keys, is_project_member, resolve_member
 from app.delegation_cadence import MIN_INTERVAL
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
@@ -46,6 +47,83 @@ from app.project_context import assemble_project_context
 from app.realtime import publish_broadcast
 
 logger = logging.getLogger(__name__)
+
+# Bare SEND/ASSIGN/HAND/ROUTE-shaped phrasing with NO pronoun object —
+# "send to Jay", "assign to the designer", "route this task to Ada" — the
+# entry-gate gap this closes: `skill_router._PROJECT_TOOL_DELEGATE_VERB`
+# requires an object between the verb and "to" ("send THIS to X") and never
+# fires on a bare "send to X" that names no object at all, which is David's
+# habitual phrasing. Captures a generous (up to 4-word) window following
+# "to" — `is_bare_send_to_member` below trims it down to the actual
+# recipient token(s) and requires the result to resolve against the
+# project's OWN roster before this counts as a delegation signal; this
+# regex alone is NOT a decision, it only proposes a candidate window.
+_BARE_SEND_TO = re.compile(
+    r"\b(?:send|assign|hand(?:\s+off)?|route)\b[^.?!]{0,60}?\bto\s+"
+    r"(?P<recipient>@?[A-Za-z][\w'-]*(?:\s+[A-Za-z][\w'-]*){0,3})",
+    re.I,
+)
+
+#: Words that never belong to a person's name/role — "send to Jay to
+#: prioritize the roadmap" must not let "Jay to prioritize" reach the
+#: roster match as one phrase. A bare "to" ends the recipient window
+#: outright (the task clause starts there); the others just should not
+#: extend a multi-word candidate.
+_RECIPIENT_STOPWORDS = frozenset({"to"})
+
+
+def is_bare_send_to_member(question: str, roster: "list[dict] | tuple[dict, ...]") -> bool:
+    """True when `question` is a bare send/assign/hand/route directed at a
+    NAMED PROJECT MEMBER, with no pronoun object required — "send to Jay to
+    prioritize the roadmap" enters the delegation path the same way "send
+    THIS to Jay" already does.
+
+    Roster-scoped by construction, not a text-only regex widening: every
+    word-prefix of the captured recipient window (1..3 words, article
+    dropped) must resolve to an actual member of THIS project's roster via
+    the same casefolded exact/prefix match tiers `resolve_member`
+    (`app.db.projects`) uses downstream — reusing its private
+    `_match_keys` helper directly rather than duplicating the match-tier
+    logic. A destination that is not a roster member — "send the email to
+    the printer", a stranger's name, an unrelated noun — never matches, so
+    this stays a precise per-project signal rather than a company-wide or
+    grammar-only widening.
+
+    `resolve_member` itself is deliberately NOT called here: it re-queries
+    `list_members` on every call, and this is a cheap per-turn text gate
+    that must not pay for an extra live read when the caller (the sixth
+    ladder branch in `qa_agent.answer`) already has the turn's `roster`
+    loaded once via `SurfaceScope`. The actual resolution — including the
+    ambiguous/no_match decline strings — still happens exactly once,
+    downstream, inside `handle_delegate_task`; this function only decides
+    whether the turn is WORTH entering the tool loop for."""
+    q = question or ""
+    if not roster:
+        return False
+    m = _BARE_SEND_TO.search(q)
+    if not m:
+        return False
+    words = m.group("recipient").strip().split()
+    if words and words[0].startswith("@"):
+        words[0] = words[0][1:]
+    # A name/role never legitimately contains a bare "to" — truncate the
+    # window there so "Jay to prioritize" only ever tries "Jay".
+    for i, w in enumerate(words):
+        if w.casefold() in _RECIPIENT_STOPWORDS:
+            words = words[:i]
+            break
+    if words and words[0].casefold() in ("the", "a", "an"):
+        words = words[1:]
+    if not words:
+        return False
+    for length in range(1, min(3, len(words)) + 1):
+        candidate = " ".join(words[:length]).casefold()
+        if any(candidate in _match_keys(member) for member in roster):
+            return True
+    first = words[0].casefold()
+    if len(first) < 2:
+        return False
+    return any(any(k.startswith(first) for k in _match_keys(member)) for member in roster)
 
 # The exact `list_individual_turns` read-DTO key set — a hard whitelist
 # applied before every `brief.delivered` broadcast (AD-P21 no-schema-
