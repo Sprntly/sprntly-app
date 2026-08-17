@@ -1306,9 +1306,28 @@ _GENERIC_CALL_WORDS = frozenset({
 })
 
 # A verb that means the caller wants THIS call's content, not a list.
+#
+# ASKING FOR THE TRANSCRIPT IS ASKING FOR THE CONTENT, and it was missing.
+# "find me the transcript of the Genworth call" carries no summary verb, so this
+# stood down, the question fell through to the listing leg, and the answer said
+# the transcripts "could not be loaded" — while "summarize the Genworth call",
+# the same call and the same data, read the transcript and answered in full.
+# Verified on staging 2026-08-16 against the same meeting, both ways.
+#
+# That is worse than a routing miss: the listing leg tells the model the index
+# holds titles and dates and NOT transcripts, so the answer states a limitation
+# the product does not have — and then offers a workaround ("ask me to check
+# Zoom") that does not route either.
+#
+# The transcript nouns are matched with or without a fetch verb, because the
+# bare noun phrase is how people ask ("transcript of the Genworth call"). They
+# are still subject to every gate below: a window word ("all the transcripts
+# from last week") still belongs to the digest, and something must still NAME a
+# call, so "find me the transcripts" alone stays with the listing.
 _SINGLE_SUMMARY_VERB = re.compile(
     r"\b(?:summari[sz]e|summary|recap|tell\s+me\s+about|what\s+(?:was|did|happened)|"
-    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through)\b",
+    r"details?\s+(?:of|on|about)|dig\s+into|walk\s+me\s+through|"
+    r"transcripts?|verbatim|what\s+(?:was|were)\s+said|read\s+me)\b",
     re.I,
 )
 
@@ -1336,6 +1355,28 @@ def _query_terms(question: str) -> list[str]:
         and w.lower() not in _GENERIC_CALL_WORDS
     ]
 
+
+# Request words stripped when deciding INTENT, and nowhere else.
+#
+# NOT added to `_ASK_WORDS`, which was the first attempt and is a real bug:
+# that set is shared with `resolve_calls`, so stripping "open" and "read" there
+# made "summarize the Open AI call" resolve to NO terms and answer "none of
+# their titles or accounts match this" — about a call sitting in the index under
+# exactly that name. A word that cannot NAME a call in a question can still be
+# half the name of one.
+#
+# Here the question is only "did this ask name anything at all?", so removing
+# fetch verbs and interrogatives is safe: they appear in every request.
+_INTENT_ONLY_STOPWORDS = frozenset({
+    "find", "fetch", "read", "open", "send", "which", "have", "has", "there",
+})
+
+# A PLURAL call noun means a set, and a set is the listing's or the digest's.
+# Without this, "send me the last 3 transcripts from Acme" matched the bare
+# `transcripts` noun, survived the window gate ("last 3" is not "last week"),
+# named an account — and was answered from exactly ONE call, which is the
+# overreach the name gate exists to prevent, arriving by a different door.
+_PLURAL_CALL_NOUN = re.compile(r"\b(?:transcripts|calls|meetings|recordings)\b", re.I)
 
 # A date the user typed, which names a call as surely as an account does. Same
 # form `select_from_candidates` already accepts when narrowing a disambiguation.
@@ -1433,10 +1474,14 @@ def is_single_call_request(question: str, history=None) -> bool:
     # A window word means they want the digest, not one call.
     if re.search(r"\b(?:last|this|past)\s+(?:week|month|quarter)\b|\ball\b", text, re.I):
         return False
+    # A set was asked for, not a call. See _PLURAL_CALL_NOUN.
+    if _PLURAL_CALL_NOUN.search(text):
+        return False
     # Something must NAME a call: an account or a distinctive title term (what
     # survives _query_terms), or a date. "our recent customer calls" survives
     # none of it — every word is a generic qualifier — and so stands down.
-    return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
+    named = [t for t in _query_terms(text) if t.lower() not in _INTENT_ONLY_STOPWORDS]
+    return bool(named) or bool(_DATE_REFERENCE.search(text))
 
 
 def fetch_transcript(
