@@ -1034,6 +1034,12 @@ export function ChatScreen() {
   // hundred milliseconds later when a fetch comes back.
   const contentPanelTabRef = useRef(contentPanelTab)
   contentPanelTabRef.current = contentPanelTab
+  // The document currently in the panel, readable AFTER an await — the
+  // document resume probe uses it to refuse to overwrite a generation that
+  // started while its list read was in flight (the stale-read rule
+  // `useThreadDocumentSync` states for the same fetch).
+  const contentDocumentIdRef = useRef<number | null>(null)
+  contentDocumentIdRef.current = content.documentId ?? null
   // Which ticket set the SHARED panel is currently holding, for the tab-switch
   // reconcile. A ref rather than a dependency: taking `content` would re-run
   // that reconcile on every content write, when the only thing it reacts to is
@@ -3990,6 +3996,12 @@ export function ChatScreen() {
   // while a manual close sticks for as long as you stay.
   const ticketSetAutoOpenedRef = useRef<Set<string>>(new Set())
 
+  /** Tabs whose DOCUMENT has been auto-opened on this visit. Same claim, same
+   *  retirement point as its two siblings above — leaving a tab retires it, so
+   *  coming back opens the document again. Declared here rather than beside its
+   *  effect so the tab-switch reconcile (which retires it) reads in order. */
+  const documentAutoOpenedRef = useRef<Set<string>>(new Set())
+
   /** Kick off ONE run for `tabId` and own its whole lifecycle on the tab.
    *
    *  The latch is written on the same commit as the kick-off, before any await,
@@ -5644,6 +5656,14 @@ export function ChatScreen() {
       if (!left?.ticketSetRunning) {
         ticketSetAutoOpenedRef.current.delete(prevTabForPanelRef.current)
       }
+      // Same claim, same retirement, for a thread whose artifact is a DOCUMENT.
+      // Without this the probe fires once per session: leaving a document
+      // thread closes the panel and the thread-reset clears `documentId`, so
+      // coming back would land in exactly the state the probe exists to fix —
+      // panel shut, document reachable only from the library — and a
+      // `generating` document would lose its live view for the rest of the
+      // session.
+      documentAutoOpenedRef.current.delete(prevTabForPanelRef.current)
     }
     // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
     // any of the early returns below — a set left on screen is wrong on every
@@ -5883,7 +5903,6 @@ export function ChatScreen() {
   //
   // `generating` DOES open, because that is the live state the panel exists to
   // show: the tab polls the row to a terminal state on its own.
-  const documentAutoOpenedRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return
     if (documentAutoOpenedRef.current.has(activeTabId)) return
@@ -5901,6 +5920,20 @@ export function ChatScreen() {
         if (activeTabIdRef.current !== tabId) return
         if (newest.status === "failed") return
         if (contentPanelTabRef.current) return
+        // A GENERATION STARTED WHILE THIS WAS IN FLIGHT MUST WIN. This is a
+        // list read of the thread; `documentCommandFlow` writes the id of the
+        // document the user just asked for. Overwriting that with an older
+        // row is the same stale-read `useThreadDocumentSync` guards against,
+        // and it would put the previous document in front of someone watching
+        // a new one being written.
+        if (contentDocumentIdRef.current != null) return
+        // TICKETS WIN THE PANEL. Both probes run on thread open, both await,
+        // and both saw an empty panel before their fetch — so without this the
+        // slower network response decides which artifact you land on, and a
+        // document could open over tickets `loadTicketSet` is still filling.
+        // The ticket-set probe is older and its ack promises a Tickets panel,
+        // so it keeps precedence; the document is one click away in the strip.
+        if (tabsRef.current.find((t) => t.id === tabId)?.ticketSetId != null) return
         setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
         openContentPanel("document")
       } catch {

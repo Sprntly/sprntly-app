@@ -122,13 +122,21 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 
 import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../../context/ContentContext"
+import { useNavigation } from "../../../../context/NavigationContext"
 import { ChatScreen } from "../ChatScreen"
 
 /** Probes for the two pieces of content state this suite is about. */
 function Harness() {
   const { content } = useContent()
+  // WHICH PANEL IS OPEN, not just which document is pointed at. The two are
+  // different assertions and only one of them is this suite's subject: AppShell's
+  // `useThreadDocumentSync` sets `documentId` in production regardless, so a test
+  // that checks only the pointer stays green through a full revert of the panel
+  // open. Review of #1197 proved exactly that by mutation.
+  const { contentPanelTab } = useNavigation()
   return (
     <>
+      <div data-testid="panel-probe">{contentPanelTab ?? "closed"}</div>
       <div data-testid="doc-probe">
         {content.documentId != null ? String(content.documentId) : "none"}
       </div>
@@ -152,6 +160,7 @@ function renderChat() {
 
 const docProbe = () => screen.getByTestId("doc-probe").textContent
 const convProbe = () => screen.getByTestId("conv-probe").textContent
+const panelProbe = () => screen.getByTestId("panel-probe").textContent
 
 async function typeAndSend(text: string) {
   const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -259,6 +268,9 @@ describe("returning to a thread brings its document back", () => {
     await settle()
 
     await waitFor(() => expect(docProbe()).toBe("42"))
+    // THE ASSERTION THAT MATTERS: the panel is OPEN on it. Without this the
+    // test passes against a version that never opens anything.
+    await waitFor(() => expect(panelProbe()).toBe("document"))
   })
 
   it("does not greet the reader with a failed document", async () => {
@@ -278,6 +290,7 @@ describe("returning to a thread brings its document back", () => {
     await settle()
 
     expect(docProbe()).toBe("none")
+    expect(panelProbe()).toBe("closed")
   })
 })
 
