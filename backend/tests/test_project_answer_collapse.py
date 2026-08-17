@@ -483,6 +483,61 @@ def test_group_delegate_identity_threaded(monkeypatch):
     assert captured["source_turn_id"] == 42
 
 
+def test_private_delegate_source_content_threaded(monkeypatch):
+    """The transcript `_try_scoped_tool_answer` builds for the model (the
+    SAME text the private surface's own question is rendered into) reaches
+    `handle_delegate_task` as `source_content` — the requester's actual
+    words, not left for the brief call to reconstruct from project memory
+    alone (root cause #3)."""
+    captured = {}
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
+    )
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task",
+        lambda **kw: captured.update(kw) or "sent",
+    )
+    scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    qa.answer(
+        enterprise_id="c1",
+        question="Here's the feedback: users want dark mode. Send this to Fortune to prioritize.",
+        dataset="d", scope=scope,
+    )
+    assert "users want dark mode" in captured["source_content"]
+
+
+def test_group_delegate_source_content_uses_prerendered_transcript(monkeypatch):
+    """Group's `source_content` comes from the full attributed transcript
+    (`prerendered_transcript`) — the model's own preceding turn (e.g. the
+    themes it just produced) rides into the brief, not only the latest
+    trigger message."""
+    captured = {}
+    monkeypatch.setattr(
+        "app.llm.run_tool_loop",
+        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
+    )
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task",
+        lambda **kw: captured.update(kw) or "sent",
+    )
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+        assigner_identity={"assigner_user_id": "u-asker", "source_turn_id": 42},
+        prerendered_transcript=(
+            "Alex (PM): here's the feedback\n"
+            "Sprntly: THEMES: users want dark mode; onboarding is too slow.\n"
+            "Alex (PM): send this to Fortune to prioritize"
+        ),
+    )
+    qa.answer(
+        enterprise_id="c1", question="send this to Fortune to prioritize",
+        dataset="d", scope=scope,
+    )
+    assert "users want dark mode" in captured["source_content"]
+
+
 def test_delegate_identity_blanked_is_red(monkeypatch):
     """MUTATION: blank the threaded identity -> the attribution assertion
     goes RED; restore it -> GREEN (PI13)."""

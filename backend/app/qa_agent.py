@@ -1842,6 +1842,12 @@ def _try_scoped_tool_answer(
                 dataset=dataset,
                 company_id=enterprise_id,
                 tool_input=tool_input,
+                # The SERVER-rendered transcript (never a model argument) —
+                # carries the requester's actual content (the feedback, the
+                # themes) into the assignee's brief. Same value the model's
+                # own user turn below is built from, so the brief and what
+                # the agent was looking at can never drift.
+                source_content=user,
             )
         if name == "execute_task":
             from app import project_task_execution
