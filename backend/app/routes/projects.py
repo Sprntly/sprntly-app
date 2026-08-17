@@ -1760,7 +1760,9 @@ def project_chat_intent(
     # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
     # conversation stamps, artifact rows/counts) — same enrichment, same
     # data, passing the already-resolved dataset instead of a second lookup.
-    enrich_chat_envelope(envelope, ctx, dataset)
+    # `project_id` scopes the listing legs to THIS project's artifacts, so
+    # the rendered cards/counts agree with the project-scoped prose.
+    enrich_chat_envelope(envelope, ctx, dataset, project_id=project_id)
     return envelope
 
 
@@ -1882,8 +1884,10 @@ def _classify_and_maybe_edit_group_prd(
     # The SHARED render-data legs `/v1/chat/intent` attaches (open lookup +
     # conversation stamps, artifact rows/counts), stamped onto THIS turn's
     # classify envelope in place — a no-op unless the intent is an
-    # open/list ask, so the edit path below pays nothing for it.
-    enrich_chat_envelope(envelope, ctx, dataset)
+    # open/list ask, so the edit path below pays nothing for it. The
+    # listing legs are scoped to THIS project's artifacts, so the group
+    # surface's cards/counts agree with its project-scoped prose.
+    enrich_chat_envelope(envelope, ctx, dataset, project_id=project_id)
     # Content-derived clarify signal — computed from THIS turn's own classify
     # outcome, never from `refusal` truthiness (which depends only on the
     # project's PRD count, not on what was asked — see `_GroupEditOutcome`'s
