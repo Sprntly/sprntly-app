@@ -26,6 +26,14 @@ export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: 
  *  tab seeded with the query (one new tab per chat started from the brief). */
 export type PendingChatHandoff = { query: string }
 
+/** A passage highlighted in a team document, handed to the chat composer.
+ *
+ *  `documentId` rides along with the text because the two answer different
+ *  halves of the requirement: the EXCERPT is what the user wants to talk
+ *  about (and, being in the message, is what grounds the answer), and the ID
+ *  is what an edit has to be applied to. */
+export type DocumentQuote = { documentId: number; excerpt: string }
+
 /** The brief-insight pointer a PRD is generated from / anchored to. Null for
  *  an ideation PRD (no insight_index) — it renders from the PRD payload alone. */
 export type PrdTabMeta = { briefId: number; insightIndex: number }
@@ -185,6 +193,18 @@ interface NavigationContextType {
   pendingOndemandDraft: string | null
   setPendingOndemandDraft: (value: string | null) => void
 
+  /** A passage the reader highlighted in a team document, on its way to the
+   *  chat composer of the thread the document is open beside. Filled by the
+   *  Document panel; consumed once by ChatScreen, which quotes it into the
+   *  draft so the next question or edit request is ABOUT that passage.
+   *
+   *  A one-shot handoff rather than shared state, for the same reason the
+   *  drafts above are: the excerpt is a message the user is composing, not a
+   *  property of the document, and leaving it set would re-quote it on the
+   *  next render. */
+  pendingDocumentQuote: DocumentQuote | null
+  setPendingDocumentQuote: (value: DocumentQuote | null) => void
+
   /** Filled by the top-insights composer when a chat is started there; consumed
    *  once by ChatScreen, which opens a fresh chat tab seeded with the query. */
   pendingChatHandoff: PendingChatHandoff | null
@@ -269,6 +289,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
+  const [pendingDocumentQuote, setPendingDocumentQuote] = useState<DocumentQuote | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
   const [pendingReportFocus, setPendingReportFocus] = useState<ReportFocusRequest | null>(null)
@@ -567,6 +588,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingSearchHandoff,
         setPendingSearchHandoff,
         pendingOndemandDraft,
+        pendingDocumentQuote,
+        setPendingDocumentQuote,
         setPendingOndemandDraft,
         pendingChatHandoff,
         setPendingChatHandoff,

@@ -2276,9 +2276,17 @@ def answer(
     # transcripts are unavailable. Placed ahead of the digest, and deliberately
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
+    # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
+    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
+    # the "the index holds titles and dates, not transcripts" line — for a
+    # question that names one call and asks for its content. The single-call
+    # gate is the strict one (it requires a name, refuses a window, refuses a
+    # plural noun), so where both match, it is the one that is right.
     if (
         _regex_ladder
         and call_index.is_listing_request(routing_text)
+        and not call_index.is_single_call_request(routing_text, history)
         and not _names_live_source()
     ):
         try:
