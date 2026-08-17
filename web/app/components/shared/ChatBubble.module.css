@@ -1,0 +1,59 @@
+/* Additive rules only — every class here is NEW markup that only renders
+   when a caller opts in (e.g. `agentTimestamp`). The main chat never passes
+   these props, so its DOM and styling stay untouched (byte-identity). This
+   is the ONE shared module the reconciled-CSS turn-render leaves carry
+   alongside the pre-existing global `bc-*` rules — no globals.css edit. */
+
+.agentTime {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--muted, #8a8a94);
+}
+
+/* `humanAlign: "start"` — a third party's turn in a multi-party thread.
+   Deliberately its OWN row/column shape rather than reusing `bc-user-head`/
+   `bc-user-bubble`: those are hard-coded `align-self: flex-end` in
+   globals.css (shared with every 1:1 surface's own-message lane), and a
+   third party rendered through them would flatten right back onto the
+   reader's own lane — the bug this layout exists to keep fixed. Visual fill
+   (background/border/shadow) stays with the caller's own `bubbleClassName`;
+   this file only owns the row/column geometry. */
+.otherRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.otherBody {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.otherHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.otherName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink, inherit);
+}
+
+/* The ONLY local rule for the multi-party peer bubble: a geometry reset of the
+   shared `bc-user-bubble` skin (globals.css), which is hard-coded
+   `align-self: flex-end; margin-right: 34px` for the reader's own right-aligned
+   lane. The peer bubble draws its FILL from that one shared rule and only
+   resets the alignment for the left multi-party lane — this is geometry, not a
+   second bubble skin. */
+.otherBubble {
+  align-self: flex-start;
+  margin-right: 0;
+}

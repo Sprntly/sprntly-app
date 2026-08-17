@@ -3,8 +3,9 @@
 The user picks which channels the corpus sync reads (saved by
 POST /v1/connectors/slack/sync-channels as sync_channel_ids /
 sync_channel_names on the connection config); select_sync_channels applies
-that selection to the bot-visible channel list. No selection = legacy
-behavior (every channel the bot is a member of).
+that selection to the bot-visible channel list. No selection = sync NOTHING
+(nothing selected, nothing assessed — the 2026-08-13 connector-scope rule;
+the legacy every-bot-member-channel default is gone).
 
 Unticking is the reverse of ticking, so this file also covers the teardown
 half: remove_channels_from_corpus takes an unticked channel's messages back
@@ -31,19 +32,23 @@ def _ch(cid: str, name: str) -> dict:
 CHANNELS = [_ch("C1", "general"), _ch("C2", "support"), _ch("C3", "random")]
 
 
-def test_no_selection_keeps_all_channels():
+def test_no_selection_syncs_nothing():
+    """No stored selection syncs NOTHING — never every bot-member channel.
+    The error tells the user where to pick channels."""
     kept, errors = select_sync_channels(CHANNELS, {})
-    assert kept == CHANNELS
-    assert errors == []
+    assert kept == []
+    assert len(errors) == 1
+    assert "No channels selected" in errors[0]
 
 
-def test_empty_selection_keeps_all_channels():
-    """An empty stored list means 'no selection', not 'sync nothing'."""
+def test_empty_selection_syncs_nothing():
+    """An empty stored list is 'not configured yet', not 'take everything'."""
     kept, errors = select_sync_channels(
         CHANNELS, {CONFIG_SYNC_CHANNEL_IDS: []}
     )
-    assert kept == CHANNELS
-    assert errors == []
+    assert kept == []
+    assert len(errors) == 1
+    assert "No channels selected" in errors[0]
 
 
 def test_selection_filters_and_orders():
@@ -490,3 +495,89 @@ def test_purge_survives_one_bad_dataset(slack_corpus, monkeypatch):
     out = slack_sync.purge_channels_from_synced_data("co-1", ["support"])
     assert out["sections_removed"] == 1
     assert out["reseeded"] == ["acme"]
+
+
+# ── a dead credential is not an empty workspace ──────────────────────────────
+#
+# Found 2026-08-16: six staging tenants had been failing this way every 20
+# minutes for days. `_slack_get` returned {"ok": False, "error":
+# "invalid_auth"}, `fetch_channels` treated not-ok as "stop and return what
+# you have", and `sync_slack` read the resulting [] as "no channels" — so the
+# user was told to invite the bot to a channel, which was never the problem.
+# Every cycle then logged a cheerful "slack-refresh done ... errors=1".
+
+
+def test_a_dead_token_raises_rather_than_reading_as_no_channels(monkeypatch):
+    """The root defect, exercised through the REAL `_slack_get` — stubbing
+    that function is what hid this in the first place. Slack answers 200 OK
+    with `{"ok": false, "error": "invalid_auth"}`, and `fetch_channels` used
+    to turn that into an empty list."""
+    from app.connectors import slack_sync
+
+    class _Resp:
+        ok = True
+        status_code = 200
+
+        def json(self):
+            return {"ok": False, "error": "invalid_auth"}
+
+    monkeypatch.setattr(slack_sync.requests, "get", lambda *a, **k: _Resp())
+    with pytest.raises(slack_sync.SlackAuthError, match="invalid_auth"):
+        slack_sync.fetch_channels("xoxb-dead")
+
+
+def test_an_ordinary_not_ok_response_still_just_stops(monkeypatch):
+    """Only the auth-class codes are fatal. Everything else keeps the old
+    "return what you have" behaviour — a ratelimit is not a dead token."""
+    from app.connectors import slack_sync
+
+    monkeypatch.setattr(
+        slack_sync, "_slack_get",
+        lambda *a, **k: {"ok": False, "error": "ratelimited"},
+    )
+    assert slack_sync.fetch_channels("xoxb-test") == []
+
+
+def test_a_401_is_an_auth_failure_not_a_generic_http_error(monkeypatch):
+    """Slack answers some revoked tokens with a status code rather than an
+    error body."""
+    from app.connectors import slack_sync
+
+    class _Resp:
+        ok = False
+        status_code = 401
+        text = "invalid_auth"
+
+    monkeypatch.setattr(slack_sync.requests, "get", lambda *a, **k: _Resp())
+    with pytest.raises(slack_sync.SlackAuthError):
+        slack_sync._slack_get("https://slack.com/api/conversations.list", "t")
+
+
+def test_the_scheduled_refresh_logs_a_dead_token_as_a_failure(monkeypatch, caplog):
+    """"slack-refresh done" at INFO is why this went unnoticed for days. A run
+    that read nothing AND carried errors is a WARNING that names the reason."""
+    import logging
+
+    from app.connectors.slack_sync import SyncResult
+    from app.kg_ingest import auto_sync
+
+    monkeypatch.setattr(
+        auto_sync, "_run_corpus_seed", lambda *a, **k: None, raising=False)
+    import app.db.companies as companies
+
+    monkeypatch.setattr(companies, "slug_for_company_id", lambda cid: "acme")
+    failed = SyncResult(dataset="acme")
+    failed.errors.append("Slack rejected our credentials (invalid_auth)")
+    monkeypatch.setattr(
+        "app.connectors.slack_sync.sync_slack",
+        lambda slug, company_id=None: failed,
+    )
+
+    with caplog.at_level(logging.INFO):
+        auto_sync._run_slack_corpus_sync("co-1")
+
+    records = [r for r in caplog.records if "slack-refresh" in r.message]
+    assert records, "the refresh logged nothing at all"
+    assert records[0].levelno == logging.WARNING
+    assert "FAILED" in records[0].getMessage()
+    assert "invalid_auth" in records[0].getMessage()

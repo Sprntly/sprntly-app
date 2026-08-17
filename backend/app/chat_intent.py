@@ -243,7 +243,10 @@ def looks_like_open_request(message: str) -> bool:
 # downgrades to carries the library (the planner forces include_library on the
 # no-target plan), so it can truthfully say what formats exist and where the
 # PRD panel's Format control lives.
-_NEEDS_PRD = frozenset({"edit_prd", "change_prd_template"})
+# assign_tickets joins them: its ticket universe IS the thread's PRD (the
+# tickets generated from it), so with no PRD in context there is nothing to
+# assign and the downgrade-to-answer can say so honestly.
+_NEEDS_PRD = frozenset({"edit_prd", "change_prd_template", "assign_tickets"})
 
 _SCHEMA: dict = {
     "type": "object",
@@ -433,14 +436,40 @@ def _render_context(
     return "\n".join(lines) + "\n\n"
 
 
-def _fallback(reason: str) -> dict:
+def _fallback(reason: str, exc: BaseException | None = None) -> dict:
+    """The fail-open `answer` envelope.
+
+    When the failure was a PROVIDER REFUSAL, the envelope says so. This
+    endpoint's fail-open contract is right — a dead model must never break a
+    send — but it has a cost nobody could see: with the planner down, NO action
+    can be chosen, so every command in the product silently becomes a chat
+    reply. Observed 2026-08-16, on an exhausted Anthropic balance: commands
+    stopped working, the chat answered in prose, and the only evidence was a
+    line in the container log.
+
+    `provider_error` rides the envelope so the client can say what happened.
+    Absent on every ordinary fallback, so nothing changes for the failures that
+    are genuinely ours.
+    """
+    notice = None
+    if exc is not None:
+        try:
+            from app.llm_errors import limit_notice
+
+            notice = limit_notice(exc)
+        except Exception:  # noqa: BLE001 — the error path must not raise
+            notice = None
     return {
         "intent": "answer",
         "confidence": 0.0,
+        "provider_error": notice,
         "task": None,
         "instruction": None,
         "artifact_type": None,
         "artifact_query": None,
+        # Present-and-null rather than absent, so every consumer sees ONE
+        # envelope shape and a missing key can never be mistaken for a kind.
+        "artifact_kind": None,
         "reason": reason,
         "source": "fallback",
     }
@@ -476,6 +505,54 @@ def _fallback(reason: str) -> dict:
 #: to its ask path like any unknown intent.
 _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     "multi_agent", "change_prd_template",
+    # Write a document of any kind into the shared "Others" library.
+    #
+    # THIS SET IS THE WIRE, and leaving an action out of it is a silent
+    # half-feature rather than an error. `ask_planner` could already decide
+    # `create_artifact`, and `/v1/custom-artifacts/generate` could already
+    # execute it — but an action missing here falls through
+    # `_fallback("unknown action")` to a plain `answer`, so the chat REPLIED IN
+    # PROSE and, knowing the product can write documents, told the user it had
+    # made one. Nothing was created and the library stayed empty. Shipped that
+    # way in #1154; found by Apurva asking for a leadership update.
+    "create_artifact",
+    # Change who OWNS tickets. The client resolves it against the thread's PRD
+    # (POST /v1/tickets/assign-plan) and asks per-ticket through the question
+    # popup when the mapping is ambiguous; the envelope's `instruction` is the
+    # whole argument. Listed here for exactly the reason create_artifact's
+    # comment records: this set is the wire, and an action missing from it is
+    # a silent half-feature, not an error.
+    "assign_tickets",
+    # The tickets counterpart of change_prd_template — dispatches
+    # POST /v1/stories/change-template with the envelope's
+    # `artifact_template_id`. The TARGET is resolved client-side (the thread's
+    # standalone ticket set, else the tab PRD's tickets), because a standalone
+    # set has no prd_id for `_NEEDS_PRD` to check — which is why this intent is
+    # deliberately NOT in that set: downgrading on "no PRD" would kill the
+    # switch for exactly the sets that need it. A thread with neither falls
+    # through to the grounded ask on the client, same as any unhandled intent.
+    "change_tickets_template",
+    # "What are my PRDs / tickets / reports?" — list what the user has CREATED,
+    # as clickable items. Retrieval like open_artifact: the route attaches the
+    # actual rows under `artifact_list` (the tenant-scoped lookup lives where
+    # the tenant scope lives — routes/chat.py), and the client renders them and
+    # opens a click into the artifact's own thread. Listed here for exactly the
+    # reason create_artifact's comment records: this set is the wire, and an
+    # action missing from it is a silent half-feature, not an error.
+    "list_artifacts",
+    # Post an artifact into the company's Slack. The client resolves the
+    # TARGET from its own context (the tab's PRD, the thread's ticket set or
+    # report) plus the envelope's `artifact_type`/`artifact_query`, previews
+    # what will be posted via POST /v1/share/slack/preview, and only sends on
+    # POST /v1/share/slack/send after the user confirms.
+    #
+    # Listed here for exactly the reason create_artifact's comment records —
+    # this set is the wire — and the stakes are higher for this one than for
+    # any other member. An action missing here falls through to `answer`, and
+    # the answer path, knowing the product can post to Slack, would reply that
+    # it had shared the document. Nothing would reach Slack, and unlike an
+    # empty library nobody can check a channel they were never told about.
+    "share_to_slack",
 }
 
 
@@ -510,6 +587,13 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     intent = plan.action
     if intent == "update_ticket":
         intent = "answer"
+    # A document with no brief is a blank page with a title on it. The planner
+    # already degrades this (`_NEEDS_TASK`), and it is re-applied here for the
+    # same reason the confidence floor is: this envelope is what the CLIENT
+    # acts on, so every condition that must hold before a build starts is
+    # enforced where the build is dispatched from.
+    if intent == "create_artifact" and not (plan.task or "").strip():
+        intent = "answer"
     if intent not in _CLIENT_INTENTS:
         return _fallback("unknown action")
 
@@ -529,7 +613,18 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
             plan.artifact_type
             if plan.artifact_type in NAMEABLE_ARTIFACT_TYPES else None
         ),
+        # `create_artifact` only: WHAT KIND of document, in the user's own
+        # words ("leadership update"). Free text — the executor stores it as a
+        # label and nothing branches on it. None on every other intent, because
+        # the planner's gate clears it there.
+        "artifact_kind": plan.artifact_kind or None,
         "artifact_query": plan.artifact_query,
+        # `share_to_slack` only: WHERE it goes and WHAT is said with it. Both
+        # may be null — no channel means the client asks which one (never a
+        # guessed destination), no note means the document goes out on its
+        # own. The planner's gate clears the pair on every other intent.
+        "share_channel": plan.share_channel,
+        "share_note": plan.share_note,
         # The uploaded format this build must be written into, when the user
         # named one. The client forwards the id to the executor; the NAME is for
         # the client to say which format it is using, so an honoured request is
@@ -537,6 +632,24 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # take on trust.
         "artifact_template_id": plan.artifact_template_id,
         "artifact_template_name": plan.artifact_template_name,
+        # `list_artifacts` only: which kind of the user's own creations to
+        # list ("all" | "prd" | "evidence" | "prototype" | "report" |
+        # "ticket_set" | "custom_artifact"). None on every other intent; the
+        # rows themselves are attached by the route, where tenancy lives.
+        "list_kind": plan.list_kind,
+        # And whether the ask was HOW MANY rather than WHICH ONES — "count"
+        # makes the route attach per-day tallies (`artifact_counts`) so the
+        # client can answer with the numbers instead of a wall of cards.
+        "list_mode": plan.list_mode,
+        # And how many they asked for ("my last 5 PRDs" → 5, "the latest PRD"
+        # → 1), from the planner's gated constraints. None — the common case —
+        # means the route's own cap. Scoped to the intent like list_kind, so a
+        # top_n extracted for an ordinary answer never leaks in here.
+        "list_limit": (
+            plan.constraints.get("top_n")
+            if intent == "list_artifacts" and isinstance(plan.constraints, dict)
+            else None
+        ),
         "reason": plan.reason or "",
         "source": "planner",
     }
@@ -565,6 +678,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
         envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "assign_tickets" and not envelope["instruction"]:
+        # Same rule as edit_prd: an assignment with nobody named and nothing
+        # targeted is a dispatch with nothing to execute. The planner gates
+        # this too (_NEEDS_INSTRUCTION); re-applied where the client is told
+        # what to do.
+        envelope.update(intent="answer", source="no_instruction")
     if envelope["intent"] == "open_artifact" and not envelope["artifact_query"]:
         # The planner already gates this, but the rule is re-applied here for
         # the same reason the other three are: this function owns what the
@@ -572,13 +691,16 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # must reach it as `answer`, never as an open of nothing.
         envelope.update(intent="answer", source="no_artifact_query")
     if (
-        envelope["intent"] == "change_prd_template"
+        envelope["intent"] in ("change_prd_template", "change_tickets_template")
         and not envelope["artifact_template_id"]
     ):
         # Re-applied like open_artifact above: the planner downgrades a
         # switch with no target itself, but this function owns what the client
         # is told to do, and a change-template dispatch with no format id would
-        # be an executor call with nothing to execute.
+        # be an executor call with nothing to execute. Covers both switches —
+        # the tickets one included, even though its ticket-set target is
+        # resolved client-side, because the FORMAT argument is the backend's to
+        # gate either way.
         envelope.update(intent="answer", source="no_target_format")
     return envelope
 
@@ -762,6 +884,6 @@ def resolve_chat_intent(
                 # actually lives.
                 envelope["artifact_type"] = "prd"
         return envelope
-    except Exception:  # noqa: BLE001 — dispatch must never break the send
+    except Exception as exc:  # noqa: BLE001 — dispatch must never break the send
         logger.exception("chat intent resolve failed; falling back to answer")
-        return _fallback("resolver error")
+        return _fallback("resolver error", exc)

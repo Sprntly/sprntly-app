@@ -325,7 +325,13 @@ def finish_artifact(
             "title": (title or "").strip()[:300],
             "body_html": _checked_body(body_html or ""),
             "status": "ready",
+            # Both halves of a previous failure are cleared, not just the
+            # operator's. A stale `error_code` on a row that has since succeeded
+            # is worse than a stale `error`: the API returns it, so the panel
+            # would render "this could not be written" over a document that
+            # plainly was.
             "error": None,
+            "error_code": None,
             # THE VERSION MOVES, and it has to. An editor that opened the row
             # while it was still `generating` holds version 1 and an empty
             # buffer; PATCH is not gated on status, so without this bump that
@@ -340,11 +346,33 @@ def finish_artifact(
 
 
 @retry_on_disconnect
-def fail_artifact(company_id: str, artifact_id: int, error: str) -> None:
-    """Record a failed generation. The stored message is for operators — the
-    web maps failures onto its own recovery copy and never renders this."""
+def fail_artifact(
+    company_id: str, artifact_id: int, error: str, *, code: str | None = None
+) -> None:
+    """Record a failed generation, in two registers.
+
+    `error` is the OPERATOR's detail — raw `str(exc)`, never returned by the
+    API, because raw exception text is not something to render into a library
+    the whole team reads.
+
+    `code` is the PRODUCT's half: a short, stable, closed-set value (see
+    `custom_artifact_generate.FAILURE_CODES`) that the API does return and the
+    web maps to its own copy. Both are written together because a failure with
+    only the first is one the person who asked can never be told about — the
+    state the panel was in when a generation failed silently on staging.
+
+    `code=None` is allowed and means "we do not know why". Callers should
+    classify rather than lean on it; it exists so a future writer that genuinely
+    cannot say is not forced to invent a code, and so rows that failed before
+    this column existed read correctly rather than being backfilled with a guess.
+    """
     require_client().table("custom_artifacts").update(
-        {"status": "failed", "error": (error or "")[:500], "updated_at": utc_now()}
+        {
+            "status": "failed",
+            "error": (error or "")[:500],
+            "error_code": code,
+            "updated_at": utc_now(),
+        }
     ).eq("company_id", company_id).eq("id", artifact_id).execute()
 
 

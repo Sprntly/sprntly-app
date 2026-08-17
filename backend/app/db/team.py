@@ -30,12 +30,18 @@ def list_company_members(company_id: str) -> list[dict]:
     Each row carries:
       id, user_id, role, created_at,
       display_name (full_name → first+last fallback → None),
-      email, avatar_url
+      email, avatar_url, job_role
 
     The profile fields default to None when no `profiles` row exists for
     the user (brand-new auth.users without a profile, test fixtures
     that skip the profile seed, etc.). Routes pass these through to the
     Settings → Team & roles page (mockup needs name + email + avatar).
+
+    `job_role` is sourced from `profiles.role` — the free-text job
+    designation captured at onboarding (ROLE_OPTIONS: Founder / PM /
+    Engineer / Data Scientist / Designer / Other). Named `job_role` here
+    to avoid colliding with the permission `role` above (company_members
+    role: owner/admin/member/viewer).
     """
     client = require_client()
     members = (
@@ -52,7 +58,7 @@ def list_company_members(company_id: str) -> list[dict]:
     user_ids = [m["user_id"] for m in members]
     profiles_resp = (
         client.table("profiles")
-        .select("id, email, full_name, first_name, last_name, avatar_url")
+        .select("id, email, full_name, first_name, last_name, avatar_url, role")
         .in_("id", user_ids)
         .execute()
     )
@@ -74,6 +80,7 @@ def list_company_members(company_id: str) -> list[dict]:
                 "display_name": display,
                 "email": prof.get("email"),
                 "avatar_url": prof.get("avatar_url"),
+                "job_role": prof.get("role"),
             }
         )
     return enriched
@@ -120,7 +127,7 @@ def get_invite(invite_id: str) -> dict | None:
     client = require_client()
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, invited_by, created_at, workspace_ids")
+        .select("id, company_id, email, role, invited_by, created_at, workspace_ids, project_id")
         .eq("id", invite_id)
         .limit(1)
         .execute()
@@ -207,6 +214,7 @@ def create_invite(
     invited_by: str | None,
     workspace_ids: list[str] | None = None,
     job_role: str | None = None,
+    project_id: int | None = None,
 ) -> dict:
     """Insert a workspace_invites row. Caller must have validated email +
     role + workspace ownership; this helper performs no validation. Returns
@@ -216,6 +224,11 @@ def create_invite(
     None means "the company's default workspace, resolved at ACCEPT time"
     (not stored — so an invite created before extra workspaces exist still
     lands somewhere sensible).
+
+    `project_id` (AD-TNM3, Extension B) is the project the invite was raised
+    from, if any: when set, `accept_invite_for_user` also adds the accepter to
+    that project's `project_members`. Defaults None and is only written when
+    set, so every existing WJ caller (which passes none) stays byte-identical.
 
     Raises if the (company_id, email) unique constraint is violated —
     routes should catch and translate to 409.
@@ -233,6 +246,10 @@ def create_invite(
         # step — display-only, distinct from the permission `role`.
         "job_role": job_role,
     }
+    if project_id is not None:
+        # Inert for every existing caller (defaults None) — only the tag-action
+        # invite path (`routes/projects.py`) sets it (Extension B).
+        payload["project_id"] = project_id
     client.table("workspace_invites").insert(payload).execute()
     # Re-read so we return the actual created_at the DB stamped.
     return get_invite(iid) or payload
@@ -269,6 +286,21 @@ def update_member_role(*, company_id: str, user_id: str, role: str) -> dict | No
     # not only the invalidating routes — sees the fresh role on the next read.
     invalidate_user(user_id)
     return get_member(company_id=company_id, user_id=user_id)
+
+
+def update_own_job_role(*, user_id: str, role: str | None) -> str | None:
+    """Set `profiles.role` (the free-text job designation) for `user_id`.
+
+    Self-edit only — callers must resolve `user_id` from the authenticated
+    session, never from a client-supplied id. Free text, nullable, no DB
+    CHECK (matches the existing column); the ROLE_OPTIONS taxonomy is
+    client-validated only.
+    """
+    require_client().table("profiles").update({"role": role}).eq(
+        "id", user_id
+    ).execute()
+    invalidate_user(user_id)
+    return role
 
 
 def delete_member(*, company_id: str, user_id: str) -> None:
@@ -309,7 +341,7 @@ def find_pending_invite_for_email_anywhere(email: str) -> dict | None:
         return None
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, created_at, workspace_ids")
+        .select("id, company_id, email, role, created_at, workspace_ids, project_id")
         .eq("email", needle)
         .execute()
         .data
@@ -359,6 +391,34 @@ def _grant_invite_workspaces(
     return granted
 
 
+def _add_invite_project_member(invite: dict, user_id: str) -> None:
+    """Extension B (AD-TNM3): if the invite carries a `project_id`, land the
+    accepter in that project's `project_members`. Fires on BOTH accept paths
+    (new-company insert AND same-company idempotent re-accept). `add_member`
+    is an idempotent upsert, so a re-accept never duplicates the row. A None
+    `project_id` (every plain WJ/team invite) is a no-op — the existing accept
+    behaviour is untouched."""
+    pid = invite.get("project_id")
+    if pid is None:
+        return
+    from app.db import projects as projects_db
+
+    projects_db.add_member(pid, user_id)
+
+    # Best-effort live landing (AD-TNM5): publish a `member.added` signal on the
+    # accepter's OWN per-user channel so an accept lands them live in the
+    # project for anyone viewing it. Fully swallowed — a realtime hiccup (or the
+    # project-name lookup) must NEVER fail or roll back the accept (AD-TNM2/
+    # AD-P22); the accepter's own client picks up membership on its normal load.
+    try:
+        from app import project_delegation
+
+        project = projects_db.get_project(pid) or {}
+        project_delegation._publish_member_added(pid, user_id, project.get("name"))
+    except Exception:  # noqa: BLE001 — best-effort, never blocks an accept
+        pass
+
+
 def accept_invite_for_user(
     *,
     user_id: str,
@@ -397,6 +457,7 @@ def accept_invite_for_user(
                 role=role,
                 workspace_ids=invite.get("workspace_ids"),
             )
+            _add_invite_project_member(invite, user_id)
             delete_invite(invite["id"])
             return {
                 "company_id": company_id,
@@ -420,6 +481,7 @@ def accept_invite_for_user(
         role=role,
         workspace_ids=invite.get("workspace_ids"),
     )
+    _add_invite_project_member(invite, user_id)
     delete_invite(invite["id"])
     return {"company_id": company_id, "role": role, "workspace_ids": granted}
 

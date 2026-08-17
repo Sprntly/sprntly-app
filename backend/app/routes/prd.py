@@ -38,6 +38,7 @@ from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
 from app.db.conversations import bind_conversation_to_prd
 from app.db.evidences import find_existing_evidence_for_theme
+from app.project_from_prd import maybe_auto_create_project_for_prd
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
@@ -133,11 +134,21 @@ async def generate(
             body.brief_id, body.insight_index, variant=PRD_VARIANT
         )
         if existing:
+            # Fork this PRD into a project too (conversation-less — the brief
+            # path has no chat thread). Dedup on the PRD-artifact fact, so a
+            # repeat generate of the same PRD reuses its project.
+            existing_project_id = maybe_auto_create_project_for_prd(
+                company_id=company.company_id, workspace_id=company.workspace_id,
+                user_id=company.user_id, prd_id=existing["id"],
+                prd_title=existing["title"], conversation_id=None,
+                allow_without_conversation=True,
+            )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                "project_id": existing_project_id,
             }
 
     insight = insights[body.insight_index]
@@ -148,6 +159,16 @@ async def generate(
         title=title,
         template_version=PRD_TEMPLATE_VERSION,
         variant=PRD_VARIANT,
+    )
+    # Fork the PRD into a project (conversation-less: the weekly-brief / Top
+    # Insights path has no chat thread). origin='prd_auto', PRD attached as the
+    # first artifact, deduped on the PRD-artifact fact so re-generating the same
+    # PRD does not spawn a second project. Best-effort inside — never breaks
+    # generation.
+    auto_project_id = maybe_auto_create_project_for_prd(
+        company_id=company.company_id, workspace_id=company.workspace_id,
+        user_id=company.user_id, prd_id=prd_id, prd_title=title,
+        conversation_id=None, allow_without_conversation=True,
     )
     # Phase 2 lifecycle: record that the user created a PRD for this brief
     # finding so it lands in the Completed section once the next brief arrives.
@@ -186,6 +207,7 @@ async def generate(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        "project_id": auto_project_id,
     }
 
 
@@ -246,11 +268,20 @@ async def generate_from_ideation(
             brief_id, theme_id, variant=PRD_VARIANT
         )
         if existing:
+            # Fork this PRD into a project too (conversation-less — ideation
+            # has no chat thread). Deduped on the PRD-artifact fact.
+            existing_project_id = maybe_auto_create_project_for_prd(
+                company_id=company.company_id, workspace_id=company.workspace_id,
+                user_id=company.user_id, prd_id=existing["id"],
+                prd_title=existing["title"], conversation_id=None,
+                allow_without_conversation=True,
+            )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                "project_id": existing_project_id,
             }
 
     prd_id = start_prd(
@@ -266,6 +297,15 @@ async def generate_from_ideation(
     # (keyed by theme_id — works identically for ideation and brief themes).
     _record_prd_action(company.company_id, insight)
 
+    # Fork the PRD into a project (conversation-less: the ideation path has no
+    # chat thread). Same prd_auto machinery + PRD-artifact dedup as the brief
+    # and chat paths. Best-effort inside — never breaks generation.
+    auto_project_id = maybe_auto_create_project_for_prd(
+        company_id=company.company_id, workspace_id=company.workspace_id,
+        user_id=company.user_id, prd_id=prd_id, prd_title=title,
+        conversation_id=None, allow_without_conversation=True,
+    )
+
     task = asyncio.create_task(
         generate_prd_and_warm(
             prd_id, brief_id, _IDEATION_INSIGHT_INDEX, insight_override=insight,
@@ -279,6 +319,7 @@ async def generate_from_ideation(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        "project_id": auto_project_id,
     }
 
 
@@ -432,16 +473,26 @@ async def generate_from_task(
         if existing:
             # Re-issuing the command resolves the SAME PRD — the new chat still
             # needs to point at it, or reopening that chat shows no PRD at all.
+            auto_project_id = None
             if body.conversation_id is not None:
                 bind_conversation_to_prd(
                     body.conversation_id, existing["id"],
                     company.company_id, company.user_id,
+                )
+                auto_project_id = maybe_auto_create_project_for_prd(
+                    company_id=company.company_id, workspace_id=company.workspace_id,
+                    user_id=company.user_id, prd_id=existing["id"],
+                    prd_title=existing["title"], conversation_id=body.conversation_id,
                 )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": PRD_VARIANT,
+                # The project this PRD's originating chat was forked into (new
+                # or pre-existing), so the client can land the user in that
+                # project's private chat. None when nothing was forked.
+                "project_id": auto_project_id,
             }
 
     # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
@@ -474,9 +525,15 @@ async def generate_from_task(
 
     # Link the commanding chat to this PRD NOW — before the (multi-second)
     # generation runs and before the client could navigate away.
+    auto_project_id = None
     if body.conversation_id is not None:
         bind_conversation_to_prd(
             body.conversation_id, prd_id, company.company_id, company.user_id
+        )
+        auto_project_id = maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=body.conversation_id,
         )
 
     # Documents attached earlier in the chat thread ride along as authoritative
@@ -518,6 +575,10 @@ async def generate_from_task(
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
+        # The project this PRD's originating chat was forked into (new or
+        # pre-existing), so the client can land the user in that project's
+        # private chat. None when nothing was forked.
+        "project_id": auto_project_id,
     }
 
 
@@ -675,6 +736,11 @@ async def import_prd(
     if conversation_id is not None:
         bind_conversation_to_prd(
             conversation_id, prd_id, company.company_id, company.user_id
+        )
+        maybe_auto_create_project_for_prd(
+            company_id=company.company_id, workspace_id=company.workspace_id,
+            user_id=company.user_id, prd_id=prd_id,
+            prd_title=title, conversation_id=conversation_id,
         )
 
     task = asyncio.create_task(
@@ -1070,6 +1136,83 @@ def answer_input_question(
     }
 
 
+class InputAnswerItem(BaseModel):
+    question_id: int
+    answer: str = Field(..., min_length=1)
+
+
+class InputAnswersBatchIn(BaseModel):
+    answers: list[InputAnswerItem] = Field(..., min_length=1)
+
+
+@router.post("/{prd_id}/input-questions/answer-batch")
+def answer_input_questions_batch(
+    prd_id: int,
+    body: InputAnswersBatchIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Answer SEVERAL "User input needed" questions in one scoped edit.
+
+    The chat's question popup collects the whole batch before submitting
+    (owner directive: answer everything first, send once) — so the answers
+    arrive together, and folding them together is strictly better than N
+    sequential calls to the single-answer route: one scoped-editor pass over
+    the document instead of N (each of which re-reads and re-writes the whole
+    HTML), one undoable version snapshot instead of N stacked ones, and no
+    window where the PRD reflects half a batch.
+
+    Same contract as the single-answer route otherwise: every question must
+    belong to this PRD and the edit is all-or-nothing — a failed edit leaves
+    the document untouched and NO question marked answered.
+    """
+    from app.prd_questions import apply_answers
+
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    # Resolve every target up front — a batch naming a foreign or unknown
+    # question dies before any LLM work, not after.
+    pairs: list[tuple[dict, str]] = []
+    for item in body.answers:
+        question = get_question(item.question_id)
+        if not question or question.get("prd_id") != prd_id:
+            raise HTTPException(404, f"Question {item.question_id} not found")
+        pairs.append((question, item.answer))
+
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "PRD has no content to edit")
+
+    try:
+        edit = apply_answers(
+            prd_html,
+            [(q["prompt"], a) for q, a in pairs],
+            enterprise_id=company.company_id,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Could not apply the answers: {exc}")
+
+    # ONE snapshot for the whole batch — undo restores the pre-batch document.
+    try:
+        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
+    except Exception:
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before input-answer batch "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
+
+    update_prd_content(prd_id, row.get("title", ""), edit["html"])
+    answered = [
+        answer_question(q["id"], a, answered_by=company.user_name) for q, a in pairs
+    ]
+
+    return {
+        "prd": get_prd_rendered(prd_id),
+        "questions": answered,
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
+
+
 class ChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
 
@@ -1091,44 +1234,19 @@ def chat_edit(
     panel can refresh live. Before this endpoint, an edit-phrased chat message
     on a PRD tab was answered in text only and the document never changed
     (issue b of the chat→PRD bug set).
+
+    Delegates to the shared `apply_chat_edit_scoped` (`project_chat_edit.py`)
+    guard-off (`project_id=None`) — this is the byte-identical main-chat hot
+    path; the project-scoped write (with the ★ cross-project IDOR gate) lives
+    on `POST /v1/projects/{id}/prd/chat-edit` instead. Request model, response
+    keys, and status codes (200 / 409 empty PRD / 502 edit failure) are
+    unchanged by the extraction.
     """
-    from app.prd_questions import apply_chat_edit
+    from app.project_chat_edit import apply_chat_edit_scoped
 
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-
-    # Edit the RAW payload_md (the pure PRD HTML) — same discipline as the
-    # input-answer editor: design-agent 'applied' patches are folded on read by
-    # get_prd_rendered, so editing the raw doc keeps them folding once.
-    prd_html = (row.get("payload_md") or "").strip()
-    if not prd_html:
-        raise HTTPException(409, "PRD has no content to edit yet")
-
-    try:
-        edit = apply_chat_edit(
-            prd_html, body.instruction, enterprise_id=company.company_id
-        )
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Could not apply the edit: {exc}")
-
-    if edit["sections_changed"]:
-        # Snapshot the pre-edit content so the change is undoable (mirrors
-        # PUT /{id} and the input-answer path).
-        try:
-            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
-        except Exception:
-            logger.warning(
-                "auto-version snapshot failed for prd_id=%s before chat edit "
-                "(undo point not captured)", prd_id, exc_info=True,
-            )
-        update_prd_content(prd_id, row.get("title", ""), edit["html"])
-    # No sections changed → the editor judged the instruction wasn't an edit;
-    # leave the stored document untouched (no snapshot, no write).
-
-    return {
-        "prd": get_prd_rendered(prd_id),
-        "sections_changed": edit["sections_changed"],
-        "summary": edit["summary"],
-    }
+    return apply_chat_edit_scoped(
+        prd_id, body.instruction, company, project_id=None
+    )
 
 
 class ChangeTemplateIn(BaseModel):

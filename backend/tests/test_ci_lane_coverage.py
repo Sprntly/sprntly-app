@@ -92,6 +92,586 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "SQL; psycopg is deliberately absent from requirements. Run locally "
         "against a scratch database when touching the ranking migration."
     ),
+    ("test_projects_schema_roundtrip.py", "RUN_PROJECTS_SCHEMA_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "projects/chat/memory migration set's CHECK constraints and partial "
+        "unique index — the fake Supabase client has no SQL engine behind it "
+        "and cannot enforce either. This is a schema-only ticket (no route/"
+        "helper code shipped alongside it), so there is no deterministic unit "
+        "coverage to stand in; the migration files themselves are reviewed in "
+        "the PR, and this suite is the real-DB proof, run locally against the "
+        "dev rig when touching this migration set."
+    ),
+    ("test_projects_crud_live.py", "RUN_PROJECTS_CRUD_LIVE"): (
+        "Real local-Supabase round-trip for the projects CRUD + memory-entry "
+        "routes/helpers (tenant-gate 404 parity, project_belongs_to_company "
+        "against a genuine second company/workspace row, memory CRUD, the "
+        "cached-summary read) — proves the real supabase-py client path a "
+        "fake in-memory SQLite store cannot. Deterministic backstop: "
+        "test_projects_routes.py and test_project_memory_entries.py cover "
+        "the same behaviour against FakeSupabaseClient and run in the fast "
+        "lane on every PR; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching these routes/helpers."
+    ),
+    ("test_project_chat_cards_live.py", "RUN_PROJECT_CARDS_LIVE"): (
+        "Real local-Supabase proof that a project chat's artifact cards/"
+        "counts are project-scoped through the real five-table fan-out and "
+        "PostgREST (the regression's exact shape). Deterministic backstop: "
+        "the project-scoping tests in test_chat_envelope_shared.py cover the "
+        "same behaviour against FakeSupabaseClient and run in the fast lane "
+        "on every PR; this suite is the real-DB proof, run locally against "
+        "the dev rig when touching the envelope's listing legs."
+    ),
+    ("test_project_memory_promotion.py", "RUN_PROJECT_MEMORY_PROMOTION_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the agent-"
+        "promotion writer: proves the pme_one_provenance XOR check accepts a "
+        "real insert, and that the promote -> schedule_regen -> "
+        "regenerate_summary loop actually updates summary_md (not merely "
+        "flips stale). Deterministic backstop: the rest of this file mocks "
+        "the classifier (app.project_memory.call_json) against "
+        "FakeSupabaseClient and covers provenance shape, stale-flip, "
+        "never-raises, and the duplicate short-circuit in the fast lane; "
+        "this suite is the real-DB/real-LLM proof, run locally against the "
+        "dev rig when touching this writer."
+    ),
+    ("test_project_memory_promotion.py", "ANTHROPIC_API_KEY"): (
+        "Same three live tests as RUN_PROJECT_MEMORY_PROMOTION_LIVE above — "
+        "both variables gate the identical tests, so this is the other half "
+        "of that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
+    ("test_project_origin_seed_live.py", "RUN_PROJECT_ORIGIN_SEED_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the project-"
+        "origin-seed writer: proves a real seed call actually lands a "
+        "project_memory_entries row through the real supabase-py client and "
+        "that the promote -> schedule_regen -> regenerate_summary loop "
+        "actually updates summary_md (not merely flips stale) — a fully-"
+        "stubbed LLM cannot prove either. Deterministic backstop: "
+        "test_project_origin_seed.py mocks call_json/add_agent_promoted_"
+        "entry/schedule_regen/get_prd/_read_turns against a fake DB and "
+        "covers the writer's contract (brief+decisions shape, the one-regen "
+        "call, the summarizer-failure fallback, the no-title unseeded case, "
+        "never-raises, the one cost line, and the DRY reuse-not-fork check) "
+        "in the fast lane; this suite is the real-DB/real-LLM proof, run "
+        "locally against the dev rig when touching this writer."
+    ),
+    ("test_project_origin_seed_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_ORIGIN_SEED_LIVE above — both "
+        "variables gate the identical test, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
+    ("test_ask_project_promotion.py", "RUN_ASK_PROJECT_PROMOTION_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the individual-"
+        "chat memory-promotion hook wired into ask_job_runner.run_ask_job: "
+        "proves a project-scoped ask's completed answer reaches the real "
+        "classifier and writes a correctly-provenanced project_memory_entries "
+        "row, that the scheduled regen loop actually updates summary_md (not "
+        "merely flips stale), and that a small-talk exchange promotes "
+        "nothing. Deterministic backstop: the rest of this file mocks the "
+        "classifier and qa_agent.answer against FakeSupabaseClient and covers "
+        "project_id threading, the non-project no-op (no call/row/cost-line), "
+        "the per-user _load_history regression guard, best-effort failure "
+        "swallowing, and editable/removable provenance in the fast lane; this "
+        "suite is the real-DB/real-LLM proof, run locally against the dev rig "
+        "when touching this hook."
+    ),
+    ("test_ask_project_promotion.py", "ANTHROPIC_API_KEY"): (
+        "Same three live tests as RUN_ASK_PROJECT_PROMOTION_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_individual_project_chat_live.py", "RUN_ASK_PROJECT_PROMOTION_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the individual-"
+        "project-chat conversation binding: proves the get-or-create "
+        "conversation helper is genuinely idempotent against a real Postgres, "
+        "and that feeding its conversation_id through the real ask pipeline "
+        "(answer stubbed, classifier real) lands a correctly-provenanced "
+        "project_memory_entries row — closing the exact gap where the shipped "
+        "UI never had a durable conversation_id to send. Deterministic "
+        "backstop: test_individual_project_chat.py covers the same get-or-"
+        "create idempotency, membership/tenant gating, the real /v1/ask route "
+        "binding path, and the non-project no-op against FakeSupabaseClient "
+        "(fake classifier) in the fast lane; this suite is the real-DB/"
+        "real-LLM proof, run locally against the dev rig when touching this "
+        "binding."
+    ),
+    ("test_individual_project_chat_live.py", "ANTHROPIC_API_KEY"): (
+        "Same two live tests as RUN_ASK_PROJECT_PROMOTION_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_project_group_gate.py", "RUN_INTERJECTION_GATE_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the smart-"
+        "interjection should-respond gate: proves the REAL classifier "
+        "decision on an agent-directed question (respond=true, one real "
+        "reply) and on an ordinary human-to-human exchange (respond=false, "
+        "no reply) — a stubbed classifier cannot prove the gate's actual "
+        "judgment, only its wiring. Deterministic backstop: the rest of "
+        "this file mocks the classifier (app.project_group_gate.call_json) "
+        "against FakeSupabaseClient and covers the pre-filter bound, the "
+        "cost-line shape, the never-raises/mutation-proofed failure "
+        "default, and the mention-bypasses-gate path in the fast lane; "
+        "this suite is the real-DB/real-LLM proof, run locally against the "
+        "dev rig when touching this gate."
+    ),
+    ("test_project_group_gate.py", "ANTHROPIC_API_KEY"): (
+        "Same two live tests as RUN_INTERJECTION_GATE_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
+    ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the group "
+        "smart-trigger port: proves the REAL classifier's continuation/"
+        "ambiguous-work-request judgment (the AD-P10 posture shift) AND "
+        "the B2 no-fabrication narration — that a 'Done' claim only ever "
+        "follows an actual prd_versions write — end to end. A stubbed "
+        "classifier/editor can prove wiring only, not that the model "
+        "actually honors the new prompt rules or that the narration guard "
+        "holds against a real editor response. Deterministic backstop: "
+        "test_group_trigger_and_no_fabrication.py covers the "
+        "agent_spoke_last/trigger_kind derivation, the in-band edit tool "
+        "handler's cases, the proposal narration branch, the "
+        "addressing-note selection, and the DRY source-scans in the fast "
+        "lane; this suite is the real-DB/real-LLM proof, run locally "
+        "against the dev rig when touching this trigger surface."
+    ),
+    ("test_group_trigger_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_GROUP_TRIGGER_LIVE above — both variables "
+        "gate the identical tests, so this is the other half of that same "
+        "exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_project_answer_collapse_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the project "
+        "chat engine collapse (LT-2..LT-9): proves multi-party speaker "
+        "attribution through the collapsed engine, project-awareness parity "
+        "(context block + 4 read tools + delegate/execute callable), a real "
+        "delegate_task call actually seeding a project_delegations row, "
+        "cancel on the plain-Q&A composer path, main-chat regression, the "
+        "backgrounded group reply not blocking the route, the LT-8 "
+        "input-shape decision, and list_artifacts parity post-ff — a stubbed "
+        "LLM can prove wiring only, never that the model actually engages "
+        "the right tool or that the router/interceptor behaviour on a "
+        "multi-speaker transcript is unchanged. Deterministic backstop: "
+        "test_surface_scope.py and test_project_answer_collapse.py cover "
+        "the byte-identity property test, the sixth-branch dispatch wiring, "
+        "all four invariant mutation proofs, the backgrounding mechanics, "
+        "and the queue-ready seams against fakes/monkeypatches in the fast "
+        "lane; this suite is the real-DB/real-LLM proof, DEFERRED-TO-STAGING "
+        "— run on staging when access lands, which also pins the LT-8 "
+        "winner before merge."
+    ),
+    ("test_project_answer_collapse_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_individual_persistence_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the private "
+        "project chat's both-sides persistence (LP-1..LP-6): a real /v1/ask "
+        "project send survives leave->return with both the question and the "
+        "answer restored, a real partial-unique enforces one row per side on "
+        "a double submit, a crafted foreign conversation_id cannot write, "
+        "send-and-leave does not flip the author's own chat unread, and a "
+        "real artifact attach succeeds end to end — a stubbed LLM can prove "
+        "wiring only, never that a project-scoped ask actually reaches the "
+        "sixth ladder branch. Deterministic backstop: "
+        "test_individual_turn_persistence.py (owned-writer ownership + "
+        "idempotency + cursor-advance, all mutation-proofed), "
+        "test_individual_persistence_routes.py (route-level dispatch/commit "
+        "persist, main-chat non-double-write), "
+        "test_conversation_turns_idempotency_migration.py (migration "
+        "additivity + partial-unique enforcement, mutation-proofed), and "
+        "test_artifact_added_realtime.py (best-effort emit + failure "
+        "survival) cover the wiring against fakes in the fast lane; this "
+        "suite is the real-DB/real-LLM proof, DEFERRED-TO-STAGING — run on "
+        "staging when access lands."
+    ),
+    ("test_individual_persistence_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_group_execution_lifecycle_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the GROUP send "
+        "routed through the shared run_execution_job lifecycle primitive "
+        "(LP-1..LP-6): a real group reply posts a turn AND flips the run row "
+        "ready; a forced failure writes status='error'+error_class with no "
+        "fabricated turn and no raw text broadcast; a named-source question "
+        "hits a connector while an unnamed PM-noun grounds in the project "
+        "ledger; a retry re-answers with a new run_id/attempt while a "
+        "side-effect run refuses; a reload after a failure surfaces "
+        "run_status='failed'; and main chat answer/cancel/fail is unchanged "
+        "post-extraction — a stubbed LLM proves wiring only, never the "
+        "model's actual tool engagement or router/interceptor judgement on a "
+        "multi-speaker transcript. Deterministic backstop: "
+        "test_run_execution_job.py (primitive lifecycle + terminal-once + "
+        "error_class + byte-identity), test_group_execution_lifecycle.py "
+        "(group-through-primitive success/failure, retry 409/422/202, "
+        "connector decision, run-status-on-read, active_project_id-unset, all "
+        "mutation proofs), and test_ask_jobs_active_attempt_migration.py "
+        "(migration additivity + partial-unique enforcement) cover the wiring "
+        "against fakes in the fast lane; this suite is the real-DB/real-LLM "
+        "proof, DEFERRED-TO-STAGING — run on staging when access lands."
+    ),
+    ("test_group_execution_lifecycle_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic backstop."
+    ),
+    ("test_project_delegations.py", "RUN_PROJECT_DELEGATIONS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "project_delegations migration's FK cascade/set-null behaviour, its "
+        "three named indexes, and its RLS policy — the fake Supabase client "
+        "has no SQL engine behind it and cannot enforce any of those. This is "
+        "a schema-only ticket (no route code shipped alongside it), so there "
+        "is no deterministic unit coverage to stand in; the migration file "
+        "and helper module are reviewed in the PR, and this suite is the "
+        "real-DB proof, run locally against the dev rig when touching this "
+        "migration or `db/project_delegations.py`."
+    ),
+    ("test_delegation_events.py", "RUN_DELEGATION_EVENTS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "delegation_events migration's CHECK constraint, FK cascade, index/"
+        "RLS-policy catalog entries, and to evaluate the v_delegation_status "
+        "left-join-lateral derive-at-read view — the fake Supabase client has "
+        "no SQL engine behind it and cannot enforce any of those or evaluate "
+        "a view. Deterministic backstop: test_project_delegation.py covers "
+        "the genesis-emit contract (exactly one assigned event per hand-off, "
+        "genesis-failure-does-not-rollback) against FakeSupabaseClient in the "
+        "fast lane; this suite is the real-DB proof, run locally against the "
+        "dev rig when touching this migration or `db/delegation_events.py`."
+    ),
+    ("test_delegation_followups.py", "RUN_DELEGATION_FOLLOWUPS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "delegation_followups migration's FK cascade, partial index, and RLS "
+        "policy, plus a real upsert_followup/get_followup round trip — the "
+        "fake Supabase client has no SQL engine behind it and cannot enforce "
+        "any of those. Deterministic backstop: test_delegation_status_ingest.py "
+        "drives upsert_followup/get_followup against FakeSupabaseClient in the "
+        "fast lane (partial-merge semantics, the pending_done_since clear/set "
+        "contract) and test_delegation_cadence.py covers the pure cadence "
+        "engine with no DB at all; this suite is the real-DB proof, run "
+        "locally against the dev rig when touching this migration or "
+        "`db/delegation_followups.py`."
+    ),
+    ("test_delegation_followup_sends.py", "RUN_DELEGATION_FOLLOWUP_SENDS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to exercise the "
+        "delegation_followup_sends migration's FK cascade, unique idempotency "
+        "constraint, and RLS policy, plus a real record_send/send_exists/"
+        "sends_for_person_since round trip and the list_due_followups "
+        "next_check_in/muted/status pre-filter (which reads the real "
+        "v_delegation_status view) — the fake Supabase client has no SQL "
+        "engine behind it and cannot enforce any of those or evaluate a view. "
+        "Deterministic backstop: test_delegation_followup.py drives the "
+        "sweep's decision/guardrail/send logic against FakeSupabaseClient "
+        "with a stubbed LLM in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this migration "
+        "or `db/delegation_followup_sends.py`/`db/delegation_followups.py`."
+    ),
+    ("test_conversation_read_cursors.py", "RUN_CONVERSATION_READ_CURSORS_ROUNDTRIP"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove the "
+        "conversation_read_cursors migration's composite PK and RLS/policy "
+        "catalog entries, plus a real set_cursor/get_cursor upsert round "
+        "trip — the fake Supabase client has no SQL engine behind it and "
+        "cannot enforce a composite primary key or an RLS-policy lookup. "
+        "Deterministic backstop: the rest of this file drives unread "
+        "derivation, read-clears-unread, advance-only clamping, per-user "
+        "cursor isolation (RED->GREEN mutation proof), and the membership + "
+        "client-supplied-id gates against FakeSupabaseClient in the fast "
+        "lane; this suite is the real-DB proof, run locally against the dev "
+        "rig when touching this migration or `db/conversation_read_cursors.py`."
+    ),
+    ("test_project_delegation.py", "RUN_DELEGATE_TASK_LIVE"): (
+        "Real local-Supabase + real-Anthropic round-trip for the "
+        "delegate_task tool: proves the REAL model actually calls the tool "
+        "on a hand-off phrase, the REAL brief LLM call, and that an "
+        "unresolvable assignee produces no DM/no delegation row — a stubbed "
+        "model can prove the handler's contract but not that the tool "
+        "actually gets invoked end to end. Deterministic backstop: the rest "
+        "of this file drives `handle_delegate_task` directly against "
+        "FakeSupabaseClient with `call_md` stubbed and covers the "
+        "tool-description/brief-prompt properties, the authz/IDOR "
+        "mutation-proof (AC3, RED->GREEN), the never-writes-a-user-turn "
+        "invariant, fail-closed resolution/brief, and the cost/log-content "
+        "assertions in the fast lane; this suite is the real-LLM proof, run "
+        "locally against the dev rig when touching this tool or "
+        "`app/project_delegation.py`."
+    ),
+    ("test_project_delegation.py", "ANTHROPIC_API_KEY"): (
+        "Same three live tests as RUN_DELEGATE_TASK_LIVE above — both "
+        "variables gate the identical tests, so this is the other half of "
+        "that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
+    ("test_project_instructions.py", "RUN_PROJECT_INSTRUCTIONS_LIVE"): (
+        "Gates two tiers in this file: (a) four migration/storage round-trip "
+        "tests that need a real local Supabase (PostgREST + Postgres) to "
+        "apply/re-apply the raw ALTER TABLE and prove the column reads back "
+        "null-by-default — the fake Supabase client has no SQL engine behind "
+        "it and cannot run DDL; (b) the two real-LLM 'instructions reach the "
+        "model's reply' tests (also gated on ANTHROPIC_API_KEY below). "
+        "Deterministic backstop: the rest of this file drives get_instructions/"
+        "set_instructions round-trip semantics indirectly via the route/IDOR "
+        "tests against FakeSupabaseClient, a builder-lane static proxy "
+        "(test_migration_is_idempotent_by_construction) proving the ALTER "
+        "TABLE is IF-NOT-EXISTS-guarded without touching any Supabase "
+        "instance, the private/group context-fold tests (monkeypatched "
+        "get_instructions, truncation-at-cap, best-effort-on-raise), and the "
+        "main-chat isolation mutation-proof — all in the fast lane. Run this "
+        "suite locally against the dev rig when touching the migration, "
+        "db/projects.py's instructions helpers, or the instructions fold."
+    ),
+    ("test_project_instructions.py", "ANTHROPIC_API_KEY"): (
+        "Same two live-LLM tests as RUN_PROJECT_INSTRUCTIONS_LIVE above — "
+        "both variables gate the identical tests, so this is the other half "
+        "of that same exemption. See that entry for the deterministic "
+        "backstop."
+    ),
+    ("test_project_ledger_live.py", "RUN_PROJECT_LEDGER_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to evaluate the "
+        "`v_delegation_status` left-join-lateral derive-at-read view through "
+        "the REAL emit route + supabase-py client — the fake Supabase client "
+        "has no SQL engine behind it and cannot evaluate a view (same "
+        "reasoning as `test_delegation_events.py`). Deterministic backstop: "
+        "`test_delegation_events_api.py` covers the pure state-machine engine, "
+        "all four fail-closed authz gates (mutation-proofed, RED->GREEN), read "
+        "isolation, the ledger-row DTO shape, and cost/log-content assertions "
+        "against `FakeSupabaseClient` with the view stood in by a data-driven "
+        "equivalent in the fast lane; this suite is the real-DB proof that the "
+        "ACTUAL view + route agree, run locally against the dev rig when "
+        "touching this endpoint or `db/delegation_events.py`."
+    ),
+    ("test_realtime_channel_auth.py", "RUN_PROJECTS_REALTIME_CHANNEL_AUTH_LIVE"): (
+        "Needs a real local Supabase (Postgres + the installed Realtime "
+        "service) to evaluate the group/per-user channel-join predicate "
+        "functions and exercise the deployed RLS policies on "
+        "`realtime.messages` — the fake Supabase client has no SQL engine "
+        "behind it and cannot evaluate a PL/pgSQL function, enforce RLS, or "
+        "resolve `realtime.topic()`/`auth.uid()`. This is a schema/"
+        "policy-only ticket (no route/helper code path runs in CI), so "
+        "there is no deterministic unit coverage to stand in; the migration "
+        "SQL is reviewed in the PR, and this suite is the real-DB proof — "
+        "including both AC-12 mutation proofs (group allow-all and the "
+        "per-user uid-bypass) — run locally against the dev rig when "
+        "touching this migration, plus the ship-gate live proof before "
+        "promotion."
+    ),
+    ("test_resolve_candidate_live.py", "RUN_RESOLVE_CANDIDATE_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to classify a "
+        "real identity across t_workspace/t_company/t_newuser/t_refuse "
+        "against real workspace_members/company_members/profiles rows in "
+        "two tenants — the fake Supabase client cannot prove the tenancy "
+        "fail-closed re-assertion holds against a genuine second "
+        "company/workspace row, only that the stubbed gates were called with "
+        "the right arguments. Deterministic backstop: test_resolve_candidate.py "
+        "covers all five tiers, the cross-tenant fail-closed proofs (AC5, "
+        "AC6 RED->GREEN mutation proof), and the needle-shape branches "
+        "against monkeypatched dependencies in the fast lane; this suite is "
+        "the real-DB proof, run locally against the dev rig when touching "
+        "this resolver or the membership helpers it composes."
+    ),
+    ("test_tag_candidate_live.py", "RUN_TAG_CANDIDATE_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove the "
+        "tag-action surface across TWO real tenants: a cross-tenant refuse "
+        "through the real HTTP route (403, zero writes in both tenants), a "
+        "real t_workspace add that lands a project_members row, and a real "
+        "t_newuser tag that creates a workspace_invites row carrying "
+        "project_id — the fake Supabase client cannot prove the tenancy "
+        "fail-closed re-assertion holds against a genuine second "
+        "company/workspace row. Deterministic backstop: test_tag_candidate_api.py "
+        "covers all five tiers, the per-tier mutation proofs (AC6), the "
+        "add_member-route IDOR fix (AC7), de-gate + seat guard, and the "
+        "candidate-search scoping against monkeypatched/fake-DB dependencies "
+        "in the fast lane; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching the tag route or resolve_candidate."
+    ),
+    ("test_invite_project_association.py", "RUN_INVITE_PROJECT_ASSOCIATION_LIVE"): (
+        "Needs a real local Supabase (PostgREST + Postgres) to prove a real "
+        "accept of a project-carrying invite inserts the project_members row "
+        "(Extension B) end to end through create_invite -> "
+        "accept_invite_for_user against real company_members/workspace_members "
+        "rows — the fake Supabase client has no real accept-flow FK/RLS engine "
+        "behind it. Deterministic backstop: the fast-lane tests in the SAME "
+        "file cover project_id round-trip through the invite, accept auto-add "
+        "on both accept paths, and the project-less non-breakage case against "
+        "FakeSupabaseClient; this env-gated case is the real-DB proof, run "
+        "locally when touching the invite primitives or the accept hook."
+    ),
+    ("test_read_tool_idor_live.py", "RUN_READ_TOOL_IDOR_LIVE"): (
+        "Real local-Supabase round-trip for the @Sprntly group agent's project "
+        "read tools' tenancy scoping (`project_group_context.dispatch_read_tool`): "
+        "proves a genuine cross-project id (same company, sibling project) and a "
+        "genuine cross-tenant id (a second real company) are BOTH refused by "
+        "get_artifact_content against real rows, that the manifest gate is "
+        "load-bearing (add-ref -> content returns -> remove -> refused, RED->GREEN), "
+        "and that list_project_artifacts surfaces only this project's own artifact "
+        "— the manifest-intersection + get_report(id, company_id) gates a fake "
+        "in-memory store cannot fully exercise. Deterministic backstop: "
+        "test_project_group_context.py mutation-proofs the identical gate "
+        "(manifest-off -> refused, flip-on -> foreign content returns, restore -> "
+        "refused) against monkeypatched dependencies and runs in the fast lane on "
+        "every PR; this suite is the real-DB proof, run locally against the dev "
+        "rig when touching these read tools or `db/artifacts.py`."
+    ),
+    ("test_projects_prd_chat_edit_route_live.py", "RUN_PROJECT_CHAT_EDIT_LIVE"): (
+        "Real local-Supabase + real-LLM round-trip for "
+        "POST /v1/projects/{id}/prd/chat-edit — the private project chat's "
+        "direct-apply PRD-edit write path, through the REAL route: an "
+        "explicit own-project prd_id edit persists IN ONE CALL (payload_md "
+        "changes, exactly one prd_versions snapshot), and a sibling PRD on a "
+        "different project in the same company is genuinely untouched. Needs "
+        "BOTH a live LLM (ANTHROPIC_API_KEY, the scoped editor calls the "
+        "model) and a real Postgres fan-out (list_artifacts_for_project) a "
+        "fake in-memory store cannot exercise. Deterministic backstops run "
+        "every PR in the fast lane: test_project_chat_edit.py mutation-proofs "
+        "the identical ★ gate (cross-project/cross-tenant/gate-error -> zero "
+        "rows, own-project -> one version) against monkeypatched "
+        "dependencies, and test_projects_prd_chat_edit_route.py covers the "
+        "route's own gate order (membership / flag / cross-tenant) with a "
+        "mocked editor; this suite is the real-LLM+real-DB proof, run "
+        "locally against the dev rig when touching this route or the shared "
+        "apply_chat_edit_scoped."
+    ),
+    ("test_projects_prd_chat_edit_route_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_CHAT_EDIT_LIVE above — the scoped editor "
+        "calls a real LLM in addition to the env flag, so it is gated on BOTH "
+        "(_RUN_LIVE = RUN_PROJECT_CHAT_EDIT_LIVE=='1' and "
+        "bool(ANTHROPIC_API_KEY)) and is unrunnable in any CI lane on either "
+        "count. See that entry for the deterministic fast-lane backstops."
+    ),
+    ("test_project_intent_route_live.py", "RUN_PROJECT_INTENT_LIVE"): (
+        "Real local-Supabase + real-LLM round-trip for "
+        "POST /v1/projects/{id}/chat/intent — the private project chat's "
+        "classify path, through the REAL route: a project with exactly one "
+        "attached PRD, an edit-phrased message classifies edit_prd carrying "
+        "the server-resolved prd_id, proving the _NEEDS_PRD downgrade "
+        "(chat_intent.py:431) does not fire against a REAL model's output. "
+        "Needs BOTH a live LLM (resolve_chat_intent calls the model) and a "
+        "real Postgres fan-out (list_artifacts_for_project) a fake "
+        "in-memory store cannot exercise. Deterministic backstop runs every "
+        "PR in the fast lane: test_project_intent_route.py covers the "
+        "route's own gate order (membership / server-vs-client target / "
+        "envelope shape) with resolve_chat_intent monkeypatched; this suite "
+        "is the real-LLM+real-DB proof, run locally against the dev rig "
+        "when touching this route."
+    ),
+    ("test_project_intent_route_live.py", "ANTHROPIC_API_KEY"): (
+        "Same live test as RUN_PROJECT_INTENT_LIVE above — resolve_chat_intent "
+        "calls a real LLM in addition to the env flag, so it is gated on BOTH "
+        "(_RUN_LIVE = RUN_PROJECT_INTENT_LIVE=='1' and "
+        "bool(ANTHROPIC_API_KEY)) and is unrunnable in any CI lane on either "
+        "count. See that entry for the deterministic fast-lane backstop."
+    ),
+    ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
+        "Needs a real local Supabase Realtime (the running Realtime service + "
+        "a live websocket) to prove a `member.added` published through the "
+        "ACTUAL Broadcast REST endpoint is genuinely RECEIVED on the target's "
+        "per-user channel — the fake Supabase client spies the publish call but "
+        "has no realtime transport to fan the event back over a socket. "
+        "Deterministic backstop: test_mention_liveness.py covers the per-user-"
+        "channel-only + never-group privacy gate, the whitelisted DTO / no-"
+        "content-leak assertion, the best-effort no-raise/no-rollback mutation "
+        "proof, the right-branch publisher wiring, and the accept-hook publish "
+        "against FakeSupabaseClient with publish_broadcast spied in the fast "
+        "lane; this suite is the real-transport proof, run locally against the "
+        "dev rig when touching the mention/add publishers or the tag route."
+    ),
+    ("test_project_artifacts_fanout_live.py", "RUN_PROJECT_ARTIFACTS_LIVE"): (
+        "Real local-Supabase round-trip for the project artifacts fan-out "
+        "(list_artifacts_for_project), including the regenerate-stays-"
+        "attached resolve-forward reproduction: a project + PRD, then a "
+        "force=True-style regenerate that mints a new prds.id in the same "
+        "family, proving the project's artifact list still resolves the "
+        "current generation against REAL rows — the fake Supabase client's "
+        "family-collapse/resolve-forward logic is identical either way, but "
+        "only real Postgres proves the write-time ownership gate and the "
+        "membership gate round-trip. Deterministic backstop: "
+        "test_project_artifacts_fanout.py covers the same regenerate/"
+        "resolve-forward/dedupe/tolerated-stale cases against "
+        "FakeSupabaseClient in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this fan-out."
+    ),
+    ("test_project_artifacts_fanout_live.py", "ANTHROPIC_API_KEY"): (
+        "One optional test in this file additionally drives the regenerate "
+        "reproduction through the GENUINE generate-from-task(force=True) "
+        "pipeline (not a direct DB insert) end to end — gated on BOTH this "
+        "key and RUN_PROJECT_ARTIFACTS_LIVE above, so it is unrunnable in "
+        "any CI lane on either count. See that entry for the deterministic "
+        "fast-lane backstop; the DB-fixture test in this same file already "
+        "proves the read path without a model."
+    ),
+    ("test_project_prd_content_live.py", "RUN_PROJECT_PRD_CONTENT_LIVE"): (
+        "Real local-Supabase round-trip for POST /v1/projects/{id}/prd/content "
+        "across TWO real tenants: a genuine cross-project prd_id and a "
+        "genuine cross-tenant prd_id both refused through the REAL route with "
+        "zero writes, and a real in-tenant on-project save updating "
+        "prds.payload_md plus inserting exactly one prd_versions row — the "
+        "fake Supabase client cannot prove the tenancy fail-closed "
+        "re-assertion holds against a genuine second company/workspace row. "
+        "No LLM call on this route, so no ANTHROPIC_API_KEY dependency. "
+        "Deterministic backstop: test_project_prd_content_route.py covers "
+        "the gate order (call-order spies), per-path mutation proofs "
+        "(zero-write), the fail-closed bypass proof, the valid-save "
+        "snapshot-then-update sequence, snapshot-failure swallowing, and the "
+        "no-body-content/no-cost-line observability contract against "
+        "FakeSupabaseClient in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this route or "
+        "`app/project_prd_gate.py`."
+    ),
+    ("test_project_join_greeting_live.py", "RUN_PROJECT_JOIN_GREETING_LIVE"): (
+        "Real local-Supabase round-trip for the on-join greeting: a genuinely "
+        "new membership, added through the real client, gets exactly one "
+        "get-or-created individual conversation and one posted assistant "
+        "turn — the fake Supabase client's insert/select stand-ins cannot "
+        "prove the get-or-create idempotency or the write against real "
+        "`conversations`/`conversation_turns` FKs. No ANTHROPIC_API_KEY "
+        "dependency — the greeting reuses the cached "
+        "project_memory_summary and makes no fresh LLM call. Deterministic "
+        "backstop: test_project_join_greeting.py covers the compose/split "
+        "helpers, the best-effort/never-raises contract, the new-only/"
+        "no-duplicate rule, and the no-LLM-call proof against monkeypatched "
+        "stand-ins in the fast lane; this suite is the real-DB proof, run "
+        "locally against the dev rig when touching this module or "
+        "`db/conversations.py`."
+    ),
+    ("test_group_chat_turns_live.py", "RUN_GROUP_CHAT_LIVE"): (
+        "Real local-Supabase round-trip for the group-chat surface: "
+        "`db/conversations.py`'s create_group_chat/get_group_chat/"
+        "list_group_turns/post_group_turn helpers AND the /v1/projects/{id}/"
+        "group* routes, driven over real HTTP through PostgREST against a "
+        "real local Postgres — the fake Supabase client cannot enforce the "
+        "uq_one_group_chat_per_project partial unique index, seed a real "
+        "project_chat_members roster, or prove the membership gate against "
+        "genuine rows. The one @Sprntly-triggered LLM call is stubbed here "
+        "too (app.routes.projects.run_tool_loop monkeypatched), so no "
+        "ANTHROPIC_API_KEY dependency. Deterministic backstop: "
+        "test_group_chat_turns.py covers the same create/idempotent-create, "
+        "human-vs-mention turn shape, roster/author fields, since-cursor "
+        "polling, foreign-tenant 404, same-tenant non-member 403, and the "
+        "individual-conversation isolation logic against FakeSupabaseClient "
+        "in the fast lane; this suite is the real-DB proof, run locally "
+        "against the dev rig when touching this surface."
+    ),
+    ("test_project_from_prd.py", "RUN_PROJECT_FROM_PRD_LIVE"): (
+        "Real local-Supabase round-trip for the auto-create-from-PRD hook "
+        "(app/project_from_prd.py, AD-P9): the Creation assertions "
+        "(prd_auto project + membership + single project_artifacts row + "
+        "conversation<->project bind) re-run against a real Postgres, "
+        "proving the writes actually persist and the FKs hold — the fake "
+        "Supabase client's in-memory stand-in cannot prove that. No LLM "
+        "call anywhere in this hook, so no ANTHROPIC_API_KEY dependency. "
+        "Deterministic backstop: this SAME file's unmarked fake-DB tests "
+        "(the majority of it, above this section) already cover creation, "
+        "idempotent first-write-wins, the no-conversation skip, "
+        "mutation-proofed failure swallowing at both the route and helper "
+        "level, all three routes/prd.py hook call sites staying wired "
+        "(AC5/AC6), and the reverse find_existing_prd_auto_project dedup "
+        "lookup (hook-forked, modal-forked, cross-origin, cross-artifact-"
+        "type, cross-company) in the fast lane; this suite is the real-DB "
+        "proof, run locally against the dev rig when touching this hook."
+    ),
 }
 
 
@@ -381,3 +961,50 @@ def test_the_detector_sees_each_gating_shape(tmp_path, marker_line):
     src = tmp_path / "test_probe.py"
     src.write_text(f"import os\nimport pytest\n{marker_line}\n\ndef test_x():\n    pass\n")
     assert _gated_env_names(src) == {"TOTALLY_UNSET_SECRET"}
+
+
+def test_ci_lane_registry_has_tag_and_invite_live():
+    """AC backstop: both env-gated tag-action live suites are registered in
+    `_KNOWN_UNRUNNABLE` with the env var that gates them. Removing either
+    entry reddens this test (and `test_no_test_is_gated_on_an_env_var_no_
+    workflow_provides` above), which is exactly the ratchet's intent —
+    a live security proof must never silently drop out of the accounted set."""
+    assert ("test_tag_candidate_live.py", "RUN_TAG_CANDIDATE_LIVE") in _KNOWN_UNRUNNABLE
+    assert (
+        "test_invite_project_association.py",
+        "RUN_INVITE_PROJECT_ASSOCIATION_LIVE",
+    ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_join_greeting_live():
+    """AC backstop: the on-join greeting's env-gated real-DB round trip is
+    registered in `_KNOWN_UNRUNNABLE` with the env var that gates it.
+    Removing this entry reddens this test (and `test_no_test_is_gated_on_
+    an_env_var_no_workflow_provides` above) — the live proof must never
+    silently drop out of the accounted set."""
+    assert (
+        "test_project_join_greeting_live.py",
+        "RUN_PROJECT_JOIN_GREETING_LIVE",
+    ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_project_prd_content_live():
+    """AC backstop: the project PRD-content route's env-gated two-tenant live
+    round-trip is registered in `_KNOWN_UNRUNNABLE` with the env var that
+    gates it. Removing this entry reddens this test (and `test_no_test_is_
+    gated_on_an_env_var_no_workflow_provides` above) — the cross-tenant IDOR
+    live proof must never silently drop out of the accounted set."""
+    assert (
+        "test_project_prd_content_live.py",
+        "RUN_PROJECT_PRD_CONTENT_LIVE",
+    ) in _KNOWN_UNRUNNABLE
+
+
+def test_ci_lane_registry_has_group_trigger_live():
+    """AC backstop: the group smart-trigger live suite is registered in
+    `_KNOWN_UNRUNNABLE` under both env vars that gate it. Removing either
+    entry reddens this test (and `test_no_test_is_gated_on_an_env_var_no_
+    workflow_provides` above) — the live no-fabrication proof must never
+    silently drop out of the accounted set."""
+    assert ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE") in _KNOWN_UNRUNNABLE
+    assert ("test_group_trigger_live.py", "ANTHROPIC_API_KEY") in _KNOWN_UNRUNNABLE

@@ -128,6 +128,10 @@ def test_the_workspace_id_is_never_the_permalink_subdomain(catalog):
 _REAL_CONFIG = {
     "team": {"id": _TEAM_ID, "name": "Acme", "domain": "acme"},
     "bot_user_id": "U999",
+    # An explicit pull selection — since the 2026-08-13 scope rule, a config
+    # with no sync_channel_ids syncs nothing, and these end-to-end runs need
+    # the C1 fixture channel to flow through to the catalog write.
+    "sync_channel_ids": ["C1"],
     "channel_id": "C777",
     "channel_name": "general",
     "target_type": "channel",
@@ -191,6 +195,7 @@ def test_team_id_from_config_yields_none_rather_than_a_wrong_value(config):
 #: silently corrupt, because it is exactly where the fallback executes.
 _CONFIG_WITHOUT_TEAM = {
     "bot_user_id": "U999", "channel_id": "C777", "channel_name": "general",
+    "sync_channel_ids": ["C1"],
 }
 
 

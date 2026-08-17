@@ -125,11 +125,73 @@ _CIR_VETO = re.compile(
     re.I,
 )
 
+# ── Market-intelligence report intent ────────────────────────────────────────
+# The sibling of CIR, and the reason it needs its own shape: CIR answers "how do
+# we stand against these rivals", this answers "what happened to the CATEGORY" —
+# funding, M&A, entrants, category movement, regulation, analyst coverage.
+#
+# `_CIR_SUBJECT` admits "market", so before this rule existed EVERY market-plus-
+# report-noun phrasing fast-pathed into CIR, including "market intelligence
+# report" — the new report's own name. Reassigning those is the point, not a
+# side effect. What deliberately STAYS with CIR is the us-versus-them family
+# ("how do we compare to the market", "benchmark us against the market", "where
+# do we stand vs the market"): those are comparisons against our position, which
+# is CIR's question whatever noun they use. That separation is why the noun list
+# below is narrower than `_CIR_REPORT_NOUN` — it omits `benchmark`, and it omits
+# `study`/`deep dive`, whose bare-market phrasings are pinned as haiku-router
+# deferrals in tests/test_cir_routing_phrases.py and are left exactly there.
+_MI_SUBJECT = r"(?:market|categor(?:y|ies)|industry|sector)"
+# `landscape` is deliberately ABSENT and stays CIR's. "market landscape" is
+# PM usage for the competitive landscape — who is in the category and where we
+# sit in it — not for a news sweep of the category, and it is pinned to CIR in
+# tests/test_cir_routing_phrases.py. `benchmark` and `study`/`deep dive` are out
+# for the same kind of reason: comparison shapes and general-study phrasings
+# already have owners.
+_MI_REPORT_NOUN = (
+    r"(?:intelligence|intel|report|briefing|brief|round-?up|digest|"
+    r"update|overview|scan)"
+)
+_MI_SUBJECT_B = rf"\b{_MI_SUBJECT}\b"
+
+_MI_REPORT_RULE_SRC = (
+    # "market intelligence", "market report", "industry landscape",
+    # "monthly category scan", "quarterly market briefing".
+    rf"\b{_MI_SUBJECT}\s+(?:\w+\s+){{0,2}}{_MI_REPORT_NOUN}\b"
+    # "report on the market", "briefing on our category", "roundup of the
+    # industry".
+    rf"|\b{_MI_REPORT_NOUN}\s+(?:of|on|for|across)\s+"
+    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_MI_SUBJECT_B}"
+)
+
+# Market SIZING is not market intelligence: "what's the TAM", "market sizing
+# report", "market structure", "five forces" are analytical frameworks over a
+# category, not a news sweep of it. `_CIR_VETO` already defers them to the haiku
+# router and tests pin that; this veto keeps the new rule from quietly claiming
+# them on its way past. The own-data half is the same guard for the same reason:
+# "the market data I uploaded" is a DS question about a spreadsheet.
+#
+# The COMPETITOR half is the load-bearing one. This rule sits above CIR, and a
+# market-shaped noun phrase can carry a competitor subject — "competitive
+# landscape report for our category" is a CIR ask that happens to say
+# "category", and is pinned to CIR. Naming competitors, the competition or
+# rivals means the question is about our position against them, which is CIR's
+# whatever else the sentence contains; so MI defers the moment one appears.
+_MI_VETO = re.compile(
+    r"\b(?:competitors?|competition|competitive|rivals?)\b"
+    r"|\bmarket\s+structure\b|\bfive\s+forces\b|\bporter'?s\b"
+    r"|\bmarket\s+siz\w+\b|(?-i:\b(?:TAM|SAM|SOM)\b)"
+    r"|\buploaded?\b|\b(?:my|our)\s+data\b|\bthe\s+data\b"
+    r"|\b(?:csvs?|spreadsheets?|excel|xlsx?)\b",
+    re.I,
+)
+
+
 # skill_id → veto pattern. When a rule matches but its veto also matches, the
 # fast-path DEFERS (falls through to the remaining rules, then the haiku router)
 # rather than claiming a question that belongs to a sibling skill.
 _RULE_VETOES: dict[str, re.Pattern] = {
     "competitive-intelligence-review": _CIR_VETO,
+    "market-intelligence-report": _MI_VETO,
 }
 
 
@@ -213,6 +275,17 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
                 r"\b(offer|sell|charge)\b", re.I),
      "company-research", "Deep company research", 0.85),
 
+    # Market intelligence — what happened to the CATEGORY (funding, M&A,
+    # entrants, category movement, regulation, analyst coverage).
+    #
+    # ABOVE the CIR rule and below company-research, which is the only ordering
+    # that works. Above CIR because `_CIR_SUBJECT` admits "market", so CIR would
+    # otherwise claim "market intelligence report" — this report's own name.
+    # Below company-research because "research our market" is an inward ask
+    # about our own positioning, and first-match-wins keeps it there.
+    (re.compile(_MI_REPORT_RULE_SRC, re.I),
+     "market-intelligence-report", "Market intelligence report", 0.85),
+
     # Competitive intelligence — REPORT-INTENT shapes only.
     #
     # This rule used to be `\b(competit|competitor|competitive analysis|market
@@ -239,7 +312,7 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
 # un-ships a capability rather than degrading it. `test_skill_router.py` pins
 # the set against the rules and against qa_agent's dispatch.
 #
-# All four have rules above; the set is stated separately because `pinned_skill`
+# All five have rules above; the set is stated separately because `pinned_skill`
 # (Slack's `/competitive` command) and the classifier can also name one without
 # a rule firing.
 PIPELINE_SKILLS: frozenset[str] = frozenset({
@@ -247,6 +320,7 @@ PIPELINE_SKILLS: frozenset[str] = frozenset({
     "public-feedback-report",
     "company-research",
     "competitive-intelligence-review",
+    "market-intelligence-report",
 })
 
 
@@ -1842,6 +1916,163 @@ def document_lookup_candidates(question: str) -> set[str]:
     if not (_DOCUMENT_NOUN.search(q) and _DOCUMENT_READ_VERB.search(q)):
         return set()
     return {"confluence"}
+
+
+#: DELEGATE-shaped phrasing: hand a task to a named person. Deliberately
+#: verb-phrase-centric (there is no fixed PM noun for "give this to someone",
+#: unlike the tracker's ticket/issue/epic vocabulary) — mirrors
+#: `_JIRA_LOOKUP_VERB`'s "verb owns the match" shape.
+_PROJECT_TOOL_DELEGATE_VERB = re.compile(
+    r"\bdelegate\b|"
+    # "assign ... to" / "hand ... to", any short noun phrase in between
+    # ("assign the export section to Ada"), never crossing a sentence
+    # boundary — mirrors the tracker gate's own bounded-window shape.
+    r"\b(?:assign|hand(?:\s+off)?)\b[^.?!]{0,40}?\bto\b|"
+    r"hand\s+off\b|"
+    r"send\s+(?:this|that|it)\s+to|"
+    r"have\s+\w+\s+(?:do|handle|take|work\s+on|own)|"
+    r"ask\s+\w+\s+to\s+(?:do|handle|take|own)|"
+    r"give\s+(?:this|that|it)\s+to",
+    re.I,
+)
+
+#: EXECUTE-shaped phrasing: ask the agent itself to draft the one v1
+#: agent-doable task type (a PRD — mirrors `project_task_execution.
+#: AGENT_DOABLE_TYPES`), or a bare "execute" naming a task.
+_PROJECT_TOOL_EXECUTE_VERB = re.compile(
+    r"\b(?:draft|write(?:\s+up)?|create|prepare|generate|put\s+together|"
+    r"come\s+up\s+with)\s+(?:a|the|an)\s+prd\b"
+    r"|\bexecute\s+(?:this|that|it|the\s+task)\b",
+    re.I,
+)
+
+#: Veto: the message merely MENTIONS a person or an artifact without asking
+#: the agent to act on either — a pure read/recall/summary request. Checked
+#: FIRST so a phrasing like "what did Ada say about the PRD" never trips the
+#: positive patterns above even though it names both a person and a document.
+_PROJECT_TOOL_MENTION_VETO = re.compile(
+    r"^\s*(?:what|who|how|when|where|why|which)\b"
+    r"|\b(?:summarize|summarise|catch\s+me\s+up|what'?s?\s+(?:in|on|the\s+status\s+of)|"
+    r"tell\s+me\s+about|status\s+of|read\s+(?:me\s+)?the|what\s+does\s+the)\b",
+    re.I,
+)
+
+
+def is_project_tool_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks the project-tool loop to actually DO
+    something — hand a task to a teammate (`delegate_task`) or draft the one
+    agent-doable task type (`execute_task`, `project_task_execution.py`) —
+    rather than merely asking about the project (which the composer's folded
+    breadth block already answers, see `routes/ask.py:347`).
+
+    Sibling of `is_jira_lookup`/`is_connector_lookup`/
+    `document_lookup_candidates`: cheap regex on `routing_text`, veto-set
+    discipline over completeness. Deliberately narrow — a message this
+    declines falls through to the composer, not to a refusal, so a false
+    negative costs an un-actioned request rather than a wrong answer (see
+    the accept-with-nudge addendum this gate's decline path relies on to
+    close that gap, `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`).
+
+    `history` is accepted for signature parity with its sibling gates (every
+    ladder predicate above `route()` takes it) but is not consulted for
+    continuation judgments in this v1 — the gate decides on the message's
+    own words only; a future pass MAY extend it the same way
+    `is_jira_lookup`'s sticky-thread continuation does."""
+    q = question or ""
+    if _PROJECT_TOOL_MENTION_VETO.search(q):
+        return False
+    return bool(_PROJECT_TOOL_DELEGATE_VERB.search(q) or _PROJECT_TOOL_EXECUTE_VERB.search(q))
+
+
+#: Read/recall/summary INTENT — an interrogative lead or a summary/read
+#: verb. Deliberately reuses the same shape as `_PROJECT_TOOL_MENTION_VETO`
+#: (the phrasings that gate vetoes are exactly the ones this gate wants),
+#: but this is a POSITIVE match, not a veto.
+_PROJECT_CONTENT_INTENT = re.compile(
+    r"^\s*(?:what|who|how|when|where|which)\b"
+    r"|\b(?:summarize|summarise|catch\s+me\s+up|tell\s+me\s+about|status\s+of|"
+    r"read\s+(?:me\s+)?the|what'?s?\s+(?:in|on)|list|show\s+me|give\s+me|open)\b",
+    re.I,
+)
+
+#: PROJECT-CONTENT noun anchor — the message must also name project
+#: content, or a bare interrogative ("what's the capital of France") would
+#: match on intent alone and pull generic chit-chat into the tool loop.
+_PROJECT_CONTENT_NOUN = re.compile(
+    r"\bprds?\b|\breports?\b|\bevidence\b|\bprototypes?\b|\bartifacts?\b|"
+    r"\bmemory\b|\btasks?\b|\bledger\b|\bdelegations?\b|\bmembers?\b|"
+    r"\broster\b|\bteam\b|\bcontext\b|"
+    r"\bwho(?:'?s|\s+is)\s+(?:on|working)\b|"
+    r"\bthis\s+project\b|"
+    r"\bwe\s+decided\b|\bdecisions?\b|"
+    r"\bowe[sd]?\b|\bowed\b|\boutstanding\b|\bwho\s+owes\b",
+    re.I,
+)
+
+
+#: PROJECT-EDIT verb — an instruction to change the project's document. Kept
+#: distinct from the read/delegate/execute gates: these phrasings ask to
+#: MUTATE the PRD, which the group surface handles via its in-band `edit_prd`
+#: tool. Anchored to an edit verb (below) AND an edit-target NOUN so plain
+#: chatter never matches.
+_PROJECT_EDIT_VERB = re.compile(
+    r"\b(?:edit|update|updating|change|changing|revise|rewrite|reword|modify|"
+    r"amend|append|tighten|expand|shorten|delete|remove|drop|insert|replace|"
+    r"add|adjust)\b",
+    re.I,
+)
+
+#: PROJECT-EDIT target NOUN — what the edit is aimed at. The group agent can
+#: only edit the project's PRD, so the anchor set is the PRD / document family.
+_PROJECT_EDIT_NOUN = re.compile(
+    r"\bprds?\b|\bdocs?\b|\bdocument\b|\bspec\b|\brequirements?\b|\bsection\b",
+    re.I,
+)
+
+
+def is_project_edit_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks to MUTATE the project's PRD — an edit verb
+    plus an edit-target noun (the PRD / document family). Sibling of
+    `is_project_tool_request`/`is_project_content_request`: cheap regex on
+    `routing_text`, noun-anchored so plain chatter or a bare interrogative
+    never matches.
+
+    Unlocks the sixth-branch tool loop for a group turn so the model can call
+    the in-band `edit_prd` tool — but ONLY on the group surface, which is the
+    only one that registers an edit tool/handler (`qa_agent.answer` guards this
+    gate on `scope.edit_prd_handler`, so it can never widen main/private
+    routing). `history` is accepted for signature parity with every other
+    ladder predicate but not consulted in v1."""
+    q = question or ""
+    if not q.strip():
+        return False
+    return bool(_PROJECT_EDIT_VERB.search(q) and _PROJECT_EDIT_NOUN.search(q))
+
+
+def is_project_content_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message expresses a read/recall/summary intent AND
+    names project content — the parallel POSITIVE gate that unlocks the
+    sixth-branch read-tool loop (`get_project_memory` /
+    `list_project_artifacts` / `get_artifact_content` / `get_task_ledger`)
+    for natural questions that `is_project_tool_request` deliberately vetoes
+    (that gate is delegate/execute-only; its veto exists precisely to send
+    these phrasings elsewhere — this gate is that elsewhere).
+
+    Noun-anchored, veto-set discipline over completeness, sibling to
+    `is_project_tool_request`: a bare interrogative with no project noun
+    ("what's the capital of France") or plain chit-chat ("hey", "thanks")
+    must NOT match — a false negative here only costs falling through to
+    the composer's breadth block (still answerable), while a false
+    positive would pull generic chit-chat into the non-streaming tool loop.
+
+    Does NOT touch `is_project_tool_request` or `_PROJECT_TOOL_MENTION_VETO`
+    — delegate/execute phrasings are owned by that gate; the caller ORs the
+    two together. `history` is accepted for signature parity with every
+    other ladder predicate but not consulted in v1."""
+    q = question or ""
+    if not q.strip():
+        return False
+    return bool(_PROJECT_CONTENT_INTENT.search(q) and _PROJECT_CONTENT_NOUN.search(q))
 
 
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:

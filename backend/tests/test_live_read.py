@@ -281,11 +281,12 @@ def test_calls_read_the_index_and_say_so(stub_registry, monkeypatch):
     "indexed" so the model never implies it read a transcript."""
     import app.call_index as call_index
 
+    # The real `IndexedCall`, not a hand-rolled namespace: a partial stub goes
+    # stale silently the moment this leg renders another column it has always
+    # had (participants and duration, added 2026-08-16).
     monkeypatch.setattr(
         call_index, "resolve_calls",
-        lambda eid, q: [SimpleNamespace(
-            call_date="2026-08-01", title="Acme QBR", account="Acme", summary=None
-        )],
+        lambda eid, q: [_indexed_call("1", "2026-08-01", "Acme QBR", "Acme")],
     )
 
     result = live_read.read_sources("co-1", ["fireflies"], query="Acme")
@@ -318,6 +319,187 @@ def test_an_empty_call_index_states_what_it_holds(stub_registry, monkeypatch):
 
     assert "13 recorded calls are indexed" in result.read[0].text
     assert "not transcripts" in result.read[0].text
+
+
+def _indexed_call(external_id, call_date, title, account=None,
+                  participants=None, duration_min=None):
+    from app.call_index import IndexedCall
+
+    return IndexedCall(
+        external_id=external_id, title=title, call_date=call_date,
+        duration_min=duration_min, participants=participants or [],
+        account=account, summary="",
+    )
+
+
+def test_local_only_reads_our_tables_and_skips_the_network(
+    stub_registry, monkeypatch
+):
+    """The stand-down's stated cost is third-party I/O, which a Postgres
+    SELECT does not incur. In local-only mode the call index is still read and
+    the networked legs are not opened at all — the fix for an indexed call
+    history going unread behind a 3-day KG horizon (2026-08-15)."""
+    import app.call_index as call_index
+
+    stub_registry["slack"] = _StubAdapter(text="- #eng: shipping friday")
+    monkeypatch.setattr(
+        call_index, "resolve_calls",
+        lambda eid, q: [_indexed_call("1", "2026-08-13T20:00:00+00:00",
+                                      "Maverik + ChaosTrack", "Maverik")],
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies", "slack"], query="Maverik", local_only=True,
+    )
+
+    by_key = {s.key: s for s in result.sources}
+    assert "Maverik + ChaosTrack" in by_key["fireflies"].text
+    # Slack was NAMED but not opened — and says so, rather than being dropped,
+    # which would read as "I looked and there was nothing".
+    assert stub_registry["slack"].calls == []
+    assert not by_key["slack"].usable
+    assert "knowledge graph" in by_key["slack"].detail
+
+
+def test_a_call_line_names_who_was_on_it(stub_registry, monkeypatch):
+    """An answer about a named call apologised that attendee names were not
+    available while the index row held all five addresses and a 51-minute
+    duration. Both are stored; this leg simply never rendered them."""
+    import app.call_index as call_index
+
+    call = _indexed_call(
+        "1", "2026-08-13T20:00:00+00:00", "Maverik + ChaosTrack", "Maverik",
+        participants=["dtung@chaostrack.com", "daniel.hagen@maverik.com"],
+        duration_min=51.0,
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
+
+    result = live_read.read_sources("co-1", ["fireflies"], query="Maverik")
+
+    text = result.read[0].text
+    assert "with: dtung@chaostrack.com, daniel.hagen@maverik.com" in text
+    assert "51 min" in text
+
+
+def test_a_long_attendee_list_is_capped_with_a_remainder(
+    stub_registry, monkeypatch
+):
+    """A big briefing must not spend the whole per-source budget on names."""
+    import app.call_index as call_index
+
+    call = _indexed_call(
+        "1", "2026-08-13T20:00:00+00:00", "All hands", None,
+        participants=[f"p{i}@acme.com" for i in range(12)],
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
+
+    result = live_read.read_sources("co-1", ["fireflies"], query="all hands")
+
+    assert "(+4 more)" in result.read[0].text
+
+
+def test_a_windowed_plan_renders_the_whole_window_not_a_keyword_probe(
+    stub_registry, monkeypatch
+):
+    """The 2026-08-15 failure: "a table of how many customer calls I had each
+    week" matched no call title, so the keyword probe answered "none match"
+    and the model built its weekly table from KG signals — which only hold the
+    ~25 newest meetings, so every older week rendered as zero while the index
+    held the whole history. A plan carrying `since`/`until` must render the
+    WINDOW: true counts per week, zero weeks included, without ever needing a
+    title to match."""
+    import app.call_index as call_index
+
+    calls = [
+        _indexed_call("1", "2026-07-13T15:00:00+00:00",
+                      "TransUnion + Demo", "TransUnion"),
+        _indexed_call("2", "2026-07-28T15:00:00+00:00",
+                      "Woodward + Demo", "Woodward"),
+    ]
+    seen = {}
+
+    def _list(eid, *, since=None, until=None, limit=50):
+        seen["since"], seen["until"], seen["limit"] = since, until, limit
+        return calls
+
+    def _probe_must_not_decide(eid, q):
+        raise AssertionError("a windowed plan fell back to the keyword probe")
+
+    monkeypatch.setattr(call_index, "list_calls", _list)
+    monkeypatch.setattr(
+        call_index, "count_calls", lambda eid, since=None, until=None: 2
+    )
+    monkeypatch.setattr(call_index, "resolve_calls", _probe_must_not_decide)
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="how many customer calls each week",
+        constraints={"since": "2026-07-11", "until": "2026-08-01"},
+    )
+
+    text = result.read[0].text
+    assert seen["since"] is not None and seen["until"] is not None
+    assert "2 recorded calls in the index between 2026-07-11 and 2026-08-01" in text
+    assert "week of 2026-07-13: 1 call(s) — TransUnion" in text
+    # The zero week is rendered EXPLICITLY: a missing line and a zero are
+    # different claims, and only the zero stops "no data" readings.
+    assert "week of 2026-07-20: 0 call(s)" in text
+    # The newest individual calls ride along so a "group last week's calls"
+    # follow-up has titles, not just counts.
+    assert "Woodward + Demo" in text
+
+
+def test_an_empty_window_is_a_fact_not_a_missing_sync(stub_registry, monkeypatch):
+    """Zero calls IN THE WINDOW on an index holding hundreds outside it must
+    say exactly that — "nothing recorded for this workspace" would be false."""
+    import app.call_index as call_index
+
+    monkeypatch.setattr(
+        call_index, "list_calls",
+        lambda eid, *, since=None, until=None, limit=50: [],
+    )
+    monkeypatch.setattr(
+        call_index, "count_calls",
+        lambda eid, since=None, until=None: 0 if (since or until) else 522,
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="calls in june",
+        constraints={"since": "2026-06-01", "until": "2026-06-30"},
+    )
+
+    text = result.read[0].text
+    assert "0 recorded calls in the index between 2026-06-01 and 2026-06-30" in text
+    assert "522 indexed calls outside this window" in text
+
+
+def test_a_long_window_rolls_up_by_month(stub_registry, monkeypatch):
+    """A multi-year window at one line per week would overflow the per-source
+    budget and be truncated from the tail — deleting the newest periods, the
+    ones the question is about. Past `_MAX_WEEK_LINES` weeks the digest groups
+    by month instead."""
+    import app.call_index as call_index
+
+    calls = [
+        _indexed_call("1", "2024-01-15T15:00:00+00:00", "Kickoff", "Acme"),
+        _indexed_call("2", "2026-07-15T15:00:00+00:00", "Renewal", "Acme"),
+    ]
+    monkeypatch.setattr(
+        call_index, "list_calls",
+        lambda eid, *, since=None, until=None, limit=50: calls,
+    )
+    monkeypatch.setattr(
+        call_index, "count_calls", lambda eid, since=None, until=None: 2
+    )
+
+    result = live_read.read_sources(
+        "co-1", ["fireflies"], query="all our calls ever",
+        constraints={"since": "2024-01-01", "until": "2026-08-01"},
+    )
+
+    text = result.read[0].text
+    assert "January 2024: 1 call(s) — Acme" in text
+    assert "July 2026: 1 call(s) — Acme" in text
+    assert "week of" not in text
 
 
 def test_github_reads_synced_prs_because_live_search_needs_a_repo(

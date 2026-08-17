@@ -10,6 +10,7 @@
   POST   /v1/tickets/{key}/comments       -> add a comment
   DELETE /v1/tickets/{key}/comments/{id}  -> remove a comment
   GET    /v1/tickets/{key}/comments/summary -> AI summary of the comment thread
+  POST   /v1/tickets/assign-plan          -> chat assignment request -> pairs + questions
   POST   /v1/tickets/lists                -> ClickUp lists to pick a target
   POST   /v1/tickets/push-clickup         -> create the tickets in ClickUp
 
@@ -221,6 +222,37 @@ def save_fields(
 
     kick_sync_from_key(company.company_id, ticket_key)
     return {"ok": True}
+
+
+class AssignPlanIn(BaseModel):
+    """The chat's assign_tickets action: the planner's `instruction` plus the
+    thread's PRD, whose generated tickets are the assignment universe."""
+    prd_id: int
+    instruction: str = Field(..., min_length=1)
+
+
+@router.post("/assign-plan")
+def assign_plan(
+    body: AssignPlanIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Resolve a chat assignment request into explicit (ticket, member) pairs
+    plus the questions the request left open (rendered by the chat's question
+    popup). PLAN ONLY — the writes happen through PUT /{key}/fields when the
+    user's clicks land, so chat gains no write path of its own. A prd_id
+    outside this company yields an empty ticket list (get_tickets is
+    company-scoped), which the plan reports as "no tickets" rather than
+    leaking whether the id exists."""
+    from app.ticket_assign import plan_assignments
+
+    return plan_assignments(
+        company.company_id, body.prd_id, body.instruction.strip(),
+        # WHO is asking, so "assign the tickets to me" resolves to the caller
+        # instead of a question about who "me" is (reported with a screenshot:
+        # the model answered "no session identity is provided" — prompt
+        # internals leaked into the chat).
+        requester_user_id=company.user_id,
+    )
 
 
 class LifecycleIn(BaseModel):

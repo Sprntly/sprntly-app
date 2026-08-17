@@ -1,0 +1,30 @@
+/* project-chat-extras — the genuinely-retained CSS atoms from the deleted
+   ProjectIndividualChat.module.css, used by the private chat's host closures
+   (the show-more toggle on an on-join greeting, the inline delegation-actions
+   row under a delivered-brief turn). Tokens only, from globals.css :root
+   (read-only — no new palette). The clarify-PRD-pick pill styling moved to the
+   shell-owned ChatShell.module.css instead, because the shell renders those
+   options and its module graph forbids importing this project-side module. */
+
+/* The on-join greeting's Show more/less toggle. */
+.showMore {
+  margin-top: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.showMore:hover {
+  text-decoration: underline;
+}
+
+/* The inline delegation-actions row under a delivered-brief turn. */
+.delegationActions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}

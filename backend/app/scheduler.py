@@ -18,6 +18,10 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
   refresh_connectors — re-pulls connector data into the KG every
                        CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
                        and KG read near-live data.
+  monthly_reports_tick — once a month per company (first configured brief
+                       weekday, at the brief time), runs each registered
+                       intelligence report, saves it into the artifacts
+                       library and announces it (app.monthly_reports).
 """
 from __future__ import annotations
 
@@ -537,6 +541,71 @@ async def _run_exact_delivery(
         )
 
 
+async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
+    """Drive the monthly intelligence reports for every company.
+
+    Ticks hourly (MONTHLY_REPORTS_TICK_MINUTES). For each company it resolves
+    the same timezone + configured day/time the brief uses and asks the pure
+    `app.monthly_reports.due_specs` decision — which forces the frequency to
+    MONTHLY (first configured weekday of the month) whatever brief cadence
+    the company picked, and reads its once-per-cycle state from the saved
+    reports themselves, so a restart can never double-run a month.
+
+    Single-phase by design, unlike the brief's generate-then-deliver split:
+    the report takes minutes to research and its announcement says "is
+    ready", so generating at the fire time and announcing on completion IS
+    the honest behaviour — there is no exact-instant delivery to protect.
+
+    Company-scoped, not per-workspace: the engines read company-level state
+    (companies.competitors, company profile) and the reports library is
+    shared across a company's workspaces. Per-company error isolation, like
+    every tick here.
+    """
+    from app import monthly_reports
+
+    now = now or datetime.now(timezone.utc)
+
+    try:
+        companies = list_companies()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Monthly reports tick: failed to list companies: %s", exc)
+        return
+
+    for company in companies:
+        company_id = company.get("id")
+        if not company_id:
+            continue
+        if not monthly_reports.monthly_reports_on(
+            company.get("notification_settings")
+        ):
+            continue
+        tz, schedule = _resolve_company_schedule(company)
+        try:
+            due = await asyncio.to_thread(
+                monthly_reports.due_specs, company_id, now, tz, schedule
+            )
+        except Exception as exc:  # noqa: BLE001 — one company never stops the tick
+            logger.error(
+                "Monthly reports tick: due-check failed for %s: %s",
+                company_id, exc,
+            )
+            continue
+        for spec in due:
+            logger.info(
+                "Monthly reports tick: running %s for company %s",
+                spec.skill, company_id,
+            )
+            try:
+                await asyncio.to_thread(
+                    monthly_reports.run_and_deliver, company, spec
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate per report
+                logger.error(
+                    "Monthly reports tick: %s failed for %s: %s",
+                    spec.skill, company_id, exc,
+                )
+
+
 async def _run_drip_email_cycle() -> None:
     """Onboarding drip / nudge email cycle (v0 checklist 2.1).
 
@@ -583,6 +652,21 @@ async def _run_invite_reminder_cycle() -> None:
         logger.info("Scheduler: invite reminder cycle → %s", summary)
     except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
         logger.error("Scheduler: invite reminder cycle failed: %s", exc)
+
+
+async def _run_task_followup_cycle() -> None:
+    """Autonomous task follow-up sweep: ping/reschedule/escalate/finalize
+    every delegated task past its next_check_in. Mirrors the invite
+    reminder job — error-isolated inside run_task_followup_cycle, blocking
+    Supabase + LLM + Resend HTTP pushed off the event loop. Opt-in via
+    TASK_FOLLOWUP_ENABLED (on top of SCHEDULER_ENABLED)."""
+    from app.delegation_followup import run_task_followup_cycle
+
+    try:
+        summary = await asyncio.to_thread(run_task_followup_cycle)
+        logger.info("Scheduler: task followup cycle → %s", summary)
+    except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
+        logger.error("Scheduler: task followup cycle failed: %s", exc)
 
 
 async def _run_scheduled_cycle() -> None:
@@ -646,7 +730,9 @@ def _run_orphan_ask_job_sweep() -> None:
     business-context refreshes abandoned in 'generating' (companies.
     business_context_refresh_status) the same way — a stale row there would
     otherwise wedge the "Save Company Shape" trigger's start-guard until this
-    sweep or a restart heals it."""
+    sweep or a restart heals it, and team documents (`custom_artifacts`)
+    abandoned in 'generating', whose age gate makes the startup sweep alone
+    unable to heal the very restart that orphaned them."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -675,6 +761,21 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned company-research run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan company-research sweep failed")
+    try:
+        # Team documents (`custom_artifacts`) abandoned mid-generation. Added
+        # here because the startup sweep alone could not heal them: with a
+        # 30-minute age gate, the restart that orphans a document is by
+        # definition too early to sweep it, so the panel spun on `generating`
+        # until the NEXT restart — which on prod can be days. A recurring sweep
+        # is what makes the age gate work at all.
+        from app.custom_artifact_generate import sweep_orphan_generating
+
+        n = sweep_orphan_generating()
+        if n:
+            logger.info(
+                "Failed %d abandoned document generation(s) stuck in generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan document-generation sweep failed")
     try:
         from app.db.business_context_refresh import (
             fail_orphan_business_context_refreshes,
@@ -820,6 +921,24 @@ def start_scheduler() -> None:
         name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
         replace_existing=True,
     )
+    # Monthly intelligence reports: once a month per company, run each
+    # registered report (competitive intelligence today), save it into the
+    # artifacts library, and announce it. The day/time/tz decisions are the
+    # pure app.brief_schedule functions with the frequency forced to MONTHLY;
+    # this cadence just has to be finer than the 24h due window, and the
+    # durable reports-row ledger makes extra ticks free no-ops.
+    if settings.monthly_reports_enabled:
+        report_minutes = (
+            getattr(settings, "monthly_reports_tick_minutes", 60) or 60
+        )
+        _scheduler.add_job(
+            _run_monthly_reports_tick,
+            trigger=IntervalTrigger(minutes=report_minutes),
+            id="monthly_reports_tick",
+            name=f"Monthly intelligence reports (tick every {report_minutes}m)",
+            replace_existing=True,
+        )
+
     # Third job: onboarding drip / nudge emails (v0 checklist 2.1). Opt-in via
     # DRIP_EMAILS_ENABLED, on its own cadence (DRIP_INTERVAL_HOURS) since the
     # drip pass is cheap and benefits from finer granularity than the brief
@@ -858,6 +977,23 @@ def start_scheduler() -> None:
             trigger=IntervalTrigger(hours=invite_hours),
             id="invite_reminders",
             name=f"Invite reminders (every {invite_hours}h)",
+            replace_existing=True,
+        )
+
+    # Autonomous task follow-up sweep: ping/reschedule/escalate/finalize
+    # every delegated task past its next_check_in (Day-0 delivery fires
+    # inline at delegation time). Opt-in via TASK_FOLLOWUP_ENABLED — its
+    # own gate ON TOP of SCHEDULER_ENABLED, exactly the invite-reminder
+    # shape above, so staging stays dark even with SCHEDULER_ENABLED=true
+    # until this is explicitly flipped for prod. Idempotent send-ledger +
+    # SQL due-filter make extra ticks cheap no-ops.
+    if getattr(settings, "task_followup_enabled", False):
+        followup_hours = getattr(settings, "task_followup_interval_hours", 1) or 1
+        _scheduler.add_job(
+            _run_task_followup_cycle,
+            trigger=IntervalTrigger(hours=followup_hours),
+            id="task_followup",
+            name=f"Autonomous task follow-up sweep (every {followup_hours}h)",
             replace_existing=True,
         )
 

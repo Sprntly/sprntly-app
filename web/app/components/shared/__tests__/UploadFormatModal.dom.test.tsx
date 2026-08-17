@@ -117,6 +117,21 @@ describe("the form", () => {
     expect(screen.queryByLabelText("Paste your format as Markdown")).toBeNull()
   })
 
+  it("puts Upload a file first, because Upload a file is the default", () => {
+    // Order, not just selection. The row used to open with its selected chip
+    // second, which reads as "Paste Markdown is the normal choice and you have
+    // switched off it" — and the guidance below the row is written for the file
+    // path, so the two disagreed. Asserted positionally on purpose: every other
+    // case here finds these buttons by accessible name and would keep passing
+    // if the order flipped back.
+    mount()
+    const labels = screen
+      .getAllByRole("button")
+      .map((b) => b.textContent?.trim())
+      .filter((t) => t === "Upload a file" || t === "Paste Markdown")
+    expect(labels).toEqual(["Upload a file", "Paste Markdown"])
+  })
+
   it("pre-selects the type the caller opened with", () => {
     mount({ initialType: "tickets" })
     expect(

@@ -38,8 +38,14 @@ _TEST_USER_ID_DEFAULT = "test-user"
 
 def setup_supabase_auth(monkeypatch) -> None:
     """Set SUPABASE_JWT_SECRET and reload app.config + app.auth so
-    require_session accepts our minted bearer JWTs as Supabase sessions."""
+    require_session accepts our minted bearer JWTs as Supabase sessions.
+
+    Also flips PROJECTS_ENABLED on so `company_client`-based tests keep
+    hitting the real `/v1/projects` routes now that the router is
+    flag-gated (the router-level dependency 404s everything when unset).
+    Tests exercising the off-path patch it back off explicitly."""
     monkeypatch.setenv("SUPABASE_JWT_SECRET", SUPABASE_JWT_SECRET)
+    monkeypatch.setenv("PROJECTS_ENABLED", "1")
     importlib.reload(sys.modules["app.config"])
     importlib.reload(sys.modules["app.auth"])
 

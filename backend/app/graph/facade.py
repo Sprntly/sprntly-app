@@ -379,26 +379,40 @@ class GraphFacade:
     def get_signals(
         self, enterprise_id: str, ids: list[str]
     ) -> dict[str, Signal]:
-        """Batched, tenant-scoped fetch of many signals in ONE query.
+        """Batched, tenant-scoped fetch of many signals in chunked `.in_()`
+        queries.
 
-        Mirrors `get_signal`'s parsing/shape but takes a list of ids and uses a
-        single `.in_("id", ids)` round-trip instead of one query per id (kills
-        the N+1 the per-edge retrieval/evidence/convergence walks would
-        otherwise incur). Returns `{id: Signal}` for the ids that exist in this
-        enterprise; ids that don't resolve are simply absent from the dict.
+        Mirrors `get_signal`'s parsing/shape but takes a list of ids instead of
+        one query per id (kills the N+1 the per-edge retrieval/evidence/
+        convergence walks would otherwise incur). Returns `{id: Signal}` for the
+        ids that exist in this enterprise; ids that don't resolve are simply
+        absent from the dict.
+
+        CHUNKED AT THE SAME WIDTH AS `edges_to_many`, and for the same reason:
+        `.in_()` renders every id into the request URL, and a UUID costs ~40
+        bytes there, so a few hundred ids is all a server's URL limit allows.
+        This used to be a single unchunked query, which was safe only because
+        every caller happened to be capped small upstream — the voice-of-
+        customer retrieval preset lifts exactly those caps, so the width had to
+        stop being an accident. One query per 150 ids, not one per id: the N+1
+        this method exists to kill stays killed.
 
         De-dupes the input ids and short-circuits the empty list to `{}` (an
         empty `IN ()` is invalid SQL anyway)."""
         unique = list(dict.fromkeys(ids))  # de-dup, preserve order
-        if not unique:
-            return {}
-        r = (
-            self._tbl("kg_signal").select("*")
-            .eq("enterprise_id", enterprise_id)
-            .in_("id", unique)
-            .execute()
-        )
-        return {row["id"]: self._row_to_signal(row) for row in (r.data or [])}
+        out: dict[str, Signal] = {}
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(unique), chunk):
+            r = (
+                self._tbl("kg_signal").select("*")
+                .eq("enterprise_id", enterprise_id)
+                .in_("id", unique[i:i + chunk])
+                .execute()
+            )
+            out.update(
+                {row["id"]: self._row_to_signal(row) for row in (r.data or [])}
+            )
+        return out
 
     def query_entities(
         self,

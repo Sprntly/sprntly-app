@@ -15,6 +15,8 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { HtmlReportView } from "../components/shared/HtmlReportView"
+import { SavedChatMarkdown } from "../components/shared/SavedChatMarkdown"
+import { looksLikeHtmlBrief } from "../lib/htmlBrief"
 import { saveBlob } from "../lib/saveBlob"
 import { ApiError, publicReportsApi, type PublicReport } from "../lib/api"
 import { reportTokenFromLocation } from "./reportTokenFromPathname"
@@ -80,7 +82,15 @@ export function PublicReportView({
           {downloading ? "Preparing…" : "Download PDF"}
         </button>
       </header>
-      <HtmlReportView html={report.html} title={report.title} watermark />
+      {/* Markdown vs document is decided by the BODY, not only the skill:
+          "saved-chat" rows always hold raw markdown
+          (`project_artifact_capture.py`), and scheduled monthly runs save
+          the report skills' answers as markdown too (`app.monthly_reports`)
+          — while legacy rows for those same skills are self-contained HTML
+          documents. Sniff the stored body so every combination renders. */}
+      {report.skill === "saved-chat" || !looksLikeHtmlBrief(report.html)
+        ? <SavedChatMarkdown markdown={report.html} />
+        : <HtmlReportView html={report.html} title={report.title} watermark />}
     </div>
   )
 }

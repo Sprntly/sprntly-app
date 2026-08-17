@@ -43,10 +43,13 @@ describe("SlackSyncChannelsPickerView", () => {
     expect(html.match(/type="checkbox"/g)).toHaveLength(2)
   })
 
-  it("explains the no-selection default (every bot-member channel)", () => {
+  it("explains the no-selection default (nothing is read until channels are picked)", () => {
     const html = render()
     expect(html).toContain("Channels to pull from")
-    expect(html).toContain("every channel the bot has been invited to")
+    // The 2026-08-13 scope rule: with nothing ticked the sync reads nothing.
+    // The old "every channel the bot has been invited to" promise must be gone.
+    expect(html).toContain("no channels are read")
+    expect(html).not.toContain("every channel the bot has been invited to")
   })
 
   it("says what ticking a channel actually does, and keeps both warnings", () => {
@@ -76,7 +79,7 @@ describe("SlackSyncChannelsPickerView", () => {
     expect(html).toMatch(/Pulling from\s*<strong>1<\/strong>\s*channel</)
   })
 
-  it("hides the saved line when nothing is persisted (pull-everything default)", () => {
+  it("hides the saved line when nothing is persisted (nothing-synced state)", () => {
     const html = render({ savedCount: 0 })
     expect(html).not.toContain("Pulling from")
   })
@@ -134,7 +137,7 @@ describe("orderBySavedFirst", () => {
   })
 
   it("returns the list untouched when nothing is saved", () => {
-    // Nothing saved means "pull from every channel" — there is no selection to
+    // Nothing saved means nothing is synced yet — there is no selection to
     // surface, so the list must not be reordered for its own sake.
     const channels = [ch("A"), ch("B")]
     expect(orderBySavedFirst(channels, new Set())).toBe(channels)

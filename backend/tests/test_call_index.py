@@ -320,6 +320,90 @@ def test_listing_questions_are_not_single_call():
     assert not ci.is_single_call_request("give me the 5 latest transcripts")
 
 
+# ── asking for the transcript IS asking for the content ──────────────────────
+#
+# Found on staging 2026-08-16, on one Zoom meeting, both ways:
+#
+#   "find me the transcript of David Mumuni's Zoom meeting"
+#       -> listing leg. Five meetings with times and attendees, and the claim
+#          that their "transcripts could not be loaded for this question".
+#   "summarize David Mumuni's Zoom meeting from Aug 5 at 14:45"
+#       -> the transcript, read and answered in full.
+#
+# Same call, same data, different verb. Worse than a routing miss: the listing
+# leg tells the model the index holds titles and dates and NOT transcripts, so
+# the answer stated a limitation the product does not have.
+
+def test_asking_for_a_named_transcript_is_a_single_call_request():
+    for question in (
+        "find me the transcript of David Mumuni's Zoom meeting",
+        "get me the Genworth transcript",
+        # The bare noun phrase, which is how people actually ask.
+        "transcript of the Mayer Brown call",
+        "what was said on the BBVA call",
+        "read me the NEFCO check-in",
+    ):
+        assert ci.is_single_call_request(question), question
+
+
+def test_a_plural_transcript_ask_that_NAMES_an_account_is_still_not_one_call():
+    """Caught by review. "send me the last 3 transcripts from Acme" has no
+    listing verb, matches the bare `transcripts` noun, survives the window gate
+    ("last 3" is not "last week") and NAMES an account — so it would have been
+    answered from exactly one call. A plural noun means a set, and a set belongs
+    to the listing or the digest."""
+    for question in (
+        "send me the last 3 transcripts from Acme",
+        "transcripts for the Genworth account",
+    ):
+        assert not ci.is_single_call_request(question), question
+
+
+def test_intent_stopwords_do_not_strip_words_that_are_part_of_a_NAME():
+    """Also caught by review, and the more dangerous of the two. The first cut
+    put these words in `_ASK_WORDS`, which `resolve_calls` shares — so "the Open
+    AI call" resolved to NO terms and the answer said "none of their titles or
+    accounts match this" about a call sitting in the index under that exact
+    name. Intent stripping is local to the intent question."""
+    assert ci._query_terms("summarize the Open AI call") == ["Open"]
+    assert "Read" in ci._query_terms("what did Read AI say")
+
+
+def test_the_single_call_prompt_answers_the_question_that_was_asked():
+    """Found live, after the routing fix landed: "find me the transcript of
+    David Mumuni's Zoom meeting" reached the right call and fetched the right
+    transcript — then answered with a paragraph about the transcript carrying no
+    timestamp. Fetching the right call and then declining to show it is, from
+    the user's side, the same failure as not finding it.
+
+    Asserted on the PROMPT because that is where the behaviour lives: the model
+    is handed the transcript either way, and what it does with it is what this
+    string decides."""
+    system = ci._SINGLE_CALL_SYSTEM
+    assert "ANSWER THE QUESTION THAT WAS ASKED" in system
+    # The transcript branch, and the explicit refusal to substitute a summary.
+    assert "reproduce the conversation itself" in system
+    assert "Do not replace it with a summary" in system
+    # Summarizing stays a first-class branch, not a casualty of the fix.
+    assert "what a PM would act on" in system
+    # And the caveat that consumed the live answer is bounded.
+    assert "never let it displace the answer" in system
+
+
+def test_transcript_asks_still_obey_every_other_gate():
+    """The new nouns buy no exemption. A window still means the digest, and a
+    plural ask that names no call still belongs to the listing — otherwise this
+    fix would trade a missed transcript for the far worse failure the
+    single-call guard exists to prevent: answering about ONE arbitrary call as
+    though it were the set that was asked about."""
+    for question in (
+        "give me all the transcripts from last week",
+        "find me the transcripts",
+        "which calls have transcripts",
+    ):
+        assert not ci.is_single_call_request(question), question
+
+
 # ── the single-call path must not claim a general ask ────────────────────────
 #
 # Reproduced live on staging (485 indexed calls): "can you summarize our recent
@@ -832,6 +916,25 @@ def test_ensure_fresh_tops_up_incrementally_from_the_last_success(monkeypatch):
     fresh = ci.ensure_fresh("ent-A")
     assert fresh.usable and not fresh.stale
     assert seen["since"] == last - ci._INCREMENTAL_OVERLAP
+
+
+def test_incremental_since_mirrors_the_read_path_anchor(monkeypatch):
+    """The scheduler's cycle must top up, not re-read history: passing no
+    `since` made every 20-minute refresh a full ten-page re-sync, which
+    exhausted a tenant's Fireflies daily quota (2026-08-15) and 429-blocked
+    every other Fireflies read for that account. Same anchor as
+    `ensure_fresh`: last success minus the late-arrival overlap."""
+    last = datetime.now(timezone.utc) - timedelta(hours=6)
+    monkeypatch.setattr(
+        ci, "_sync_state", lambda cid: {"last_success_at": last.isoformat()}
+    )
+    assert ci.incremental_since("ent-A") == last - ci._INCREMENTAL_OVERLAP
+
+
+def test_incremental_since_is_none_before_the_first_success(monkeypatch):
+    """A fresh connection still needs its one full history pull."""
+    monkeypatch.setattr(ci, "_sync_state", lambda cid: None)
+    assert ci.incremental_since("ent-A") is None
 
 
 def test_ensure_fresh_degrades_to_stale_when_the_source_fails(monkeypatch):

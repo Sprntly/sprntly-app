@@ -101,27 +101,71 @@ def pick(
     return connected[0]
 
 
+def _adapter_for(name: str):
+    """The LookupProvider for a tracker key, imported lazily — mirroring the
+    connected branches, whose adapters pull in their OAuth clients."""
+    if name == "clickup":
+        from app.connector_lookup.clickup import PROVIDER
+
+        return PROVIDER
+    if name == "jira":
+        from app.connector_lookup import jira as jira_adapter
+
+        return jira_adapter.PROVIDER
+    return None
+
+
+def _kg_fallback(
+    *,
+    enterprise_id: str,
+    question: str,
+    history: list[dict] | None,
+    trackers: list[str],
+) -> dict:
+    """Answer a tracker question from the knowledge graph when no live tracker
+    session is available.
+
+    The 20-minute connector sync keeps every tracker's tasks fresh in the graph,
+    so an absent or failed live session is no longer a dead end: `connector_answer`
+    degrades to a KG-only tool loop (its nothing-connected branch, with
+    `include_knowledge_graph=True`) instead of returning the connect copy. The KG
+    reader is tenant-scoped and tracker-agnostic — which tracker's adapter carries
+    us into that branch does not change what the graph returns — so the adapters
+    are passed only so the loop's shared plumbing (and its honest degradation)
+    still applies.
+    """
+    providers = [p for p in (_adapter_for(t) for t in trackers) if p is not None]
+    return connector_answer.answer(
+        enterprise_id=enterprise_id,
+        question=question,
+        history=history,
+        providers=providers,
+        include_knowledge_graph=True,
+        skill_action="Tracker lookup",
+    )
+
+
 def answer(
     *, enterprise_id: str, question: str, history: list[dict] | None = None
 ) -> dict:
     """Answer a tracker read against the company's connected tracker."""
-    # The user named a tracker and it is NOT connected. Serving the other one
-    # would answer a question about ClickUp out of Jira and never say so — worse
-    # than an honest refusal, because the answer looks authoritative.
+    # The user named a tracker and it is NOT connected. We used to dead-end here
+    # with "connect X" — but the same tracker's tasks are synced into the
+    # knowledge graph, so read those instead of false-denying. This does NOT
+    # answer out of a different tracker's LIVE data (the old worry): the KG reader
+    # is tenant-scoped and reads Sprntly's own extracted signals, not the other
+    # tracker's session.
     named = named_trackers(question)
     if named and not any(_has_connection(enterprise_id, t) for t in named):
-        missing = " or ".join(_DISPLAY[t] for t in named)
-        return connector_answer.plain_payload(
-            f"{missing} isn't connected, so I can't read it — I'd rather say that "
-            f"than answer about a different tracker. Connect {missing} in "
-            "Settings → Connectors and ask me again."
-            + connector_answer.connected_sources_sentence(enterprise_id),
-            skill_action="Tracker lookup",
+        return _kg_fallback(
+            enterprise_id=enterprise_id, question=question,
+            history=history, trackers=named,
         )
     tracker = pick(enterprise_id, question, history)
     if tracker == "jira":
         # Unchanged path: the Jira lookup owns its own session handling, connect/
-        # reconnect copy, propose→confirm card and decision-log row.
+        # reconnect copy, propose→confirm card and decision-log row. Its KG
+        # degradation is wired inside jira_lookup.answer (it passes the flag).
         from app import jira_lookup
 
         return jira_lookup.answer(
@@ -135,12 +179,16 @@ def answer(
             question=question,
             history=history,
             providers=[PROVIDER],
+            include_knowledge_graph=True,
             skill_action="ClickUp lookup",
         )
-    return connector_answer.plain_payload(
-        "I can read your tickets live — status, assignees, comments — but no "
-        "tracker is connected yet. Connect **Jira** or **ClickUp** in Settings → "
-        "Connectors and ask me again."
-        + connector_answer.connected_sources_sentence(enterprise_id),
-        skill_action="Tracker lookup",
+    # No tracker is connected. The interceptor only reaches this when a tracker
+    # was named (its claim gate), and a named-but-unconnected tracker is already
+    # handled above — so in practice this is the belt-and-braces none-named,
+    # none-connected case. Read the graph rather than dead-ending on the old
+    # "connect Jira or ClickUp" copy; both adapters are offered so the KG-only
+    # branch is reached through the shared loop.
+    return _kg_fallback(
+        enterprise_id=enterprise_id, question=question,
+        history=history, trackers=list(TRACKERS),
     )

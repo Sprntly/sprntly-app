@@ -51,6 +51,25 @@ def test_clarify_passes_through_questions(tenant_client, monkeypatch):
     assert body["missing"] == ["Target users", "Success criteria"]
 
 
+def test_clarify_headers_pass_through_and_blank_to_none(tenant_client, monkeypatch):
+    """v3: each question may carry a `header` — the category chip the chat's
+    question stepper wears. Optional end-to-end: blank/missing → None, and the
+    popup falls back to a generic chip."""
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(prd_clarify, "llm_call", lambda **kw: _llm_result({
+        "sufficient": False,
+        "questions": [
+            {"prompt": "Who are the target users?", "header": " Target users "},
+            {"prompt": "How will you measure success?", "header": "   "},
+            {"prompt": "What is out of scope?"},
+        ],
+    }))
+    body = t.client.post(
+        "/v1/prd/clarify-task", json={"task": "build a dashboard"}
+    ).json()
+    assert [q["header"] for q in body["questions"]] == ["Target users", None, None]
+
+
 def test_clarify_sanitizes_and_caps_questions(tenant_client, monkeypatch):
     t = tenant_client.make(slug="acme")
     monkeypatch.setattr(prd_clarify, "llm_call", lambda **kw: _llm_result({

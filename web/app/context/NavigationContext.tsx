@@ -8,6 +8,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  type MutableRefObject,
   type ReactNode,
 } from "react"
 import { usePathname, useRouter } from "next/navigation"
@@ -24,6 +25,14 @@ export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: 
  *  chat tab. BriefChat fills this; ChatScreen consumes it once, spawning a fresh
  *  tab seeded with the query (one new tab per chat started from the brief). */
 export type PendingChatHandoff = { query: string }
+
+/** A passage highlighted in a team document, handed to the chat composer.
+ *
+ *  `documentId` rides along with the text because the two answer different
+ *  halves of the requirement: the EXCERPT is what the user wants to talk
+ *  about (and, being in the message, is what grounds the answer), and the ID
+ *  is what an edit has to be applied to. */
+export type DocumentQuote = { documentId: number; excerpt: string }
 
 /** The brief-insight pointer a PRD is generated from / anchored to. Null for
  *  an ideation PRD (no insight_index) — it renders from the PRD payload alone. */
@@ -80,7 +89,12 @@ export type PrdTabRequest = {
 /** The right-side content panel's tabs. Evidence → PRD → Tickets are the PRD
  *  pipeline; Reports is the thread's captured report documents, which hang off
  *  the conversation rather than off a PRD. */
-export type ContentPanelTab = "evidence" | "prd" | "tickets" | "reports"
+export type ContentPanelTab =
+  | "evidence" | "prd" | "tickets" | "reports"
+  /** A team document (custom artifact) — the "Others" library's kind. Like
+   *  Reports it hangs off the CHAT THREAD rather than off the PRD, so it sits
+   *  after the pipeline and stays hidden until the thread actually has one. */
+  | "document"
 
 /** A request to open a captured report in the thread it was generated in.
  *
@@ -179,6 +193,18 @@ interface NavigationContextType {
   pendingOndemandDraft: string | null
   setPendingOndemandDraft: (value: string | null) => void
 
+  /** A passage the reader highlighted in a team document, on its way to the
+   *  chat composer of the thread the document is open beside. Filled by the
+   *  Document panel; consumed once by ChatScreen, which quotes it into the
+   *  draft so the next question or edit request is ABOUT that passage.
+   *
+   *  A one-shot handoff rather than shared state, for the same reason the
+   *  drafts above are: the excerpt is a message the user is composing, not a
+   *  property of the document, and leaving it set would re-quote it on the
+   *  next render. */
+  pendingDocumentQuote: DocumentQuote | null
+  setPendingDocumentQuote: (value: DocumentQuote | null) => void
+
   /** Filled by the top-insights composer when a chat is started there; consumed
    *  once by ChatScreen, which opens a fresh chat tab seeded with the query. */
   pendingChatHandoff: PendingChatHandoff | null
@@ -235,6 +261,16 @@ interface NavigationContextType {
   toggleAiPanelCollapsed: () => void
   /** Expand the right assistant rail (no-op on bottom layout / when AI bar hidden). */
   expandAiPanel: () => void
+
+  /** One-shot guard, mirroring `skipPanelCloseOnNavRef` exactly: set `true`
+   *  by `ChatScreen`'s fork-to-private-chat nav (`goToProjectPrivateChat`)
+   *  immediately before its synchronous `router.push`, and consumed
+   *  (read + reset) by the globally-mounted `useArtifactUrlSync`'s `?prd=`
+   *  reflect effect — which would otherwise `router.replace` the just-
+   *  generated PRD back onto the URL a tick after the push, reverting the
+   *  fork nav. Scoped to that ONE reflect arm only; every other consumer of
+   *  this context is unaffected by its presence. */
+  skipArtifactReflectOnNavRef: MutableRefObject<boolean>
 }
 
 const NavigationContext = createContext<NavigationContextType | null>(null)
@@ -253,6 +289,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
+  const [pendingDocumentQuote, setPendingDocumentQuote] = useState<DocumentQuote | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
   const [pendingReportFocus, setPendingReportFocus] = useState<ReportFocusRequest | null>(null)
@@ -276,6 +313,11 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   /** Previous pathname, so the route-change effect can tell a genuine navigation
    *  from a no-op re-run and only act on real changes. */
   const prevPathnameRef = useRef(pathname)
+  /** One-shot fork-nav guard (mirrors `skipPanelCloseOnNavRef` immediately
+   *  above) — see the `NavigationContextType` field doc comment. Purely
+   *  additive: only `ChatScreen`'s fork-nav sets it, only
+   *  `useArtifactUrlSync`'s `?prd=` reflect effect reads/resets it. */
+  const skipArtifactReflectOnNavRef = useRef(false)
 
   useEffect(() => {
     try {
@@ -546,6 +588,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingSearchHandoff,
         setPendingSearchHandoff,
         pendingOndemandDraft,
+        pendingDocumentQuote,
+        setPendingDocumentQuote,
         setPendingOndemandDraft,
         pendingChatHandoff,
         setPendingChatHandoff,
@@ -569,6 +613,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         aiPanelCollapsed,
         toggleAiPanelCollapsed,
         expandAiPanel,
+        skipArtifactReflectOnNavRef,
       }}
     >
       {children}

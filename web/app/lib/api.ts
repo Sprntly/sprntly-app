@@ -565,6 +565,15 @@ export type AskStartResponse = {
 export type AskStatusResponse = AskResponse & {
   status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
+  /** The typed failure category ("provider_limit" | "provider_unavailable" |
+   *  "provider_error" | "timeout" | "local_gate" | "app"). `error` alone is a
+   *  stringified exception — fine in a log, useless on screen — so a PROVIDER
+   *  refusal is named here and paired with copy below. */
+  error_class?: string | null
+  /** A sentence to show the user, set only for the three `provider_*` classes.
+   *  Composed server-side from a fixed table, never the provider's own text
+   *  (which can carry request ids, org names and billing detail). */
+  error_message?: string | null
   /** The skill `qa_agent.route()` chose, or null when it answered directly with
    *  no skill. Backed by the `ask_jobs.routed_skill` column and returned at
    *  EVERY status — including `generating` — so it is known while the answer is
@@ -590,8 +599,19 @@ export const askApi = {
       conversation_id?: number
       pinned_skill?: string
       prd_id?: number
+      project_id?: number
       evidence_id?: number
       ticket_set_id?: number
+      /** Individual-project-chat send identity (project branch only): the
+       *  idempotency key the server persists the user turn under, and links
+       *  the answer to via ask_job_id. Ignored server-side on every other
+       *  branch. */
+      client_message_id?: string
+      /** Individual-project-chat structured attachments (project branch only):
+       *  persisted onto the user turn's `conversation_turns.attachments` and
+       *  folded into the answer's question server-side. Ignored on every
+       *  other branch. */
+      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
@@ -602,10 +622,18 @@ export const askApi = {
       // PRD-tab chat: ground the answer on the PRD open beside this chat
       // (+ its insight, evidence, tickets, prototype).
       ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
+      // Individual project chat: fold this project's memory (summary + top-N
+      // entries) + the caller's job_role into the turn (backend/app/routes/
+      // ask.py's `project_id` field) — membership-gated server-side.
+      ...(opts?.project_id != null ? { project_id: opts.project_id } : {}),
       // Standalone-artifact chat: ground on the open evidence report or the
       // open ticket set instead — one primary artifact per tab.
       ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
       ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
+      ...(opts?.client_message_id != null ? { client_message_id: opts.client_message_id } : {}),
+      // Structured attachments (project branch): the server persists them onto
+      // the user turn and folds their text into the answer's question.
+      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
@@ -939,15 +967,81 @@ export type ChatIntentEnvelope = {
      *  conversation's); the backend downgrades a target-less or format-less
      *  request to `answer` before it ever reaches a surface. */
     | "change_prd_template"
+    /** Write a document of any kind into the shared "Others" library —
+     *  dispatches POST /v1/custom-artifacts/generate with `task` +
+     *  `artifact_kind`. Needs no target PRD: a leadership update stands alone.
+     *
+     *  This arrived LATE relative to the backend: the planner could decide it
+     *  and the endpoint could execute it for a whole release before the
+     *  envelope was allowed to carry it, during which the chat answered in
+     *  prose and told users it had written a document that was never created.
+     *  An intent the client cannot see is an intent that does not exist. */
+    | "create_artifact"
+    /** Change who OWNS tickets ("assign the auth ticket to Dave") — the client
+     *  resolves `instruction` against the thread's PRD via
+     *  POST /v1/tickets/assign-plan, applies the explicit pairs, and asks the
+     *  open ones through the question popup. Targeted like edit_prd: the
+     *  backend downgrades a PRD-less or instruction-less request to `answer`
+     *  before it reaches a surface. */
+    | "assign_tickets"
+    /** Switch the thread's TICKETS into a different uploaded ticket format —
+     *  dispatches POST /v1/stories/change-template with
+     *  `artifact_template_id`. The TARGET is the client's to resolve (the
+     *  tab's standalone ticket set, else the tab PRD's tickets), because a
+     *  standalone set has no prd_id the backend could gate on; a format-less
+     *  request is still downgraded to `answer` server-side. */
+    | "change_tickets_template"
+    /** "What are my PRDs / tickets / reports?" — list what the user has
+     *  CREATED, as clickable items. The rows ride the envelope under
+     *  `artifact_list` (resolved server-side where tenancy lives); the client
+     *  renders them and a click opens the artifact in its own thread with its
+     *  conversation history, exactly like clicking it on the Artifacts
+     *  screen. */
+    | "list_artifacts"
+    /** "Share this PRD on my slack channel and ask the team for feedback" —
+     *  post an artifact the user already has into their Slack. The client
+     *  resolves the TARGET from its own context (the tab's PRD, the thread's
+     *  ticket set or report) plus `artifact_type`/`artifact_query`, calls
+     *  POST /v1/share/slack/preview, and shows what will be posted and where.
+     *  NOTHING IS SENT until the user confirms — the send is a second call
+     *  (POST /v1/share/slack/send), because a message in a team channel is
+     *  public and cannot be taken back. */
+    | "share_to_slack"
+    /** The private project chat's classify route ONLY (`POST /{project_id}/
+     *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
+     *  main chat runs, so a `switch (envelope.intent)` consumer that never
+     *  sees this surface is unaffected as long as it falls through on an
+     *  unmatched case (every existing consumer does). A PRD-target intent
+     *  (`edit_prd`) with no PRD open beside this chat — `clarification`
+     *  carries the fixed "open a PRD" message; the project's PRDs are never
+     *  enumerated or auto-selected. */
+    | "clarify"
   confidence: number
   /** generate_prd: self-contained task brief composed from the thread. */
   task: string | null
-  /** edit_prd: the change to apply, self-contained. */
+  /** edit_prd / assign_tickets: the change to apply, self-contained. */
   instruction: string | null
+  /** create_artifact: WHAT KIND of document, in the user's own words
+   *  ("leadership update"). Free text — the executor stores it as a label and
+   *  nothing branches on it. Null on every other intent. */
+  artifact_kind: string | null
   /** open_artifact: which existing artifact kind to bring up. */
   artifact_type: OpenArtifactKind | null
-  /** open_artifact: the subject the user named the document by. */
+  /** open_artifact / share_to_slack: the subject the user named the document
+   *  by. Null on a share means "the document already in play" — the client's
+   *  own tab/thread context decides, which is the common case ("share THIS
+   *  PRD"). */
   artifact_query: string | null
+  /** share_to_slack ONLY — the channel the user named, without the '#'. Null
+   *  (the common case: "share this on slack") means they named none, and the
+   *  preview comes back `needs_channel` with the picker's options. Never a
+   *  guessed destination. */
+  share_channel?: string | null
+  /** share_to_slack ONLY — the words to post alongside the document, in the
+   *  user's own intent ("ask the team for feedback" → "Would love the team's
+   *  feedback on this."). Null means the document goes out on its own. The
+   *  user can edit this in the preview before confirming. */
+  share_note?: string | null
   /** generate_prd / generate_tickets: the uploaded FORMAT the user asked this
    *  document to be written in ("…using our Acme format"). Null — the normal
    *  case — means the company's active format, which the backend resolves on
@@ -958,6 +1052,15 @@ export type ChatIntentEnvelope = {
    *  writing in. Never send this back — it is for the user, not the executor. */
   artifact_template_name: string | null
   reason: string
+  /** Set ONLY when the intent decision failed because the LLM provider refused
+   *  the request (out of credits, rate limited, overloaded).
+   *
+   *  The endpoint's fail-open contract means the message still goes to the ask
+   *  path, which is right — but with the planner down NO action can be chosen,
+   *  so every command in the product silently becomes a chat reply. This is
+   *  what lets the surface say so instead of leaving the user to notice that
+   *  commands quietly stopped working. */
+  provider_error?: { code: string; message: string } | null
   /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction"
    *  | "no_artifact_query" | "template_not_found" | "no_target_format" —
    *  template_not_found means the user named a format we could not find, so
@@ -975,6 +1078,80 @@ export type ChatIntentEnvelope = {
   /** open_artifact ONLY — the backend's lookup of `artifact_query` against this
    *  company's artifact library. Absent for every other intent. */
   open?: OpenArtifactResult
+  /** list_artifacts ONLY — which kind of the user's own creations was asked
+   *  for ("all" | "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+   *  | "custom_artifact"). Null/absent on every other intent. */
+  list_kind?: string | null
+  /** list_artifacts ONLY — how many they asked for ("my last 5 PRDs" → 5,
+   *  "the latest PRD" → 1). Null/absent — the common case — means the
+   *  backend's own cap; the rows in `artifact_list` are ALREADY trimmed to
+   *  it, so the client reads this only to phrase the reply. */
+  list_limit?: number | null
+  /** list_artifacts ONLY — "count" when the ask was HOW MANY rather than
+   *  which ones. Null/absent reads as "items". */
+  list_mode?: string | null
+  /** list_artifacts + list_mode "count" ONLY — the tallies, computed
+   *  server-side over the FULL library (never the capped card list): the
+   *  total, today's and yesterday's counts (UTC calendar dates), and up to 14
+   *  recent days that have artifacts, newest first. Null when the tally
+   *  failed — the reply degrades to the cards alone. */
+  artifact_counts?: {
+    kind: string
+    total: number
+    today: number
+    yesterday: number
+    by_day: { date: string; count: number }[]
+  } | null
+  /** list_artifacts ONLY — the rows themselves, resolved server-side where
+   *  tenancy lives (the same aggregation the Artifacts screen reads, newest
+   *  first, capped). The client renders these as clickable items; a click
+   *  opens the artifact in its own thread with its conversation history. */
+  artifact_list?: ChatArtifactItem[]
+  /** `clarify` ONLY (private project chat) — the fixed "open a PRD" message
+   *  ("Open a PRD beside this chat and I'll edit it."). Absent on every
+   *  other intent. */
+  clarification?: string
+  /** Retained for shape stability; the private classify route no longer
+   *  enumerates or auto-selects across a project's PRDs, so this is always
+   *  absent/empty now — the edit target is always the caller's own
+   *  open-drawer `prd_id`, never a picked-from-a-list id. */
+  prd_options?: { id: number; title: string }[]
+}
+
+/** One row of the chat's artifact listing — a clickable stand-in for the same
+ *  row on the Artifacts screen, carrying exactly the ids that screen's own
+ *  open flow uses. `source.conversation_id` + `source.conversation_title`
+ *  (when both present) are the thread a click resumes; either missing means
+ *  the artifact has no surviving chat and the click falls back to the
+ *  panel-only / standalone open — never a fake history. */
+export type ChatArtifactItem = {
+  type: "prd" | "evidence" | "prototype" | "report" | "ticket_set" | "custom_artifact"
+  id: number
+  title: string
+  status: string
+  created_at: string | null
+  brief_anchored: boolean
+  source: {
+    conversation_id?: number | null
+    conversation_title?: string | null
+    prd_id?: number | null
+    prd_title?: string | null
+    brief_id?: number | null
+    insight_index?: number | null
+    week_label?: string | null
+    skill?: string | null
+    question?: string | null
+  }
+  open: {
+    prd_id?: number | null
+    evidence_id?: number | null
+    brief_id?: number | null
+    insight_index?: number | null
+    report_id?: number | null
+    ticket_set_id?: number | null
+    custom_artifact_id?: number | null
+    prototype_id?: number | null
+  }
 }
 
 /** Artifact kinds an OPEN request can name. Both have an existing right-panel
@@ -1001,6 +1178,14 @@ export type OpenArtifactCandidate = {
    *  first finding underneath an unrelated document. */
   brief_anchored: boolean
   week_label: string | null
+  /** The conversation that produced this PRD, stamped server-side (newest
+   *  binding wins) so an open can resume the chat the user had about it.
+   *  Null/absent = no surviving thread (uploaded/brief-generated PRD, or the
+   *  chat was deleted) — the open falls back to the panel beside the current
+   *  thread, exactly as before. Both must be present to resume: a title-less
+   *  id means the chat row is gone. */
+  conversation_id?: number | null
+  conversation_title?: string | null
 }
 
 /** The 0/1/many verdict for an open request. All three outcomes are part of the
@@ -1080,6 +1265,11 @@ export type PrdStartResponse = {
   /** Storage variant — `v2` for new rows; historical `v1` rows in prod
    *  remain readable. Implementation detail; UI shouldn't switch on it. */
   variant?: string
+  /** The project this PRD's originating chat was auto-forked into (new or
+   *  pre-existing), so the client can land the user in that project's
+   *  private chat after generation. `null`/absent when nothing forked (an
+   *  unbound generate, or an older backend) — additive-optional. */
+  project_id?: number | null
 }
 
 export type PrdRecord = {
@@ -2541,8 +2731,9 @@ export const connectorsApi = {
     }),
   /** Save which channels the Slack corpus sync pulls from (stored on the
    * connection config as sync_channel_ids / sync_channel_names). An empty
-   * list clears the selection — the sync reverts to every channel the bot
-   * is a member of. `joined` echoes the public channels the bot could
+   * list clears the selection — the sync then pulls NOTHING until channels
+   * are picked again (2026-08-13 scope rule; the every-bot-member-channel
+   * fallback is gone). `joined` echoes the public channels the bot could
    * self-join right away.
    *
    * Unticking is the reverse of ticking, so the response also reports the
@@ -2803,7 +2994,7 @@ export const prdApi = {
   clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
     api.post<{
       sufficient: boolean
-      questions: { prompt: string; options: string[]; skip_default?: string | null }[]
+      questions: { prompt: string; header?: string | null; options: string[]; skip_default?: string | null }[]
       missing: string[]
     }>("/v1/prd/clarify-task", {
       task,
@@ -2907,6 +3098,17 @@ export const prdApi = {
       `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
       { answer },
     ),
+  /** Answer SEVERAL input questions in ONE scoped edit — the question popup
+   *  collects its whole batch before submitting. All-or-nothing: a failed
+   *  edit leaves the PRD untouched and no question marked answered. */
+  answerInputQuestionsBatch: (
+    prdId: number,
+    answers: { question_id: number; answer: string }[],
+  ) =>
+    api.post<PrdInputAnswersBatchResponse>(
+      `/v1/prd/${prdId}/input-questions/answer-batch`,
+      { answers },
+    ),
   /** Apply a free-form chat edit instruction to the PRD ("make this PRD
    *  shorter"). Same scoped-editor contract as answerInputQuestion — only the
    *  affected sections change, saved as an undoable version — driven by the
@@ -2967,6 +3169,14 @@ export type PrdInputQuestionsList = {
 export type PrdInputAnswerResponse = {
   prd: PrdRecord
   question: PrdInputQuestion
+  sections_changed: string[]
+  summary: string
+}
+
+/** Response from the batch answer route — same contract, N answered rows. */
+export type PrdInputAnswersBatchResponse = {
+  prd: PrdRecord
+  questions: PrdInputQuestion[]
   sections_changed: string[]
   summary: string
 }
@@ -3721,10 +3931,165 @@ export type TicketDataResponse = {
   comments: { id: number; author: string; body: string; time: string }[]
 }
 
+/** One explicit (ticket, member) pair the assign-plan resolved — the request
+ *  stated it unambiguously, so the client applies it immediately through
+ *  saveFields (the same write the drawer's assignee picker makes). */
+export type TicketAssignment = {
+  ticket_key: string
+  ticket_title: string
+  assignee: TicketAssignee
+}
+
+/** One question the assignment request left open, shaped for the
+ *  QuestionPopup. `fixed` is the side of the pair the request DID settle;
+ *  each option's `value` is the other side (a user_id when fixed is a
+ *  ticket, a ticket_key when fixed is a member), so one click completes a
+ *  pair. Member options also carry the full `assignee` record to write. */
+export type TicketAssignQuestion = {
+  header: string
+  prompt: string
+  fixed:
+    | { kind: "ticket"; ticket_key: string; ticket_title: string }
+    | { kind: "member"; assignee: TicketAssignee }
+  /** Person-fixed questions only: the request asked for SEVERAL tickets
+   *  ("assign 2 tickets to X"), so the popup renders this question as a
+   *  multi-pick — tick several, confirm once, every pick becomes a write.
+   *  Never set on ticket-fixed questions (a ticket has one assignee). */
+  multi?: boolean
+  options: {
+    value: string
+    label: string
+    description?: string | null
+    assignee?: TicketAssignee
+  }[]
+}
+
+export type TicketAssignPlan = {
+  assignments: TicketAssignment[]
+  questions: TicketAssignQuestion[]
+  /** One honest line for anything not honoured (unknown name, no tickets).
+   *  Empty when everything resolved. */
+  note: string
+}
+
+// ── Share to Slack (the chat's `share_to_slack` action) ─────────────────────
+
+/** A Slack channel the bot can see. `is_member` is what decides whether the
+ *  post needs a self-join first — and for a PRIVATE channel, whether it can
+ *  succeed at all (the bot cannot add itself to one). */
+export type SlackShareChannel = {
+  id: string
+  name: string
+  is_private: boolean
+  is_member: boolean
+}
+
+/** The artifact being shared, as the preview resolved it. `url` is the link
+ *  that will appear in Slack, so the preview shows the real destination
+ *  rather than a description of one. */
+export type SlackShareTarget = {
+  type: "prd" | "ticket_set" | "report" | "custom_artifact"
+  id: number
+  title: string
+  kind_label: string
+  url: string
+}
+
+/** WHICH artifact to share. The explicit ids are the client's own context and
+ *  win over the phrase — "share this PRD" means the one on the tab, not the
+ *  best title match for words the user never typed. */
+export type SlackShareTargetRef = {
+  prd_id?: number | null
+  report_id?: number | null
+  ticket_set_id?: number | null
+  custom_artifact_id?: number | null
+  artifact_type?: string | null
+  artifact_query?: string | null
+}
+
+export type SlackSharePreview = {
+  /** "ready" — target + channel resolved, show the preview and a Send.
+   *  "needs_target" / "ambiguous_target" — ask which document (`candidates`).
+   *  "unsupported_type" — that kind can't be shared (`named_type` says which).
+   *  "needs_channel" — ask which channel (`channels`).
+   *  "blocked" — a private channel Sprntly can't join; `warning` says why. */
+  status:
+    | "ready"
+    | "needs_target"
+    | "ambiguous_target"
+    | "unsupported_type"
+    | "needs_channel"
+    | "blocked"
+  target: SlackShareTarget | null
+  candidates?: SlackShareTarget[]
+  named_type?: string | null
+  channel?: SlackShareChannel | null
+  channels?: SlackShareChannel[]
+  /** What the user typed that didn't resolve, so the picker can say so. */
+  channel_query?: string | null
+  channel_status?: "resolved" | "ambiguous" | "not_found" | "needs_channel"
+  /** Exactly what will be posted — the same composition `send` rebuilds
+   *  server-side, so what is approved here is what Slack receives. `summary`
+   *  is the document teaser, handed back separately so the card can render
+   *  the FIXED part of the message (document, teaser, link) while the user is
+   *  still editing the note; echoing `text` would go stale on every keystroke. */
+  message?: {
+    text: string
+    blocks: Record<string, unknown>[]
+    summary: string
+  }
+  /** A heads-up shown BEFORE the user confirms (Sprntly will join the channel
+   *  to post; or, on `blocked`, that it cannot). Null when there is nothing
+   *  to say. */
+  warning?: string | null
+}
+
+export const slackShareApi = {
+  /** Resolve what and where, and compose the message — WITHOUT posting.
+   *  Read-only in every branch. */
+  preview: (
+    target: SlackShareTargetRef,
+    opts: { channel?: string | null; note?: string | null } = {},
+  ) =>
+    api.post<SlackSharePreview>("/v1/share/slack/preview", {
+      ...target,
+      channel: opts.channel ?? null,
+      note: opts.note ?? null,
+    }),
+  /** Post it. Takes the CONFIRMED channel id (not a name) and the same target
+   *  ref the preview took; the message body is rebuilt server-side from the
+   *  database, so the client never dictates what our bot posts. `note` is the
+   *  one exception — the user's own words, which they may have edited. */
+  send: (
+    target: SlackShareTargetRef,
+    channelId: string,
+    note?: string | null,
+  ) =>
+    api.post<{
+      ok: boolean
+      channel: string
+      ts: string | null
+      target: SlackShareTarget
+    }>("/v1/share/slack/send", {
+      ...target,
+      channel_id: channelId,
+      note: note ?? null,
+    }),
+}
+
 export const ticketDataApi = {
   /** Get all saved overrides for a ticket (fields, description, attachments, comments). */
   getData: (ticketKey: string) =>
     api.get<TicketDataResponse>(`/v1/tickets/${encodeURIComponent(ticketKey)}/data`),
+  /** The chat's assign_tickets action: resolve an assignment instruction
+   *  against the PRD's tickets + the team roster. PLAN ONLY — apply each pair
+   *  with saveFields as the user's clicks land (or immediately for the
+   *  explicit ones). */
+  assignPlan: (prdId: number, instruction: string) =>
+    api.post<TicketAssignPlan>("/v1/tickets/assign-plan", {
+      prd_id: prdId,
+      instruction,
+    }),
   /** Save description + acceptance criteria. */
   saveDescription: (ticketKey: string, description: string, acceptanceCriteria: string[]) =>
     api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/description`, {
@@ -3918,6 +4283,34 @@ export type StoryCache = {
   fresh: boolean
   stories: GeneratedStory[]
   generated_at?: string
+  /** Which uploaded TICKET format rendered this set. Null/absent = Sprntly's
+   *  built-in layout (including sets stored before the stamp existed). */
+  artifact_template_id?: string | null
+  /** That format's display name, resolved server-side (same contract as
+   *  `prdApi.get`) so the footer's "Format: {name}" label needs no second
+   *  fetch. Null for the built-in and for a since-deleted format. */
+  artifact_template_name?: string | null
+  /** A background format switch is still running over these tickets. The
+   *  `stories` beside it are the PREVIOUS format's and entirely readable —
+   *  this reports the switch, it does not withhold the set. Poll until false. */
+  relaying?: boolean
+  /** The format being switched INTO, for the in-flight copy. Null while
+   *  switching to the built-in (and whenever `relaying` is false). */
+  relaying_into_name?: string | null
+}
+
+/** What POST /v1/stories/change-template returns — an ACKNOWLEDGEMENT, not the
+ *  result. `unchanged` means the set was already in that format (a satisfied
+ *  request; nothing was scheduled). Otherwise `status` is `"relaying"`: the
+ *  re-lay was scheduled server-side and now runs to completion whatever the
+ *  client does next, including navigating away or closing the tab. There are
+ *  deliberately no `stories` here — they do not exist yet. Watch `relaying` on
+ *  `getForPrd` / `ticketSetsApi.get` for the finished set. */
+export type TicketTemplateSwitch = {
+  status: "relaying" | "ready"
+  unchanged?: boolean
+  artifact_template_id: string | null
+  artifact_template_name: string | null
 }
 
 /** What POST /v1/stories/generate hands back on both paths.
@@ -3938,6 +4331,26 @@ export const storiesApi = {
    *  only regenerate when missing/stale (`fresh` false). No LLM call. */
   getForPrd: (prdId: number) =>
     api.get<StoryCache>(`/v1/stories/for-prd/${prdId}`),
+  /** Re-lay an existing ticket set into a different ticket format, in place —
+   *  a PRD's persisted tickets (`{prdId}`) or a standalone chat-born set
+   *  (`{ticketSetId}`). `templateId` null = back to Sprntly's built-in layout
+   *  (a real choice here, unlike the generate route's "no preference").
+   *
+   *  Fire-and-forget: this resolves as soon as the switch is scheduled, and the
+   *  re-lay then runs server-side whatever the client does — so the caller
+   *  should dismiss its confirm UI on the response, not wait out the work. The
+   *  re-laid tickets arrive via the `relaying` flag on `getForPrd` /
+   *  `ticketSetsApi.get` going false. */
+  changeTemplate: (
+    target: { prdId: number } | { ticketSetId: number },
+    templateId: string | null,
+  ) =>
+    api.post<TicketTemplateSwitch>("/v1/stories/change-template", {
+      ...("prdId" in target
+        ? { prd_id: target.prdId }
+        : { ticket_set_id: target.ticketSetId }),
+      artifact_template_id: templateId,
+    }),
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
    *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
@@ -4056,6 +4469,16 @@ export type TicketSetRecord = {
   conversation_id: number | null
   source_text: string
   created_at?: string | null
+  /** Which uploaded TICKET format rendered this set (null/absent = Sprntly's
+   *  built-in), with its display name resolved server-side — the same pair
+   *  `storiesApi.getForPrd` carries, for the same footer label. */
+  artifact_template_id?: string | null
+  artifact_template_name?: string | null
+  /** A background format switch is still running over this set — the same pair
+   *  `getForPrd` carries. `status` stays "ready" throughout, because the
+   *  tickets below are the previous format's and still entirely usable. */
+  relaying?: boolean
+  relaying_into_name?: string | null
 }
 
 /** One row of a thread's ticket-set list (GET /v1/ticket-sets/by-conversation/
@@ -4670,6 +5093,10 @@ export type ConversationRecord = {
   pinned: boolean
   /** The PRD this conversation is about, when opened from a PRD tab (else null). */
   prd_id?: number | null
+  /** The project this conversation is bound to (fork or explicit join), when
+   *  one exists (else null/absent). Lets a reopened thread restore the
+   *  project-menu affordance it had when the binding was made. */
+  project_id?: number | null
   created_at: string
   updated_at: string
 }
@@ -4991,9 +5418,16 @@ export type ArtifactItem =
        *  <h1>). The row renders its own fallback rather than a fabricated
        *  title stored on the record. */
       title: string
-      /** Lifecycle. Aggregation filters to generating|ready — a `failed`
-       *  generation produced nothing and is not an artifact. */
-      status: "generating" | "ready"
+      /** Lifecycle, all three states.
+       *
+       *  `failed` used to be filtered out of the aggregation on the grounds
+       *  that "a run that produced nothing is not an artifact". True of the
+       *  ROW and false of the PRODUCT: the person who asked for the document
+       *  went looking for it, and excluding it meant the library answered by
+       *  showing nothing at all — no document, no failure, no reason. That is
+       *  what made a failed generation invisible. It is listed, labelled, and
+       *  openable onto its own reason. */
+      status: "generating" | "ready" | "failed"
       /** LAST EDIT, not birth. A library of living documents is browsed by
        *  last touch, and this is the key the unified listing sorts on. The
        *  birth date is `born_at` below — the two are separate precisely so a
@@ -5031,6 +5465,14 @@ export type CustomArtifactDoc = {
   conversation_id: number | null
   created_by: string | null
   updated_by: string | null
+  /** WHY a `failed` document failed, as a stable code — never the server's raw
+   *  error text, which stays operator-side. `documentFailureCopy` turns it into
+   *  the sentence a person reads.
+   *
+   *  Absent on listings (they select a fixed column set) and null on a document
+   *  that failed before the column existed, which is why the copy helper has an
+   *  unknown-reason case rather than assuming one is always present. */
+  error_code?: string | null
 }
 
 /** A save refused because someone else saved first. `current` is their
@@ -5081,6 +5523,15 @@ export const customArtifactsApi = {
       .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
       .then((r) => r.artifacts),
   get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** The documents born in one chat, newest first — what re-attaches a thread's
+   *  document to its panel after a reload. Bodies omitted; opening one fetches
+   *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
+  listForConversation: (conversationId: number) =>
+    api
+      .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>(
+        `/v1/custom-artifacts/by-conversation/${conversationId}`,
+      )
+      .then((r) => r.artifacts),
   create: (body: {
     kind?: string
     title?: string
@@ -5209,6 +5660,10 @@ export type PublicReport = {
   title: string
   /** Humanised report kind, e.g. "Voice of customer report". */
   kind: string
+  /** Raw skill id — the render-mode discriminator: `"saved-chat"` means
+   *  `html` is raw markdown (render with SavedChatMarkdown); anything else
+   *  is a self-contained HTML document (render with HtmlReportView). */
+  skill: string
   html: string
   created_at: string | null
 }
@@ -5295,4 +5750,652 @@ export const mcpTokensApi = {
     api.post<McpTokenCreated>("/v1/mcp-tokens", { name, token_role }),
   revoke: (id: string) =>
     api.delete<{ ok: true }>(`/v1/mcp-tokens/${encodeURIComponent(id)}`),
+}
+
+// ── Projects (shared container + collaboration context, build spec §5) ──
+
+/** Artifact type keys a project can hold (`project_artifacts.artifact_type`). */
+export type ProjectArtifactType = "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+
+/** `ArtifactItem` narrowed to the five kinds a project can actually hold —
+ *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates only
+ *  `ProjectArtifactType`, so a `custom_artifact` row can never legitimately
+ *  reach project-scoped UI. `projectsApi.artifacts()` (this project's own
+ *  attached refs) is typed to this narrower shape; `artifactsApi.list()`
+ *  (the whole company library, which DOES include custom_artifact rows) is
+ *  not — callers that pick FROM the library to attach TO a project must
+ *  filter a `custom_artifact` row out themselves before it reaches
+ *  project-typed state (see `AddArtifactModal.tsx`). */
+export type ProjectableArtifactItem = Extract<ArtifactItem, { type: ProjectArtifactType }>
+
+const PROJECT_ARTIFACT_TYPES = new Set<ProjectArtifactType>([
+  "prd", "evidence", "prototype", "report", "ticket_set",
+])
+
+/** Runtime guard mirroring `ProjectableArtifactItem`'s own doc — the ONE
+ *  place other project-scoped call sites narrow an `ArtifactItem["type"]`
+ *  before indexing a `Record<ProjectArtifactType, …>` badge/count map or
+ *  calling `projectsApi.addArtifact`, rather than each duplicating the
+ *  five-value list. */
+export function isProjectArtifactType(t: ArtifactItem["type"]): t is ProjectArtifactType {
+  return PROJECT_ARTIFACT_TYPES.has(t as ProjectArtifactType)
+}
+
+/** One row from `GET /v1/projects` — recency-ordered, MEMBER-scoped by the
+ *  backend (AD-P11: a workspace project the caller isn't a member of never
+ *  appears here). Counts are derived at read time, never stored. Note: this
+ *  list row carries `member_count` only (no per-member identity/avatar data —
+ *  that lives on `GET /v1/projects/{id}`), so a project card cannot render
+ *  real member initials from this endpoint alone. */
+export type ProjectListItem = {
+  id: number
+  company_id: string
+  workspace_id: string
+  name: string
+  origin: "manual" | "prd_auto" | "artifact"
+  created_by: string
+  created_at: string
+  updated_at: string
+  artifact_counts: Partial<Record<ProjectArtifactType, number>>
+  member_count: number
+  has_group_chat: boolean
+  memory_count: number
+}
+
+/** A project member row from `GET /v1/projects/{id}` — either a real
+ *  `project_members` row (`kind: "human"`) or the virtual "Sprntly" agent
+ *  member the backend prepends to every response (`kind: "agent"`,
+ *  AD-P6 — never a stored row, always this shape). */
+export type ProjectMember =
+  | {
+      kind: "human"
+      user_id: string
+      name: string | null
+      email: string | null
+      avatar_url: string | null
+      job_role: string | null
+      added_at: string | null
+    }
+  | {
+      kind: "agent"
+      user_id: null
+      name: string
+      role_label: string
+      status: string
+    }
+
+/** `GET /v1/projects/{id}` — the project row plus its member roster
+ *  (human members + the prepended virtual agent member, AD-P6) and the
+ *  project's single group-chat id (`null` until a group chat has been
+ *  created for this project). Membership-gated server-side: a same-tenant
+ *  non-member gets 403, a foreign-tenant project id 404s
+ *  (`ApiError.status`, never a crash). */
+export type ProjectDetail = {
+  id: number
+  company_id: string
+  workspace_id: string
+  name: string
+  origin: "manual" | "prd_auto" | "artifact"
+  created_by: string
+  created_at: string
+  updated_at: string
+  members: ProjectMember[]
+  group_chat_id: number | null
+}
+
+/** `GET /v1/projects/{id}/memory/summary` — the cached synthesized
+ *  "what this project knows" summary, read-only (never triggers an LLM
+ *  call). `summary_md` is `null` until a summary has been generated;
+ *  `entry_count` always reflects the current discrete-entry count. */
+export type ProjectMemorySummary = {
+  project_id?: number
+  summary_md: string | null
+  entry_count: number
+  generated_at?: string
+  stale: boolean
+}
+
+/** `GET /v1/projects/{id}/memory/insight` — the single most-recently-
+ *  updated agent-promoted `project_memory_entries` row, shaped for the
+ *  individual chat's cross-chat INSIGHT turn (`bc-turn--insight`,
+ *  design-spec AC7). `null` when the project has no agent-promoted entry
+ *  yet — user-authored entries alone never produce an insight. `by` is
+ *  fixed at `"Sprntly"` in v1 (per-teammate attribution is a flagged
+ *  follow-on); `text` is the stored, already-summarized entry body, never
+ *  a verbatim transcript turn. */
+export type ProjectMemoryInsight = {
+  by: string
+  text: string
+  /** The KIND of conversation this insight was promoted from — `"group"`
+   *  (the project's group chat) or `"individual"` (a member's private chat
+   *  with Sprntly). `null`/omitted when unresolved. Lets a renderer say
+   *  "from the group chat" vs "from a chat with Sprntly" instead of
+   *  assuming group whenever a source conversation exists. */
+  source_kind?: "group" | "individual" | null
+}
+
+/** One `project_memory_entries` row (`GET/POST/PATCH/DELETE
+ *  /v1/projects/{id}/memory*` — `supabase/migrations/*_project_memory.sql`).
+ *  Provenance is a STORED FACT, never inferred client-side: the schema's
+ *  XOR check guarantees exactly one of `author_user_id`/`promoted_by` is
+ *  set — `author_user_id` set = user-authored ("Manual"/"Added by
+ *  <name>"), `promoted_by === "agent"` = agent-promoted ("Promoted by
+ *  Sprntly"). Agent promotion itself is a Phase 2 writer; this ticket only
+ *  ever produces the user-authored shape, but the type covers both so the
+ *  UI renders whatever the API returns. */
+export type ProjectMemoryEntry = {
+  id: number
+  project_id: number
+  body: string
+  author_user_id: string | null
+  promoted_by: "agent" | null
+  source_conversation_id: number | null
+  /** The KIND of conversation `source_conversation_id` points at —
+   *  `"group"` or `"individual"`, batch-resolved server-side
+   *  (`conversations.kind`). `null` when `source_conversation_id` is null
+   *  or unresolved. See `ProjectMemoryInsight.source_kind`. */
+  source_conversation_kind?: "group" | "individual" | null
+  created_at: string
+  updated_at: string
+}
+
+/** One row from `GET/POST /v1/projects/{id}/group/turns`
+ *  (`backend/app/db/conversations.py`'s `list_group_turns`/`post_group_turn`).
+ *  A human turn carries `author_user_id`/`author_name`/`author_job_role`; an
+ *  agent turn (the `@Sprntly`-mention reply) carries `author_user_id: null`
+ *  and `role: "assistant"` — the only conversation_turns rows with a
+ *  `role`/author split at all, since single-owner individual chats never
+ *  needed one. */
+export type GroupTurn = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  author_user_id: string | null
+  author_name: string | null
+  author_job_role: string | null
+  created_at: string
+  /** Artifact-open candidates for this turn (the same disambiguation shape
+   *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by
+   *  `list_group_turns`/`post_group_turn` today — group turns carry no
+   *  artifact-resolution envelope yet (that's a `/v1/ask`-only mechanism).
+   *  Optional and wired here so `ProjectGroupChat` composes the real
+   *  `OpenArtifactChips` primitive rather than a bespoke one the day the
+   *  backend starts sending this. */
+  open_candidates?: OpenArtifactCandidate[]
+  /** The FULL structured reply persisted on an assistant turn
+   *  (`conversation_turns.reply` jsonb): the engine's `AskResponse`
+   *  (answer/key_points/citations), optionally merged with the classify
+   *  envelope's card data (`artifact_list`, nested `open.candidates`).
+   *  Null/absent for human turns and for assistant turns persisted before
+   *  the column existed — those render from `content` alone. */
+  reply?: (AskResponse & {
+    artifact_list?: ChatArtifactItem[]
+    open?: { candidates?: OpenArtifactCandidate[] } | null
+  }) | null
+  /** The latest agent run-status, attached by the backend onto the HUMAN turn
+   *  whose id == the run's `source_turn_id` (already mapped to the FE
+   *  vocabulary at the DTO edge: running/done/failed/declined). Drives the
+   *  group chat's "thinking" pending state so a reply that's still generating
+   *  never flashes a false "Sprntly stayed out". Null/absent on turns with no
+   *  associated run. */
+  run_status?: "queued" | "running" | "done" | "failed" | "declined" | null
+  error_class?: string | null
+}
+
+/** Response from `POST /v1/projects/{id}/individual` — the caller's durable
+ *  individual project chat (`conversations.kind='individual'`, scoped
+ *  project_id+user_id). Get-or-create, idempotent per (project, caller):
+ *  this is the `conversation_id` `ProjectIndividualChat` threads into every
+ *  `/v1/ask` call so the individual-chat memory-promotion hook
+ *  (`project_id` AND `conversation_id` both set) can actually fire. */
+export type IndividualChatConversation = {
+  id: number
+  project_id: number | null
+  user_id: string | null
+  kind: "individual" | "group"
+  created_at: string
+  updated_at: string
+}
+
+/** One row from `GET /v1/projects/{id}/individual/turns`
+ *  (`backend/app/db/conversations.py`'s `list_individual_turns`) — the
+ *  caller's OWN individual project chat, never another member's (own-
+ *  conversation read gate, the read-side counterpart of the delegate-tool's
+ *  cross-user write). No `author_user_id`/`author_name` split like
+ *  `GroupTurn`: an individual chat is single-owner, so a `role: "user"` row
+ *  is always the caller and a `role: "assistant"` row is always the agent
+ *  (either a normal reply or a delegated brief delivered with no paired
+ *  question). */
+export type IndividualTurn = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  created_at: string
+  /** The idempotency key an owned write carried, `null` for every
+   *  pre-existing/cross-user brief turn. Lets the FE engine dedup a
+   *  session turn against its now-persisted history row by this key
+   *  instead of the numeric id (which the session turn never has). */
+  client_message_id?: string | null
+}
+
+/** Response from `GET /v1/projects/{id}/individual/unread` and
+ *  `POST /v1/projects/{id}/individual/read` — the caller's OWN derived
+ *  unread signal for their individual project chat (AD-P3/AD-P20: `unread`
+ *  is derived server-side at read time from a stored read cursor, never a
+ *  stored boolean). `latest_turn_id` is `null` when the chat has no turns
+ *  yet; `last_read_turn_id` is `0` when the caller has never read it. The
+ *  `/read` route omits `unread`/`latest_turn_id` (it only reports the
+ *  cursor it just advanced to), so those two fields are optional here. */
+export type IndividualUnreadStatus = {
+  unread?: boolean
+  latest_turn_id?: number | null
+  last_read_turn_id: number
+}
+
+/** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
+ *  minted `report` artifact ref (item-14 substrate, build spec §2). Always
+ *  `artifact_type: "report"` in v1 — a saved chat output is captured as a
+ *  report (`backend/app/project_artifact_capture.py`). */
+export type SavedChatArtifact = {
+  artifact_type: "report"
+  artifact_id: number
+  project_id: number
+}
+
+/** One row from `GET /v1/projects/{id}/delegations?view=...` — the
+ *  ledger's party-filtered read DTO (`_ledger_row_dto`). `bucket` is
+ *  `"done"` once `status` lands in a closed state, else `"open"`;
+ *  `other_party` is the assigner for `assigned_to_me` and the assignee for
+ *  `waiting_on`. No endpoint returns a delegation the caller is not party
+ *  to. */
+export type DelegationLedgerRow = {
+  delegation_id: number
+  task_summary: string
+  status: string
+  status_at: string
+  bucket: "open" | "done"
+  other_party_user_id: string
+  other_party_name: string | null
+  delivered_conversation_id: number | null
+  delivered_turn_id: number | null
+}
+
+/** Response from `GET /v1/projects/{id}/delegations/counts` — open-only
+ *  counts (a `reopened` delegation counts as open; `completed`/`declined`/
+ *  `cancelled` do not) feeding the rail card. */
+export type DelegationCounts = {
+  assigned_to_me_open: number
+  waiting_on_open: number
+}
+
+/** Response from `POST /v1/projects/{id}/delegations/{delegationId}/events`
+ *  — the delegation's derived status right after the appended event. */
+export type DelegationEventResult = {
+  delegation_id: number
+  status: string
+}
+
+/** Response from `POST /v1/projects/{id}/prd/chat-edit` — a discriminated
+ *  shape over two outcomes: `edited: true` applied DIRECTLY through the
+ *  shared editor (no confirm step — the PRD is already changed by the time
+ *  this resolves), carrying the changed sections + the rendered PRD;
+ *  `edited: false` is a terminal no-edit reply (flag off, no PRD open,
+ *  denied target, or a no-op instruction) carrying a plain `answer`. */
+export type ProjectChatEditResult =
+  | { edited: true; prd: PrdRecord; sections_changed: string[]; summary: string }
+  | { edited: false; answer: string }
+
+/** Response from `GET`/`PUT /v1/projects/{id}/instructions` — `null` means
+ *  nothing has been saved yet (or the value was cleared). */
+export type ProjectInstructions = { instructions: string | null }
+
+export const projectsApi = {
+  /** Projects in the caller's active workspace, recency-ordered, scoped to
+   *  the caller's memberships by the backend — no `dataset`/company arg
+   *  (tenancy rides the `X-Workspace-Id` header, `ask.py`'s pattern). */
+  list: () => api.get<{ projects: ProjectListItem[] }>("/v1/projects").then((r) => r.projects),
+  /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`).
+   *  `prd_id` is only meaningful for `origin: "prd_auto"` — the create-
+   *  modal's "Auto · from PRD" tab sends the forked PRD's id so the server
+   *  can dedupe (first-write-wins, AD-P9): re-selecting an already-forked
+   *  PRD returns the EXISTING project instead of a new one. */
+  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact"; prd_id?: number }) =>
+    api.post<ProjectListItem>("/v1/projects", payload),
+  /** Add an existing user to the project by email
+   *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`
+   *  404 when no account exists for that email — inviting a
+   *  non-existing user is `org_invites`-based and a fast-follow (out of
+   *  scope); callers must handle the 404 without crashing. There is no
+   *  per-project permission role on `project_members` (v1 membership is
+   *  all-or-nothing, AD-P11) — this call carries only the email. */
+  addMember: (id: number | string, email: string) =>
+    api.post<{ project_id: number; user_id: string }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/members`,
+      { email },
+    ),
+  /** Tag a name-or-email onto the project (`POST /v1/projects/{id}/tag`).
+   *  The backend classifies the needle against the project's tenancy and
+   *  acts per tier: `t_member` (echo, no write), `t_workspace` (adds a
+   *  member), `t_company`/`t_newuser` (creates a project-carrying invite +
+   *  emails it), or refuses with 403 for a cross-tenant identity (AD-TNM1 —
+   *  same opaque body for every refuse reason). Any project member may call
+   *  it (AD-TNM4); a non-member gets 403. `409` when the company is at its
+   *  seat limit on an invite tier. Callers must handle the 403/409 without
+   *  crashing. */
+  tagCandidate: (id: number | string, needle: string) =>
+    api.post<{
+      tier: "t_member" | "t_workspace" | "t_company" | "t_newuser"
+      member?: unknown
+      added?: unknown
+      invited?: boolean
+      email_status?: string
+    }>(`/v1/projects/${encodeURIComponent(String(id))}/tag`, { needle }),
+  /** Tenant-scoped candidate directory for the tag picker
+   *  (`GET /v1/projects/{id}/candidates?q=`). Returns members already on the
+   *  project plus in-tenant non-members (workspace, then company), each
+   *  tagged `kind`, filtered by `q` (casefold-contains on name/email) and
+   *  capped at 20 — never anyone outside the project's company. A non-member
+   *  caller gets 403. */
+  candidateSearch: (id: number | string, q: string) =>
+    api
+      .get<{
+        candidates: {
+          kind: "member" | "workspace" | "company"
+          user_id: string
+          name: string | null
+          email: string | null
+        }[]
+      }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`,
+      )
+      .then((r) => r.candidates),
+  /** Add an artifact ref to the project
+   *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
+   *  ownership validation happens server-side; a foreign/absent artifact
+   *  404s. Used as the "from an artifact" create flow's follow-up call to
+   *  seed a freshly-created project's first item. */
+  addArtifact: (id: number | string, artifactType: ProjectArtifactType, artifactId: number) =>
+    api.post<{ project_id: number; artifact_type: string; artifact_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/artifacts`,
+      { artifact_type: artifactType, artifact_id: artifactId },
+    ),
+  /** Apply a free-form chat edit instruction to the project's PRD
+   *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private project chat's
+   *  in-place, versioned edit path, reusing the same scoped editor + ★
+   *  cross-project IDOR gate the main chat's `prdApi.chatEdit` calls
+   *  guard-off, applying DIRECTLY — no confirm step. `prdId` is the PRD open
+   *  in the caller's artifact drawer (the explicit edit target, parity with
+   *  main chat's own open-tab `prd_id`); omitted/`null` means no PRD is open,
+   *  and the route returns the "open a PRD" clarify rather than a write. The
+   *  route's ★ cross-project + cross-tenant gate still runs on WHATEVER id
+   *  reaches it before any write, unconditionally. Membership-gated and
+   *  `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
+   *  rather than an error. */
+  prdChatEdit: (id: number | string, instruction: string, prdId?: number | null, clientMessageId?: string) =>
+    api.post<ProjectChatEditResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
+      {
+        instruction,
+        ...(prdId != null ? { prd_id: prdId } : {}),
+        ...(clientMessageId != null ? { client_message_id: clientMessageId } : {}),
+      },
+    ),
+  /** Persist the caller's own owned user+assistant turn pair
+   *  (`POST /v1/projects/{id}/individual/turns`) — the explicit-owner home
+   *  for the branches with no dedicated chat route (generate/clarify/
+   *  terminal outcomes). Idempotent on `clientMessageId`; membership-gated
+   *  server-side, ownership resolved from `(project_id, caller)` — never a
+   *  client-supplied `conversation_id`. */
+  persistIndividualTurns: (
+    id: number | string,
+    payload: { clientMessageId: string; question: string; answer: string },
+  ) =>
+    api.post<{ user_turn_id: number; assistant_turn_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/individual/turns`,
+      { client_message_id: payload.clientMessageId, question: payload.question, answer: payload.answer },
+    ),
+  /** Classify one private-chat message via the project-scoped counterpart
+   *  of `chatIntentApi.resolve` (`POST /v1/projects/{id}/chat/intent`).
+   *  `prdId` is the PRD open in the caller's artifact drawer — the EXPLICIT
+   *  edit target (parity with main chat's own open-tab `prd_id`); omitted/
+   *  `null` means no PRD is open, so an `edit_prd` verdict downgrades to the
+   *  "open a PRD" clarify. There is no server-side inference over the
+   *  project's own PRDs to fall back on — sending the real open id is what
+   *  keeps an `edit_prd` verdict from downgrading. Same contract as
+   *  `chatIntentApi.resolve`: fail-open BY THE CALLER, any network/HTTP
+   *  failure should fall back to the ask path, never block the send. */
+  resolveIntent: (
+    id: number | string,
+    message: string,
+    opts?: { conversationId?: number | null; prdId?: number | null },
+  ) =>
+    api.post<ChatIntentEnvelope>(
+      `/v1/projects/${encodeURIComponent(String(id))}/chat/intent`,
+      {
+        message,
+        ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
+        ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
+      },
+    ),
+  /** Save a chat output as a first-class project artifact
+   *  (`POST /v1/projects/{id}/artifacts/from-chat`, item-14 substrate).
+   *  `content` is required (whitespace-only throws `ApiError` `.status` 400);
+   *  `title` is optional — server-derived when omitted (explicit title, else
+   *  the content's first non-empty line, else "Saved from chat").
+   *  `sourceConversationId` stays optional in v1 (not yet wired by any
+   *  caller). Throws `ApiError` `.status` 502 when the save itself fails,
+   *  403/404 for the membership gate (AD-P11). */
+  saveChatArtifact: (
+    id: number | string,
+    payload: { content: string; title?: string; sourceConversationId?: number },
+  ) =>
+    api.post<SavedChatArtifact>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts/from-chat`, {
+      content: payload.content,
+      title: payload.title,
+      source_conversation_id: payload.sourceConversationId,
+    }),
+  /** Project detail: members (incl. the virtual agent member) + group-chat
+   *  id. Throws `ApiError` with `.status` 403 (same-tenant non-member) or
+   *  404 (foreign-tenant/absent) — callers must handle both without
+   *  crashing (design-spec AC — membership-gated detail view). */
+  get: (id: number | string) =>
+    api.get<ProjectDetail>(`/v1/projects/${encodeURIComponent(String(id))}`),
+  /** The project's artifacts, in the same unified shape `GET /v1/artifacts`
+   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` (not
+   *  the narrower `ProjectableArtifactItem[]`) to match every existing
+   *  caller/fixture — a `custom_artifact` row is impossible here today (the
+   *  backing join table's DB CHECK constraint), but callers that index a
+   *  `Record<ProjectArtifactType, …>` off `.type` still guard with
+   *  `isProjectArtifactType` rather than relying on that being statically
+   *  provable from this return type alone. */
+  artifacts: (id: number | string) =>
+    api
+      .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)
+      .then((r) => r.artifacts),
+  /** The cached project-memory summary — read-only, no LLM call. */
+  memorySummary: (id: number | string) =>
+    api.get<ProjectMemorySummary>(`/v1/projects/${encodeURIComponent(String(id))}/memory/summary`),
+  /** The single latest agent-promoted memory entry, for the individual
+   *  chat's cross-chat INSIGHT turn — read-only, no LLM call, `null` when
+   *  none exists yet. */
+  memoryInsight: (id: number | string) =>
+    api.get<ProjectMemoryInsight | null>(`/v1/projects/${encodeURIComponent(String(id))}/memory/insight`),
+  /** Poll read (AD-P4 — no realtime in v1): group turns after the `since`
+   *  cursor (a turn id), ascending. `since` omitted fetches the whole
+   *  history. Empty (never a crash) when the group chat hasn't been
+   *  created yet — `backend/app/routes/projects.py`'s
+   *  `list_group_turns_route` returns `{turns: []}` in that case. */
+  groupTurns: (id: number | string, since?: number) =>
+    api
+      .get<{ turns: GroupTurn[] }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/group/turns${since != null ? `?since=${since}` : ""}`,
+      )
+      .then((r) => r.turns),
+  /** Post a human turn to the project's group chat (create-if-absent
+   *  server-side). An `@Sprntly` mention in `content` triggers ONE
+   *  best-effort agent reply — the POST resolves only after that reply
+   *  attempt completes (or is skipped for a non-mention), so the caller's
+   *  busy state should span the whole request, not just the network hop. */
+  postGroupTurn: (
+    id: number | string,
+    content: string,
+    opts?: {
+      /** The pinned skill riding this send (its trigger is ALREADY spliced
+       *  into `content` by the engine — the same single splice rule every
+       *  surface uses; this field additionally names the pick on the wire). */
+      pinned_skill?: { id: string; trigger: string; label?: string } | null
+      /** Resolved attachment refs ({name, content, key?, mime?, size?}) —
+       *  persisted on the turn and folded into the agent's question
+       *  server-side (mirrors the private surface's attachment ride). */
+      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+      /** The idempotency key: a retry/double-submit carrying the same id
+       *  replays the original turn instead of double-posting. */
+      client_message_id?: string
+      /** The PRD open in the artifact drawer beside this group chat — the
+       *  explicit `edit_prd` target (parity with main chat's own open-tab
+       *  `prd_id`). `null`/omitted means no PRD is open, so an in-band edit
+       *  request gets the "open a PRD" clarify rather than a guess. */
+      prd_id?: number | null
+    },
+  ) =>
+    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, {
+      content,
+      ...(opts?.pinned_skill ? { pinned_skill: opts.pinned_skill } : {}),
+      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
+      ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
+      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
+    }),
+  /** Get-or-create the caller's durable individual project chat
+   *  (create-if-absent, idempotent — mirrors the group chat's own
+   *  `POST .../group`, one level down). Called once per chat session
+   *  (the result is cached client-side) so every ask on this thread
+   *  reuses the SAME `conversation_id`. */
+  individualChat: (id: number | string) =>
+    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
+  /** Load-on-open read of the caller's own individual project chat (create-if-
+   *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
+   *  `since` omitted fetches the whole history. Empty (never a crash) when
+   *  the caller hasn't opened this chat yet — `list_individual_turns_route`
+   *  returns `{turns: []}` in that case, same as the group-chat route. */
+  individualTurns: (id: number | string, since?: number) =>
+    api
+      .get<{ turns: IndividualTurn[] }>(
+        `/v1/projects/${encodeURIComponent(String(id))}/individual/turns${since != null ? `?since=${since}` : ""}`,
+      )
+      .then((r) => r.turns),
+  /** The discrete, provenance-tagged memory entries — the source of truth
+   *  behind the cached `memorySummary` above (AD-P3). Most-recently-updated
+   *  first, server-side. */
+  memoryEntries: (id: number | string) =>
+    api
+      .get<{ entries: ProjectMemoryEntry[] }>(`/v1/projects/${encodeURIComponent(String(id))}/memory`)
+      .then((r) => r.entries),
+  /** Add a user-authored memory entry. `author_user_id` is set server-side
+   *  from the session — never sent by the client. */
+  addMemory: (id: number | string, body: string) =>
+    api.post<ProjectMemoryEntry>(`/v1/projects/${encodeURIComponent(String(id))}/memory`, { body }),
+  /** Edit an entry's body. 404s (`ApiError.status`) when `entryId` isn't in
+   *  this project — callers must handle it without crashing. */
+  patchMemory: (id: number | string, entryId: number, body: string) =>
+    api.patch<ProjectMemoryEntry>(
+      `/v1/projects/${encodeURIComponent(String(id))}/memory/${encodeURIComponent(String(entryId))}`,
+      { body },
+    ),
+  /** Remove an entry. Same 404 posture as `patchMemory`. */
+  deleteMemory: (id: number | string, entryId: number) =>
+    api.delete<{ deleted: true }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/memory/${encodeURIComponent(String(entryId))}`,
+    ),
+  /** Remove a teammate (`DELETE /v1/projects/{id}/members/{user_id}`).
+   *  Authorization is v1-simple (AD-P11): any member may remove any OTHER
+   *  member except the creator. Throws `ApiError` with `.status` 400
+   *  (self-removal — out of scope, use a future leave-project flow), 409
+   *  (the project creator can't be removed), or 404 (target isn't a
+   *  current member) — callers must handle all three without crashing. */
+  removeMember: (id: number | string, userId: string) =>
+    api.delete<{ removed: true }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/members/${encodeURIComponent(userId)}`,
+    ),
+  /** The caller's OWN derived unread signal for their individual project
+   *  chat (`GET /v1/projects/{id}/individual/unread`, AD-P3/AD-P20 — no
+   *  stored boolean; derived server-side from the read cursor). Never
+   *  throws on "chat not opened yet" — the route returns the zero-state
+   *  `{unread: false, latest_turn_id: null, last_read_turn_id: 0}`. */
+  individualUnread: (id: number | string) =>
+    api.get<IndividualUnreadStatus>(`/v1/projects/${encodeURIComponent(String(id))}/individual/unread`),
+  /** Advance the caller's OWN read cursor to the latest turn in their
+   *  individual project chat (`POST /v1/projects/{id}/individual/read`) —
+   *  clears the rail badge. Advance-only server-side (a stale re-post can
+   *  never move the cursor backward); safe to call every time the
+   *  individual chat is opened, not just the first time. */
+  markIndividualRead: (id: number | string) =>
+    api.post<{ last_read_turn_id: number }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/individual/read`,
+    ),
+  /** Append one lifecycle event to a delegation
+   *  (`POST /v1/projects/{id}/delegations/{delegationId}/events`) — server-
+   *  enforced four-gate authz + legal-transition graph — the ledger's
+   *  IDOR-critical surface. Throws `ApiError` `.status` 404 (delegation
+   *  not in this project, opaque — existence never disclosed), 403 (wrong
+   *  party for this event), 409 (illegal transition from the current
+   *  derived status), or 422 (unknown/non-emittable event — `assigned` is
+   *  server-only genesis, never client-emittable) — callers must handle
+   *  all four without crashing. */
+  emitDelegationEvent: (
+    id: number | string,
+    delegationId: number | string,
+    event: string,
+    note?: string,
+  ) =>
+    api.post<DelegationEventResult>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations/${encodeURIComponent(
+        String(delegationId),
+      )}/events`,
+      { event, note },
+    ),
+  /** Party-filtered ledger read (`GET /v1/projects/{id}/delegations?view=`)
+   *  — `"assigned_to_me"` returns rows where the caller is the assignee,
+   *  `"waiting_on"` where the caller is the assigner. No "all project
+   *  delegations" view exists — a member never sees a delegation they are
+   *  not a party to. */
+  ledger: (id: number | string, view: "assigned_to_me" | "waiting_on") =>
+    api.get<DelegationLedgerRow[]>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations?view=${encodeURIComponent(view)}`,
+    ),
+  /** Open-only ledger counts for the rail card
+   *  (`GET /v1/projects/{id}/delegations/counts`). */
+  ledgerCounts: (id: number | string) =>
+    api.get<DelegationCounts>(
+      `/v1/projects/${encodeURIComponent(String(id))}/delegations/counts`,
+    ),
+  /** Persist a full-HTML PRD edit made in THIS project's artifact drawer
+   *  (`POST /v1/projects/{id}/prd/content`) — the project-scoped, ★
+   *  cross-project-IDOR-gated equivalent of `prdApi.update` (`PUT /v1/prd/{id}`,
+   *  which is cross-TENANT-gated only and has no project concept). The
+   *  drawer's inline editor injects THIS as its save handler so a project edit
+   *  NEVER writes through the global cross-tenant-only path: the route runs
+   *  `assert_prd_on_project` (403 for a cross-project id) BEFORE `require_owned_prd`
+   *  (404 cross-tenant), and auto-snapshots the pre-edit content to
+   *  `prd_versions`. `html` is the full serialized `<!DOCTYPE html>…` document
+   *  the editor round-trips (same shape `prdApi.update` stores). */
+  savePrdContent: (id: number | string, prdId: number, title: string, html: string) =>
+    api.post<{ id: number; title: string; payload_md: string }>(
+      `/v1/projects/${encodeURIComponent(String(id))}/prd/content`,
+      { prd_id: prdId, title, html },
+    ),
+  /** The project's saved free-text instructions for the Sprntly agent
+   *  (`GET /v1/projects/{id}/instructions`) — `null` when nothing has
+   *  been set. Membership-gated (403 same-tenant non-member, 404
+   *  foreign-tenant/absent) — callers must handle both without crashing. */
+  instructions: (id: number | string) =>
+    api.get<ProjectInstructions>(`/v1/projects/${encodeURIComponent(String(id))}/instructions`),
+  /** Persist the project's instructions (`PUT /v1/projects/{id}/instructions`).
+   *  An empty/whitespace-only string clears the saved value; the server
+   *  echoes back the saved (possibly cleared) value. Throws `ApiError`
+   *  `.status` 422 over the 2000-char cap. */
+  setInstructions: (id: number | string, instructions: string) =>
+    api.put<ProjectInstructions>(
+      `/v1/projects/${encodeURIComponent(String(id))}/instructions`,
+      { instructions },
+    ),
 }

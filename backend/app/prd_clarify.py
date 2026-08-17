@@ -24,7 +24,14 @@ logger = logging.getLogger(__name__)
 
 _AGENT = "prd"
 
-CLARIFY_PROMPT_VERSION = "prd-clarify-v2"
+# v3: each question also carries a `header` — a 2–3 word category label the
+# chat's question stepper (QuestionPopup) wears as its chip ("Target users",
+# "Success metric"). Optional end-to-end: a missing header renders a generic
+# chip, so older payloads and a model that omits it degrade cleanly.
+# v4: the overflow clause stopped naming the "User input needed" section —
+# prd-author v4.8 retired it from the house format, so unasked questions now
+# land inline as [NEED]/[ESCALATE] markers rather than in an appendix list.
+CLARIFY_PROMPT_VERSION = "prd-clarify-v4"
 
 _SCHEMA: dict = {
     "type": "object",
@@ -37,6 +44,10 @@ _SCHEMA: dict = {
                 "type": "object",
                 "properties": {
                     "prompt": {"type": "string"},
+                    "header": {
+                        "type": "string",
+                        "description": "2–3 word category label for this question, e.g. 'Target users'.",
+                    },
                     "options": {"type": "array", "items": {"type": "string"}},
                     "skip_default": {"type": "string"},
                 },
@@ -82,8 +93,8 @@ requirements. If every plausible answer yields the same PRD, don't ask.
 Question rules:
 - sufficient=true whenever no question survives the tests. ZERO questions is \
 a valid and common outcome — never pad to reach a count. Five is a hard \
-ceiling: keep the most consequential five; the PRD's own "User input needed" \
-section catches the rest.
+ceiling: keep the most consequential five; anything else surfaces inline in \
+the PRD as its `[NEED]`/`[ESCALATE]` markers.
 - Never ask for: metric values or baselines (the PRD marks those [NEED]), \
 implementation or tech-stack choices, taste/wording preferences. Asking WHAT \
 to measure is fine; asking for the number is not.
@@ -93,6 +104,10 @@ otherwise leave options empty for free text.
 - Every question carries `skip_default`: the one-line assumption the author \
 proceeds with if the user skips it. Make it the most defensible default, not \
 a guess.
+- Every question carries `header`: a 2–3 word category label naming what the \
+question is about ("Target users", "Success metric", "Scope cut") — it is \
+worn as a chip above the question in the UI, so keep it a noun phrase, never \
+a sentence.
 - Make each question concrete to THIS task (name its systems and terms), \
 never generic PM boilerplate.
 - `missing` lists the ingredient names that are absent (from the 5 above).
@@ -130,8 +145,10 @@ def clarify_prd_task(enterprise_id: str, task: str, source_docs_md: str | None =
             if isinstance(q, dict) and isinstance(q.get("prompt"), str) and q["prompt"].strip():
                 opts = [o for o in (q.get("options") or []) if isinstance(o, str) and o.strip()]
                 skip = q.get("skip_default")
+                header = q.get("header")
                 questions.append({
                     "prompt": q["prompt"].strip(),
+                    "header": header.strip() if isinstance(header, str) and header.strip() else None,
                     "options": opts[:4],
                     "skip_default": skip.strip() if isinstance(skip, str) and skip.strip() else None,
                 })

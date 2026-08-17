@@ -435,6 +435,44 @@ def test_a_format_switch_to_an_unknown_name_keeps_the_action_and_the_query():
     assert plan.include_library is True
 
 
+def test_a_tickets_switch_carries_its_validated_target():
+    """`change_tickets_template` rides the same gate a tickets build does: the
+    target must be this company's, a TICKET format, and usable."""
+    plan = ap.apply_gates(
+        _plan_out(action="change_tickets_template", action_confidence=0.95,
+                  artifact_template_id=TICKETS_READY),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.action == "change_tickets_template"
+    assert plan.artifact_template_id == TICKETS_READY
+    assert plan.template_query is None
+
+
+def test_a_tickets_switch_to_a_prd_format_becomes_a_question():
+    """The mirror image of the PRD-switch-to-ticket-format case — and the
+    reported bug's shape, inverted: a wrong-kind id must become a question,
+    never a silent swap or a refused action."""
+    plan = ap.apply_gates(
+        _plan_out(action="change_tickets_template",
+                  artifact_template_id=PRD_READY),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.artifact_template_id is None
+    assert plan.template_query == "Lightweight PRD"
+
+
+def test_a_tickets_switch_naming_nothing_degrades_to_a_library_answer():
+    plan = ap.apply_gates(
+        _plan_out(action="change_tickets_template"),
+        enterprise_id=COMPANY, connected=[], templates=LIBRARY,
+    )
+
+    assert plan.action == "answer"
+    assert plan.include_library is True
+
+
 def test_tickets_take_a_ticket_format():
     plan = ap.apply_gates(
         _plan_out(action="generate_tickets", task="break down the PRD",

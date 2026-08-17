@@ -1599,6 +1599,13 @@ def answer(*, enterprise_id: str, question: str,
         "answer": review, "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
         "_skill": CIR_SKILL,
+        # The ONE return in this module that is an actual review document.
+        # `_skill` cannot carry that meaning: `_plain_payload` stamps it on the
+        # degraded apologies too, and query mode stamps it on follow-up answers
+        # read back off a stored run. Unattended callers — `app.monthly_reports`
+        # — need to tell "here is the review" from "I couldn't build one", so
+        # the distinction is explicit rather than inferred from copy.
+        "_report": True,
         "_skill_action": f"{label} · {len(names)} competitors",
         "_skill_source": "competitive-intel",
         "_skill_mode": mode,

@@ -45,11 +45,27 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # are None on the ones they do not belong to.
         "artifact_type": None,
         "artifact_query": None,
+        # `create_artifact`'s KIND rides along on the same terms: present on
+        # every verdict, None on the ones it does not belong to. This exact
+        # assertion is what caught the key being added — which is the job it
+        # exists to do, so it is updated rather than loosened.
+        "artifact_kind": None,
+        # And `share_to_slack`'s destination pair, on the same
+        # present-on-every-verdict terms. A channel riding an unrelated verdict
+        # would name a destination nothing is going to, so the planner's gate
+        # clears the pair everywhere else and this pins that it does.
+        "share_channel": None,
+        "share_note": None,
         # Likewise the requested FORMAT: present on every verdict, None when the
         # message named none — which is the normal case and means the executor
         # resolves the company's active format exactly as it always has.
         "artifact_template_id": None,
         "artifact_template_name": None,
+        # And list_artifacts' KIND + COUNT, on the same
+        # present-on-every-verdict terms.
+        "list_kind": None,
+        "list_limit": None,
+        "list_mode": None,
         "reason": "asked for a spec",
         "source": "planner",
     }
@@ -145,6 +161,77 @@ def test_a_format_switch_with_no_target_at_all_never_reaches_the_client():
 
     assert envelope["intent"] == "answer"
     assert envelope["source"] == "no_target_format"
+
+
+def test_a_tickets_format_switch_reaches_the_client_with_its_target():
+    """change_tickets_template dispatches POST /v1/stories/change-template with
+    the envelope's artifact_template_id — and it is deliberately NOT gated on
+    prd_id: the target may be a standalone ticket set, which the backend cannot
+    see from a prd_id-shaped envelope, so target resolution is the client's.
+    prd_id=None here IS the standalone-set case, and the switch must survive it
+    (the exact downgrade that would kill it is what change_prd_template gets)."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_tickets_template", action_confidence=0.9,
+            artifact_template_id="tpl-t1",
+            artifact_template_name="Acme Tickets",
+        ),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "change_tickets_template"
+    assert envelope["artifact_template_id"] == "tpl-t1"
+    assert envelope["artifact_template_name"] == "Acme Tickets"
+
+
+def test_a_tickets_switch_with_no_format_never_reaches_the_client():
+    """Same rule as the PRD switch: a change-template dispatch with no format
+    id is an executor call with nothing to execute."""
+    envelope = ci._plan_to_envelope(
+        _plan("change_tickets_template", action_confidence=0.9),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_format"
+
+
+def test_a_tickets_switch_naming_an_unknown_format_asks_which():
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "change_tickets_template", action_confidence=0.9,
+            template_query="the Contoso ticket format",
+        ),
+        prd_id=42,
+    )
+
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "template_not_found"
+
+
+def test_a_listing_verdict_reaches_the_client_with_its_kind():
+    """list_artifacts is a client intent — the rows are attached by the ROUTE
+    (where tenancy lives), so the adapter's whole job is passing the intent,
+    the kind and the asked-for count through un-downgraded. No PRD gate:
+    listing needs no target."""
+    envelope = ci._plan_to_envelope(
+        _plan("list_artifacts", action_confidence=0.9, list_kind="prd",
+              constraints={"top_n": 5}),
+        prd_id=None,
+    )
+
+    assert envelope["intent"] == "list_artifacts"
+    assert envelope["list_kind"] == "prd"
+    # "my last 5 PRDs" — the count rides the envelope so the route can trim.
+    assert envelope["list_limit"] == 5
+
+
+def test_a_count_extracted_for_an_answer_never_leaks_into_the_listing_field():
+    envelope = ci._plan_to_envelope(
+        _plan("answer", constraints={"top_n": 3}),
+        prd_id=None,
+    )
+    assert envelope["list_limit"] is None
 
 
 def test_the_format_reason_wins_over_a_low_confidence_downgrade():
@@ -253,6 +340,43 @@ def test_edit_prd_with_no_instruction_is_downgraded():
     """An edit with nothing to apply at least gets answered."""
     envelope = ci._plan_to_envelope(
         _plan("edit_prd", instruction="", confidence=0.95), prd_id=42
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_instruction"
+
+
+def test_assign_tickets_reaches_the_client_with_its_instruction():
+    """The client resolves the instruction against the thread PRD's tickets
+    (POST /v1/tickets/assign-plan) — both halves must survive the trip."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "assign_tickets", action_confidence=0.9,
+            instruction="assign the login ticket to Dave",
+        ),
+        prd_id=42,
+    )
+    assert envelope["intent"] == "assign_tickets"
+    assert envelope["instruction"] == "assign the login ticket to Dave"
+
+
+def test_assign_tickets_without_a_prd_is_answered_instead():
+    """Its ticket universe IS the thread's PRD: with none in context there is
+    nothing to assign, and the downgrade can say so honestly."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "assign_tickets", action_confidence=0.9,
+            instruction="assign the login ticket to Dave",
+        ),
+        prd_id=None,
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "no_target_prd"
+
+
+def test_assign_tickets_with_no_instruction_is_downgraded():
+    """Same rule as edit_prd: a dispatch with nothing to execute."""
+    envelope = ci._plan_to_envelope(
+        _plan("assign_tickets", action_confidence=0.9, instruction=""), prd_id=42
     )
     assert envelope["intent"] == "answer"
     assert envelope["source"] == "no_instruction"

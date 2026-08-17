@@ -525,7 +525,14 @@ def test_pinned_voc_still_answers_from_the_kg_alone(monkeypatch):
         raise AssertionError("a pinned VoC must not run the live digest")
 
     monkeypatch.setattr(cd, "answer", _no_digest)
-    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    # `**kw` absorbs the `scale=VOC_SCALE` the pinned path now passes — it
+    # retrieves at the same width as the merged path so an explicit
+    # `/voice-of-customer-report` can't return less feedback than the plain
+    # question would.
+    monkeypatch.setattr(
+        qa, "_retrieve_kg_bundle",
+        lambda eid, q, **kw: {"signals": [1], "themes": []},
+    )
     import app.graph.retrieval as retrieval
     monkeypatch.setattr(retrieval, "render_context_section", lambda b: "KG SIGNAL")
     captured = {}
@@ -690,6 +697,64 @@ def test_the_cheap_call_index_listing_is_never_contested(monkeypatch):
 
     assert out["_skill_source"] == "call-index"
     assert calls == [], "the listing path must not run a contest"
+
+
+def test_a_named_transcript_ask_reaches_the_single_call_leg(monkeypatch):
+    """THE ROUTING HALF, which a predicate test cannot see.
+
+    "get me the Genworth transcript" matches BOTH gates: `_LISTING_VERB` covers
+    "get" and `_CALL_NOUN` covers "transcript". The listing branch runs first,
+    so before this the question was answered with the LIST — plus the line
+    saying the index holds titles and dates and not transcripts — for a
+    question that names one call and asks for its content.
+
+    Testing this at the ladder rather than on `is_single_call_request` is the
+    point: the predicate was already right, and the answer was still wrong.
+    """
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index-listing"},
+    )
+    monkeypatch.setattr(
+        ci, "answer_single_call",
+        lambda cid, q, *, history, fresh: {"_skill_source": "call-index-single"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="get me the Genworth transcript",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index-single"
+
+
+def test_a_general_transcript_ask_still_gets_the_listing(monkeypatch):
+    """The control: naming no call, it belongs to the listing exactly as before.
+    Without this, 'prefer single-call' would be a licence to answer any
+    transcript question from one arbitrary call."""
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index-listing"},
+    )
+    monkeypatch.setattr(
+        ci, "answer_single_call",
+        lambda cid, q, *, history, fresh: {"_skill_source": "call-index-single"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="which calls have transcripts",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index-listing"
 
 
 def test_a_contest_failure_keeps_the_built_in(monkeypatch):
@@ -2156,3 +2221,242 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
 
     assert seen["kg_question"] == "turn that into a plan"
     assert seen["docs_question"] == "turn that into a plan"
+
+
+# ── ★ typed scope-driven gate on the connector-lookup interceptors ───────────
+# A project surface (private/group) hands `qa_agent.answer(scope=...)` a
+# `SurfaceScope`. `_skip_project_connectors(scope, routing_text, history)`
+# replaces the old `active_project_id()` ContextVar predicate: it SKIPS the
+# tracker / named-source / document interceptors for a project surface UNLESS
+# the question NAMES a source one of them can serve. So a named-source project
+# question is ADMITTED (AC9); an UNNAMED PM-noun question ("what tasks are
+# open?") is skipped and grounds in the folded project block (AC10); and for a
+# MAIN ask (`scope is None`) the helper is always False, so the three guards
+# behave byte-for-byte as before (AC11). All directions are proved.
+from app.surface_scope import Surface, SurfaceScope
+
+_PROJECT_GROUP_SCOPE = SurfaceScope(surface=Surface.project_group, project_id=1)
+
+
+def _stub_answer_generation(monkeypatch):
+    """Stub the router + the (expensive) answer-generation call so a
+    fell-through turn returns fast with a recognisable answer."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k: {
+            "answer": "grounded-from-project-block", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+
+
+def test_project_named_source_admits_connector_but_unnamed_skips(monkeypatch):
+    """AC9/AC10: on a PROJECT surface a NAMED tracker question is ADMITTED to
+    the tracker interceptor; an UNNAMED PM-noun question is SKIPPED and grounds
+    in the project block. AC11: a MAIN ask (scope=None) fires as before."""
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: True)
+    monkeypatch.setattr(tracker_mod, "any_connected", lambda eid: True)
+    # named_trackers is empty UNLESS the question actually names a tracker.
+    monkeypatch.setattr(
+        tracker_mod, "named_trackers",
+        lambda text: ["jira"] if "jira" in text.lower() else [],
+    )
+    monkeypatch.setattr(
+        tracker_mod, "answer",
+        lambda **k: {
+            "answer": "tracker result", "_skill_source": "connector-lookup",
+            "_skill_action": "Tracker lookup",
+        },
+    )
+
+    # MAIN (scope=None): interceptor fires exactly as before (AC11).
+    out_main = qa.answer(enterprise_id="ent", question="what tasks are open?", dataset="acme")
+    assert out_main.get("_skill_source") == "connector-lookup", out_main
+
+    # PROJECT + NAMED source ("jira"): admitted → interceptor fires (AC9).
+    out_named = qa.answer(
+        enterprise_id="ent", question="what's the status of the jira ticket?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_named.get("_skill_source") == "connector-lookup", out_named
+
+    # PROJECT + UNNAMED PM-noun: skipped → grounds in the project block (AC10).
+    out_unnamed = qa.answer(
+        enterprise_id="ent", question="what tasks are open?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_unnamed.get("_skill_source") != "connector-lookup", out_unnamed
+    assert out_unnamed.get("answer") == "grounded-from-project-block", out_unnamed
+
+
+def test_skip_connectors_forced_false_routes_pm_noun_to_tracker_is_red(monkeypatch):
+    """MUTATION (AC10, PI13): force `_skip_project_connectors` to always return
+    False (the pre-ticket blanket-off-for-project extreme) and the UNNAMED
+    PM-noun question is hijacked into the tracker interceptor → RED. Restoring
+    the real named-source decision → GREEN (proved by the test above)."""
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: True)
+    monkeypatch.setattr(tracker_mod, "any_connected", lambda eid: True)
+    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: [])
+    monkeypatch.setattr(
+        tracker_mod, "answer",
+        lambda **k: {
+            "answer": "tracker result", "_skill_source": "connector-lookup",
+            "_skill_action": "Tracker lookup",
+        },
+    )
+    # The mutation: always admit (never skip) on a project surface.
+    monkeypatch.setattr(qa, "_skip_project_connectors", lambda scope, rt, hist: False)
+
+    out = qa.answer(
+        enterprise_id="ent", question="what tasks are open?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    # With the gate defeated the unnamed PM-noun is wrongly hijacked to the
+    # tracker — this is the RED the named-source decision prevents.
+    assert out.get("_skill_source") == "connector-lookup", out
+
+
+def test_project_named_connector_and_document_admit(monkeypatch):
+    """AC9: a project ask naming a CONNECTOR reaches the named-source branch,
+    and one naming a DOCUMENT provider reaches the document-lookup branch."""
+    import app.connector_lookup.registry as registry_mod
+    import app.connector_lookup.tracker as tracker_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
+    monkeypatch.setattr(tracker_mod, "named_trackers", lambda text: [])
+    monkeypatch.setattr(
+        qa, "is_connector_lookup",
+        lambda text, history=None: {"slack"} if "slack" in text.lower() else None,
+    )
+    monkeypatch.setattr(
+        qa, "document_lookup_candidates",
+        lambda text: {"confluence"} if "runbook" in text.lower() else set(),
+    )
+    monkeypatch.setattr(registry_mod, "connected_providers", lambda eid: ["confluence"])
+    monkeypatch.setattr(
+        registry_mod, "answer_for_hints",
+        lambda **k: {
+            "answer": "read source", "_skill_source": "connector-lookup",
+            "_skill_action": "Named source lookup",
+        },
+    )
+
+    out_conn = qa.answer(
+        enterprise_id="ent", question="what did slack say about pricing?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_conn.get("_skill_source") == "connector-lookup", out_conn
+
+    out_doc = qa.answer(
+        enterprise_id="ent", question="what does our onboarding runbook say?",
+        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+    )
+    assert out_doc.get("_skill_source") == "connector-lookup", out_doc
+
+
+def test_main_scope_none_connector_guards_byte_identical(monkeypatch):
+    """AC11: for a MAIN ask (scope=None) each interceptor fires exactly as the
+    pre-ticket `_project_scoped_ask()`-False path did — the helper returns
+    False for `scope is None` and for `Surface.main`."""
+    import app.connector_lookup.registry as registry_mod
+
+    _stub_answer_generation(monkeypatch)
+    monkeypatch.setattr(qa, "is_jira_lookup", lambda text, history=None: False)
+    monkeypatch.setattr(qa, "is_connector_lookup", lambda text, history=None: {"slack"})
+    monkeypatch.setattr(
+        registry_mod, "answer_for_hints",
+        lambda **k: {
+            "answer": "read from slack", "_skill_source": "connector-lookup",
+            "_skill_action": "Named source lookup",
+        },
+    )
+    q = "what did slack say about the pricing change?"
+
+    # scope=None and Surface.main both behave identically (interceptor fires).
+    for scope in (None, SurfaceScope(surface=Surface.main)):
+        out = qa.answer(enterprise_id="ent", question=q, dataset="acme", scope=scope)
+        assert out.get("_skill_source") == "connector-lookup", (scope, out)
+
+    # And `_skip_project_connectors` is False for both, directly.
+    assert qa._skip_project_connectors(None, q, None) is False
+    assert qa._skip_project_connectors(SurfaceScope(surface=Surface.main), q, None) is False
+
+
+# ── ★ an explicit project-content ask beats a STALE connector mention ────────
+# `is_connector_lookup` also fires on a sticky-thread follow-up (e.g. a bare
+# "context") whenever `history` names a connector a few turns back, even
+# though the CURRENT message names nothing. Left alone that stale hit vetoed
+# the sixth-branch project loop for exactly the phrasing
+# `is_project_content_request` exists to admit. `_skip_project_connectors`
+# now re-checks `is_connector_lookup` history-free: a connector named in THIS
+# message still wins outright; a connector that only shows up once history is
+# added is stale, and an explicit content ask lifts the veto.
+_PRIOR_SLACK_MENTION_HISTORY = [
+    {"role": "user", "content": "check slack for the pricing decision"},
+    {"role": "assistant", "content": "Here is what I found in Slack about pricing."},
+]
+
+
+def test_stale_connector_history_does_not_veto_explicit_context_ask():
+    """A bare 'give me the context' names no connector itself; the sticky
+    Slack mention lives only in `history`. The project branch must NOT be
+    vetoed — `_skip_project_connectors` returns True (skip the connector
+    interceptors, let the sixth branch claim the turn)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", _PRIOR_SLACK_MENTION_HISTORY,
+    ) is True
+
+
+def test_in_message_connector_still_wins_over_project_branch():
+    """When the CURRENT message itself names a connector ('...from slack'),
+    the connector must still win: `_skip_project_connectors` returns False
+    (do NOT skip the connector interceptors — the project branch does not
+    steal this turn)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE,
+        "give me the full context from slack",
+        _PRIOR_SLACK_MENTION_HISTORY,
+    ) is False
+
+
+def test_context_ask_with_no_connector_anywhere_is_unchanged():
+    """Control: no connector named in the message OR history — the project
+    branch fires exactly as it did before this fix (unrelated history, or
+    none at all, never triggers the stale-connector carve-out)."""
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", [],
+    ) is True
+    assert qa._skip_project_connectors(
+        _PROJECT_GROUP_SCOPE, "give me the context", None,
+    ) is True
+
+
+def test_stale_connector_ask_reaches_project_branch_end_to_end(monkeypatch):
+    """End-to-end through `qa.answer()`: a project-surface turn with a prior
+    Slack mention in history, asking a bare 'give me the context', reaches
+    the sixth-branch project tool loop rather than falling through to the
+    connector/company-wide path."""
+    scope = SurfaceScope(
+        surface=Surface.project_group, project_id=1,
+        extra_tools=({"name": "get_project_memory"},),
+    )
+
+    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset):
+        return {"answer": "project-scoped-context", "_skill_source": "project-tools"}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _fake_scoped_tool_answer)
+
+    out = qa.answer(
+        enterprise_id="ent", question="give me the context",
+        dataset="acme", scope=scope, history=_PRIOR_SLACK_MENTION_HISTORY,
+    )
+    assert out.get("_skill_source") == "project-tools", out
+    assert out.get("answer") == "project-scoped-context", out

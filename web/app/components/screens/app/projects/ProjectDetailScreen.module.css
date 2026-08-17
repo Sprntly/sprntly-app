@@ -1,0 +1,953 @@
+/* ProjectDetailScreen — component-scoped styles (globals.css is never
+ * edited for this ticket, per BUILD.md §6 hot-file rule). Every value below
+ * resolves to an existing `web/app/globals.css` custom property except the
+ * artifact-type badge hexes, which are copied VERBATIM from
+ * `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` (same exception already taken by
+ * `ProjectsScreen.module.css` — not a new palette, the app's real one). */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* ── Top bar ─────────────────────────────────────────────────────────── */
+
+.topBar {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 9px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.backLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  text-decoration: none;
+  border-radius: var(--radius-sm);
+}
+
+.backLink:hover {
+  color: var(--accent-ink);
+}
+
+.backLink:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.topSep {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+  flex-shrink: 0;
+}
+
+.projName {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-serif);
+  font-size: 17px;
+  font-weight: 400;
+  color: var(--ink);
+  white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.projName svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.topAvatars {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+}
+
+.topAv {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  font-weight: 700;
+  background: var(--surface-4);
+  color: var(--ink-2);
+  box-shadow: 0 0 0 1.5px var(--surface-2);
+  margin-left: -6px;
+  flex-shrink: 0;
+}
+
+.topAv:first-child {
+  margin-left: 0;
+}
+
+/* "+" invite affordance next to the avatar stack — a BARE "+" glyph (no
+ * background/border chrome), matching the artifacts modal's icon-only back
+ * button: ink-2 → accent-ink on hover only. Opens settings on the Invite
+ * tab. Distinct class name from the existing `.inviteBtn` accent pill below
+ * (no collision). */
+.avInviteBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-left: 4px;
+  border: none;
+  background: transparent;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color 0.12s;
+  flex-shrink: 0;
+}
+
+.avInviteBtn:hover {
+  color: var(--accent-ink);
+}
+
+.avInviteBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.topSpacer {
+  flex: 1;
+}
+
+.railToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.railToggle:hover {
+  background: var(--surface-3);
+}
+
+.railToggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── Top-bar chat switch (redesign: relocated from the standing rail) ── */
+
+.topChatToggle {
+  display: flex;
+  gap: 4px;
+  padding: 3px;
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  flex-shrink: 0;
+}
+
+/* Square icon-only "Project settings" gear (redesign — top bar). */
+.gearBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.gearBtn:hover {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.gearBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Count badge on the top-bar "Artifacts (N)" pill. */
+.topbarCount {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 2px;
+}
+
+/* ── Body: main pane (+ the in-place artifact drawer when one is open) ─ */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  /* Redesign: full-bleed chat by default — there is no standing right
+     rail any more. The only second column the grid ever gets is the
+     in-place artifact drawer (`.bodyDrawerOpen` below). */
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* AD-HOC (live-rig): artifact drawer open — [ chat | drawer ] side-by-side.
+   The drawer takes a wide right region so the artifact is readable, the
+   chat keeps a workable min width to its left, both scroll independently. */
+.bodyDrawerOpen {
+  grid-template-columns: minmax(360px, 1fr) minmax(420px, 600px);
+}
+
+@media (max-width: 1080px) {
+  .bodyDrawerOpen {
+    grid-template-columns: minmax(300px, 1fr) minmax(380px, 520px);
+  }
+}
+
+@media (max-width: 960px) {
+  /* Narrow viewports: the drawer takes the full width (the chat is a tap
+     away behind the close control) rather than crushing both columns. */
+  .bodyDrawerOpen {
+    grid-template-columns: 1fr;
+  }
+  .bodyDrawerOpen .main {
+    display: none;
+  }
+}
+
+/* ── Main pane (chat host + composer shell — AD-P13: no bespoke bubbles) */
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--surface);
+}
+
+.chatNote {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 8px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.chatNote svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.chatNote b {
+  color: var(--ink-2);
+}
+
+/* `align-items`/`justify-content: center` here were centering styles for the
+ * now-deleted `.threadPlaceholder` dashed box that stood in for the chat
+ * before `ProjectMainThread` mounted the real, internally-scrolling
+ * `ChatShell`. They never got revisited once the real host landed: a
+ * non-stretch cross-axis on this flex row leaves the mounted host's
+ * bounded-viewport sizing resting on `height: 100%` alone to fill this box,
+ * instead of the ordinary flex-stretch every other scroll region in this app
+ * relies on (`.od-center`, `.main-column`, ...). Reverted to the default
+ * stretch so the host fills `.threadHost` the same way regardless of
+ * content — the group surface's taller multi-party rows are what actually
+ * exercise this, not private's shorter single-party ones. */
+.threadHost {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  padding: 24px;
+}
+
+.threadPlaceholder {
+  max-width: 420px;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-lg);
+  padding: 22px;
+  background: var(--surface-2);
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 12px 22px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.composerBox {
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-sm);
+  padding: 11px 13px 9px;
+}
+
+.composerInput {
+  font-size: 13.5px;
+  color: var(--ink-4);
+  padding: 2px 2px 10px;
+  min-height: 22px;
+}
+
+.composerTools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+}
+
+.composerPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+.composerPill:hover {
+  background: var(--surface-4);
+}
+
+.composerPill:focus-visible,
+.composerSend:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.composerSend {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--nav);
+  border: none;
+  border-radius: 999px;
+  padding: 7px 15px;
+  cursor: pointer;
+}
+
+.composerSend:hover {
+  background: var(--nav-2);
+}
+
+/* ── Right rail ──────────────────────────────────────────────────────── */
+
+.rail {
+  border-left: 1px solid var(--line);
+  background: var(--surface-2);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.railSectionLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  padding: 15px 16px 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.railSectionCount {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: 999px;
+  padding: 0 6px;
+}
+
+.chatToggleBtn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.chatToggleBtn svg {
+  flex-shrink: 0;
+}
+
+.chatToggleBtn:hover {
+  color: var(--ink);
+}
+
+.chatToggleBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chatToggleBtnActive {
+  background: var(--accent-muted);
+  color: var(--accent-ink);
+  border-color: var(--accent-soft);
+  box-shadow: var(--shadow-sm);
+}
+
+.chatToggleDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.chatRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: calc(100% - 20px);
+  margin: 2px 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  color: var(--ink-2);
+  background: none;
+  border: 1px solid transparent;
+  font-family: var(--font-body);
+  text-align: left;
+}
+
+.chatRow:hover {
+  background: var(--surface-3);
+}
+
+.chatRow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.chatRowActive {
+  background: var(--nav);
+  color: var(--nav-text-hover);
+}
+
+.chatRowActive:hover {
+  background: var(--nav);
+}
+
+.chatRowIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  flex-shrink: 0;
+}
+
+.chatRowActive .chatRowIcon {
+  background: var(--nav-2);
+  color: var(--nav-text-hover);
+}
+
+.chatRowTitle {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatRowDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--accent-alpha-18);
+}
+
+.chatRowUnreadDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+  box-shadow: 0 0 0 2px var(--accent-alpha-18);
+}
+
+.chatRowPrivate {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-4);
+  background: var(--surface-3);
+  border-radius: 4px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+}
+
+.chatRowActive .chatRowPrivate {
+  color: var(--nav-text);
+  background: var(--nav-2);
+}
+
+.card {
+  margin: 3px 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--surface-2);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.cardHead h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.cardHead h4 svg {
+  color: var(--accent);
+}
+
+.cardCount {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.fastFollowBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: 5px;
+  padding: 2px 7px;
+}
+
+.teaser {
+  font-size: 11.5px;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  padding: 8px 9px;
+  line-height: 1.45;
+}
+
+.teaserSrc {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-ink);
+  margin-bottom: 4px;
+}
+
+.cardActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.viewAllBtn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-2);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px;
+  cursor: pointer;
+}
+
+.viewAllBtn:hover {
+  background: var(--surface-4);
+}
+
+.viewAllBtn:focus-visible,
+.addBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.addBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-soft);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.addBtn:hover {
+  background: var(--accent-soft);
+}
+
+.taskList {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+}
+
+.taskRow {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.taskRow:last-of-type {
+  border-bottom: none;
+}
+
+.taskBox {
+  width: 16px;
+  height: 16px;
+  border-radius: 5px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface-2);
+  flex-shrink: 0;
+}
+
+.taskSummary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.taskAssignee {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8.5px;
+  font-weight: 700;
+  background: var(--surface-4);
+  color: var(--ink-2);
+}
+
+.memberRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 1px 10px;
+  padding: 7px 8px;
+  border-radius: var(--radius-sm);
+}
+
+.memberRow:hover {
+  background: var(--surface-3);
+}
+
+.memberRowAgent {
+  background: var(--accent-alpha-06);
+  border: 1px solid var(--accent-soft);
+  margin: 3px 10px;
+}
+
+.memberAv {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--surface-4);
+  color: var(--ink-2);
+  flex-shrink: 0;
+}
+
+.agentAv {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-muted);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif);
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.memberMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.memberName {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.memberRole {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+.memberRemoveBtn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+
+.memberRow:hover .memberRemoveBtn,
+.memberRemoveBtn:focus-visible {
+  opacity: 1;
+}
+
+.memberRemoveBtn:hover,
+.memberRemoveBtn:focus-visible {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.agentTag {
+  font-size: 8.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.workingPill {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent-ink);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.workingPill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-alpha-18);
+  animation: projectAgentPulse 2s ease-in-out infinite;
+}
+
+@keyframes projectAgentPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px var(--accent-alpha-18);
+  }
+  50% {
+    box-shadow: 0 0 0 4px var(--accent-alpha-18);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workingPill::before {
+    animation: none;
+  }
+}
+
+.inviteRow {
+  display: flex;
+  gap: 8px;
+  margin: 8px 12px 4px;
+}
+
+.inviteInput {
+  flex: 1;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--surface-2);
+  font-family: var(--font-body);
+}
+
+.inviteInput:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.inviteBtn {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.inviteBtn:hover {
+  background: var(--accent-hover);
+}
+
+.inviteBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.tagNote {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 10.5px;
+  color: var(--ink-2);
+  background: var(--warn-soft);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 8px 12px 18px;
+  line-height: 1.4;
+}
+
+.tagNote svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--warn);
+}
+
+.tagNote b {
+  color: var(--ink);
+}
+
+/* ── Access-denied / not-found states ───────────────────────────────── */
+
+.stateWrap {
+  max-width: 1220px;
+  margin: 0 auto;
+  padding: 0 4px;
+}
+
+/* ── Loading state — centered app spinner (reused `Spinner` from
+ * `components/auth/icons.tsx`, rotation via the shared `.auth-btn-spin`
+ * class in globals.css; no bespoke skeleton/keyframe here). ── */
+
+.spinnerWrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 360px;
+  max-width: 1220px;
+  margin: 0 auto;
+  color: var(--ink-3);
+}

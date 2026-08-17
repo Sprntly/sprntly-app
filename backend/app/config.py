@@ -499,6 +499,16 @@ class Settings(BaseSettings):
     # NOTE: the setting kept its historical WEEKLY_BRIEF_TICK_MINUTES env name so
     # existing staging/prod .env files keep working (they are hand-managed).
     weekly_brief_tick_minutes: int = 15
+    # Monthly intelligence reports (app.monthly_reports): once a month per
+    # company — the first configured brief weekday, at the brief time — run
+    # each registered report (competitive intelligence today), save it into
+    # the artifacts library, and announce it (Slack + email ready-ping). Rides
+    # SCHEDULER_ENABLED like every job here; this flag is the reports-only
+    # kill switch. The tick is hourly: the due window is 24h and the durable
+    # ledger (the saved reports row) makes extra ticks free no-ops, so a fine
+    # cadence buys nothing.
+    monthly_reports_enabled: bool = True
+    monthly_reports_tick_minutes: int = 60
     # Ticket tracker sync: every tick, two-way sync each PRD whose tickets were
     # pushed to ClickUp/Jira (prd_ticket_sync rows with auto_sync=true). 15 min
     # by default; raise via TICKET_SYNC_INTERVAL_MINUTES (e.g. 60–120) if
@@ -583,6 +593,15 @@ class Settings(BaseSettings):
     # From: header for invite reminder emails. Empty → brief_email_from (the
     # same verified sender the Day-0 existing-user notification uses).
     invite_from_email: str = ""
+
+    # Autonomous task follow-up sweep (app/delegation_followup.py): the
+    # TASK_FOLLOWUP scheduler job that pings/reschedules/escalates tasks
+    # past their next_check_in. OFF by default — its own opt-in flag ON
+    # TOP of SCHEDULER_ENABLED (the invite-reminder gating pattern), so a
+    # staging environment stays dark even with SCHEDULER_ENABLED=true
+    # until this is explicitly flipped for prod.
+    task_followup_enabled: bool = False
+    task_followup_interval_hours: int = 1
 
     # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
     # check of recent extraction output per skill_id against the expected

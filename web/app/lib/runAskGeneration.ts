@@ -13,6 +13,7 @@ import { pollUntil } from "./poll"
 import { clearPendingJob, getPendingJob, setPendingJob, type PendingJob } from "./jobResume"
 import { throttlePartial } from "./runPrdGeneration"
 import { subscribeToGenerationStream } from "./streamGeneration"
+import { providerNoticeFromAsk, type ProviderNotice } from "./providerLimitNotice"
 
 /** Live-preview callback: the accumulating answer markdown as it streams.
  *  Progressive display only — the poll's final payload stays authoritative. */
@@ -85,7 +86,16 @@ export function getPendingAsk(company: string, tabId: string): PendingJob | null
   return getPendingJob("ask", company, askScope(tabId))
 }
 
-class AskFailedError extends Error {}
+class AskFailedError extends Error {
+  /** The typed provider refusal behind this failure, when there was one.
+   *
+   *  Carried on the ERROR rather than returned alongside it because every
+   *  caller already has a `catch` and none has a second channel — and the one
+   *  thing that must not happen is the reason being available server-side and
+   *  invisible to the person who made the request. Undefined for an ordinary
+   *  failure, so existing handling is untouched. */
+  providerNotice?: ProviderNotice
+}
 
 /**
  * The 12-minute wall-clock budget expired while the job was still `generating`.
@@ -286,7 +296,17 @@ async function _pollAskLoop(
     throw new AskStoppedError("Ask was stopped")
   }
   if (final.status === "error") {
-    throw new AskFailedError(final.error || "Ask failed on the backend")
+    // A PROVIDER refusal (out of credits, rate limited, overloaded) gets the
+    // server's own user-safe sentence as the error message AND the typed
+    // notice attached, so the surface can both render the bubble and raise a
+    // toast the user cannot miss. `final.error` is a stringified exception —
+    // never the right thing to put in front of a person.
+    const notice = providerNoticeFromAsk(final)
+    const failure = new AskFailedError(
+      notice?.message || final.error || "Ask failed on the backend",
+    )
+    if (notice) failure.providerNotice = notice
+    throw failure
   }
   // Unreachable: generating (timeout) throws above; ready/cancelled/error all
   // returned or threw.
@@ -306,10 +326,23 @@ export async function runAskGeneration(
     conversation_id?: number
     pinned_skill?: string
     prd_id?: number
+    /** Individual project chat: folds the project's memory into this turn
+     *  server-side. Passed straight through to `askApi.start` — see its own
+     *  doc for the membership-gate contract. */
+    project_id?: number
     /** Standalone-artifact grounding — the open evidence report / ticket set,
      *  mutually exclusive with prd_id (the tab has one primary artifact). */
     evidence_id?: number
     ticket_set_id?: number
+    /** Individual-project-chat send identity — the idempotency key the
+     *  server persists this turn's user side under. Passed straight through
+     *  to `askApi.start`. */
+    client_message_id?: string
+    /** Individual-project-chat structured attachments — the resolved
+     *  attachment texts riding this send. Passed straight through to
+     *  `askApi.start`; the server persists them onto the user turn and folds
+     *  them into the answer's question (project branch only). */
+    attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial

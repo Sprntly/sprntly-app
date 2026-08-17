@@ -280,6 +280,22 @@ def _require_feature_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def _require_prd_patch_access() -> None:
+    """Gate for the shared `prd_patches` list/accept/reject routes: reachable
+    when EITHER the Design Agent OR the project PRD-edit feature is on.
+
+    The project-chat PRD-edit flow reuses these same three routes to surface and
+    resolve its pending patches. Without this widen, a deployment running
+    project PRD-edit with DESIGN_AGENT_ENABLED off would strand every project
+    patch in `pending` (the routes would 404). Both flags default off → 404
+    (feature invisible) when neither is set, so a Design-Agent-only deployment
+    is byte-for-byte unchanged (project_prd_edit_enabled() is False there)."""
+    from app.project_prd_patch_tool import project_prd_edit_enabled
+
+    if not (_feature_enabled() or project_prd_edit_enabled()):
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 def _require_company_prototype_enabled(company_id: str) -> None:
     """Per-company prototype gate (companies.prototype_enabled, managed from
     the staff admin panel) — checked UNDER the global env master switch on the
@@ -833,7 +849,7 @@ from app.db.prd_patches import (
 class PrdPatchOut(BaseModel):
     id: int
     prd_id: int
-    prototype_id: int
+    prototype_id: int | None      # NULL for a project-chat patch (no prototype anchor)
     rationale: str
     patch_md: str
     status: str           # 'pending' | 'applied' | 'rejected'
@@ -870,7 +886,7 @@ def get_pending_patches(
     `list_pending_patches`. A PRD with no pending patches returns `[]` (the banner
     renders nothing). 401 without a session; 404-invisibility is moot here (a
     foreign-workspace PRD simply yields no rows under this workspace filter)."""
-    _require_feature_enabled()
+    _require_prd_patch_access()
     workspace_id = company.company_id
     return [
         PrdPatchOut(**_patch_to_out(p))
@@ -4394,7 +4410,7 @@ def post_accept_patch(
     PrdScreen `contentEditable`. 404 when the patch is not in the caller's
     workspace (cross-tenant invisibility). Idempotent: re-accepting an
     already-applied patch is a no-op flip that returns the row."""
-    _require_feature_enabled()
+    _require_prd_patch_access()
     workspace_id = company.company_id
     row = mark_patch_applied(patch_id=patch_id, workspace_id=workspace_id)
     if not row:
@@ -4419,7 +4435,7 @@ def post_reject_patch(
     (`mark_patch_rejected`) and return the updated row. The PRD is unaffected
     (rejected patches are excluded by `apply_patches_to_prd_md`). 404 when not in
     the caller's workspace. Idempotent (mirrors accept)."""
-    _require_feature_enabled()
+    _require_prd_patch_access()
     workspace_id = company.company_id
     row = mark_patch_rejected(patch_id=patch_id, workspace_id=workspace_id)
     if not row:

@@ -122,7 +122,15 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
    *  to false (existing editable behavior), so every non-guest caller is
    *  byte-for-byte unchanged. */
   readOnly?: boolean
-}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence, readOnly = false }, ref) {
+  /** AD-P13b (one editor, two consumers): the save HANDLER the editor calls
+   *  with the full serialized `<!DOCTYPE html>…` document + title. When
+   *  OMITTED (every main-chat caller) `persist` keeps calling `prdApi.update`
+   *  byte-for-byte as before — this prop is purely additive. The PROJECT
+   *  drawer injects a project-scoped, ★ cross-project-IDOR-gated save here
+   *  (`projectsApi.savePrdContent`) so a project edit never writes through the
+   *  global cross-tenant-only path. */
+  onSave?: (fullHtml: string, title: string) => Promise<void>
+}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence, readOnly = false, onSave }, ref) {
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -185,7 +193,14 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     // recovers the edit; cleared again the moment the server has it.
     saveHtmlDraft(prdId, { base: baseDoc.current, doc })
     try {
-      await prdApi.update(prdId, { title: titleRef.current, payload_md: doc })
+      // AD-P13b: an injected save handler (the project drawer's gated save)
+      // takes precedence; absent it, the byte-for-byte pre-existing main-chat
+      // path (`prdApi.update`) runs unchanged.
+      if (onSave) {
+        await onSave(doc, titleRef.current)
+      } else {
+        await prdApi.update(prdId, { title: titleRef.current, payload_md: doc })
+      }
       // Saved — this is no longer an unsaved edit, so the draft must go. Left
       // behind, it outranks the server copy on every later open, which is how a
       // collaborator's saved edits became invisible to whoever edited last.
@@ -198,7 +213,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       // Local draft is preserved; surface as saved so the UI isn't stuck.
       onStatus?.("saved")
     }
-  }, [prdId, onStatus, readDoc, readOnly])
+  }, [prdId, onStatus, readDoc, readOnly, onSave])
 
   useImperativeHandle(ref, () => ({ save: persist }), [persist])
 

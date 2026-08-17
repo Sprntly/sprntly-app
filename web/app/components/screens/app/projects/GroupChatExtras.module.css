@@ -1,0 +1,31 @@
+/* GroupChatExtras — the group-surface styling families that ride the shared
+   `ChatShell` through host-supplied nodes (roster) and engine-emitted nodes
+   (typing indicator, error, posting-wait).
+   Relocated verbatim from the deleted `ProjectGroupChat.module.css` at the fold:
+   these families had no home in `ChatShell.module.css` (row/bubble/role/time
+   went there in T3a; picker/chip/affordance live in `mention-picker.module.css`).
+   Tokens only, from web/app/globals.css :root (read-only, per AD-P13 §3 — no new
+   palette). Project-side module — the shell never imports it. */
+
+/* ── Typing indicator (engine-emitted, dock.aboveComposer) ── */
+.typingIndicator {
+  font-size: 11px;
+  font-style: italic;
+  color: var(--ink-4);
+  padding: 0 16px 6px;
+}
+
+/* ── Send/load error (engine-emitted, dock.aboveComposer) ── */
+.error {
+  font-size: 12px;
+  color: var(--danger-ink);
+  background: var(--danger-soft);
+  padding: 8px 14px;
+  margin: 0 16px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Posting-wait node (engine-emitted, transcript.trailing) ── */
+.postingWait {
+  padding: 4px 8px;
+}

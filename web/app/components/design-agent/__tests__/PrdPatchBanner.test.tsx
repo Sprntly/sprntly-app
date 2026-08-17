@@ -122,18 +122,27 @@ describe("PrdPanelContent mount (AC7 — contentEditable untouched)", () => {
     new URL("../../shared/PrdPanelContent.tsx", import.meta.url),
     "utf8",
   )
+  // AD-P13b DRY consolidation extracted the contentEditable PRD-body region
+  // OUT of PrdPanelContent.tsx into the shared PrdMarkdownEditor.tsx primitive
+  // (one editor, two consumers). The invariant below is migrated to its new
+  // home, not dropped — same relocation `PrdSections-design.test.tsx`'s own
+  // `test_content_editable_region_untouched` already made.
+  const editorSrc = readFileSync(
+    new URL("../../shared/PrdMarkdownEditor.tsx", import.meta.url),
+    "utf8",
+  )
 
   it("references contentEditable exactly once", () => {
-    const matches = src.match(/contentEditable/g) ?? []
+    const matches = editorSrc.match(/contentEditable/g) ?? []
     expect(matches).toHaveLength(1)
   })
 
   it("keeps the contentEditable div's sibling props intact", () => {
     // The prd-body antipattern block must be byte-identical to HEAD: the
     // contentEditable div carries spellCheck + suppressContentEditableWarning.
-    expect(src).toContain('className="prd-body"')
-    expect(src).toContain("spellCheck={false}")
-    expect(src).toContain("suppressContentEditableWarning")
+    expect(editorSrc).toContain('className="prd-body"')
+    expect(editorSrc).toContain("spellCheck={false}")
+    expect(editorSrc).toContain("suppressContentEditableWarning")
   })
 
   it("mounts PrdPatchBanner above the prd content (import + single mount line)", () => {

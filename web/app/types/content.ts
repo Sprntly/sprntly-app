@@ -226,6 +226,10 @@ export interface ConversationRow {
    *  null). Carried from `ConversationRecord.prd_id` so resuming a PRD chat from
    *  history can re-bind the tab to its PRD and reopen the content panel. */
   prd_id?: number | null
+  /** The project this conversation is bound to (else null). Carried from
+   *  `ConversationRecord.project_id` so resuming a project-bound chat from
+   *  history restores the project-menu affordance in the content panel. */
+  project_id?: number | null
 }
 
 export interface TeamMemberRow {
@@ -727,6 +731,13 @@ export interface AppContentState {
    *  conversation's captured reports; null (a brand-new chat with nothing
    *  persisted yet, or the brief tab) means there is no thread to list. */
   conversationId: number | null
+  /** The project a main-chat-generated PRD silently forked into (server-side
+   *  `maybe_auto_create_project_for_prd`, returned on the generate response).
+   *  Non-null ONLY while the current thread is bound to a project — it gates the
+   *  project-menu affordance in the content panel header. Null (the normal state
+   *  for every non-project chat) leaves the panel byte-identical to before. Cleared
+   *  on thread-switch / new-chat alongside the other thread-scoped fields. */
+  activeProjectId: number | null
   /** A specific report to open in the Reports tab, set when the user arrived by
    *  clicking that exact document (e.g. an Artifacts row). The tab consumes it
    *  once — selecting the report and clearing this — so the user lands on what
@@ -741,6 +752,14 @@ export interface AppContentState {
    *  first ask persists). Reading that null as "standalone" is what used to
    *  render the PREVIOUS thread's document inside an empty new chat. */
   reportFocusStandalone: boolean
+  /** The team document (custom artifact) open in the panel's Document tab, or
+   *  null when this thread has none — which is the normal state, and what
+   *  keeps the tab hidden. Set by the chat's `create_artifact` dispatch. */
+  documentId: number | null
+  /** True from the moment a document is requested until its first poll shows
+   *  it ready. Purely presentational: the row's own `status` is the truth, and
+   *  this only avoids a flash of "empty document" before the first fetch. */
+  documentGenerating: boolean
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */
@@ -832,6 +851,21 @@ export interface AppContentState {
      *  message. The panel maps the kind to its own copy, so a stack trace or a
      *  provider error string can never reach the screen. */
     error?: TicketSetFailureKind | null
+    /** Which uploaded TICKET format rendered this set (null = Sprntly's
+     *  built-in), with its server-resolved display name — what the Tickets
+     *  footer's "Format: {name}" label and switch control read. Undefined on
+     *  slices written mid-run (the stamp lands with the terminal read). */
+    artifactTemplateId?: string | null
+    artifactTemplateName?: string | null
+    /** A background format switch is running over this set. Distinct from
+     *  `status`, which stays `ready` throughout — the tickets on screen are
+     *  the previous format's and remain readable, pushable and editable while
+     *  the re-lay runs. The panel shows a working strip over them and the
+     *  Format control withholds a second switch until it clears. */
+    relaying?: boolean
+    /** The format being switched INTO, for the strip's copy. Null when the
+     *  target is Sprntly's built-in layout. */
+    relayingIntoName?: string | null
   } | null
   /** True from kick-off until the run reaches a terminal state. Distinct from
    *  `ticketSet.status`: the slice may not exist at all yet (the create call is
@@ -845,6 +879,13 @@ export interface AppContentState {
    *  brand-new chat tab also has a null conversation id, and reading that null
    *  as "standalone" is a bug this codebase has already shipped once. */
   ticketSetStandalone?: boolean
+  /** Bumped (any new value) to make the Tickets tab RE-READ a PRD's persisted
+   *  tickets — the in-place format switch persists re-laid stories server-side
+   *  and the tab's cache-first effect would otherwise keep rendering the copy
+   *  it already loaded. A re-read, never a regeneration: the switch leaves
+   *  `content_hash` untouched, so the re-run serves the fresh cache with no
+   *  LLM call. Standalone sets don't need it (their slice IS the data). */
+  ticketsRefreshNonce?: number
 }
 
 /** How a standalone ticket-set run ended badly. A KIND, not a message: the

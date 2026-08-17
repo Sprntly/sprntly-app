@@ -52,7 +52,9 @@ DROPPED for the rest, rather than being quietly discarded — the brief
 (`docs/ASK_PLANNER.md` §6) claims "live connector reads carry constraints in the
 tool args", and that is true of exactly one adapter. `top_n` is applied here
 instead, as a result cap, because it costs nothing and every source can honour
-it.
+it. The CALLS local leg (fireflies/zoom) honours the window too, since
+2026-08-15: it reads our own `call_index` table, where a date filter is one
+`where` clause — see `_windowed_calls_digest`.
 """
 from __future__ import annotations
 
@@ -326,13 +328,52 @@ def _local_github(enterprise_id: str, query: str, constraints: dict) -> str:
     return f"{len(hits)} open pull request(s) match:\n" + "\n".join(listed)
 
 
+#: Attendees listed on one call line before "+N more". A briefing can carry a
+#: dozen; the first several identify the room, and the rest cost prompt budget
+#: that the summary text uses better.
+_ATTENDEES_PER_CALL = 8
+
+
+def _attendees(participants: list) -> str:
+    """Attendees as 'with: a@x.com, b@y.com (+3 more)'.
+
+    Kept whole rather than reduced to a count: the question this answers is
+    "who was on it", and "5 participants" answers the arithmetic instead."""
+    names = [str(p).strip() for p in (participants or []) if str(p).strip()]
+    if not names:
+        return ""
+    shown = ", ".join(names[:_ATTENDEES_PER_CALL])
+    extra = len(names) - _ATTENDEES_PER_CALL
+    return f"with: {shown}" + (f" (+{extra} more)" if extra > 0 else "")
+
+
 def _local_calls(enterprise_id: str, query: str, constraints: dict) -> str:
     """Recorded calls from the INDEX — never the Fireflies/Zoom API.
 
-    A keyword miss reports the index size, and says explicitly what the index
-    does and does not hold: titles, dates and accounts, NOT transcripts. Without
-    that the model reads "no matching calls" as "nothing was said about this"."""
+    TWO MODES, decided by whether the plan carries a date window:
+
+    A window (`since`/`until`) renders the WHOLE window as a timeline digest —
+    true total, per-period counts with the external accounts spoken to, then
+    the newest calls that fit. Keyword-matching a window question is the
+    reported 2026-08-15 failure: "a table of how many customer calls I had
+    [each week]" matched no title, this leg answered "none of their titles
+    match this", and the model built its week-by-week table from KG signals
+    instead — which only ever hold the ~25 most recent meetings, so every
+    older week rendered as zero while the index held the whole history.
+    Counting is the INDEX's job, not the model's: the digest states the
+    counts so the answer cannot get them wrong.
+
+    No window keeps the keyword probe exactly as it was. A keyword miss
+    reports the index size, and says explicitly what the index does and does
+    not hold: titles, dates and accounts, NOT transcripts. Without that the
+    model reads "no matching calls" as "nothing was said about this"."""
     from app import call_index
+
+    window = _calls_window(constraints)
+    if window is not None:
+        digest = _windowed_calls_digest(enterprise_id, *window)
+        if digest:
+            return digest
 
     matches = call_index.resolve_calls(enterprise_id, query)
     if not matches:
@@ -342,16 +383,206 @@ def _local_calls(enterprise_id: str, query: str, constraints: dict) -> str:
         return (
             f"{total} recorded calls are indexed for this workspace, but none of "
             "their titles or accounts match this. That says nothing about what "
-            "was SAID on them — the index holds titles, dates and accounts, not "
-            "transcripts."
+            "was SAID on them — the index holds titles, dates, attendees and "
+            "accounts, not transcripts."
         )
     listed = [
         f"- {c.call_date or 'undated'} · {c.title or 'untitled'}"
         + (f" · {c.account}" if c.account else "")
+        # WHO WAS ON IT, and for how long. The index has stored both since it
+        # was built, and this leg dropped them — so an answer about a named
+        # call apologised that "names or titles of the attendees" were not
+        # available while the row listed all five email addresses and a
+        # 51-minute duration (reported 2026-08-15). Attendees are the single
+        # most-asked fact about a meeting after what was said.
+        + (f" · {_attendees(c.participants)}" if c.participants else "")
+        + (f" · {c.duration_min:.0f} min" if c.duration_min else "")
         + (f" · {c.summary}" if c.summary else "")
         for c in matches
     ]
     return f"{len(matches)} indexed call(s) match:\n" + "\n".join(listed)
+
+
+#: How many indexed rows a windowed digest reads. Far above any real window
+#: (the largest index today is ~522 rows TOTAL); if a window still overflows
+#: it, the digest says which end it covered rather than implying completeness.
+_WINDOW_SCAN_CAP = 1_000
+
+#: Week lines beyond which the digest rolls up by MONTH instead. A months-long
+#: window at one line per week would blow PER_SOURCE_CHARS and be truncated
+#: from the tail — which silently deletes the newest periods, the ones the
+#: question is usually about.
+_MAX_WEEK_LINES = 26
+
+#: Account names listed per period line before "+N more".
+_ACCOUNTS_PER_LINE = 6
+
+
+def _calls_window(constraints: dict) -> Optional[tuple]:
+    """The planner's window as aware datetimes, or None when it named none.
+
+    `since`/`until` arrive as bare ISO dates (`_gate_constraints` validated
+    them). `until` means "through that day", so it becomes end-of-day — the
+    index compares full timestamps and a midnight bound would drop every call
+    ON the closing date."""
+    from datetime import datetime, time as dtime, timezone
+
+    def _parse(key: str) -> Optional[Any]:
+        raw = constraints.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.strip())
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        if key == "until":
+            parsed = datetime.combine(
+                parsed.date(), dtime.max, tzinfo=parsed.tzinfo
+            )
+        return parsed
+
+    since, until = _parse("since"), _parse("until")
+    if since is None and until is None:
+        return None
+    return (since, until)
+
+
+def _windowed_calls_digest(enterprise_id: str, since, until) -> str:
+    """One window of the call index, rendered as counts the model can repeat.
+
+    Every period in the window is rendered, INCLUDING zero-call ones — a
+    missing line and a zero are different claims, and only the explicit zero
+    stops the model treating absence as "data not synced". Never raises to the
+    caller ("" falls through to the keyword probe): a digest that failed to
+    build must not eat the leg."""
+    from datetime import datetime, timedelta, timezone
+
+    from app import call_index
+
+    try:
+        calls = call_index.list_calls(
+            enterprise_id, since=since, until=until, limit=_WINDOW_SCAN_CAP
+        )
+        total = call_index.count_calls(enterprise_id, since=since, until=until)
+    except Exception:  # noqa: BLE001 — degrade to the keyword probe, never break
+        logger.warning(
+            "[planner] windowed call digest failed for %s", enterprise_id,
+            exc_info=True,
+        )
+        return ""
+
+    def _day(value) -> str:
+        return value.date().isoformat()
+
+    label_since = _day(since) if since else "the first indexed call"
+    label_until = _day(until) if until else "now"
+
+    if not calls:
+        # A zero WINDOW on a synced index is a fact — without it the leg would
+        # report "nothing recorded for this workspace" while hundreds of calls
+        # sit outside the window.
+        overall = call_index.count_calls(enterprise_id)
+        if not overall:
+            return ""
+        return (
+            f"0 recorded calls in the index between {label_since} and "
+            f"{label_until}. The workspace has {overall} indexed calls outside "
+            "this window, so the source is synced — this window is genuinely "
+            "empty."
+        )
+
+    dated = []
+    for c in calls:
+        parsed = call_index._parse_ts(c.call_date)
+        if parsed is not None:
+            dated.append((parsed, c))
+    dated.sort(key=lambda pair: pair[0])
+    if not dated:
+        # Rows exist but none carry a parseable date — no timeline to draw.
+        # Fall through to the keyword probe rather than claim an empty window.
+        return ""
+
+    start = (since or dated[0][0]).astimezone(timezone.utc)
+    end = (until or dated[-1][0]).astimezone(timezone.utc)
+
+    # Week lines (Monday-start), or month lines when the window is long enough
+    # that weeks would overflow the per-source budget.
+    week_start = (start - timedelta(days=start.weekday())).date()
+    weeks_in_window = ((end.date() - week_start).days // 7) + 1
+    by_month = weeks_in_window > _MAX_WEEK_LINES
+
+    def _bucket(day) -> str:
+        if by_month:
+            return day.strftime("%Y-%m")
+        monday = day - timedelta(days=day.weekday())
+        return monday.isoformat()
+
+    buckets: dict[str, list] = {}
+    for parsed, c in dated:
+        buckets.setdefault(_bucket(parsed.date()), []).append(c)
+
+    lines = []
+    cursor = week_start.replace(day=1) if by_month else week_start
+    while cursor <= end.date():
+        key = cursor.strftime("%Y-%m") if by_month else cursor.isoformat()
+        span = (
+            cursor.strftime("%B %Y") if by_month
+            else f"week of {cursor.isoformat()}"
+        )
+        in_bucket = buckets.get(key, [])
+        accounts: list[str] = []
+        for c in in_bucket:
+            if c.account and c.account not in accounts:
+                accounts.append(c.account)
+        line = f"- {span}: {len(in_bucket)} call(s)"
+        if accounts:
+            shown = ", ".join(accounts[:_ACCOUNTS_PER_LINE])
+            extra = len(accounts) - _ACCOUNTS_PER_LINE
+            line += f" — {shown}" + (f" (+{extra} more accounts)" if extra > 0 else "")
+        lines.append(line)
+        if by_month:
+            cursor = (cursor.replace(day=28) + timedelta(days=4)).replace(day=1)
+        else:
+            cursor += timedelta(days=7)
+
+    header_total = total if total is not None else len(calls)
+    header = (
+        f"{header_total} recorded calls in the index between {label_since} and "
+        f"{label_until}."
+    )
+    if len(calls) >= _WINDOW_SCAN_CAP and (total or 0) > len(calls):
+        header += (
+            f" The breakdown below covers the NEWEST {len(calls)} of them only."
+        )
+
+    parts = [header, "Per period, oldest first (external accounts when identified):"]
+    parts.extend(lines)
+
+    # The newest individual calls that still fit the per-source budget, so a
+    # follow-up half of the question ("group last week's by client") has real
+    # titles to work from — not just counts.
+    body_len = sum(len(p) + 1 for p in parts)
+    newest = []
+    for parsed, c in reversed(dated):
+        entry = (
+            f"- {_day(parsed)} · {c.title or 'untitled'}"
+            + (f" · {c.account}" if c.account else "")
+        )
+        if body_len + len(entry) > PER_SOURCE_CHARS - 200:
+            break
+        newest.append(entry)
+        body_len += len(entry) + 1
+    if newest:
+        parts.append(f"Newest {len(newest)} calls in the window:")
+        parts.extend(newest)
+
+    parts.append(
+        "Counts above are complete for the window; the index holds titles, "
+        "dates, attendees and accounts, not transcripts."
+    )
+    return "\n".join(parts)
 
 
 _LOCAL_RUNNERS: dict[str, Callable[[str, str, dict], str]] = {
@@ -416,6 +647,7 @@ def read_sources(
     query: str,
     constraints: Optional[dict] = None,
     budget_s: float = BUDGET_S,
+    local_only: bool = False,
 ) -> LiveReadResult:
     """Read every named provider live, in parallel, under one shared deadline.
 
@@ -423,6 +655,18 @@ def read_sources(
     company has connected. This function does NOT re-decide it; a provider with
     no live leg is reported as unreadable rather than dropped, because the
     planner named it and the user deserves to know it could not be reached.
+
+    `local_only` runs ONLY the legs served from our own storage (`_LOCAL_LEGS`)
+    and skips the networked fan-out entirely. That is the shape the
+    `LIVE_CONNECTOR_READS_ENABLED` stand-down actually wanted: its stated cost
+    is "up to 8s of third-party I/O per answer", which a Postgres SELECT does
+    not incur. Standing the local legs down with the live ones took the
+    already-synced call index off the answer path, so a question about calls
+    the sync had indexed since 2023 was answered from the KG's ~3-day signal
+    horizon instead — the 2026-08-15 "past calls are missing" report. A
+    provider with a networked leg is still NAMED as unread in this mode, for
+    the same honesty rule that governs a timeout: silently omitting it reads
+    as "there was nothing there".
 
     Never raises. A source that fails degrades to an unread entry; the whole
     read failing degrades to an empty result and a plain answer.
@@ -441,6 +685,21 @@ def read_sources(
     for provider in providers:
         leg = _LEGS.get(provider)
         if leg is not None:
+            if local_only:
+                # Named, not read — and SAID so, rather than dropped. The
+                # answer prompt renders unread sources with their reason, so
+                # the model can say "I didn't check Slack" instead of implying
+                # it looked and found nothing.
+                result.sources.append(SourceRead(
+                    key=provider,
+                    display_name=_display(provider),
+                    status=STATUS_NOT_READABLE,
+                    detail=(
+                        "was not read live for this answer — it is covered by "
+                        "the connector sync into the knowledge graph"
+                    ),
+                ))
+                continue
             runnable.append(leg)
             continue
         local_key = _LOCAL_LEGS.get(provider)

@@ -25,7 +25,17 @@ from app.kg_ingest.types import RawRecord
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
-_PAGE_LIMIT = 5          # pages per site — pilot-scale cap; bump when needed
+# Pages per site, 100 issues each. Was 5 — a "pilot-scale cap; bump when
+# needed", and 2026-08-16 is when it was needed: a tenant asking about work
+# older than its newest 500 issues got an answer built from a graph that had
+# never seen it, with nothing anywhere saying the history had been cut off.
+# Raising this is SAFE IN A WAY THE FIREFLIES CAP WAS NOT: Jira Cloud rate
+# limits per-second, not per-day, so 20 requests once per refresh cycle is far
+# from any ceiling — where Fireflies' DAILY quota was exhausted by exactly this
+# kind of per-cycle re-walk (see call_index.incremental_since). Cost per cycle
+# is API calls only; the ingest ledger dedups by content hash, so an issue that
+# has not changed is never extracted twice.
+_PAGE_LIMIT = 20
 _PAGE_SIZE = 100
 # Only the fields we render — keeps the payload small and the extractor focused.
 _FIELDS = "summary,description,status,priority,issuetype,project,labels,assignee,updated,created"

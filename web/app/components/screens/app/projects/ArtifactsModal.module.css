@@ -1,0 +1,197 @@
+/* ArtifactsModal — component-scoped styles (globals.css is never edited
+ * for this ticket, per BUILD.md §6 hot-file rule). Every value below
+ * resolves to an existing `web/app/globals.css` custom property except the
+ * artifact-type badge hexes, which live in `ArtifactsModal.tsx` (copied
+ * VERBATIM from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE`, not this file —
+ * same exception `ProjectDetailScreen.module.css` already documents). */
+
+.panel {
+  /* Fixed, standard modal size — does NOT grow/shrink with content. Both
+   * internal views (Artifacts list ⇆ Add artifact) share this one shell, so
+   * switching between them never resizes the dialog. Shrinks only on short
+   * viewports (the max-height cap). */
+  height: 720px;
+  max-height: calc(100vh - 96px);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Keeps the relocated "Add existing artifact" trigger seated next to the
+ * close button as one group, so the header's existing space-between still
+ * reads as two clusters (title block / actions) instead of three items
+ * spread evenly across the row. Layout-only — no new color/token. */
+.headActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.panel :global(.modal-body) {
+  /* Fill the fixed-height panel and scroll internally on overflow, so the
+   * outer dialog size stays constant regardless of how many artifacts. */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* Add-artifact view header left cluster: "← Back" + the title block. */
+.addHead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Icon-only back control in the Add-artifact view header — returns to the
+ * list view within the SAME modal (no close/reopen). Mirrors the top-bar
+ * "← All projects" back button's ghost treatment (ink-2 → accent-ink on
+ * hover, focus ring) so the back affordance reads the same product-wide.
+ * Token-only. */
+.backBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  color: var(--ink-2);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color 0.12s;
+}
+
+.backBtn:hover {
+  color: var(--accent-ink);
+}
+
+.backBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-3);
+}
+
+.stateWrap {
+  padding: 24px 4px;
+  font-size: 13px;
+  color: var(--ink-3);
+  text-align: center;
+}
+
+/* ── Filter chips ── */
+
+.chips {
+  display: flex;
+  gap: 8px;
+  margin: 2px 0 16px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 13px;
+  border-radius: 16px;
+  cursor: pointer;
+  white-space: nowrap;
+  border: 1px solid var(--line-strong);
+  background: var(--surface-2);
+  color: var(--ink-2);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.chip:hover {
+  border-color: var(--ink-4);
+}
+
+.chipOn {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+.chipN {
+  font-size: 10.5px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.chip:not(.chipOn) .chipN {
+  color: var(--ink-4);
+}
+
+/* ── Artifact list (full-width; the fixed-height modal body scrolls) ── */
+
+.list {
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+
+.row:hover {
+  background: var(--surface-3);
+}
+
+.icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.rowMain {
+  flex: 1;
+  min-width: 0;
+}
+
+.rowTitle {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.rowSrc {
+  font-size: 11.5px;
+  color: var(--ink-3);
+}

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useGuestSession } from "../../context/GuestSessionContext"
@@ -12,18 +12,32 @@ import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { HtmlReportView } from "./HtmlReportView"
 import { useCpanelPhase } from "./useCpanelPhase"
 import { EmptyPane } from "./EmptyPane"
+
+// LAZY, and deliberately so. DocumentTab mounts the rich-text editor, which
+// pulls ProseMirror in behind it. A static import here would put that whole
+// dependency in the bundle of every screen that renders the panel — including
+// the overwhelming majority of chats that never write a document — and would
+// force every existing ContentPanel test to resolve TipTap just to render a
+// tab bar. Loaded when the tab is actually opened.
+const DocumentTab = lazy(() =>
+  import("./DocumentTab").then((m) => ({ default: m.DocumentTab })),
+)
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { useRouter } from "next/navigation"
 import {
-  ApiError, storiesApi, ticketSetsApi,
-  type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketLifecycle, type TicketStub,
-  type TicketSyncState, type TrackerMeta, type TrackerProvider,
+  ApiError, artifactTemplatesApi, storiesApi, ticketSetsApi,
+  type ArtifactTemplate, type ClickUpList, type ClickUpTicketState,
+  type GeneratedStory, type JiraProject, type TicketLifecycle,
+  type TicketStub, type TicketSyncState, type TrackerMeta,
+  type TrackerProvider,
 } from "../../lib/api"
-import { runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
-import { PrdPanelContent } from "./PrdPanelContent"
+import { ConfirmDialog } from "./ConfirmDialog"
+import { builtinFormatName } from "../../lib/compileNotes"
+import { followTicketSetSwitch, runTicketSetGeneration } from "../../lib/runTicketSetGeneration"
+import { PrdPanelContent, type PrdPanelContentProps } from "./PrdPanelContent"
+import { ProjectPanelSection } from "../screens/app/projects/ProjectPanelSection"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { EVIDENCE_GEN, STANDALONE_TICKET_GEN, TICKET_GEN } from "./generationPhases"
 import { ReportsTab } from "./ReportsTab"
@@ -35,6 +49,7 @@ import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
   IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar, IconLink,
+  IconFolder,
 } from "@tabler/icons-react"
 import { downloadPrdPdf, slugifyTitle } from "../../lib/prdExport"
 import { buildCombinedHtml } from "../../lib/combinedExport"
@@ -58,6 +73,10 @@ const TABS = [
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
   { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
+  // A team document written from this chat ("draft a leadership update"). Same
+  // posture as Reports and for the same reason — it hangs off the THREAD, not
+  // off the PRD — so it sits last and is hidden until one exists.
+  { icon: <IconFileText size={11.5}/> , id: "document", label: "Document" },
 ] as const
 
 // The key is versioned because the bounds below moved: widths stored under the
@@ -306,10 +325,42 @@ function useResolvePrd() {
   return { meta, resolving, resolve }
 }
 
-export function ContentPanel() {
-  const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
+export type ContentPanelProps = {
+  /** Context-optional overrides forwarded verbatim to the PRD tab's
+   *  `PrdPanelContent` (see its own doc for the override contract — prop
+   *  provided → used instead of context; prop absent → context, unchanged).
+   *  Every OTHER tab (Evidence / Tickets / Reports / Document) and the
+   *  panel's own chrome (tab bar, resize, header Share menu) stay bound to
+   *  the workspace-root context; this is additive, main-chat's own render
+   *  (`<ContentPanel />`, no props) is byte-identical to before. */
+  prdPanelOverrides?: Omit<PrdPanelContentProps, "evidenceTabAvailable">
+}
+
+export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
+  const {
+    contentPanelTab, openContentPanel, closeContentPanel, showToast,
+    setPendingDocumentQuote,
+  } = useNavigation()
   const guestSession = useGuestSession()
   const { content } = useContent()
+
+  // ── Project section toggle (strictly additive entry-flow reshape) ───────────
+  // When the open panel belongs to a main-chat PRD that silently forked a
+  // project (`content.activeProjectId != null`), the header shows a project-menu
+  // icon that flips the panel BODY between the artifact tabs and an in-panel
+  // project section (invite / memory / members). It is LOCAL state, not a
+  // NavigationContext tab, deliberately: a nav tab would be auto-closed on every
+  // route change (NavigationContext), and the project view is mutually exclusive
+  // with the artifact view within the ONE open panel — clicking any artifact tab
+  // flips it back off. When no project is bound the icon is hidden and this state
+  // is inert, so the panel renders byte-identical to before.
+  const [projectSectionOpen, setProjectSectionOpen] = useState(false)
+  const hasActiveProject = content.activeProjectId != null
+  useEffect(() => {
+    // A thread with no bound project can never show the project section — reset
+    // so a stale open-state can't survive a thread-switch onto an unbound chat.
+    if (!hasActiveProject && projectSectionOpen) setProjectSectionOpen(false)
+  }, [hasActiveProject, projectSectionOpen])
 
   const { mounted, phase } = useCpanelPhase(contentPanelTab != null)
 
@@ -394,6 +445,9 @@ export function ContentPanel() {
     // asked for.
     tickets: !pipelineInScope && !standaloneSet,
     reports: reportsHidden,
+    // Hidden until this thread has written one. A tab that is always present
+    // but usually empty teaches people to ignore it.
+    document: content.documentId == null,
   }
   // The tab currently being shown is never pulled out from under the reader —
   // whatever is in the body must stay reachable in the bar above it. Evidence is
@@ -412,6 +466,9 @@ export function ContentPanel() {
   // never kick off a generation nobody asked for.
   const { resolve: resolvePrd } = useResolvePrd()
   const handleTabClick = useCallback((id: (typeof TABS)[number]["id"]) => {
+    // Artifact and project views are mutually exclusive within the one open
+    // panel — choosing an artifact tab returns the body to the artifacts.
+    setProjectSectionOpen(false)
     openContentPanel(id)
     if (id === "prd" && !content.prd && !content.prdGenerating) void resolvePrd()
   }, [openContentPanel, content.prd, content.prdGenerating, resolvePrd])
@@ -616,6 +673,11 @@ export function ContentPanel() {
             <span className="cpanel-main-name">
               {activeTab === "reports"
                 ? "Reports"
+                // Same rule, one tab over: a leadership update is not a PRD,
+                // and letting the line fall through to the literal "PRD" put
+                // the wrong document's name over the right one's body.
+                : activeTab === "document"
+                  ? "Document"
                 // A standalone set has no PRD to name, and naming one anyway
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
@@ -629,13 +691,33 @@ export function ContentPanel() {
                 meaning on Reports — a report carries its OWN share/PDF actions,
                 on the open document (ReportsTab). Force-disabled in guest mode —
                 a guest has no edit/export entitlement (AC15). */}
-            {activeTab !== "reports" && (
+            {/* Document is excluded for the same reason as Reports: this menu
+                exports the Evidence + PRD pair, which has nothing to do with a
+                team document — and on a thread with no PRD it would export
+                nothing at all. */}
+            {activeTab !== "reports" && activeTab !== "document" && (
               <ShareMenu
                 prd={actionablePrd}
                 evidence={content.evidence}
                 onToast={showToast}
                 disabledReason={guestSession ? "Sign in to a full workspace to share" : undefined}
               />
+            )}
+            {/* Project menu — present ONLY when this panel's PRD forked a project
+                (main-chat entry flow). Toggles the panel body between the
+                artifact tabs and the in-panel project section. Hidden entirely
+                otherwise, so a non-project panel is byte-identical to before. */}
+            {hasActiveProject && (
+              <button
+                type="button"
+                className={`cpanel-close${projectSectionOpen ? " cpanel-tab--active" : ""}`}
+                onClick={() => setProjectSectionOpen((v) => !v)}
+                aria-label={projectSectionOpen ? "Back to document" : "Project"}
+                aria-pressed={projectSectionOpen}
+                title="Project"
+              >
+                <IconFolder size={16} />
+              </button>
             )}
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
@@ -644,11 +726,34 @@ export function ContentPanel() {
         </div>
 
         <div className="cpanel-body">
+          {projectSectionOpen && content.activeProjectId != null ? (
+            <ProjectPanelSection projectId={content.activeProjectId} />
+          ) : (
+          <>
           {activeTab === "evidence" && <EvidenceTab />}
-          {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
+          {activeTab === "prd" && (
+            <PrdPanelContent evidenceTabAvailable={!evidenceHidden} {...prdPanelOverrides} />
+          )}
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
             <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
+          {activeTab === "document" && content.documentId != null && (
+            <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading document…</div>}>
+              {/* Keyed on the id: a second "draft a …" in the same thread
+                  swaps this prop, and every ref in that component (the base
+                  version, the user's unsaved text, the dirty flag) belongs to
+                  the document it was mounted for. Remounting is the only way
+                  none of it leaks into the next one. */}
+              <DocumentTab
+                key={content.documentId}
+                documentId={content.documentId}
+                onQuote={(excerpt) =>
+                  setPendingDocumentQuote({ documentId: content.documentId!, excerpt })}
+              />
+            </Suspense>
+          )}
+          </>
           )}
         </div>
 
@@ -659,14 +764,17 @@ export function ContentPanel() {
             mutation/generation triggers (Generate PRD, Generate Prototype) a
             read-only guest is never entitled to fire. */}
         {activeTab === "evidence" && !guestSession && <EvidenceBottomBar />}
-        {/* The Tickets bar launches the PROTOTYPE, which is generated from a
-            PRD. A standalone ticket set has none and never will, so the bar is
-            withheld entirely rather than rendered with a permanently disabled
-            button — a control that can never be used is worse than no control.
-            Deliberately keyed on the SET, not on "no PRD in scope": a tickets
-            tab whose PRD was cleared by evidenceOpenScopePatch keeps its
-            disabled CTA (that pipeline can still get a PRD; this one cannot). */}
-        {activeTab === "tickets" && !guestSession && !standaloneSet && <TicketsBottomBar />}
+        {/* The Tickets bar carries the Format control (which ticket format
+            these tickets render in, and the in-place switch — the PRD footer's
+            twin) plus, for PRD-backed tabs only, the prototype CTA. A
+            standalone set gets the bar too now — its tickets have a format to
+            see and switch — but never the prototype button: a set has no PRD
+            and never will, and a control that can never be used is worse than
+            no control. Deliberately keyed on the SET, not on "no PRD in
+            scope": a tickets tab whose PRD was cleared by
+            evidenceOpenScopePatch keeps its disabled CTA (that pipeline can
+            still get a PRD; this one cannot). */}
+        {activeTab === "tickets" && !guestSession && <TicketsBottomBar />}
       </aside>
     </>
   )
@@ -704,49 +812,400 @@ function EvidenceBottomBar() {
   )
 }
 
-// ── Fixed bottom bar: Tickets tab → Generate / View Prototype ─────────────────
-// The Tickets tab's next pipeline step is the prototype, driven by the canonical
-// GeneratePrototypeCTA (the only sanctioned generate/view-prototype trigger). A
-// Tickets tab always has a PRD in scope, so the button is never disabled here.
+// ── Fixed bottom bar: Tickets tab → Format control + Generate / View Prototype ─
+// Two affordances, mirroring the PRD tab's own footer:
+//   * the FORMAT control — which uploaded ticket format these tickets render
+//     in, with an in-place switch (POST /v1/stories/change-template). Works on
+//     both a PRD's persisted tickets and a standalone chat-born set; the
+//     switch is a re-LAYOUT, so ticket identities, edits and tracker mappings
+//     all survive it (see the backend route's docstring).
+//   * the prototype CTA (PRD-backed tabs only) — the next pipeline step,
+//     driven by the canonical GeneratePrototypeCTA.
 function TicketsBottomBar() {
-  const { content } = useContent()
+  const { showToast } = useNavigation()
+  const { content, setContent } = useContent()
   // TicketsBottomBar only ever renders under activeTab === "tickets" (see
   // ContentPanel's conditional render below), so the literal tab is correct,
   // not an assumption.
+  const ticketSet = content.ticketSet ?? null
+  const standaloneSet = !!ticketSet || !!content.ticketSetGenerating
   const scopedPrd = prdInScopeFor(content, "tickets")
   const prdId = scopedPrd?.prd_id ?? null
-  return (
-    <div className="cpanel-bottom-bar">
-      <GeneratePrototypeCTA
-        prdId={prdId}
-        figmaFileKey={scopedPrd?.figma_file_key ?? null}
-        prdTitle={scopedPrd?.title}
-        // The PRD's own :::design platform_hint (already parsed into the
-        // sections in scope here) seeds the generate panel's platform
-        // default; the toggle still overrides. Optional-chained: a PRD
-        // hydrated without parsed sections (e.g. a bare record) simply
-        // yields no hint.
-        platformHint={
-          scopedPrd?.sections?.find(
-            (s): s is PrdDesignBlock => s.type === "prd-design",
-          )?.platformHint ?? null
+
+  // ── the Format control (the PRD footer's twin) ────────────────────────────
+  // Which format rendered the tickets on screen. null id = Sprntly's built-in;
+  // the whole value null = not known yet (hydrating below). `ready` gates the
+  // control: a set still generating (or a PRD with no tickets yet) has nothing
+  // to re-format, so the toggle is withheld rather than armed to 409.
+  const [currentFormat, setCurrentFormat] = useState<{ id: string | null; name: string | null } | null>(null)
+  const [ticketsReady, setTicketsReady] = useState(false)
+  const [showFormats, setShowFormats] = useState(false)
+  // null = not fetched yet (lazy on first open, like the PRD picker).
+  const [formats, setFormats] = useState<ArtifactTemplate[] | null>(null)
+  const [formatsError, setFormatsError] = useState(false)
+  const [confirmTarget, setConfirmTarget] = useState<{ id: string | null; name: string } | null>(null)
+  const [switching, setSwitching] = useState(false)
+  // A background format switch running over a PRD's tickets, as the poll below
+  // reads it off the row. The standalone path keeps the same state on its own
+  // slice (`ticketSet.relaying`) because that slice IS what the tab renders.
+  const [relayingInto, setRelayingInto] = useState<{ name: string | null } | null>(null)
+  // Bumped when this panel schedules a switch, to restart the poll below — it
+  // stops itself once there is nothing to watch, so without this a switch
+  // started from here would not be followed until something else re-ran it.
+  const [switchNonce, setSwitchNonce] = useState(0)
+  // True between scheduling a switch and announcing that it landed. A ref, so
+  // the knowledge survives the poll effect being torn down and rebuilt by that
+  // very bump — and so a re-lay quick enough to finish before the first probe
+  // still gets its re-read and its toast.
+  const pendingSwitchRef = useRef(false)
+  const formatToggleRef = useRef<HTMLButtonElement>(null)
+  // What to do when a switch lands, read through a ref by the poll below.
+  //
+  // NOT a dependency of that effect, deliberately: `setContent`/`showToast`
+  // come from providers, and any provider handing back a fresh callback
+  // identity per render turns an effect that depends on them into one that
+  // re-subscribes on every render — and this effect sets state, so that is an
+  // infinite render loop, not a slow one.
+  const onSwitchLanded = useRef<(name: string | null) => void>(() => {})
+  onSwitchLanded.current = (name: string | null) => {
+    // Re-read the tab's stories: the re-laid set is persisted and
+    // `content_hash` is untouched, so this serves the fresh cache with no LLM
+    // call and never a regeneration.
+    setContent({ ticketsRefreshNonce: Date.now() })
+    showToast(
+      "Format switched",
+      `These tickets now use ${name || builtinFormatName("tickets")}.`,
+    )
+  }
+  const relaying = standaloneSet ? !!ticketSet?.relaying : relayingInto !== null
+  const relayingName = standaloneSet
+    ? (ticketSet?.relayingIntoName ?? null)
+    : (relayingInto?.name ?? null)
+
+  useEffect(() => {
+    // Hydrate the label + readiness. A standalone set carries its own stamp on
+    // the slice (loadTicketSet/settle read it back with the row); a PRD's
+    // tickets carry it on the cache read. `ticketsRefreshNonce` re-runs this
+    // after an in-place switch so the label tracks the persisted truth.
+    if (standaloneSet) {
+      setCurrentFormat(ticketSet ? {
+        id: ticketSet.artifactTemplateId ?? null,
+        name: ticketSet.artifactTemplateName ?? null,
+      } : null)
+      setTicketsReady(
+        ticketSet?.status === "ready" && (ticketSet?.stories?.length ?? 0) > 0,
+      )
+      return
+    }
+    if (prdId == null) {
+      setCurrentFormat(null)
+      setTicketsReady(false)
+      setRelayingInto(null)
+      return
+    }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    // Whether a switch is outstanding, so the landing is announced exactly
+    // once. Seeded from the ref: this panel may have just scheduled one.
+    let sawSwitch = pendingSwitchRef.current
+    const probe = async () => {
+      try {
+        const cache = await storiesApi.getForPrd(prdId)
+        if (cancelled) return
+        setCurrentFormat({
+          id: cache.artifact_template_id ?? null,
+          name: cache.artifact_template_name ?? null,
+        })
+        const ready = cache.status === "ready" && cache.stories.length > 0
+        setTicketsReady(ready)
+
+        // A background format switch (this client's or another's — the row is
+        // the truth, so a switch started in one tab is reported in every one).
+        const isRelaying = !!cache.relaying
+        setRelayingInto(isRelaying ? { name: cache.relaying_into_name ?? null } : null)
+        if (sawSwitch && !isRelaying) {
+          sawSwitch = false
+          pendingSwitchRef.current = false
+          onSwitchLanded.current(cache.artifact_template_name ?? null)
         }
-        // Safe: the panel shows ONE current PRD at a time, so the unscoped
-        // da:generating signal can't mislabel a different PRD's run.
-        listenForCrossSurfaceGenerating
-        render={({ label, onClick, disabled }) => (
+        if (isRelaying) sawSwitch = true
+
+        // Keep probing while the tab beside us is (re)generating this set, or
+        // while a switch is re-laying it — so the Format control and the strip
+        // both track the row instead of a snapshot taken at mount. The loop
+        // stops itself when there is nothing left to watch, and on unmount; it
+        // never generates.
+        if (!ready || isRelaying) timer = setTimeout(() => { void probe() }, 2500)
+      } catch { /* label stays hidden — the tab itself reports the real error */ }
+    }
+    void probe()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [standaloneSet, ticketSet, prdId, content.ticketsRefreshNonce, switchNonce])
+
+  // Escape closes the picker and hands focus back to the toggle (the confirm
+  // dialog handles its own) — same keyboard contract as the PRD picker.
+  useEffect(() => {
+    if (!showFormats || confirmTarget) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowFormats(false)
+        formatToggleRef.current?.focus()
+      }
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [showFormats, confirmTarget])
+
+  const loadFormats = useCallback(async () => {
+    setFormatsError(false)
+    try {
+      const rows = await artifactTemplatesApi.list("tickets")
+      // Active-or-ready only — same offer the generate path can honour.
+      setFormats(rows.templates.filter((r) => r.is_active || r.compile_status === "ready"))
+    } catch {
+      setFormatsError(true)
+    }
+  }, [])
+
+  const toggleFormats = useCallback(async () => {
+    const opening = !showFormats
+    setShowFormats(opening)
+    if (opening && formats === null) await loadFormats()
+  }, [showFormats, formats, loadFormats])
+
+  const confirmSwitch = useCallback(async () => {
+    const target = confirmTarget
+    if (!target) return
+    const apiTarget = standaloneSet && ticketSet
+      ? { ticketSetId: ticketSet.id }
+      : prdId != null ? { prdId } : null
+    if (!apiTarget) return
+    setSwitching(true)
+    try {
+      // Resolves as soon as the switch is SCHEDULED, not when it lands. The
+      // dialog closes on that — the re-lay is the server's job now, and it
+      // finishes whether this panel is open, on another tab, or closed.
+      const res = await storiesApi.changeTemplate(apiTarget, target.id)
+      setSwitching(false)
+      setConfirmTarget(null)
+      setShowFormats(false)
+      if (res.unchanged) return
+
+      // The label deliberately does NOT move yet: the tickets on screen are
+      // still the old format's, and naming the new one over them would be a
+      // lie for as long as the re-lay takes. The strip says what is happening;
+      // the label follows the row when it lands.
+      if (standaloneSet && ticketSet) {
+        void followTicketSetSwitch(ticketSet.id, setContent, ticketSet, target.name)
+          .then((landed) => {
+            if (landed) {
+              showToast("Format switched", `These tickets now use ${target.name}.`)
+            }
+          })
+      } else {
+        // The PRD path is followed by the poll above, which owns the re-read
+        // and the completion toast — that is also what makes a switch started
+        // in ANOTHER tab announce itself here. Show the strip immediately
+        // rather than a poll interval later, and restart that poll, which has
+        // nothing left to watch by now and has stopped.
+        pendingSwitchRef.current = true
+        setRelayingInto({ name: target.name })
+        setSwitchNonce((n) => n + 1)
+      }
+      showToast(
+        "Switching format",
+        `Re-laying these tickets into ${target.name}. You can carry on — this finishes on its own.`,
+      )
+    } catch {
+      setSwitching(false)
+      setConfirmTarget(null)
+      showToast("Couldn't switch the format", "The tickets are unchanged — try again in a moment.")
+    }
+  }, [confirmTarget, standaloneSet, ticketSet, prdId, setContent, showToast])
+
+  return (
+    <>
+      {/* A format switch running in the background. Sits ABOVE the tickets
+          rather than over them: the set on screen is the previous format's and
+          stays readable, pushable and editable for the whole re-lay — this
+          reports work, it does not block the surface. Says so explicitly,
+          because the whole point of moving the switch off the request is that
+          the user can leave. */}
+      {relaying && (
+        <div
+          data-testid="tickets-relaying-strip"
+          role="status"
+          style={{ margin: "0 24px 12px", padding: "10px 14px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface-2)", display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "var(--ink-2)", flexShrink: 0 }}
+        >
+          <span className="tickets-relaying-spinner" aria-hidden="true" />
+          <span>
+            Re-laying these tickets into{" "}
+            <strong style={{ color: "var(--ink)" }}>
+              {relayingName || builtinFormatName("tickets")}
+            </strong>
+            . You can close this or carry on — it finishes on its own.
+          </span>
+        </div>
+      )}
+
+      {/* Format picker — expands ABOVE the pinned bar, like the PRD panel's. */}
+      {showFormats && (
+        <div id="tickets-format-picker" style={{ margin: "0 24px 12px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden", flexShrink: 0 }}>
+          <div style={{ padding: "10px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)", fontSize: 12, fontWeight: 600, color: "var(--ink-2)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <span>Format</span>
+            {formats !== null && !formatsError && (
+              <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>{formats.length + 1} format{formats.length !== 0 ? "s" : ""}</span>
+            )}
+          </div>
+          {formatsError ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>
+              We couldn&apos;t load your formats. Check your connection and try again.{" "}
+              <button type="button" onClick={() => { void loadFormats() }} style={{ border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12, fontWeight: 600, padding: 0 }}>Try again</button>
+            </div>
+          ) : formats === null ? (
+            <div style={{ padding: "20px 16px", textAlign: "center", fontSize: 12, color: "var(--ink-4)" }}>Loading formats…</div>
+          ) : (
+            <>
+              <div style={{ maxHeight: 260, overflowY: "auto" }}>
+                {[
+                  { id: null as string | null, name: builtinFormatName("tickets"), builtin: true },
+                  ...formats.map((f) => ({ id: f.id as string | null, name: f.name || "(untitled)", builtin: false })),
+                ].map((row) => {
+                  const rowStyle = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 16px", borderBottom: "1px solid var(--line)", fontSize: 12.5 } as const
+                  const actionStyle = { fontSize: 11, padding: "4px 10px", borderRadius: 6, border: "1px solid var(--line)", background: "var(--surface)", cursor: "pointer", color: "var(--accent)", fontWeight: 600, flexShrink: 0 } as const
+                  const isCurrent = (currentFormat?.id ?? null) === row.id
+                  return (
+                    <div key={row.id ?? "builtin"} style={rowStyle}>
+                      <div style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontWeight: 500, color: "var(--ink)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={row.name}>{row.name}</span>
+                        {row.builtin && <span className="tag tag-impact" style={{ flexShrink: 0 }}>built-in</span>}
+                      </div>
+                      {isCurrent
+                        ? <span style={{ fontSize: 11, color: "var(--ink-4)", fontWeight: 600, flexShrink: 0 }}>Current</span>
+                        : relaying
+                          // Replaced by the reason, never left as a dead
+                          // button: the backend 409s a second switch (the two
+                          // would race each other's write), so offering one
+                          // would be offering a refusal.
+                          ? <span style={{ fontSize: 11, color: "var(--ink-4)", flexShrink: 0 }}>Switch in progress</span>
+                          : (
+                          <button
+                            type="button"
+                            id={`tickets-format-use-${row.id ?? "builtin"}`}
+                            onClick={() => setConfirmTarget({ id: row.id, name: row.name })}
+                            style={actionStyle}
+                          >
+                            Use this format
+                          </button>
+                        )}
+                    </div>
+                  )
+                })}
+                {formats.length === 0 && (
+                  <div style={{ padding: "10px 16px", fontSize: 12, color: "var(--ink-4)" }}>
+                    No ticket formats uploaded yet — add one on the Templates screen.
+                  </div>
+                )}
+              </div>
+              {/* Pre-answers the question before the confirm restates it. */}
+              <div style={{ padding: "8px 16px", fontSize: 11, color: "var(--ink-4)", borderTop: "1px solid var(--line)" }}>
+                Switching re-lays every ticket into the new sections. Content, edits and tracker links are kept.
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      <div className="cpanel-bottom-bar">
+        {/* Which format these tickets are written in, and the switch. Withheld
+            (not disabled) until the tickets are ready — a generating set has
+            nothing to re-format yet. */}
+        {ticketsReady && (
           <button
             type="button"
-            className="btn btn-primary btn-sm cpanel-next-btn"
-            data-testid="tickets-footer-prototype-cta"
-            disabled={disabled || prdId == null}
-            onClick={onClick}
+            ref={formatToggleRef}
+            className="btn btn-ghost btn-sm"
+            data-testid="tickets-format-toggle"
+            aria-expanded={showFormats}
+            aria-controls="tickets-format-picker"
+            onClick={() => { void toggleFormats() }}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4, marginRight: "auto" }}
+            title={currentFormat?.id != null && currentFormat.name ? `Format: ${currentFormat.name}` : undefined}
           >
-            {label}
+            {(() => {
+              // Names the format the tickets are ACTUALLY in. During a switch
+              // that is still the old one — the label follows the row, not the
+              // request, so it can never name a format nothing on screen uses.
+              const name = currentFormat === null
+                ? "…"
+                : currentFormat.id === null
+                  ? "Sprntly built-in"
+                  : (currentFormat.name || "Custom format")
+              const clamped = name.length > 24 ? `${name.slice(0, 24).trimEnd()}…` : name
+              return relaying ? `Format: ${clamped} — switching…` : `Format: ${clamped}`
+            })()}
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showFormats ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+              <path d="M5 7L1 3h8z" />
+            </svg>
           </button>
         )}
+        {/* The prototype is generated from a PRD — a standalone set has none
+            and never will, so the CTA is withheld entirely there. */}
+        {!standaloneSet && (
+          <GeneratePrototypeCTA
+            prdId={prdId}
+            figmaFileKey={scopedPrd?.figma_file_key ?? null}
+            prdTitle={scopedPrd?.title}
+            // The PRD's own :::design platform_hint (already parsed into the
+            // sections in scope here) seeds the generate panel's platform
+            // default; the toggle still overrides. Optional-chained: a PRD
+            // hydrated without parsed sections (e.g. a bare record) simply
+            // yields no hint.
+            platformHint={
+              scopedPrd?.sections?.find(
+                (s): s is PrdDesignBlock => s.type === "prd-design",
+              )?.platformHint ?? null
+            }
+            // Safe: the panel shows ONE current PRD at a time, so the unscoped
+            // da:generating signal can't mislabel a different PRD's run.
+            listenForCrossSurfaceGenerating
+            render={({ label, onClick, disabled }) => (
+              <button
+                type="button"
+                className="btn btn-primary btn-sm cpanel-next-btn"
+                data-testid="tickets-footer-prototype-cta"
+                disabled={disabled || prdId == null}
+                onClick={onClick}
+              >
+                {label}
+              </button>
+            )}
+          />
+        )}
+      </div>
+
+      {/* The switch's confirm — reversible (switch back any time), so
+          tone="default"; danger-red stays reserved for destruction. */}
+      <ConfirmDialog
+        open={!!confirmTarget}
+        title={confirmTarget?.id === null
+          ? "Re-lay these tickets in Sprntly's built-in format?"
+          : `Re-lay these tickets in “${confirmTarget?.name ?? ""}”?`}
+        body="Sprntly re-arranges each ticket's description into that format's sections — the content stays, and edits, comments and tracker links all keep pointing at the same tickets. Switch back at any time."
+        confirmLabel="Use this format"
+        busyLabel="Switching…"
+        busy={switching}
+        onConfirm={() => { void confirmSwitch() }}
+        onCancel={() => {
+          if (switching) return
+          setConfirmTarget(null)
+          setTimeout(() => formatToggleRef.current?.focus(), 0)
+        }}
       />
-    </div>
+    </>
   )
 }
 
@@ -1372,7 +1831,11 @@ export function TicketsTab() {
       if (timer) clearTimeout(timer)
     }
   }, [prdId, regenNonce, guestSession, content.guestTickets,
-      content.ticketSet, content.ticketSetGenerating])
+      content.ticketSet, content.ticketSetGenerating,
+      // Bumped by the Format control after an in-place switch: re-read the
+      // persisted (re-laid) set. content_hash is untouched by a switch, so
+      // this serves the fresh cache — no LLM call.
+      content.ticketsRefreshNonce])
 
   // ── Sync state: load per PRD, poll while a sync runs ─────────────────────
   // True while a push/registration flow is mid-flight (destination chosen but

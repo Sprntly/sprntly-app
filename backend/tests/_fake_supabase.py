@@ -101,15 +101,15 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks", "custom_fields"},
-    "prd_tickets":       {"stories"},
+    "prd_tickets":       {"stories", "relayout"},
     # Standalone ticket sets carry the same `stories` payload shape as
     # prd_tickets — the whole point of the second home.
-    "ticket_sets":       {"stories"},
+    "ticket_sets":       {"stories", "relayout"},
     "call_transcripts":  {"payload"},
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
-    "conversation_turns":  {"attachments"},
+    "conversation_turns":  {"attachments", "reply"},
     # text[] + vector(1536) — JSON-encoded in the mirror.
     "document_catalog":    {"topics", "embedding"},
     "design_agent_map_cache": {"payload"},
@@ -129,6 +129,8 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "ideation_items":       {"shortlisted"},
     "kg_signal":            {"evidence_eligible"},
     "artifact_templates":   {"is_active"},
+    "project_memory_summary": {"stale"},
+    "delegation_followups": {"muted"},
 }
 
 

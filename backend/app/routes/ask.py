@@ -4,6 +4,7 @@ import logging
 import random
 import sys
 import time
+import uuid
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
@@ -17,6 +18,7 @@ from app.auth import (  # noqa: F401 — require_company re-exported for tests' 
     require_workspace,
     require_workspace_from_query,
 )
+from app import llm_errors
 from app.graph import token_stream
 from app.ingest import convert
 from app.db import (
@@ -33,6 +35,11 @@ from app.deps.ownership import (
 )
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
+from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE
+# The SAME structured-attachment model the persisted `conversation_turns`
+# read/write path uses (routes/conversations.py) — reused here so the /v1/ask
+# project branch persists attachments in the exact shape `_load_history` folds.
+from app.routes.conversations import TurnAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +133,12 @@ class AskIn(BaseModel):
     # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
     # tickets, prototype). Ownership-gated in the route.
     prd_id: int | None = Field(default=None, ge=1)
+    # Optional individual project chat: when set, the caller's project
+    # memory (summary + top-N entries) and job_role are folded into this
+    # turn's context. Membership-gated in the route — a foreign-tenant
+    # project 404s, a same-tenant non-member 403s. Omitted: `/v1/ask`
+    # behaves exactly as it does today (no project block).
+    project_id: int | None = Field(default=None, ge=1)
     # Standalone-artifact grounding, same idea for the tabs that hold an
     # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
     # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
@@ -134,6 +147,21 @@ class AskIn(BaseModel):
     # PRD tab's context already carries its evidence and tickets.
     evidence_id: int | None = Field(default=None, ge=1)
     ticket_set_id: int | None = Field(default=None, ge=1)
+    # Individual-project-chat send identity: the idempotency key a
+    # retry/double-submit carries for the persisted `conversation_turns`
+    # user turn (project branch only — ignored on the main/PRD/artifact
+    # branches, which don't persist a turn here). Client-issued when the
+    # sender's engine mints one; the route mints a server uuid4 when absent
+    # so persistence is never skipped for an older client.
+    client_message_id: str | None = None
+    # Structured attachments (project branch only): the resolved attachment
+    # texts riding this individual-chat send. Persisted onto the user turn's
+    # `conversation_turns.attachments` column (so a reloaded thread shows the
+    # chip) and folded into the question the ANSWER sees — mirroring how
+    # `_load_history` folds a PRIOR turn's attachments. Ignored on the
+    # main/PRD/artifact branches (which never persist a turn here). The clamp
+    # matches main's composer ceiling.
+    attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
 
     # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
     # NUL; this one stops one ARRIVING — the client inlines attachment text it
@@ -300,6 +328,23 @@ async def ask(
         if get_set(company.company_id, body.ticket_set_id) is None:
             raise HTTPException(404, "Ticket set not found")
 
+    # Individual project chat (AD-P2/AD-P8/AD-P11): the project must belong
+    # to the caller's company/workspace (404 on a foreign-tenant id, same
+    # non-disclosure posture as the dataset/prd gates above), AND the caller
+    # must be a MEMBER of it (403 — a same-tenant non-member must not have
+    # the project's memory folded into an answer just by knowing its id;
+    # this is the same IDOR class the other project membership gates close).
+    # Both checks run BEFORE any project memory is read.
+    if body.project_id is not None:
+        from app.db.projects import is_project_member, project_belongs_to_company
+
+        if not project_belongs_to_company(
+            body.project_id, company.company_id, company.workspace_id
+        ):
+            raise HTTPException(404, "Project not found")
+        if not is_project_member(body.project_id, company.user_id):
+            raise HTTPException(403, "Not a member of this project")
+
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already
     # holds an assistant turn must not be served a cache hit that never read
@@ -310,6 +355,56 @@ async def ask(
     with timed("route:ask.history"):
         history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
+    # Project context fold-in (AD-P8 — the bounded-assembly pattern, not the
+    # KG tables): the project's memory summary + top-N entries + the
+    # caller's job_role, prepended onto `history` as one extra "context" row
+    # ahead of the real turns — the SAME mechanism `_load_history` already
+    # uses to fold attachment text in, so every existing prompt-assembly
+    # site (`qa_agent._render_history` / `ask_runner.compose_ask_answer`)
+    # picks it up unmodified. Best-effort (AD-P7): a failure here (missing
+    # summary row, a DB hiccup) degrades to no project block — it must never
+    # block the answer. An empty/new project also yields no block.
+    if body.project_id is not None:
+        try:
+            from app.project_group_context import assemble_private_project_context
+
+            # Same breadth the @Sprntly group agent gets — memory summary +
+            # roster + task-ledger digest + artifact manifest, plus the
+            # caller's own memory entries/job_role. Breadth only: single-shot,
+            # no read tools / no tool loop / no write path.
+            project_block = assemble_private_project_context(
+                body.project_id, company.user_id, body.dataset, enterprise_id
+            )
+        except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+            logger.warning(
+                "assemble_private_project_context failed project_id=%s",
+                body.project_id, exc_info=True,
+            )
+            project_block = ""
+        if project_block:
+            # AUTHORITATIVE framing (not a passive "Context:" turn): ASK_SYSTEM
+            # tells the model to answer from connected sources and to deflect
+            # ("connect a connector") when a workspace-meta question — who is on
+            # the project, its tasks/delegations, its PRDs/artifacts — isn't in
+            # those sources. This block IS the source of truth for those, so the
+            # header explicitly tells the model to answer them from it and NOT
+            # to deflect. Breadth only; stays a single injected row (no tools).
+            history = [
+                {
+                    "role": "context",
+                    "content": f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{project_block}",
+                }
+            ] + history
+        # Best-effort bind (first-write-wins, mirrors bind_conversation_to_prd):
+        # navigating away mid-generation must not orphan the conversation ↔
+        # project link. Never blocks the answer on failure.
+        if body.conversation_id is not None:
+            from app.db.conversations import bind_conversation_to_project
+
+            bind_conversation_to_project(
+                body.conversation_id, body.project_id, enterprise_id, company.user_id
+            )
+
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
     # cached answer onto an immediately-`ready` ask job (rather than returning it
@@ -318,6 +413,8 @@ async def ask(
     # user-visible result is identical (same payload, same synthetic delay).
     # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
     # so it would serve a context-free answer for a question about the open PRD.
+    # SKIPPED for project-scoped asks, same reason: a cache hit never read the
+    # project's memory block just folded into `history` above.
     # SKIPPED for a mid-thread ask, for the same reason: a thread that already
     # holds an assistant turn has context a cache hit never read. A FIRST-TURN
     # ask deliberately stays eligible even though `conversation_id` is already
@@ -329,6 +426,9 @@ async def ask(
         await _timed_cache_resolve(body.dataset, body.question)
         if (
             body.prd_id is None
+            # SKIPPED for project-scoped asks too: a cache hit never read the
+            # project's memory block just folded into `history` above.
+            and body.project_id is None
             # An artifact-tab ask is context-bound for the same reason a
             # PRD-tab one is: the cache never read the open document.
             and body.evidence_id is None
@@ -352,14 +452,70 @@ async def ask(
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
     # `history` was already loaded above (before cache resolution).
+    #
+    # Individual-project-chat persistence identity (AC1/AC4): resolved ONLY
+    # for the project branch — main/PRD/artifact asks stay byte-unchanged
+    # (AC7), never minting or threading a client_message_id at all.
+    resolved_client_message_id = (
+        (body.client_message_id or str(uuid.uuid4())) if body.project_id is not None else None
+    )
+    # Structured attachments (project branch only): fold THIS turn's
+    # attachment text into the question the ANSWER sees, reusing the EXACT
+    # `[Attached: {name}]\n{body}` format `_load_history` folds a prior turn's
+    # attachments with, so behaviour matches today. The CLEAN `body.question`
+    # (no fold) is what gets persisted onto the user turn — so `_load_history`
+    # folds the attachments exactly ONCE on a follow-up (no double-count).
+    # On every non-project branch `answer_question is body.question` (no
+    # attachments read), keeping those sends byte-identical.
+    answer_question = body.question
+    if body.project_id is not None and body.attachments:
+        for a in body.attachments:
+            if a.content:
+                answer_question += f"\n\n[Attached: {a.name}]\n{a.content}"
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
-        question=body.question,
+        question=answer_question,
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
         prd_id=body.prd_id,
+        client_message_id=resolved_client_message_id,
     )
+    if body.project_id is not None:
+        # Persist the USER'S OWN turn at dispatch (AC1) — owned/idempotent,
+        # server-side conversation resolution (AC6), keyed on the SAME
+        # client_message_id just threaded onto the job row above so the
+        # answer (persisted after `complete_ask_job`, ask_job_id-linked) and
+        # the question land as one dialogue pair. Best-effort: a persist
+        # failure must never block the answer that's already generating.
+        from app.db.conversations import post_owned_individual_user_turn
+
+        try:
+            post_owned_individual_user_turn(
+                project_id=body.project_id,
+                user_id=company.user_id,
+                content=body.question,
+                client_message_id=resolved_client_message_id,
+                # Persist the CLEAN question + the STRUCTURED attachments (not the
+                # folded answer text) so a reloaded thread shows the chip and
+                # `_load_history` folds the text exactly once on a follow-up.
+                attachments=(
+                    [a.model_dump(exclude_none=True) for a in body.attachments]
+                    if body.attachments
+                    else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist individual-chat user turn ask_id=%s project_id=%s",
+                ask_id, body.project_id, exc_info=True,
+            )
+        # Identifiers only — never the memory/PRD body the answer was
+        # grounded on (see `assemble_project_context`'s docstring).
+        logger.info(
+            "ask.project_context ask_id=%s project_id=%s conversation_id=%s",
+            ask_id, body.project_id, body.conversation_id,
+        )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
         # requests, so a fire-and-forget create_task would never run and the
@@ -369,7 +525,9 @@ async def ask(
         await run_ask_job(
             ask_id=ask_id,
             enterprise_id=enterprise_id,
-            question=body.question,
+            # The attachment-folded question (project branch); identical to
+            # `body.question` on every other branch.
+            question=answer_question,
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
@@ -387,6 +545,10 @@ async def ask(
             # ownership (see app.ask_runner.set_active_conversation).
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook (project_memory
+            # build spec §5.3) — None on every non-project ask, so the hook
+            # never fires for them.
+            project_id=body.project_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -395,7 +557,9 @@ async def ask(
         run_ask_job(
             ask_id=ask_id,
             enterprise_id=enterprise_id,
-            question=body.question,
+            # The attachment-folded question (project branch); identical to
+            # `body.question` on every other branch.
+            question=answer_question,
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
@@ -407,6 +571,8 @@ async def ask(
             # The caller's own identity — see above.
             user_id=company.user_id,
             workspace_id=company.workspace_id,
+            # Gates the individual-chat memory-promotion hook — see above.
+            project_id=body.project_id,
         )
     )
     _inflight_tasks.add(task)
@@ -512,9 +678,23 @@ def get_ask(
         raise HTTPException(404, "Ask not found")
     status = row.get("status") or "generating"
     payload = row.get("response") or {}
+    # A provider refusal gets a NAMED code and a sentence the client can show.
+    # `error` alone is a stringified exception — useful in a log, useless on a
+    # screen, and on the out-of-credits path it is the one thing the user most
+    # needs to be told (observed 2026-08-16: every surface degraded correctly
+    # and silently, and nothing said why). Both stay null for an ordinary
+    # failure, so the existing error rendering is untouched.
+    error_class = row.get("error_class")
+    error_message = (
+        llm_errors.user_message(error_class)
+        if error_class in llm_errors.PROVIDER_CODES
+        else None
+    )
     return {
         "status": status,
         "error": row.get("error"),
+        "error_class": error_class,
+        "error_message": error_message,
         # The skill the router picked, readable from `generating` onwards — the
         # rest of this body is empty until the job is ready, so this is the only
         # thing a waiting client can learn about what is actually running.

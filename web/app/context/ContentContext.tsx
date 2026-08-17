@@ -56,8 +56,14 @@ const EMPTY: AppContentState = {
   evidenceGenerating: false,
   evidencePartialHtml: null,
   conversationId: null,
+  activeProjectId: null,
   reportFocusId: null,
   reportFocusStandalone: false,
+  // The team document open in the panel's Document tab, or null when the
+  // thread has none. Null is the normal state: the tab is hidden until a
+  // document exists, exactly as Reports is.
+  documentId: null,
+  documentGenerating: false,
   threadReports: [],
   threadReportsStatus: "idle",
   threadReportsConversationId: null,

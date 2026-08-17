@@ -151,7 +151,17 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     regardless of the plan. A v7 row's kg flag on a library question is a
 #     contract where a v6 row's was a coincidence, so the two must not be
 #     pooled.
-_PROMPT_VERSION = "ask-planner-v7"
+# v8: the action menu gained `assign_tickets` — "assign this ticket to Dave"
+#     used to land on update_ticket (whose executor rewrites CONTENT, not
+#     ownership) or on a plain answer. Widening on v4's rule: a v8 row answers
+#     a question no v7 row was asked ("who should own these tickets"), so the
+#     two must not be pooled.
+# v9: the action menu gained `share_to_slack` — "share this PRD on my slack
+#     channel and ask the team for feedback" used to land on `answer`, where
+#     the best available outcome was prose describing how to share it by hand.
+#     Widening on v4's rule: a v9 row answers a question no v8 row was asked
+#     (where does this document GO), so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v9"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -185,6 +195,16 @@ _ACTIONS: frozenset[str] = frozenset({
     "generate_tickets",
     "generate_prototype",
     "update_ticket",
+    # Change WHO OWNS tickets, not what they say: "assign the auth ticket to
+    # Dave", "give these tickets to Priya and Sam", "spread the tickets across
+    # the team". Its own action rather than a shading of `update_ticket`
+    # because the two dispatch to different machinery — update_ticket rewrites
+    # ONE ticket's content through a propose-and-confirm loop, while this one
+    # resolves people against the workspace roster and may need to ASK (which
+    # ticket? which person?) through the chat's question popup before anything
+    # is written. Its argument is `instruction` (the assignment request,
+    # self-contained: who was named, which tickets were meant).
+    "assign_tickets",
     "multi_agent",
     # Retrieval, not authoring: "open the billing PRD" names a document to SHOW.
     # It is a client intent (`chat_intent._CLIENT_INTENTS`), so a planner that
@@ -216,6 +236,48 @@ _ACTIONS: frozenset[str] = frozenset({
     # argument is a FORMAT (artifact_template_id / template_query, gated by
     # `_gate_template`), never a task or an instruction.
     "change_prd_template",
+    # The same switch for the thread's TICKETS (POST /v1/stories/
+    # change-template). Its own action rather than a shading of
+    # change_prd_template for the reported reason: "change the ticket template
+    # to Acme" had no action that could take a TICKET format, so `_gate_template`
+    # refused the id (wrong artifact_type for a PRD switch) and the request
+    # died as a which-did-you-mean answer about a format the user had already
+    # named correctly. Same argument contract as change_prd_template.
+    "change_tickets_template",
+    # List what the user has CREATED in Sprntly — their PRDs, ticket sets,
+    # reports, team documents, prototypes, evidence. Its own action rather
+    # than a shading of `answer` for the reported reason: "what are the PRDs
+    # I have?" was treated as a knowledge question and went hunting through
+    # CONNECTED SOURCES (Drive/Confluence files with "PRD" in the name) —
+    # confidently describing other people's documents while the user's own
+    # artifact library sat unread. The listing itself is DETERMINISTIC: the
+    # route reads the library and the client renders clickable items; the
+    # model's whole job is recognising the ask and naming the kind
+    # (`list_kind`). Retrieval like open_artifact, so no task, no instruction.
+    "list_artifacts",
+    # Post an artifact the user already has into their Slack — "share this PRD
+    # on my slack channel and ask the team for feedback". Its own action rather
+    # than a shading of `answer`, because the answer path can only ever TALK
+    # about sharing: the message goes out over the company's Slack connection,
+    # which is a side effect on a system outside this product, and the one
+    # thing that must never happen is the chat saying it posted when nothing
+    # was posted (create_artifact's note records that exact failure).
+    #
+    # It names WHAT to share the way open_artifact does (`artifact_type` +
+    # `artifact_query`, both optional here — "share this PRD" means the one on
+    # the tab), and WHERE with `share_channel`, and WITH WHAT FRAMING in
+    # `share_note`. Nothing is posted on this verdict alone: the client previews
+    # the message and the user confirms, so a misread channel costs a glance
+    # rather than a message in front of the wrong audience.
+    "share_to_slack",
+})
+
+#: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
+#: fallback for junk — lists every kind. Vocabulary matches the artifact
+#: listing's own `type` values (db/artifacts.py), with "all" on top.
+LIST_ARTIFACT_KINDS: frozenset[str] = frozenset({
+    "all", "prd", "evidence", "prototype", "report", "ticket_set",
+    "custom_artifact",
 })
 
 #: Actions that need a `task` brief, and ones that need an `instruction`. An
@@ -239,7 +301,13 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     # kind, so an empty task here would produce a generation about nothing.
     "create_artifact",
 })
-_NEEDS_INSTRUCTION: frozenset[str] = frozenset({"edit_prd", "update_ticket"})
+_NEEDS_INSTRUCTION: frozenset[str] = frozenset({
+    "edit_prd", "update_ticket",
+    # An assignment with no instruction has nobody to assign and nothing to
+    # assign them to — same "an action whose ARGUMENT is missing is worse than
+    # no action" rule as the other two.
+    "assign_tickets",
+})
 #: `open_artifact` without a subject to look up is not an open request — the
 #: same "an action whose ARGUMENT is missing is worse than no action" rule the
 #: other two encode. Degrades to `answer`, which is the recoverable landing.
@@ -253,6 +321,12 @@ _TASK_CHARS = 4000
 # question; it is logged, so it gets the same one-line clamp every other
 # user-derived string in a prompt/log gets.
 _ENTITY_CHARS = 200
+
+# A `share_note` becomes the top line of a real Slack message, so it is capped
+# where a note stops being a note. Slack's own block limit is 3000 characters
+# and the composer leaves room for the document's title, summary and link
+# underneath — this is well inside both.
+_SHARE_NOTE_CHARS = 600
 
 # The planner's `reason` is one short clause by contract. Clamped anyway before
 # it reaches the log — the comparison line is meant to be greppable, and one
@@ -322,8 +396,8 @@ _PLANNER_SCHEMA: dict = {
         "instruction": {
             "type": "string",
             "description": (
-                "edit_prd / update_ticket only: the change to apply, "
-                "self-contained."
+                "edit_prd / update_ticket / assign_tickets only: the change to "
+                "apply, self-contained."
             ),
         },
         # THE FORM, decided after the SUBJECT. Schema order is generation order,
@@ -348,12 +422,13 @@ _PLANNER_SCHEMA: dict = {
         "artifact_template_id": {
             "type": ["string", "null"],
             "description": (
-                "generate_prd / generate_tickets / change_prd_template only: "
-                "the exact id from \"Company formats\" when the message asks "
-                "for that format BY NAME. null is the normal answer and means "
-                "the company's active format is used — never name one the user "
-                "did not ask for. For change_prd_template it is the TARGET, "
-                "and one of this pair is required."
+                "generate_prd / generate_tickets / change_prd_template / "
+                "change_tickets_template only: the exact id from \"Company "
+                "formats\" when the message asks for that format BY NAME. null "
+                "is the normal answer and means the company's active format is "
+                "used — never name one the user did not ask for. For the two "
+                "change_*_template actions it is the TARGET, and one of this "
+                "pair is required."
             ),
         },
         "template_query": {
@@ -367,16 +442,64 @@ _PLANNER_SCHEMA: dict = {
         "artifact_type": {
             "type": ["string", "null"],
             "description": (
-                "open_artifact only: which KIND of existing artifact to bring "
-                "up — prd, evidence, prototype, report or tickets."
+                "open_artifact / share_to_slack only: which KIND of existing "
+                "artifact is meant — prd, evidence, prototype, report or "
+                "tickets."
             ),
         },
         "artifact_query": {
             "type": ["string", "null"],
             "description": (
-                "open_artifact only: the subject the user named the document "
-                "by, in their own words. Required for an open request — without "
-                "it there is nothing to look up."
+                "open_artifact / share_to_slack only: the subject the user "
+                "named the document by, in their own words. Required for an "
+                "OPEN request — without it there is nothing to look up. "
+                "OPTIONAL for a share, where null means the document already "
+                "in play ('share this PRD')."
+            ),
+        },
+        # WHERE, decided after WHAT. Schema order is generation order, so the
+        # artifact is already named when the destination is chosen — a channel
+        # name in the message cannot steer which document gets picked.
+        "share_channel": {
+            "type": ["string", "null"],
+            "description": (
+                "share_to_slack only: the Slack channel the user named, "
+                "without the leading '#' — 'share this in #product-team' → "
+                "'product-team'. null when they named NO specific channel "
+                "('share this on slack', 'send it to my slack channel'), which "
+                "is the normal case and makes the product ask which one. Never "
+                "invent a channel name and never treat 'my slack channel' as "
+                "one — that phrase names no channel."
+            ),
+        },
+        "share_note": {
+            "type": ["string", "null"],
+            "description": (
+                "share_to_slack only: the message to post ALONGSIDE the "
+                "document, in the user's own intent — 'ask the team for "
+                "feedback' → 'Would love the team's feedback on this.' Write "
+                "it as the words that will appear in Slack, first person, one "
+                "or two sentences. null when they asked only to share it and "
+                "said nothing about what to say."
+            ),
+        },
+        "list_kind": {
+            "type": ["string", "null"],
+            "enum": ["all", "prd", "evidence", "prototype", "report",
+                     "ticket_set", "custom_artifact", None],
+            "description": (
+                "list_artifacts only: which kind of THEIR OWN creations to "
+                "list — 'all' when they asked for artifacts generally or "
+                "named several kinds. null on every other action."
+            ),
+        },
+        "list_mode": {
+            "type": ["string", "null"],
+            "enum": ["items", "count", None],
+            "description": (
+                "list_artifacts only: 'count' when the ask is HOW MANY (a "
+                "tally or a today-vs-yesterday comparison), 'items' when it "
+                "is WHICH ONES. null on every other action."
             ),
         },
         "company_skill_id": {
@@ -555,6 +678,13 @@ or wants an answer.
   Sprntly's own default/built-in format rather than an uploaded one, set
   `template_query` to their words — the assistant explains the PRD panel's
   Format control, which handles that switch.
+- change_tickets_template — the same switch for the thread's TICKETS: "change
+  the ticket template to Acme", "switch the tickets to our new format",
+  "re-format these tickets". Same argument contract as change_prd_template
+  (`artifact_template_id` from "Company formats" — a TICKET format this time —
+  or `template_query`; no task, no instruction; the built-in sets
+  `template_query`, and the assistant points at the Tickets panel's Format
+  control).
 - create_artifact — write a DOCUMENT OF ANY OTHER KIND and keep it in the
   team's shared library: a leadership update, a launch plan, a postmortem, a
   customer FAQ, a board memo, release notes, an onboarding guide. There is no
@@ -573,6 +703,13 @@ or wants an answer.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
 - update_ticket — rewrite an EXISTING ticket from a PRD or from this thread
   ("update the ticket with the PRD details"). Set `instruction`.
+- assign_tickets — change WHO OWNS tickets: "assign the auth ticket to Dave",
+  "give these tickets to Priya and Sam", "assign the tickets to the team",
+  "reassign SPR-3 to Maya". Set `instruction` to the assignment request,
+  self-contained: every person named, and which ticket(s) the thread says they
+  should get. The product resolves names against the workspace roster and asks
+  per-ticket when the message names people but not which ticket each one gets
+  — so an instruction that only names people is still complete.
 - multi_agent — the full multi-agent analysis suite: a PRD, an evidence report
   and four analysis documents (technical design, QA test cases, risk analysis,
   traceability matrix), all cross-referenced. Set `task`.
@@ -580,8 +717,75 @@ or wants an answer.
   artifacts. Choose it ONLY when the user asks for that depth outright, by
   naming it ("multi-agent", "aggressive analysis") or by asking for the full
   suite. "Generate a PRD" alone is generate_prd, never this.
+- list_artifacts — the user asks what THEY HAVE MADE in this product: "what
+  are my PRDs?", "show me my tickets", "list my reports", "what artifacts have
+  I created?", "what have we generated so far?". The product reads their own
+  artifact library and shows the items as clickable results — you gather
+  nothing and read nothing. Set `list_kind` to the kind they asked about
+  (prd, ticket_set, report, custom_artifact for team documents, prototype,
+  evidence) or "all" when they asked generally. A NUMBER in the ask goes in
+  `constraints.top_n` — "my last 5 PRDs" / "the 3 most recent reports" is
+  top_n 5 / 3, and a SINGULAR ask ("the latest PRD I created", "my most
+  recent report") is top_n 1 — the product shows exactly that many. A
+  HOW-MANY ask ("how many PRDs have I created?", "how many today compared to
+  yesterday?") is still THIS action with `list_mode` "count" — the product
+  computes the numbers from the library and answers with them; routing it as
+  a knowledge question sweeps connected sources for a tally no source keeps.
+  `list_mode` is "items" for everything else. No task, no instruction, no
+  sources, no pipeline.
+- share_to_slack — post a document the user ALREADY HAS into their Slack:
+  "share this PRD on my slack channel and ask the team for feedback", "send
+  the checkout tickets to #product", "post the weekly brief in slack", "share
+  that report with the team on slack". Name WHAT with `artifact_type` (prd,
+  tickets, report — the kinds that can be shared) and `artifact_query` (the
+  subject, their words); leave `artifact_query` null when they mean the
+  document already in play ("share THIS PRD", "post that in slack"), which is
+  the common case. Name WHERE with `share_channel` when they gave a channel,
+  and WHAT TO SAY with `share_note`. No task, no instruction, no sources, no
+  pipeline — nothing is generated and nothing is read.
+  NOTHING IS POSTED ON YOUR VERDICT. The product shows the user exactly what
+  will go to Slack and which channel, and waits for them to confirm — so
+  choosing this action when they asked to share is right even if you are
+  unsure which channel or which document they meant. Both are asked.
 
 Rules that decide the close calls:
+
+- SHARING IS NOT WRITING, and share_to_slack takes an EXISTING document. "Share
+  the checkout PRD on slack" posts the PRD they already have; it never writes
+  one. When the thread has no such document, this is still the action — the
+  product says it cannot find it, which is recoverable, where generating an
+  unrequested PRD is not. But a message that asks to WRITE something and send
+  it ("draft a launch update and post it in #general") is the WRITE action
+  (create_artifact / generate_prd) — the product offers to share it once it
+  exists, and a share cannot post what does not exist yet.
+- SLACK AS A DESTINATION vs SLACK AS A SOURCE. "Share this PRD on slack" sends
+  something TO Slack → share_to_slack. "What are people saying in slack about
+  onboarding?" reads FROM Slack → `answer` with slack in `sources`. The verb
+  decides: share / post / send / drop it in → the destination; what / who /
+  find / search → the source.
+- Asking HOW to share is not asking to share. "Can I share PRDs to slack?",
+  "how do I post this to my team?" are `answer`. Requesting > asking about,
+  the same rule create_artifact carries.
+- A PERSON IS NOT A SLACK DESTINATION. share_to_slack's target is a Slack
+  CHANNEL — a name after "#", "my slack channel", "the team on slack" — never
+  a person's name. "Send this to Fortune to prioritize", "give this to the
+  designer", "hand this off to Priya", "loop Dave in on this" name a TEAMMATE,
+  not a channel — that is never share_to_slack, whatever the verb. It is
+  `answer`: naming a teammate as the target of "send/give/hand/assign ... to"
+  is a delegation, which the assistant itself resolves and hands off when it
+  answers — not a build action you choose here, and never a guess that a
+  person's name is a Slack channel.
+
+- THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
+  answer. "What are my PRDs / tickets / reports?" means the documents THEY
+  MADE HERE — list_artifacts, never a sweep of Drive/Confluence/GitHub files
+  that happen to have "PRD" in the name (the reported failure: the library
+  sat unread while the answer described other documents). A question about a
+  file IN a connected source ("what does the Q3 PRD doc in Drive say?") is
+  still `answer` with sources.
+- list_artifacts vs open_artifact: PLURAL vs ONE. "What PRDs do I have?"
+  lists; "open the checkout PRD" opens that one. A request that names a
+  SPECIFIC subject wants an open; a request for the inventory wants the list.
 
 - SUBJECT MATTER decides generate_prd, never document shape. A PRD specifies a
   product change.
@@ -593,9 +797,20 @@ Rules that decide the close calls:
   FORMAT/template the document is written in → change_prd_template — "change
   the template", "use the Acme format for this", "switch this to the new
   format" are format switches even though they sound like edits.
+- change_prd_template vs change_tickets_template: WHICH ARTIFACT decides it.
+  "the ticket template" / "the tickets' format" → change_tickets_template;
+  "the template" / "the PRD's format" → change_prd_template. When the message
+  names neither artifact, the thread decides: a switch asked right after
+  tickets were generated or while tickets are on screen is about the tickets;
+  otherwise it is about the document.
 - DIRECTION decides edit_prd vs update_ticket, and the same words run both ways.
   "Update the PRD with the ticket details" changes the DOCUMENT → edit_prd.
   "Update the ticket with the PRD details" changes the TICKET → update_ticket.
+- WHO vs WHAT decides update_ticket vs assign_tickets. Changing a ticket's
+  CONTENT (description, criteria, scope) → update_ticket. Changing who it
+  BELONGS to → assign_tickets — even when phrased as an update ("update the
+  ticket to Dave", "put Priya on the login ticket"). ASKING about ownership is
+  neither: "who is assigned to the auth ticket?" is `answer`.
 - ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
   auth?" is `answer`. This applies hardest to create_artifact, where the
   library is SHARED with the whole team: a document created from a question
@@ -663,8 +878,15 @@ answer instead.
 - call-listing: list or count recorded calls/transcripts ("the 5 latest
   transcripts", "which calls did we have last week"). The index answers this
   instantly; do not send a listing question anywhere else.
-- single-call-read: read or summarize ONE named call ("summarize the Mayer
-  Brown call").
+- single-call-read: read ONE named call, whatever the verb. "Summarize the
+  Mayer Brown call", "more details on the Maverik meeting", "what happened on
+  the Acme call", "who was on the Thermo Fisher briefing" are all this. The
+  test is that the question names ONE meeting — usually by the company or
+  person on it — not that it says "summarize". If a question names a company
+  AND a meeting/call/demo/briefing, this is almost always the right pick, and
+  picking it beats naming fireflies in `sources`: only this reads the actual
+  transcript, so attendees, objections and figures survive. Naming the source
+  instead gets the distilled summary, which has already lost them.
 - data-analysis: compute over the company's uploaded CSV/Excel tables
   ("analyze my data", "what do the numbers say"). A real analysis engine over
   the actual rows, not a text answer.
@@ -871,10 +1093,10 @@ When a "Company formats" list is present in the input, two fields act on it:
   they meant.
 
 Never set both, and never set either when the message names no format at all.
-The one exception to "no format named → neither" is change_prd_template: its
-whole point is the format, so a switch request that names none (or names the
-built-in) sets template_query to the user's words and the assistant asks which
-— see the action's own bullet above.
+The one exception to "no format named → neither" is the two change_*_template
+actions: their whole point is the format, so a switch request that names none
+(or names the built-in) sets template_query to the user's words and the
+assistant asks which — see the actions' own bullets above.
 
 Each line in the list also carries a short description of what that format
 contains. Answer "what's in the Acme format" / "how is X structured" from
@@ -984,6 +1206,23 @@ class Plan:
     #: exclusive with the id above (`_gate_template` enforces it), and its
     #: presence is what turns a build into a question about which format.
     template_query: Optional[str] = None
+    #: `share_to_slack` only: the channel the user named, without the '#'.
+    #: None — the common case — means they named none, and the product asks
+    #: which one rather than guessing a destination.
+    share_channel: Optional[str] = None
+    #: `share_to_slack` only: the words to post alongside the document. None
+    #: means they said nothing about what to say, and the share goes out with
+    #: the document alone.
+    share_note: Optional[str] = None
+    #: `list_artifacts` only: which kind of the user's own creations to list.
+    #: Always a member of LIST_ARTIFACT_KINDS once gated ("all" for junk or
+    #: absence), and None on every other action — the listing itself is
+    #: deterministic route work, this is the only argument.
+    list_kind: Optional[str] = None
+    #: `list_artifacts` only: "count" for a how-many ask (the route computes
+    #: per-day tallies and the client answers with the numbers), "items" for
+    #: a which-ones ask (the clickable cards). Junk coerces to "items".
+    list_mode: Optional[str] = None
     documents: list[str] = field(default_factory=list)
     in_scope: bool = True
 
@@ -1014,6 +1253,15 @@ class Plan:
             # from a build that named none.
             "template": self.artifact_template_name or self.artifact_template_id,
             "template_query": self.template_query,
+            # WHAT KIND of document a `create_artifact` plan decided to write,
+            # in the user's own words. Logged for the same reason `template` is
+            # above: this is the argument the action is DISPATCHED with, so a
+            # plan line without it cannot answer "what did it think it was
+            # writing" — the first question asked of any document that came out
+            # wrong. None on every other action, by the planner's own gate.
+            "artifact_kind": self.artifact_kind,
+            "list_kind": self.list_kind,
+            "list_mode": self.list_mode,
             # "pipeline" rather than false when a pipeline owns the turn, because
             # `apply_gates` zeroes `web_search` for pipeline exclusivity — the
             # pipeline runs its OWN sweep. Logging a bare `false` there was
@@ -1363,6 +1611,8 @@ _TEMPLATE_ACTIONS: dict[str, str] = {
     # Switching an existing PRD's format validates against the same rows a
     # PRD build does — the target must be a usable PRD format.
     "change_prd_template": "prd",
+    # And a tickets switch against the rows a tickets build does.
+    "change_tickets_template": "tickets",
     "generate_prd": "prd",
     "generate_tickets": "tickets",
 }
@@ -1552,10 +1802,32 @@ def apply_gates(
     if action == "open_artifact" and not _artifact_query:
         action, task, instruction = ACTION_ANSWER, "", ""
         _artifact_type = _artifact_query = None
-    if action != "open_artifact":
+    if action not in ("open_artifact", "share_to_slack"):
         # Arguments belong to their action; a stray pair on any other verdict is
         # noise that downstream would otherwise try to honour.
         _artifact_type = _artifact_query = None
+    # A SHARE with no subject is not degraded, and that asymmetry with
+    # open_artifact one line up is the point: "share this PRD" names no subject
+    # because the subject is the document already on the tab, which the ROUTE
+    # resolves from the caller's context. An open has no such fallback — there
+    # is nothing to show — so it still needs its query.
+
+    # `share_to_slack`'s own two arguments. Neither is required: no channel
+    # means the product asks which one, and no note means the document goes out
+    # on its own. Same belongs-to-its-action clamp as every field above, so a
+    # channel name extracted from an unrelated message cannot ride along on a
+    # verdict that will never post anything.
+    _share_channel: Optional[str] = None
+    _share_note: Optional[str] = None
+    if action == "share_to_slack":
+        _share_channel = _clean_str(out.get("share_channel"))
+        if _share_channel:
+            # Slack channel names carry no '#' in the API and cap at 80 chars;
+            # the model is told this, and this is where it stops being advice.
+            _share_channel = _share_channel.lstrip("#").strip()[:80] or None
+        _share_note = _clean_str(out.get("share_note"))
+        if _share_note:
+            _share_note = _share_note[:_SHARE_NOTE_CHARS]
 
     # `create_artifact`'s own argument. Unlike `artifact_query` above, a MISSING
     # kind does not degrade the action: the user asked for a document and the
@@ -1567,6 +1839,18 @@ def apply_gates(
     if _artifact_kind:
         _artifact_kind = _artifact_kind[:120]
 
+    # `list_artifacts`'s own argument. A missing or invented kind does not
+    # degrade the action — "list my stuff" is a complete request, and "all" is
+    # its honest reading — so junk coerces to "all" rather than to a refusal.
+    # Same belongs-to-its-action clamp as the two above.
+    _list_kind: Optional[str] = None
+    _list_mode: Optional[str] = None
+    if action == "list_artifacts":
+        _raw_kind = _clean_str(out.get("list_kind"))
+        _list_kind = _raw_kind if _raw_kind in LIST_ARTIFACT_KINDS else "all"
+        _raw_mode = _clean_str(out.get("list_mode"))
+        _list_mode = _raw_mode if _raw_mode in ("items", "count") else "items"
+
     # A format switch with no target is not a switch. `_gate_template` already
     # turns a bad id into a `template_query` (a which-did-you-mean on the chat
     # surface); this catches the plan that carried NEITHER — the model chose
@@ -1575,7 +1859,7 @@ def apply_gates(
     # library is forced along so the answer can list what they DO have and
     # point at the PRD panel's Format control.
     _switch_without_target = (
-        action == "change_prd_template"
+        action in ("change_prd_template", "change_tickets_template")
         and not artifact_template_id
         and not template_query
     )
@@ -1615,10 +1899,14 @@ def apply_gates(
         # scope gate: partial output must never produce a canned refusal.
         artifact_type=_artifact_type,
         artifact_query=_artifact_query,
+        share_channel=_share_channel,
+        share_note=_share_note,
         artifact_kind=_artifact_kind,
         artifact_template_id=artifact_template_id,
         artifact_template_name=artifact_template_name,
         template_query=template_query,
+        list_kind=_list_kind,
+        list_mode=_list_mode,
         documents=_gate_documents(
             out.get("documents"), enterprise_id, known_documents
         ),

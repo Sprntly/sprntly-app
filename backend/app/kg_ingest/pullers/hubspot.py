@@ -27,7 +27,11 @@ logger = logging.getLogger(__name__)
 
 API = "https://api.hubapi.com"
 _TIMEOUT = 30
-_MAX_PAGES = 10  # 100/page — pilot-scale cap
+# 100 records/page. Was 10 — the same pilot-scale cap the Jira and ClickUp
+# pullers carried, lifted for the same reason on 2026-08-16 (see jira.py for
+# the full note). HubSpot rate limits per-10-seconds, so 20 sequential pages
+# once per refresh cycle is not close to a ceiling.
+_MAX_PAGES = 20
 
 _DEAL_PROPS = "dealname,amount,dealstage,pipeline,closedate,hs_lastmodifieddate,hubspot_owner_id,description"
 _TICKET_PROPS = ("subject,content,hs_pipeline_stage,hs_ticket_priority,"

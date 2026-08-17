@@ -230,15 +230,11 @@ export function UploadFormatModalView({
                 role="group"
                 aria-label="Format source"
               >
-                <button
-                  type="button"
-                  className={`btn btn-sm${source === "paste" ? " btn-primary" : ""}`}
-                  aria-pressed={source === "paste"}
-                  disabled={submitting}
-                  onClick={() => onSourceChange("paste")}
-                >
-                  Paste Markdown
-                </button>
+                {/* Upload first, because upload is the default. A row whose
+                    selected chip sits second reads as "the other one is the
+                    normal choice" — and the copy underneath is written for the
+                    file path ("Markdown or Word (.docx) works best"), so the
+                    order and the explanation now point the same way. */}
                 <button
                   type="button"
                   className={`btn btn-sm${source === "file" ? " btn-primary" : ""}`}
@@ -247,6 +243,15 @@ export function UploadFormatModalView({
                   onClick={() => onSourceChange("file")}
                 >
                   Upload a file
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm${source === "paste" ? " btn-primary" : ""}`}
+                  aria-pressed={source === "paste"}
+                  disabled={submitting}
+                  onClick={() => onSourceChange("paste")}
+                >
+                  Paste Markdown
                 </button>
               </div>
 

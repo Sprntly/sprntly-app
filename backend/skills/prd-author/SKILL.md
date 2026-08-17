@@ -9,7 +9,7 @@ description: >
   skill (`implementation-spec`), derived from a finished Part A.
 ---
 
-# prd-author (v4.7)
+# prd-author (v4.8)
 
 ## Purpose
 Turn a signal (or a one-line idea) into a decision-ready PRD a human can approve in minutes. This is **Part A — the PRD for people to approve.** Once Part A exists, the `implementation-spec` skill derives **Part B — the Implementation Spec your coding agent builds from.** This skill owns Part A only; it never emits Part B.
@@ -60,14 +60,14 @@ If a fact is not in one of those two places, it does not enter the Evidence sect
 - **Never invent a date or period.** No figure carries a timeframe that was not stated.
 - **Never construct a quote.** A quote renders only when the exact wording was supplied. If the substance of what a user said is known but the wording is not, render it as a paraphrased finding with its source — not in quotation marks, not in the quote style.
 - **Never restate a supplied number as a different one.** No rounding, rescaling, unit conversion, or extrapolation from sample to population. Report it as given.
-- **An assumption is not evidence.** Assumptions belong in Hypothesis, Appendix → Risks, the riskiest-assumption box, an `[ASSUMPTION]` marker, or a tagged step inside a projected-impact chain. They never appear as an evidence item — the Evidence section is the one place a reader stops checking and starts believing.
+- **An assumption is not evidence.** Assumptions belong in Hypothesis, Risks, the riskiest-assumption box, an `[ASSUMPTION]` marker, or a tagged step inside a projected-impact chain. They never appear as an evidence item — the Evidence section is the one place a reader stops checking and starts believing.
 - **Do not pad the section.** A PRD with two real signals shows two real signals plus `[NEED]` items for the gaps. Thin evidence is a finding about the state of the work, not a formatting problem to solve.
 - **Inference is allowed only where the arithmetic is visible in the source.** Reading a supplied figure ("31% of tickets carry this tag, so it is the largest contact driver") is fine when the comparison sits in the same supplied data. Anything beyond that is an assumption and moves out of Evidence.
 
 **Illustrative mode (no real inputs).** When the skill is run as a demo, a template fill, or a worked example with no supplied signals, the page renders a visible label directly under the byline — `Illustrative example — evidence is fictional, not sourced` — and every evidence item's type label is prefixed `EXAMPLE`. The label reuses existing tokens, so no stylesheet change is needed: emit it inside the byline block as `<span class="tag esc">Illustrative example</span>` followed by the plain text `evidence is fictional, not sourced`. There is no silent illustrative mode: a document that looks sourced must be sourced. Run in this mode only when the caller has asked for an example; a real request with thin inputs gets `[NEED]` items, not fiction.
 
 ## Structure (in order — normative for the house format; a supplied template overrides section names and order, never the judgment rules — see Template adoption)
-The spine reads: what world is this (Context) → what's wrong (Problem) → how we know (Evidence) → who it happens to (Users) → what we'll measure (Goal) → what we believe (Hypothesis) → what we build (Requirements) → what could go wrong (Risks). Open items sit in the Appendix, below the argument.
+The spine reads: what world is this (Context) → what's wrong (Problem) → how we know (Evidence) → who it happens to (Users) → what we'll measure (Goal) → what we believe (Hypothesis) → what we build (Requirements) → what could go wrong (Risks). The document ends there: open items are not a section (v4.8) — an unknown renders as a `[NEED]`/`[ESCALATE]` marker inline, in the section where the gap actually is, and the decisions the team still owes are collected by the product's question flow outside the document.
 
 1. **Title — short, and reasoned rather than assembled.** Before writing it, ask what the smallest phrase is that tells a reader what changes. Name the change, not the essay about the change. Target **4–8 words**; no colon-and-subtitle constructions, no restating the problem, no company name unless two products would otherwise be confused. Test: it has to sit in a roadmap row and still mean something. A long title is almost always the Problem section leaking upward.
 2. **Author byline** — logged-in user's name, directly under the title.
@@ -82,8 +82,9 @@ The spine reads: what world is this (Context) → what's wrong (Problem) → how
 7. **Goal** — ONE primary metric with formula + baseline + **projected impact** (assumption chain + confidence, or a visibly blank slot — the blank is a designed element, see visual spec). Guardrails listed separately, never collapsed into the primary.
 8. **Hypothesis — one plain-English sentence, causal chain visible.** Use the shape *If we do X, then Y will happen, which moves Z* (or *By doing X we believe Y, driving Z*). Name the change, the behavior it produces, and the outcome that follows. Strip restatement of the problem, hedging, and any explanation the reader already has from Context. Directly before Requirements; ~55 words.
 9. **Requirements** — table by default: `# | Requirement | Description | Type`, Type ∈ Happy path / Edge case / Failure (never "Core"). Long mode adds Priority / Signal/Source / Acceptance. Prose only on request. These Type tags are load-bearing: `implementation-spec` inherits them (Happy path → happy-path EARS; Edge case → mandatory edge branch; Failure → mandatory failure branch).
-10. **Risks — in the body (v4.4 — moved up out of the appendix).** Sits between Requirements and the Appendix: the reader sees what we're building, then what could break it. Named risks in one paragraph, then **exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem** inside it.
-11. **Appendix** — renders with Part A, not a separate file. Contains **User input needed** and nothing else: ≤5 items, tagged `[ESCALATE]`/`[NEED]`, each with an owner; self-clearing; the appendix disappears entirely when empty. *Retired in v4.4: Non-goals, Alignment, Rollout, Done-when — do not reintroduce them, in either length mode.*
+10. **Risks — in the body, closing the document (v4.4 moved it out of the appendix; v4.8 retired the appendix beneath it).** Sits after Requirements: the reader sees what we're building, then what could break it. Named risks in one paragraph, then **exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem** inside it.
+
+*Retired sections — do not reintroduce them, in either length mode.* v4.8 retired the **Appendix and its "User input needed" list** (owner decision, 2026-08-14): the house document has no open-questions section of any name — "Still open", "Open questions", "User input needed" all read as the same regression. Unknowns render inline as `[NEED]`/`[ESCALATE]` markers where they occur, exactly as the hard rules already require. The ONE exception is a company-supplied template that defines its own open-items section — Template adoption governs, their format wins, and that section renders. v4.4 retired: Non-goals, Alignment, Rollout, Done-when.
 
 ## Template adoption (v4.5)
 When the caller supplies a template — a blank company PRD form, a filled PRD to match, an exported doc, or a named house format — **adopt it.** The supplied template governs the shape of the document; this skill governs whether the content in it is true.
@@ -148,16 +149,14 @@ Every Part A renders as a single-file HTML editable page using these tokens. All
 
 **Components:**
 - *Byline:* mono, small, `AUTHOR` label in accent green, sits tight under the title.
-- *Section eyebrows:* 10.5px uppercase, letterspaced, accent green, thin top rule (first section unruled). Section order per the v4.4 structure: Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, Risks, then Appendix.
+- *Section eyebrows:* 10.5px uppercase, letterspaced, accent green, thin top rule (first section unruled). Section order per the v4.8 structure: Context, Problem, Evidence, Users, Goal, Hypothesis, Requirements, then Risks — nothing after Risks.
 - *Terms of art* in Context: dotted underline (`border-bottom: 1.5px dotted`).
 - *Evidence section:* the eyebrow row is a plain `EVIDENCE` label — no link. Items sit on dash-ruled rows — claim (magnitudes bold) over a mono meta line: `TYPE-LABEL — source · date`, where the type label is a small tinted chip naming the evidence kind (DATA ANALYSIS, USER QUOTE, CUSTOMER COMPLAINTS, COMPETITIVE ANALYSIS, …). No per-item links. Verbatim quotes render in italic Spectral inside quotation marks.
 - *Goal block:* white panel; rows keyed `PRIMARY METRIC / PROJECTED IMPACT / GUARDRAILS` in mono; formula in mono; confidence rendered as a tinted tag (`medium` = edge tint, `low` = fail tint). **Blank projected impact renders as a dotted underline slot** with a muted italic note (e.g. "blank — fills after pilot") — never omitted, never faked.
 - *Users:* numbered green discs.
 - *Hypothesis:* 3px green left rule, no background fill.
 - *Requirements table:* white, hairline rules, uppercase column heads; Type as a color-coded pill (happy/edge/fail tints).
-- *User input needed:* checkbox squares + `[ESCALATE]` (fail tint) / `[NEED]` (edge tint) mono tags + owner in secondary color.
-- *Risks (body section):* standard eyebrow; **riskiest assumption** in a white box with a red-brown left rule, the 3-line pre-mortem inside it in italic. The box styles (`.riskiest`, `.rk`, `.pre`) are unscoped in `prd.css` and render identically outside the appendix.
-- *Appendix:* heavy 2px top rule, `APPENDIX` label, note "Renders with Part A — not a separate file"; holds User input needed only, its heading as an `<h3>` (scoped `.appendix h3`), not an eyebrow.
+- *Risks (body section, the document's last):* standard eyebrow; **riskiest assumption** in a white box with a red-brown left rule, the 3-line pre-mortem inside it in italic. The box styles (`.riskiest`, `.rk`, `.pre`) are unscoped in `prd.css`. (The `.appendix`/`.inputs` styles remain in `prd.css` for pre-v4.8 documents and company templates that keep an open-items section — the house template no longer uses them.)
 **Accessibility/quality floor:** responsive to mobile, type labels never color-only (pill text carries the meaning), print-clean.
 
 ## Output contract (what to emit)
@@ -186,8 +185,8 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 ## Quality checklist
 - [ ] Part A only; no Implementation Spec content emitted (that is the `implementation-spec` skill).
 - [ ] Author byline present, sourced from the logged-in user (or `[NEED: author]`) — never invented.
-- [ ] Part A matches the visual specification exactly (tokens, components, blank-impact slot, pills, tags, appendix box).
-- [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix (User input needed).
+- [ ] Part A matches the visual specification exactly (tokens, components, blank-impact slot, pills, tags).
+- [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → Risks — and the document ends at Risks.
 - [ ] Context passes the informed-insider test: no company or product explainer, just the mechanic as it works today + terms of art. ~70 words.
 - [ ] Every evidence item carries a type label, source, and date — never fabricated; quotes verbatim; types varied where the signals allow. The Evidence header carries NO link (matches item 5).
 - [ ] Pre-emit provenance check run per evidence item: the specific supplying artifact was nameable for each one, or the item did not ship.
@@ -195,11 +194,11 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 - [ ] Problem opens on the user, carries one sizing number, closes on business cost; stands alone if lifted out; no smuggled solution.
 - [ ] Hypothesis is one plain-English sentence in if-X-then-Y-which-moves-Z form, with no restatement of the problem.
 - [ ] Goal: one primary metric w/ formula + baseline; projected impact filled with chain + confidence, or rendered as the designed blank; guardrails separate.
-- [ ] Requirements table default with Happy path / Edge case / Failure types (so `implementation-spec` inherits the branches); ≤5 user inputs, tagged, owned.
+- [ ] Requirements table default with Happy path / Edge case / Failure types (so `implementation-spec` inherits the branches).
 - [ ] Evidence is 3 items or fewer — hard cap, every mode, every template; types varied; `[NEED]` rows excluded from the cap.
 - [ ] Length mode correct: standard ~750 words ex-requirements unless detailed was explicitly requested; detailed never inferred from input volume; nothing padded to reach a budget.
-- [ ] Risks in the body between Requirements and Appendix; exactly one riskiest assumption + 3-line pre-mortem in its box.
-- [ ] Appendix holds User input needed only; no Non-goals, Alignment, Rollout, or Done-when at any length.
+- [ ] Risks in the body after Requirements, closing the document; exactly one riskiest assumption + 3-line pre-mortem in its box.
+- [ ] No Appendix and no open-questions section of any name ("User input needed", "Still open", "Open questions") — unless the company's own template defines one; no Non-goals, Alignment, Rollout, or Done-when at any length.
 - [ ] If a template was supplied: correspondence map reasoned first; their section names, order, AND form of expression followed (stories stay stories, prose stays prose, no house table imported); happy/edge/failure coverage survives in whatever form they use; v4 visuals and all judgment rules intact; no estimate, team size, or date authored.
 - [ ] Title is 4–8 words and names the change, not the problem.
 - [ ] Raw HTML emitted, no code fence, no commentary; nothing fabricated; every gap labeled.

@@ -23,13 +23,15 @@
  * question-specific bits use a scoped `piq-*` class family.
  */
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useMemo, useState } from "react"
+import { createPortal } from "react-dom"
 import {
   prdApi,
   type PrdInputQuestion,
   type PrdInputQuestionsList,
   type PrdRecord,
 } from "../../lib/api"
+import { QuestionPopup, type PopupAnswer } from "./QuestionPopup"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import type { PrdState } from "../../types/content"
 import { IconSparkle } from "./app-icons"
@@ -248,6 +250,22 @@ export type PrdInputQuestionsProps = {
     prdId: number,
   ) => Promise<PrdInputQuestion[] | PrdInputQuestionsList>
   answerQuestion?: typeof prdApi.answerInputQuestion
+  answerQuestionsBatch?: typeof prdApi.answerInputQuestionsBatch
+  /** POPUP MODE (the chat's QuestionPopup stepper, docked above the composer).
+   *
+   *  `undefined` — legacy inline mode: pending questions render as chat
+   *  messages, exactly as before this prop existed.
+   *  `null` — popup mode, but the dock is owned by a higher-priority batch
+   *  (the clarify gate) or not mounted yet: pending questions HOLD (nothing
+   *  inline, no popup) until the host hands the dock over.
+   *  an element — popup mode, live: pending questions render into it as one
+   *  stepper batch; the thread keeps only the resolved ✓ lines. The batch
+   *  SUBMITS ONCE, when the last question settles (owner directive: finish
+   *  all the questions before anything is sent) — one scoped edit folds every
+   *  answer in together. A question SKIPPED in the popup falls back to its
+   *  inline card — skipping is "not in a stepper", never "make the question
+   *  disappear". */
+  popupHost?: HTMLElement | null
 }
 
 // While the backend backfills extraction for a PRD opened before its questions
@@ -256,6 +274,56 @@ export type PrdInputQuestionsProps = {
 // stuck flag from polling forever.
 const EXTRACT_POLL_MS = 2500
 const EXTRACT_POLL_MAX = 24 // ≈60s
+
+// ── the stepper's draft — what makes interruption non-lossy ──────────────────
+//
+// The popup batch submits ONCE, when the last question settles (the owner's
+// finish-everything-first directive). Before this draft existed, everything up
+// to that point lived in component state only — so a tab switch, the dock
+// being claimed by a higher-priority batch (clarify/assign), or a panel
+// refresh mid-batch silently discarded every answer given, and the next open
+// re-asked from 1/N. Answering "over and over" with nothing ever reaching the
+// backend was the reported bug, and the six-hour request log confirming ZERO
+// answer submissions was the diagnosis.
+//
+// Every settle (answer or skip) now writes here, keyed by QUESTION ID — ids
+// are stable for stored rows, and a re-extraction (a regenerated PRD) mints
+// new ids, so its draft entries simply never match and stale drafts die with
+// their questions. Cleared when the batch submits.
+
+type QuestionDraft = Record<number, PopupAnswer>
+
+const draftKey = (prdId: number) => `sprntly_prd_qdraft_${prdId}`
+
+function loadQuestionDraft(prdId: number): QuestionDraft {
+  try {
+    const raw = localStorage.getItem(draftKey(prdId))
+    const parsed = raw ? JSON.parse(raw) : null
+    return parsed && typeof parsed === "object" ? (parsed as QuestionDraft) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveQuestionDraftEntry(
+  prdId: number, questionId: number, answer: PopupAnswer,
+) {
+  try {
+    const draft = loadQuestionDraft(prdId)
+    draft[questionId] = answer
+    localStorage.setItem(draftKey(prdId), JSON.stringify(draft))
+  } catch {
+    /* best-effort — a full store just loses the resume, as before */
+  }
+}
+
+export function clearQuestionDraft(prdId: number) {
+  try {
+    localStorage.removeItem(draftKey(prdId))
+  } catch {
+    /* ignore */
+  }
+}
 
 /**
  * Public component. Loads the PRD's input questions and renders each pending one
@@ -268,6 +336,8 @@ export function PrdInputQuestions({
   onPrdUpdated,
   listQuestions,
   answerQuestion,
+  answerQuestionsBatch,
+  popupHost,
 }: PrdInputQuestionsProps) {
   const [questions, setQuestions] = useState<PrdInputQuestion[]>([])
   const [answerText, setAnswerText] = useState<Record<number, string>>({})
@@ -275,6 +345,17 @@ export function PrdInputQuestions({
   const [pendingAnswer, setPendingAnswer] = useState<string | null>(null)
   const [errorId, setErrorId] = useState<{ id: number; msg: string } | null>(null)
   const [resolvedLines, setResolvedLines] = useState<Record<number, string>>({})
+  // Popup machinery. `batch` is the SNAPSHOT of pending questions the open
+  // stepper is walking — snapshotted so state changes mid-batch can't
+  // reshuffle the stepper under the user. `popupSkipped` are questions the
+  // user skipped in a stepper; they fall back to inline cards.
+  // `batchApplying`/`batchError` cover the ONE submit the whole batch makes
+  // after its last question settles.
+  const popupMode = popupHost !== undefined
+  const [batch, setBatch] = useState<PrdInputQuestion[] | null>(null)
+  const [popupSkipped, setPopupSkipped] = useState<Record<number, boolean>>({})
+  const [batchApplying, setBatchApplying] = useState(false)
+  const [batchError, setBatchError] = useState<string | null>(null)
 
   useEffect(() => {
     // Input questions are a best-effort enhancement: if the endpoint errors, the
@@ -298,6 +379,21 @@ export function PrdInputQuestions({
             ? { questions: res, extracting: false }
             : { questions: res.questions ?? [], extracting: !!res.extracting }
           setQuestions(qs)
+          // Skips PERSIST across opens (the draft) — a question skipped in a
+          // previous sitting renders as its inline card instead of re-opening
+          // the stepper on every open of this PRD, which is the second half
+          // of the "they keep coming" bug. Draft entries whose ids no longer
+          // exist (a re-extracted set) simply never match.
+          const draft = loadQuestionDraft(prdId)
+          const persistedSkips: Record<number, boolean> = {}
+          for (const q of qs) {
+            if (q.status === "pending" && draft[q.id]?.skipped) {
+              persistedSkips[q.id] = true
+            }
+          }
+          if (Object.keys(persistedSkips).length) {
+            setPopupSkipped((prev) => ({ ...persistedSkips, ...prev }))
+          }
           if (extracting && polls < EXTRACT_POLL_MAX) {
             polls += 1
             timer = setTimeout(load, EXTRACT_POLL_MS)
@@ -349,13 +445,151 @@ export function PrdInputQuestions({
     [prdId, busyId, answerQuestion, onPrdUpdated],
   )
 
+  /** The popup batch's ONE submit: every answered question folds into the PRD
+   *  in a single scoped edit. All-or-nothing — on failure nothing was marked
+   *  answered server-side, so the whole batch falls back to inline cards for
+   *  retry rather than pretending half of it landed. */
+  const submitBatch = useCallback(
+    async (items: { question: PrdInputQuestion; answer: string }[]) => {
+      if (!items.length) return
+      setBatchApplying(true)
+      setBatchError(null)
+      try {
+        const batchFn = answerQuestionsBatch ?? prdApi.answerInputQuestionsBatch
+        const res = await batchFn(
+          prdId,
+          items.map((it) => ({ question_id: it.question.id, answer: it.answer })),
+        )
+        const byId = new Map(res.questions.map((q) => [q.id, q]))
+        setQuestions((prev) => prev.map((q) => byId.get(q.id) ?? q))
+        const line = changedSectionsLine(res.sections_changed)
+        setResolvedLines((prev) => {
+          const next = { ...prev }
+          for (const it of items) next[it.question.id] = line
+          return next
+        })
+        clearPrdDrafts(prdId)
+        onPrdUpdated?.(prdStateFromRecord(res.prd))
+      } catch (e) {
+        setBatchError(
+          e instanceof Error ? e.message : "Could not apply your answers",
+        )
+        // Back to the inline cards, still pending, answers re-askable.
+        setPopupSkipped((prev) => {
+          const next = { ...prev }
+          for (const it of items) next[it.question.id] = true
+          return next
+        })
+      } finally {
+        setBatchApplying(false)
+      }
+    },
+    [prdId, answerQuestionsBatch, onPrdUpdated],
+  )
+
+  // Open a stepper batch: popup mode, dock free, nothing open yet, and at
+  // least one pending question the user hasn't popup-skipped. The batch is a
+  // snapshot — see the state's comment. The id signature (not the array
+  // identity, which changes every render) is what gates re-runs.
+  const pendingForPopup = useMemo(
+    () => questions.filter((q) => q.status === "pending" && !popupSkipped[q.id]),
+    [questions, popupSkipped],
+  )
+  const pendingSig = pendingForPopup.map((q) => q.id).join(",")
+  useEffect(() => {
+    if (
+      popupMode && popupHost && batch == null && !batchApplying &&
+      pendingForPopup.length > 0
+    ) {
+      setBatch(pendingForPopup)
+    }
+    // Dock taken away mid-batch (a higher-priority popup, a tab switch) → drop
+    // the snapshot; nothing was submitted (the batch sends only on completion),
+    // so the reopened batch simply asks again from the top.
+    if (popupMode && !popupHost && batch != null) {
+      setBatch(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pendingSig stands in for pendingForPopup
+  }, [popupMode, popupHost, batch, batchApplying, pendingSig])
+
   // Render pending questions as actionable, and questions answered in THIS
   // session as resolved lines (so the chat confirms the change). Questions that
   // were already answered before this mount are hidden to keep the thread clean.
+  // In popup mode the pending ones live in the stepper instead — inline keeps
+  // the resolved record, plus any question skipped OUT of a stepper (skipping
+  // means "not in a popup", never "gone").
   const visible = questions.filter(
-    (q) => q.status === "pending" || resolvedLines[q.id] != null,
+    (q) =>
+      resolvedLines[q.id] != null ||
+      (q.status === "pending" && (!popupMode || popupSkipped[q.id])),
   )
-  if (visible.length === 0) return null
+
+  const popupNode =
+    popupMode && popupHost && batch && batch.length > 0
+      ? createPortal(
+          <QuestionPopup
+            key={batch.map((q) => q.id).join(",")}
+            questions={batch.map((q) => ({
+              header: q.tag === "escalate" ? "Decision" : "Input needed",
+              prompt: q.prompt,
+              options: q.options.map((o) => ({
+                label: o.label,
+                description: o.description ?? null,
+              })),
+            }))}
+            fallbackHeader="PRD question"
+            // The previous sitting's answers, restored by question id — the
+            // stepper resumes at the first open question instead of re-asking
+            // from 1/N after every interruption (the reported bug).
+            initialAnswers={(() => {
+              const draft = loadQuestionDraft(prdId)
+              const seeded: Record<number, PopupAnswer> = {}
+              batch.forEach((q, i) => {
+                const entry = draft[q.id]
+                if (entry && !entry.skipped && entry.answer) seeded[i] = entry
+              })
+              return seeded
+            })()}
+            // Every settle persists — NOT a submit; the one batch submit below
+            // is unchanged. This is only what makes an unmount recoverable.
+            onProgress={(i, a) => {
+              if (batch[i]) saveQuestionDraftEntry(prdId, batch[i].id, a)
+            }}
+            onComplete={(answers) => {
+              // Skips fall back to their inline cards; everything answered
+              // goes out as ONE batch, submitted only now — never mid-stepper.
+              setPopupSkipped((prev) => {
+                const next = { ...prev }
+                answers.forEach((a, i) => {
+                  if (a.skipped && batch[i]) next[batch[i].id] = true
+                })
+                return next
+              })
+              // The draft's ANSWER entries are spent (they ride the submit);
+              // its SKIP entries persist so a skipped question stays inline
+              // across opens rather than re-opening the stepper forever.
+              try {
+                const remaining: QuestionDraft = {}
+                answers.forEach((a, i) => {
+                  if (a.skipped && batch[i]) remaining[batch[i].id] = a
+                })
+                localStorage.setItem(draftKey(prdId), JSON.stringify(remaining))
+              } catch { /* best-effort */ }
+              setBatch(null)
+              void submitBatch(
+                answers.flatMap((a, i) =>
+                  !a.skipped && a.answer && batch[i]
+                    ? [{ question: batch[i], answer: a.answer }]
+                    : [],
+                ),
+              )
+            }}
+          />,
+          popupHost,
+        )
+      : null
+
+  if (visible.length === 0 && !popupNode && !batchApplying && !batchError) return null
 
   return (
     <div className="piq-list" data-testid="prd-input-questions">
@@ -375,6 +609,25 @@ export function PrdInputQuestions({
           onSubmitText={() => submit(q, answerText[q.id] ?? "")}
         />
       ))}
+      {/* The batch's ONE submit, in flight — the popup has already closed, so
+          this line is what says the answers are landing. */}
+      {batchApplying ? (
+        <div
+          className="piq-applying"
+          role="status"
+          aria-live="polite"
+          data-testid="prd-input-batch-applying"
+        >
+          <span className="piq-applying-spinner" aria-hidden />
+          <span>Applying your answers — folding them into the PRD (this can take a minute)…</span>
+        </div>
+      ) : null}
+      {batchError ? (
+        <div className="piq-error" role="alert" data-testid="prd-input-batch-error">
+          {batchError} — the questions are back below, nothing was changed.
+        </div>
+      ) : null}
+      {popupNode}
     </div>
   )
 }

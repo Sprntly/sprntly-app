@@ -24,7 +24,7 @@ vi.mock("../api", async () => {
 vi.mock("../poll", () => ({ sleepUntilNextPoll: () => Promise.resolve() }))
 
 import { ApiError } from "../api"
-import { loadTicketSet, runTicketSetGeneration } from "../runTicketSetGeneration"
+import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../runTicketSetGeneration"
 import type { AppContentState } from "../../types/content"
 
 const STORY = {
@@ -235,5 +235,75 @@ describe("loadTicketSet", () => {
 
     expect(out).toEqual({ ok: false, kind: "failed" })
     expect(r.last()?.ticketSet).toMatchObject({ id: 7, status: "failed", error: "failed" })
+  })
+})
+
+describe("followTicketSetSwitch", () => {
+  // A format switch runs server-side now, so the client's only job is to
+  // follow it. The tickets on screen are the PREVIOUS format's and stay
+  // readable throughout — blanking them would make a background job look like
+  // a reload, which is exactly what `loadTicketSet` would do here.
+  const SET = {
+    id: 7, title: "Webhook retries", stories: [STORY], conversationId: 42,
+    status: "ready", sourceText: "make tickets", stubs: [], progress: null,
+    error: null, artifactTemplateId: null, artifactTemplateName: null,
+  }
+
+  it("marks the slice relaying immediately, without dropping the tickets", async () => {
+    ticketSetsApiMock.get.mockResolvedValue({
+      id: 7, title: "Webhook retries", status: "ready", stories: [STORY],
+      ticket_count: 1, conversation_id: 42, source_text: "make tickets",
+      artifact_template_id: "tpl-tick", artifact_template_name: "Acme Tickets",
+      relaying: false,
+    })
+    const r = recorder()
+
+    await followTicketSetSwitch(7, r.setContent, SET, "Acme Tickets")
+
+    // The FIRST patch says "switching" and still carries the tickets.
+    expect(r.patches[0].ticketSet).toMatchObject({
+      id: 7, relaying: true, relayingIntoName: "Acme Tickets", stories: [STORY],
+    })
+    expect(r.patches[0].ticketSet).not.toBeNull()
+  })
+
+  it("republishes the re-laid set once the switch lands", async () => {
+    const relaid = [{ ...STORY, description_layout: [{ label: "Summary", source: "what" }] }]
+    ticketSetsApiMock.get
+      .mockResolvedValueOnce({
+        id: 7, title: "Webhook retries", status: "ready", stories: [STORY],
+        ticket_count: 1, conversation_id: 42, source_text: "make tickets",
+        artifact_template_id: null, artifact_template_name: null, relaying: true,
+      })
+      .mockResolvedValueOnce({
+        id: 7, title: "Webhook retries", status: "ready", stories: relaid,
+        ticket_count: 1, conversation_id: 42, source_text: "make tickets",
+        artifact_template_id: "tpl-tick", artifact_template_name: "Acme Tickets",
+        relaying: false,
+      })
+    const r = recorder()
+
+    const landed = await followTicketSetSwitch(7, r.setContent, SET, "Acme Tickets")
+
+    expect(landed).toBe(true)
+    expect(r.last().ticketSet).toMatchObject({
+      stories: relaid,
+      artifactTemplateId: "tpl-tick",
+      artifactTemplateName: "Acme Tickets",
+      relaying: false,
+      relayingIntoName: null,
+    })
+  })
+
+  it("stops the strip rather than spinning when the set goes missing", async () => {
+    // Giving up watching must never leave a working strip over a switch nobody
+    // is following any more — the row is the truth and the next open re-reads it.
+    ticketSetsApiMock.get.mockRejectedValue(new ApiError(404, "gone"))
+    const r = recorder()
+
+    const landed = await followTicketSetSwitch(7, r.setContent, SET, "Acme Tickets")
+
+    expect(landed).toBe(false)
+    expect(r.last().ticketSet).toMatchObject({ relaying: false, relayingIntoName: null })
   })
 })

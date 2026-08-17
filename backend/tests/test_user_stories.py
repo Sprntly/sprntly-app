@@ -805,6 +805,29 @@ def test_compiling_a_ticket_format_maps_headings_to_sources():
     assert by_source["custom:acceptance_owner"] == "Acceptance owner"
 
 
+def test_pagination_headings_are_extraction_artifacts_not_sections():
+    """A PDF has no heading concept — the converter emits its pagination as
+    heading-shaped lines, and a real upload compiled to `Page 1 / Page 2 /
+    Page 3` sections. Pagination is skipped; a format that is ONLY pagination
+    compiles to nothing and is refused with the honest no-sections message
+    instead of succeeding as junk."""
+    import pytest as _pytest
+
+    from app.stories.layout import TicketLayoutError, compile_ticket_layout
+
+    layout = compile_ticket_layout(
+        "# Page 1\n"
+        "## Summary\n"
+        "**page 2**\n"
+        "## User story\n"
+    )
+    sources = [e["source"] for e in layout]
+    assert sources == ["what", "user_story"]
+
+    with _pytest.raises(TicketLayoutError):
+        compile_ticket_layout("# Page 1\n## Page 2\n## Page 3\n")
+
+
 def test_the_custom_section_hint_names_only_the_custom_keys():
     # The canonical five are already in the schema; repeating them would be
     # prompt weight for no information.

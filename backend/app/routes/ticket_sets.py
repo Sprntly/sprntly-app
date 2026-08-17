@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.db.ticket_sets import get_set, list_sets_for_conversation
+from app.stories.relayout_state import relayout_in_flight
 from app.stories.scope import set_scope
 
 logger = logging.getLogger(__name__)
@@ -63,6 +64,10 @@ def _public_set(row: dict) -> dict:
         "conversation_id": row.get("conversation_id"),
         "source_text": row.get("source_text") or "",
         "created_at": row.get("created_at"),
+        # Which ticket format rendered this set (None = the built-in). The
+        # display name is resolved where the company scope lives (the route
+        # below), not here — this helper has no company in hand.
+        "artifact_template_id": row.get("artifact_template_id") or None,
     }
 
 
@@ -105,6 +110,14 @@ def get_ticket_set(
     Tickets are returned with DELETED ones dropped and EXCLUDED ones tagged,
     exactly as GET /v1/stories/for-prd/{prd_id} does, so the panel renders the
     same lifecycle semantics on both paths.
+
+    `relaying` reports a background format switch (POST /v1/stories/change-
+    template) still running over this set. The `status` beside it stays
+    `ready`, because it is: the tickets returned here are the previous format's
+    and every one of them is still readable, pushable and editable. It is the
+    poll's completion signal — this is the read `loadTicketSet` follows — and
+    the reason a user can leave mid-switch and be told, on their return, that
+    the switch is still going.
     """
     row = _require_owned_set(set_id, company.company_id)
     out = _public_set(row)
@@ -112,6 +125,19 @@ def get_ticket_set(
         company.company_id, set_id, out["stories"]
     )
     out["ticket_count"] = len(out["stories"])
+    # The stamp's display name, resolved server-side so the panel's "Format:
+    # {name}" label needs no second fetch — same contract as GET /v1/prd/{id}
+    # and GET /v1/stories/for-prd/{prd_id}.
+    from app.routes.stories import _template_display_name
+
+    out["artifact_template_name"] = _template_display_name(
+        company.company_id, out["artifact_template_id"]
+    )
+    relaying = relayout_in_flight(row)
+    out["relaying"] = relaying is not None
+    out["relaying_into_name"] = _template_display_name(
+        company.company_id, relaying.get("template_id")
+    ) if relaying else None
     return out
 
 

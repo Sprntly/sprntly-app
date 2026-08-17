@@ -167,8 +167,14 @@ def test_only_the_customers_markdown_is_uncached(isolated_settings, monkeypatch)
     compile_prd_template("co-1", row["id"])
 
     prefix, user_input = seen["user_cacheable_prefix"], seen["input"]
-    # The house skeleton IS the prefix, and carries the class vocabulary.
-    assert 'class="ev"' in prefix and 'class="inputs"' in prefix
+    # The house skeleton IS the prefix, and carries the class vocabulary. The
+    # inputs hook is the exception since prd-author v4.8 retired the house
+    # appendix: the SYSTEM text still teaches it, so a format that keeps an
+    # open-items section can wire its answer buttons, but the reference
+    # skeleton no longer demonstrates a section the house PRD does not have.
+    assert 'class="ev"' in prefix
+    assert 'class="inputs"' not in prefix
+    assert '<ul class="inputs">' in seen["system"]
     assert "Acme's own form" not in prefix
     # ...and the customer's file is only in the uncached input.
     assert "Acme's own form" in user_input
@@ -283,9 +289,6 @@ def test_a_hand_built_good_skeleton_is_ready():
         # No `ul.ev` → applyEvidenceTruncation returns false and "View more
         # evidence" disappears with no error anywhere.
         ('<ul class="ev"><li>{{claim}}</li></ul>', "missing_evidence_list"),
-        # No `ul.inputs` in `.appendix` → extract_input_questions finds nothing
-        # and the PRD's chat loses every answer button.
-        ('<ul class="inputs"><li>{{open question}}</li></ul>', "missing_input_questions"),
         # No <h1> → the document has no title for anything to name it by.
         ("<h1>{{title}}</h1>", "missing_title"),
         # No byline → same code; ONE note per concept, never two.
@@ -358,6 +361,27 @@ def test_the_hypothesis_hook_is_only_required_when_the_map_claims_one():
     ]}
     verdict = validate_prd_skeleton(without_hyp, claims)
     assert [n["code"] for n in verdict.notes] == ["missing_hypothesis"]
+
+
+def test_the_inputs_hook_is_only_required_when_the_map_claims_one():
+    """Since prd-author v4.8 the house PRD has no open-questions appendix, so
+    a format without one is exactly as complete as ours and must not be
+    blocked — but one that CLAIMS an open-questions home and drops the
+    `ul.inputs` hook silently loses its chat answer buttons
+    (`extract_input_questions` finds nothing)."""
+    without_inputs = _GOOD_SKELETON.replace(
+        '<ul class="inputs"><li>{{open question}}</li></ul>', ""
+    )
+
+    assert validate_prd_skeleton(without_inputs, _GOOD_MAP).status == "ready"
+
+    claims = {**_GOOD_MAP, "sections": [
+        {"id": "s1", "house": "Open questions", "customer": "Still to decide",
+         "order": 1, "form": "bullets"},
+        _GOOD_MAP["sections"][1],
+    ]}
+    verdict = validate_prd_skeleton(without_inputs, claims)
+    assert [n["code"] for n in verdict.notes] == ["missing_input_questions"]
 
 
 def test_requirements_may_be_a_table_or_a_declared_alternative_form():

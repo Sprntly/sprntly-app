@@ -183,9 +183,11 @@ def test_the_kg_tool_is_absent_by_default():
     assert "Sprntly knowledge graph" not in captured["system"]
 
 
-def test_an_adapter_with_verbatim_copy_never_gets_a_tool_its_prompt_omits():
-    """Jira passes its own long-tuned system_text. Handing that loop a tool the
-    prompt never describes wastes an iteration at best."""
+def test_a_verbatim_prompt_gets_the_kg_tool_with_its_block_appended():
+    """A tuned prompt (Jira) predates the KG tool, so when the flag is on the
+    framework both OFFERS the tool AND appends the KG system block, so the prompt
+    is told the tool exists before it is handed one. (The flag-off contract — a
+    verbatim prompt gets no KG tool — is guarded in test_connector_lookup.py.)"""
     captured: dict = {}
     answer_mod.answer(
         enterprise_id="ent", question="what does our onboarding spec say?",
@@ -193,8 +195,9 @@ def test_an_adapter_with_verbatim_copy_never_gets_a_tool_its_prompt_omits():
         system_text="verbatim jira prompt",
         run_loop=_capture_loop(captured), log=lambda *_a: None,
     )
-    assert kg.TOOL_NAME not in [t["name"] for t in captured["tools"]]
-    assert captured["system"] == "verbatim jira prompt"
+    assert kg.TOOL_NAME in [t["name"] for t in captured["tools"]]
+    assert "verbatim jira prompt" in captured["system"]
+    assert "## Sprntly knowledge graph" in captured["system"]
 
 
 def test_the_kg_tool_dispatches_with_the_callers_tenant(monkeypatch):

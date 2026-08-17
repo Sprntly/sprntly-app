@@ -588,11 +588,12 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    # v7 since library questions became exclusive (kg=false / no sources is
-    # now contractual for them). The version is pinned here rather than merely
-    # compared to itself because pooling rows across versions would pool two
-    # different menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v7"
+    # v8 since the action menu gained `assign_tickets` ("assign this ticket to
+    # Dave" used to land on update_ticket, whose executor rewrites content, not
+    # ownership). The version is pinned here rather than merely compared to
+    # itself because pooling rows across versions would pool two different
+    # menus.
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v9"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -635,6 +636,15 @@ def test_the_schema_property_order_is_load_bearing():
         # `open_artifact`'s two arguments sit with the action's other arguments,
         # before any choice of skill or pipeline — same rule as task/instruction.
         "artifact_type", "artifact_query",
+        # `share_to_slack`'s destination comes AFTER the two fields naming the
+        # document — same subject-before-form rule as the template pair above,
+        # one action over: a channel name in the message must not steer which
+        # document gets picked.
+        "share_channel", "share_note",
+        # `list_artifacts`' KIND rides with the action arguments too — a pure
+        # enum pick, no ordering subtlety beyond staying ahead of the
+        # skill/pipeline choices like every other action argument.
+        "list_kind", "list_mode",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
         "sources", "include_knowledge_graph", "include_library",
@@ -657,7 +667,9 @@ def test_the_schema_property_order_is_load_bearing():
     # invite the model to pick one on every single build.
     for optional in ("constraints", "task", "instruction", "documents",
                      "artifact_type", "artifact_query",
-                     "artifact_template_id", "template_query"):
+                     "share_channel", "share_note",
+                     "artifact_template_id", "template_query", "list_kind",
+                     "list_mode"):
         assert optional not in ap._PLANNER_SCHEMA["required"]
     # `include_library` IS required, like `include_knowledge_graph` beside it:
     # both are booleans with a real default answer, and an omitted boolean is
@@ -725,10 +737,11 @@ def test_generate_prd_survives_an_empty_task_on_purpose():
     assert "generate_prd" not in ap._NEEDS_TASK
 
 
-@pytest.mark.parametrize("action", ["edit_prd", "update_ticket"])
+@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets"])
 def test_an_edit_without_an_instruction_degrades_to_answer(action):
     """`chat_intent` already applies this rule (`no_instruction` → answer);
-    rewriting a document toward nothing is worse than not rewriting it."""
+    rewriting a document toward nothing is worse than not rewriting it — and
+    an assignment with nobody named has nothing to execute."""
     assert ap._gate_action(action, "", "")[0] == "answer"
     assert ap._gate_action(action, "", "make it shorter") == (
         action, "", "make it shorter",
@@ -803,6 +816,22 @@ def test_the_log_dict_is_one_flat_greppable_record():
     assert record["method"] == "generic"
     assert record["sources"] == ["jira"]
     assert record["reason"] == "ticket context"
+
+
+def test_the_log_dict_records_what_kind_of_document_was_decided():
+    """`artifact_kind` is the ARGUMENT `create_artifact` dispatches with, so a
+    plan line without it cannot answer "what did it think it was writing" —
+    the first question asked of a document that came out wrong."""
+    plan = ap.Plan(action="create_artifact", task="Q3 for the board",
+                   artifact_kind="leadership update")
+    assert plan.as_log_dict()["artifact_kind"] == "leadership update"
+
+
+def test_the_log_dict_carries_the_kind_key_even_when_there_is_none():
+    """Logged unconditionally, like `template` beside it: an omitted key makes
+    "no kind was named" indistinguishable from "this line predates the field"
+    when grepping a journal."""
+    assert "artifact_kind" in ap.Plan(action="answer").as_log_dict()
 
 
 # ── the feature flag ─────────────────────────────────────────────────────────

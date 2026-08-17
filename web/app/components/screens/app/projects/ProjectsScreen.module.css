@@ -1,0 +1,297 @@
+/* ProjectsScreen — component-scoped styles (globals.css is never edited for
+ * this ticket, per BUILD.md §6 hot-file rule). Every value below resolves to
+ * an existing `web/app/globals.css` custom property; no new palette. */
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 26px;
+}
+
+.title {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 32px;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  margin: 0 0 6px;
+  color: var(--ink);
+}
+
+.sub {
+  color: var(--ink-3);
+  font-size: 14px;
+  max-width: 640px;
+  margin: 0;
+}
+
+.newBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 36px;
+  padding: 0 15px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.newBtn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.newBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.searchRow {
+  margin: 4px 0 22px;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--ink);
+  font-size: 13px;
+  min-width: 240px;
+  max-width: 340px;
+}
+
+.search input {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 13px;
+  font-family: var(--font-body);
+  color: var(--ink);
+  width: 100%;
+}
+
+.search input::placeholder {
+  color: var(--muted);
+}
+
+.sectionLabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 0 0 12px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 18px;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 188px;
+  padding: 20px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-body);
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.card:hover {
+  box-shadow: var(--shadow-md);
+  border-color: var(--line-strong);
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.cardTop {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cardTitle {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-size: 19px;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  margin: 0;
+  color: var(--ink);
+  /* Reserve a consistent two-line title area so a 1-line title occupies the
+   * same vertical space as a wrapping 2-line title — keeps every card's body
+   * (badges + footer) at the same start position. Overflow clamps with an
+   * ellipsis past two lines. */
+  min-height: 2.6em;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.autoBadge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-muted);
+  color: var(--accent-ink);
+  white-space: nowrap;
+}
+
+.badgeRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.countBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: var(--radius-sm);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  /* Pin the footer to the bottom of the card regardless of how much body
+   * content sits above it, so footers line up across the grid row. */
+  margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.avStack {
+  display: inline-flex;
+}
+
+.av {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-4);
+  color: var(--ink-2);
+  border: 1.5px solid var(--surface-2);
+  box-shadow: 0 0 0 1.5px var(--surface-2);
+  margin-left: -6px;
+  flex-shrink: 0;
+}
+
+.av:first-child {
+  margin-left: 0;
+}
+
+.avOverflow {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--ink-2);
+  background: var(--surface-3);
+}
+
+.metaRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.metaItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.memDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex-shrink: 0;
+}
+
+.noMatch {
+  color: var(--ink-3);
+  font-size: 13px;
+  padding: 32px 0;
+  text-align: center;
+}
+
+.skeletonGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 18px;
+}
+
+.skeletonCard {
+  height: 176px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-3);
+  border: 1px solid var(--line);
+}
+
+.retryRow {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.retryBtn {
+  display: inline-flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 16px;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.retryBtn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.retryBtn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

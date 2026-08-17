@@ -8271,6 +8271,397 @@
     font-style: italic;
   }
 
+  /* The one-line pointer that stands in for the clarify card while its batch
+     is being answered in the QuestionPopup below the thread. */
+  .cqc-popup-note {
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  /* Share-to-Slack preview (SlackSharePreviewCard) — what will be posted, and
+     where, before it is. Rendered inside an existing .bc-agent-body, so it
+     styles only its own internals and inherits the agent chrome, exactly like
+     the clarify card above. */
+  .ssc-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .ssc-intro,
+  .ssc-line {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink);
+  }
+
+  .ssc-line--muted {
+    font-size: 13px;
+    color: var(--ink-4);
+  }
+
+  .ssc-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .ssc-choice,
+  .ssc-channel {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .ssc-choice-kind {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .ssc-channel-hash {
+    color: var(--ink-4);
+  }
+
+  .ssc-channel-note {
+    font-size: 11px;
+    color: var(--ink-4);
+    font-style: italic;
+  }
+
+  .ssc-channel--active,
+  .ssc-choice--active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .ssc-filter {
+    width: 100%;
+    padding: 7px 10px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .ssc-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  /* The message, split in two: the editable note above, the fixed document
+     block below. The border ties them into one "this is the post" unit while
+     keeping visible which half the user controls. */
+  .ssc-message {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--surface-1);
+  }
+
+  .ssc-note {
+    min-height: 58px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    resize: vertical;
+  }
+
+  .ssc-note:focus {
+    outline: none;
+    background: var(--surface-2);
+  }
+
+  .ssc-doc {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+  }
+
+  .ssc-doc-head {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+  }
+
+  .ssc-doc-kind {
+    flex: none;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .ssc-doc-title {
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .ssc-doc-summary {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+
+  .ssc-doc-link {
+    font-size: 11.5px;
+    color: var(--ink-4);
+    word-break: break-all;
+  }
+
+  .ssc-warning {
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+
+  .ssc-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  /* Settled: one quiet line saying what happened. Deliberately understated —
+     it is a record, not an announcement. */
+  .ssc-card--resolved {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+
+  .ssc-resolved-mark {
+    flex: none;
+    font-weight: 700;
+    color: var(--ink-4);
+  }
+
+  .ssc-card--sent .ssc-resolved-mark {
+    color: var(--accent);
+  }
+
+  /* QuestionPopup — the chat's question stepper, docked above the composer.
+     One question at a time: category chip + ‹ 1/2 › + Skip in the head,
+     options as full-width rows with a description subline. Elevated so it
+     reads as "on top of the chat", not another thread message. */
+  .qpu {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0 0 10px;
+    padding: 14px 16px;
+    border: 1px solid var(--line-strong);
+    border-radius: 14px;
+    background: var(--surface-2);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .qpu-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .qpu-chip {
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+  }
+
+  .qpu-nav {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .qpu-nav-btn,
+  .qpu-skip,
+  .qpu-close {
+    border: none;
+    background: none;
+    padding: 2px 6px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--ink-3);
+    cursor: pointer;
+    border-radius: 6px;
+  }
+
+  .qpu-nav-btn {
+    font-size: 14px;
+    line-height: 1;
+  }
+
+  .qpu-nav-btn:hover:not(:disabled),
+  .qpu-skip:hover:not(:disabled),
+  .qpu-close:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--surface-3);
+  }
+
+  .qpu-nav-btn:disabled,
+  .qpu-skip:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .qpu-close {
+    font-size: 15px;
+    line-height: 1;
+  }
+
+  .qpu-count {
+    font-size: 11.5px;
+    color: var(--ink-4);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .qpu-prompt {
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .qpu-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* Past five options the list scrolls instead of growing the popup — a
+     ten-ticket "which tickets?" question used to render all ten rows and push
+     the composer off the bottom of the screen. The pixel cap itself is
+     MEASURED in the component (rows are one line, two lines, or a label plus a
+     description depending on the host, so no constant here is right twice);
+     only the scrolling and the "there is more below" cue live here. */
+  .qpu-options--scroll {
+    overflow-y: auto;
+    /* Scrollbars are transparent until the pointer is over them (see the
+       global rules at the top of this file), so at rest the fade is the ONLY
+       thing telling the user the list continues. It lifts once the last row is
+       in view so a fully-scrolled list doesn't look permanently clipped. */
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 22px), transparent);
+  }
+
+  .qpu-options--scroll[data-scroll-end="1"] {
+    -webkit-mask-image: none;
+    mask-image: none;
+  }
+
+  .qpu-option {
+    display: flex;
+    flex-direction: column;
+    /* Load-bearing under the cap above: a height-constrained flex column
+       SHRINKS its items to fit rather than overflowing, which would squash all
+       ten rows into the space of five instead of scrolling them. */
+    flex: 0 0 auto;
+    gap: 2px;
+    align-items: flex-start;
+    text-align: left;
+    padding: 9px 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    font: inherit;
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .qpu-option:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    background: var(--surface-3);
+  }
+
+  .qpu-option:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .qpu-option--active {
+    border-color: var(--accent);
+  }
+
+  .qpu-option--other {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  /* Regular weight, deliberately. The question above IS the title of this
+     card; when the options carried the same 600 as the prompt the whole popup
+     read as one bold block with no hierarchy in it (reported from a live
+     session: "everything is bolded"). Emphasis belongs to the prompt only. */
+  .qpu-option-label {
+    font-size: 13px;
+    font-weight: 400;
+    line-height: 1.4;
+  }
+
+  .qpu-option-desc {
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ink-3);
+  }
+
+  .qpu-other-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-end;
+  }
+
+  .qpu-input {
+    width: 100%;
+    min-height: 52px;
+    resize: vertical;
+    padding: 8px 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+  }
+
+  .qpu-other-submit {
+    font-size: 12px;
+  }
+
+  .qpu-skip-hint {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink-4);
+  }
+
+  /* No skip-the-whole-batch footer here by owner directive (2026-08-16): the
+     popup asks one question at a time and Skip in the head is the only way
+     past one, so a batch is skipped by deciding on each question rather than
+     by one click that silently defaults all of them. */
+
   /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
      Reuses the .bc-* agent chrome + .bc-action-btn buttons; these add the
      question-specific bits. */
@@ -8393,6 +8784,19 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  /* Tickets panel — a format switch running in the background. Reuses
+     piq-spin rather than minting a third identical keyframe. */
+  .tickets-relaying-spinner {
+    flex: none;
+    width: 13px;
+    height: 13px;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    display: inline-block;
+    animation: piq-spin 0.7s linear infinite;
   }
 
   /* Composer dock — transparent so the composer + suggestions float over the

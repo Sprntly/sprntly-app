@@ -1,9 +1,16 @@
 """Structured "User input needed" questions for a PRD — extraction + answer.
 
-The `prd-author` skill writes a "User input needed" section into the PRD as
-decorative HTML (`<ul class="inputs"><li>…[ESCALATE]/[NEED]…owner…</li></ul>`).
-Nothing structured reaches the product, so those decisions sat inert inside the
-document. This module gives them a life:
+The `prd-author` skill USED to write a "User input needed" section into the PRD
+as decorative HTML (`<ul class="inputs"><li>…[ESCALATE]/[NEED]…owner…</li></ul>`).
+Nothing structured reached the product, so those decisions sat inert inside the
+document. This module gave them a life.
+
+prd-author v4.8 retired that section from the house format (owner decision
+2026-08-14) — a fresh built-in-format PRD carries no open-items list, so
+extraction finds nothing and the popup stays quiet, by design. Everything here
+still runs for the documents that DO carry the section: every pre-v4.8 PRD, and
+any PRD generated against a company template that defines its own open-items
+section (Template adoption renders theirs). The mechanics:
 
   1. `extract_input_questions(prd_id)` — a LIGHTWEIGHT pass (run once after the PRD
      is generated) reads the finished PRD and lifts each "User input needed" item
@@ -206,7 +213,12 @@ def extract_input_questions(prd_id: int) -> list[dict]:
 
 # ── Scoped answer / editor ───────────────────────────────────────────────────
 
-EDIT_PROMPT_VERSION = "prd-input-answer-edit-v1"
+# v2: the editor takes ONE OR MORE resolved decisions per call. The chat's
+# question popup collects the whole batch before submitting (owner directive
+# after testing v1's submit-per-click: "let me finish all the questions before
+# you submit"), and folding N answers in one pass costs one scoped edit
+# instead of N sequential ones — with N version snapshots collapsing to one.
+EDIT_PROMPT_VERSION = "prd-input-answer-edit-v2"
 
 _EDIT_SCHEMA: dict = {
     "type": "object",
@@ -220,23 +232,23 @@ _EDIT_SCHEMA: dict = {
 
 _EDIT_SYSTEM = """\
 You are Sprntly's PRD editor. You are given a complete PRD as a self-contained \
-HTML document and ONE resolved "User input needed" decision (a question and the \
-answer the team chose). Apply the answer to the PRD with the MINIMAL change \
-necessary.
+HTML document and ONE OR MORE resolved "User input needed" decisions (each a \
+question and the answer the team chose). Apply the answers to the PRD with the \
+MINIMAL change necessary.
 
 Rules:
-- Change ONLY the sections the answer actually affects (e.g. Requirements, Goal, \
+- Change ONLY the sections the answers actually affect (e.g. Requirements, Goal, \
 Hypothesis, Users, Appendix). Leave every unaffected section — and the document's \
 `<style>`, byline, structure, and section order — BYTE-FOR-BYTE unchanged.
-- Remove the answered item from the "User input needed" list. If that list \
+- Remove EACH answered item from the "User input needed" list. If that list \
 becomes empty, remove the whole "User input needed" block — the section is \
 self-clearing. In older PRDs that is its `<div class="eyebrow">` + the `<ul \
 class="inputs">`; in newer PRDs (v4.7 layout) it is the `<h3>` + `<ul \
 class="inputs">` inside the Appendix, and if the Appendix then holds nothing \
 else, remove the whole `<div class="appendix">` too.
 - Do NOT restyle, reorder, rename, or re-author anything else. Do NOT touch \
-unrelated `[NEED]`/`[ESCALATE]` items. Invent no new numbers — fold in exactly \
-what the answer states.
+`[NEED]`/`[ESCALATE]` items that are not among the answered decisions. Invent \
+no new numbers — fold in exactly what each answer states.
 - Keep the output a single valid, self-contained HTML document that still renders \
 in the same visual system.
 
@@ -245,10 +257,9 @@ section names you changed in `sections_changed` (e.g. ["Requirements", "Goal"]),
 and a one-line `summary` of the edit.""" + VOICE_GUARD
 
 _EDIT_USER = """\
-Apply this resolved decision to the PRD below.
+Apply these resolved decisions to the PRD below.
 
-QUESTION: {question}
-ANSWER: {answer}
+{decisions}
 
 PRD (HTML — edit and return the full document):
 {prd_html}
@@ -327,7 +338,15 @@ def apply_chat_edit(prd_html: str, instruction: str, enterprise_id: str) -> dict
 
 
 def apply_answer(prd_html: str, question: str, answer: str, enterprise_id: str) -> dict:
-    """Run the scoped editor: fold ONE answered decision into the PRD HTML.
+    """Fold ONE answered decision into the PRD HTML (the inline-card path)."""
+    return apply_answers(prd_html, [(question, answer)], enterprise_id)
+
+
+def apply_answers(
+    prd_html: str, decisions: list[tuple[str, str]], enterprise_id: str
+) -> dict:
+    """Run the scoped editor: fold one OR MORE answered decisions into the PRD
+    HTML in a single pass — the popup submits its whole batch at once.
 
     Returns `{"html": <updated document>, "sections_changed": [...],
     "summary": ...}`. Raises RuntimeError if the model returns no usable HTML (the
@@ -335,13 +354,18 @@ def apply_answer(prd_html: str, question: str, answer: str, enterprise_id: str) 
     skill — no template, no grounding, no exemplars — so it stays a cheap,
     targeted edit rather than a full regeneration.
     """
+    if not decisions:
+        raise RuntimeError("no decisions to apply")
+    block = "\n\n".join(
+        f"QUESTION: {q}\nANSWER: {a}" for q, a in decisions
+    )
     result = llm_call(
         enterprise_id=enterprise_id,
         agent=_AGENT,
         purpose="apply_prd_input_answer",
         prompt_version=EDIT_PROMPT_VERSION,
         system=_EDIT_SYSTEM,
-        input=_EDIT_USER.format(question=question, answer=answer, prd_html=prd_html),
+        input=_EDIT_USER.format(decisions=block, prd_html=prd_html),
         json_schema=_EDIT_SCHEMA,
         max_tokens=32000,
         long_output=True,
