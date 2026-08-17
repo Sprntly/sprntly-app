@@ -220,6 +220,54 @@ describe("useProjectGroupThread — transport", () => {
     expect(latest!.postingWaitNode).toBeTruthy()
   })
 
+  it("test_group_engine_tail_mention_shows_thinking_and_suppresses_stayed_out — an @Sprntly tail is a deterministic reply: thinking state on, stay-out off, even long past the grace window", async () => {
+    groupTurnsMock.mockResolvedValueOnce([
+      // Old created_at (far past the grace window) — the mention alone must
+      // hold the stay-out note back, because the agent ALWAYS answers a call.
+      gt({ id: 1, role: "user", content: "@Sprntly can you summarize?" }),
+    ])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    expect(latest!.showThinking).toBe(true)
+    expect(latest!.showStayedOut).toBe(false)
+  })
+
+  it("test_group_engine_tail_run_status_running_shows_thinking — a backend-confirmed running run on the tail human turn plumbs through to the shell turn and drives the thinking state, never a stay-out", async () => {
+    groupTurnsMock.mockResolvedValueOnce([
+      gt({
+        id: 1, role: "user", content: "what do we think folks",
+        run_status: "running",
+        created_at: new Date().toISOString(),
+      }),
+    ])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    expect(latest!.showThinking).toBe(true)
+    expect(latest!.showStayedOut).toBe(false)
+    // The run-status reaches the ShellTurn (the render path reads it there).
+    expect(latest!.turns[latest!.turns.length - 1].runStatus).toBe("running")
+  })
+
+  it("test_group_engine_fresh_tail_within_grace_suppresses_stayed_out — a just-created no-mention tail is held silent (no stay-out, no thinking) while a reply may still be generating", async () => {
+    groupTurnsMock.mockResolvedValueOnce([
+      gt({ id: 1, role: "user", content: "no mention here", created_at: new Date().toISOString() }),
+    ])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    expect(latest!.showStayedOut).toBe(false)
+    expect(latest!.showThinking).toBe(false)
+  })
+
+  it("test_group_engine_settled_history_tail_shows_stayed_out_immediately — a history-loaded no-mention tail past the grace window shows the stay-out with no wait", async () => {
+    // The default gt() created_at is years in the past — the grace window is
+    // already elapsed at mount, so the note must show on the first settle.
+    groupTurnsMock.mockResolvedValueOnce([gt({ id: 1, role: "user" })])
+    render(React.createElement(Harness, { projectId: 7 }))
+    await flush()
+    expect(latest!.showStayedOut).toBe(true)
+    expect(latest!.showThinking).toBe(false)
+  })
+
   it("test_group_engine_exposes_presence_members_and_typers (AC1 — review-flagged)", async () => {
     realtimeState.presenceMembers = [{ userId: "u1", name: "Ada" }, { userId: "u2", name: "Bo" }]
     realtimeState.typers = [{ userId: "u2", name: "Bo" }]

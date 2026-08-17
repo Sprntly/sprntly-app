@@ -303,7 +303,11 @@ function ChatShellInner(
         showAgent: false,
         agentName: transcript.agentName,
         humanAlign: isMe ? "end" : "start",
-        speaker: isMe ? "You" : (turn.author.name ?? "Someone"),
+        // Name the author on every human row — including the viewer's own —
+        // to match the main/private surfaces (which label the self bubble with
+        // the person's name, not "You"). Fall back to "You" only when the name
+        // genuinely can't be resolved.
+        speaker: turn.author.name ?? (isMe ? "You" : "Someone"),
         userHeadExtra: (
           <>
             {!isMe && turn.author.role ? <span className={shellStyles.gcRole}>{turn.author.role}</span> : null}
@@ -318,7 +322,11 @@ function ChatShellInner(
             turn.author.avatarStyle && typeof turn.author.avatarStyle === "object"
               ? turn.author.avatarStyle
               : undefined,
-          bubbleClassName: isMe ? shellStyles.gcBubbleMe : shellStyles.gcBubbleOther,
+          // The viewer's own bubble renders in the SAME light treatment as
+          // peers (and as the main/private surfaces) — no dark-green own-bubble.
+          // Self stays distinguishable by right-alignment (`gcMsgMe`), not by
+          // colour, matching the private surface's light right-aligned bubble.
+          bubbleClassName: shellStyles.gcBubbleOther,
           bodyNode: transcript.renderUserBody?.(turn),
         },
       }
