@@ -57,7 +57,12 @@ from app import project_delegation
 from app import project_group_context
 from app import project_join_greeting
 from app import project_task_execution
-from app.project_chat_edit import apply_chat_edit_scoped
+from app.project_chat_edit import (
+    apply_chat_edit_scoped,
+    apply_proposed_chat_edit,
+    propose_chat_edit_scoped,
+)
+from app.db import prd_edit_proposals as prd_edit_proposals_db
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.project_prd_patch_tool import (
     _project_prd_ids,
@@ -972,16 +977,155 @@ def project_chat_edit(
         return {"edited": False, "answer": answer}
 
     try:
-        result = apply_chat_edit_scoped(
-            prd_id, body.instruction, ctx, project_id=project_id, dataset=dataset,
+        proposal = propose_chat_edit_scoped(
+            prd_id, body.instruction, ctx,
+            project_id=project_id, dataset=dataset,
+            surface="private", client_message_id=resolved_client_message_id,
         )
     except ProjectPrdWriteDenied:
         answer = "I can only edit a PRD that's attached to this project."
         _persist_edit_turns(answer)
         return {"edited": False, "answer": answer}
 
-    _persist_edit_turns(result.get("summary") or "Updated the PRD.")
-    return {"edited": True, **result}
+    if not proposal.get("proposed"):
+        # The editor judged the instruction wasn't an edit — nothing to
+        # confirm. Terminal no-op answer, same shape as the refusals above.
+        answer = proposal.get("summary") or "I didn't find anything in the PRD to change for that."
+        _persist_edit_turns(answer)
+        return {"edited": False, "answer": answer}
+
+    # An edit is READY but NOT yet written — nothing touched `prds`. Hand the
+    # caller the token to confirm (or cancel). The turn pair is persisted at
+    # confirm, not here, so an unconfirmed proposal leaves no chat trace.
+    return {
+        "edited": False,
+        "pending": True,
+        "mutation": {
+            "token": proposal["token"],
+            "summary": proposal["summary"],
+            "sections_changed": proposal["sections_changed"],
+            "prd_id": proposal["prd_id"],
+        },
+    }
+
+
+class ProjectPrdChatEditTokenIn(BaseModel):
+    """Body for the confirm/cancel legs of the project PRD chat-edit gate — the
+    opaque single-use token a prior `chat-edit` call returned under
+    `mutation.token`."""
+    token: str = Field(..., min_length=1)
+
+
+@router.post("/{project_id}/prd/chat-edit/confirm")
+def project_chat_edit_confirm(
+    project_id: int,
+    body: ProjectPrdChatEditTokenIn,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Confirm a previously-proposed project PRD edit: commit exactly the
+    token's stored patch (applied content == proposed content, no second edit
+    pass). Membership-gated; rides the same `PROJECT_PRD_EDIT_ENABLED` flag.
+
+    The two IDOR gates re-run on the CALLER inside `apply_proposed_chat_edit`
+    (the stored token target is untrusted), and the proposal lookup is
+    tenant-scoped + expiry-filtered + single-use. A denied/unknown/expired/
+    already-consumed token degrades to a soft `{"edited": False, "answer"}`
+    (never a raw 403/404 to chat), mirroring this route's write-denied
+    discipline. On success the owned turn pair persists (private surface) or a
+    completed 'Done' group turn is posted + broadcast (group surface)."""
+    _require_project_member(project_id, ctx)
+
+    if not project_prd_edit_enabled():
+        return {
+            "edited": False,
+            "answer": "PRD editing from chat isn't turned on for this project yet.",
+        }
+
+    dataset = _dataset_for(ctx)
+    try:
+        result = apply_proposed_chat_edit(
+            body.token, ctx, project_id=project_id, dataset=dataset,
+        )
+    except ProjectPrdWriteDenied:
+        return {
+            "edited": False,
+            "answer": "I can only edit a PRD that's attached to this project.",
+        }
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            # Unknown / expired / already-applied / cross-tenant — all soft to
+            # chat, never a raw 404.
+            return {
+                "edited": False,
+                "answer": "That change is no longer available to apply.",
+            }
+        raise
+
+    if not result.get("applied"):
+        # Concurrent change since propose — nothing was clobbered.
+        return {
+            "edited": False,
+            "answer": "The PRD changed since this edit was proposed, so I didn't apply it. Please try again.",
+        }
+
+    summary = result.get("summary") or ""
+    done_answer = f"Done — I've updated the PRD. {summary}".strip() if summary \
+        else "Done — I've updated the PRD."
+
+    if result.get("surface") == "group" and result.get("conversation_id") is not None:
+        # Group surface: narrate the completed edit as a group turn, exactly
+        # the past-tense 'Done' the pre-gate group path posted inline.
+        assistant_turn = conversations_db.post_group_turn(
+            result["conversation_id"], None, done_answer, role="assistant",
+        )
+        _publish_group_turn_created(project_id, result["conversation_id"], assistant_turn)
+    else:
+        # Private surface: persist the owned instruction + done-summary turn
+        # pair, keyed by the proposal's client_message_id so a double-confirm
+        # dedups per side. Best-effort — a persist hiccup never blocks the
+        # already-committed edit.
+        cmid = result.get("client_message_id") or str(uuid.uuid4())
+        try:
+            conversations_db.post_owned_individual_user_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=result.get("instruction") or "",
+                client_message_id=cmid,
+            )
+            conversations_db.post_owned_individual_assistant_turn(
+                project_id=project_id,
+                user_id=ctx.user_id,
+                content=done_answer,
+                client_message_id=cmid,
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist confirmed edit turns project_id=%s",
+                project_id, exc_info=True,
+            )
+
+    return {
+        "edited": True,
+        "prd": result["prd"],
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
+    }
+
+
+@router.post("/{project_id}/prd/chat-edit/cancel")
+def project_chat_edit_cancel(
+    project_id: int,
+    body: ProjectPrdChatEditTokenIn,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Cancel a pending project PRD edit: drop the proposal row so its token
+    can never apply. Membership-gated; makes NO `prds` write. The delete is
+    tenant-scoped (`company_id` in the query), so a cross-tenant token
+    silently matches nothing — the response is always `{"cancelled": True}`
+    (no existence disclosure)."""
+    _require_project_member(project_id, ctx)
+    prd_edit_proposals_db.delete_proposal(body.token, ctx.company_id)
+    return {"cancelled": True}
 
 
 class ProjectPrdContentIn(BaseModel):
@@ -1658,10 +1802,15 @@ class _GroupEditOutcome(NamedTuple):
     path (the single classify-and-edit path stays authoritative for every
     trigger kind — mention, continuation, gate):
 
-    - `applied_turn` not None → a real edit was written in place
-      (`apply_chat_edit_scoped` + `prd_versions` snapshot) and the
-      completed-past-tense assistant turn is already posted/broadcast; the
-      caller returns immediately and never reaches the unified-engine reply.
+    - `applied_turn` not None → the classify pass PROPOSED an edit (via
+      `propose_chat_edit_scoped`) and its assistant turn is already
+      posted/broadcast: either a proposal turn carrying `reply.pending_mutation`
+      (an edit was found, awaiting confirmation — nothing written to `prds`
+      yet), or a plain 'nothing to change' turn. The field name is kept
+      (rather than renamed to `proposed_turn`) so the caller's early-return
+      contract is unchanged; the caller returns immediately either way and
+      never reaches the unified-engine reply. The actual `prds` write happens
+      later, only when the confirm route commits the stored proposal.
     - `applied_turn` None AND `was_edit_request` True → the latest turn WAS
       an edit request but nothing was written (flag off, or the target
       would not resolve — zero/ambiguous PRD, `refusal` says which when
@@ -1755,25 +1904,41 @@ def _classify_and_maybe_edit_group_prd(
             needs_prd_clarify=needs_prd_clarify, envelope=envelope,
         )
 
-    result = apply_chat_edit_scoped(
-        prd_id, envelope["instruction"], ctx, project_id=project_id, dataset=dataset,
+    proposal = propose_chat_edit_scoped(
+        prd_id, envelope["instruction"], ctx,
+        project_id=project_id, dataset=dataset,
+        conversation_id=conversation_id, surface="group",
     )
-    # The edit was written to `prds.payload_md` in place, versioned, right
-    # here — there is no propose/queue/accept step. Word the assistant turn
-    # as a COMPLETED, past-tense update ONLY when the editor actually
-    # changed something (`sections_changed`); otherwise say plainly that
-    # nothing was changed rather than claiming an update (B2 no-fabrication
-    # — never misreport an edit as done when it wasn't). `summary` is the
-    # editor's own one-line description of WHAT changed; if the model
-    # returned nothing usable we fall back to a plain done-message.
-    summary = (result.get("summary") or "").strip()
-    if result.get("sections_changed"):
-        narration = f"Done — I've updated the PRD. {summary}".strip() if summary \
-            else "Done — I've updated the PRD."
-    else:
+    # NOTHING was written to `prds` here — the edit is PROPOSED, not applied.
+    # Word the assistant turn as a PROPOSAL that invites confirmation ONLY
+    # when the editor actually found something to change (`proposed`);
+    # otherwise say plainly that nothing needs changing rather than claiming a
+    # pending edit (B2 no-fabrication). `summary` is the editor's own one-line
+    # description of WHAT would change.
+    summary = (proposal.get("summary") or "").strip()
+    if not proposal.get("proposed"):
         narration = summary or "I didn't find anything in the PRD to change for that."
+        assistant_turn = conversations_db.post_group_turn(
+            conversation_id, None, narration, role="assistant"
+        )
+        _publish_group_turn_created(project_id, conversation_id, assistant_turn)
+        return _GroupEditOutcome(applied_turn=assistant_turn, was_edit_request=True, refusal=None)
+
+    # An edit is READY but UNWRITTEN. Narrate the proposal and stamp the
+    # pending mutation onto the turn's structured `reply` so the client can
+    # offer a confirm/cancel affordance; the write happens only when the
+    # confirm route commits the stored patch (applied == proposed).
+    narration = f"I'd like to update the PRD: {summary} Confirm to apply.".strip() if summary \
+        else "I'd like to update the PRD. Confirm to apply."
+    pending_reply = {
+        "pending_mutation": {
+            "token": proposal["token"],
+            "summary": proposal["summary"],
+            "prd_id": proposal["prd_id"],
+        }
+    }
     assistant_turn = conversations_db.post_group_turn(
-        conversation_id, None, narration, role="assistant"
+        conversation_id, None, narration, role="assistant", reply=pending_reply,
     )
     _publish_group_turn_created(project_id, conversation_id, assistant_turn)
     return _GroupEditOutcome(applied_turn=assistant_turn, was_edit_request=True, refusal=None)

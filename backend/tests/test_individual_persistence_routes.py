@@ -261,19 +261,34 @@ def test_prd_edit_route_persists_success_shape(tenant_client, isolated_settings,
         "summary": "Tightened requirements.",
     })
 
-    resp = t.client.post(
+    # Under the confirmation gate the edit route PROPOSES (no persist yet);
+    # the turn pair is persisted at CONFIRM, keyed by the same
+    # client_message_id the propose carried.
+    propose = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
         json={"instruction": "tighten requirements", "client_message_id": "edit-cmid-2"},
     )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["edited"] is True
+    assert propose.status_code == 200, propose.text
+    pbody = propose.json()
+    assert pbody["pending"] is True
+    token = pbody["mutation"]["token"]
+
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["edited"] is True
 
     from app.db import conversations as conversations_db
 
     conv = conversations_db.get_individual_project_chat(project_id, t.user_id)
     turns = _turns(conv["id"], t.user_id)
     assert [tn["role"] for tn in turns] == ["user", "assistant"]
-    assert turns[1]["content"] == "Tightened requirements."
+    # The stored ORIGINAL instruction is the user turn; the assistant turn is
+    # the completed 'Done' narration carrying the edit summary.
+    assert turns[0]["content"] == "tighten requirements"
+    assert turns[1]["content"].startswith("Done — I've updated the PRD.")
+    assert "Tightened requirements." in turns[1]["content"]
 
 
 # ── The owned turn-pair route (AC2/AC3/AC4/AC6) ──────────────────────────

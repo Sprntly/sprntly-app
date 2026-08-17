@@ -180,12 +180,16 @@ def test_route_resolves_target_not_client_id(tenant_client, isolated_settings, m
     assert _versions(prd_b) == []
 
 
-# ── AC7/AC10 — resolvable own-project PRD applies in place ───────────────────
+# ── AC7/AC10 — resolvable own-project PRD: propose then confirm ──────────────
 def test_route_own_project_edits_in_place(tenant_client, isolated_settings, monkeypatch):
+    """Under the confirmation gate the first call PROPOSES (writes nothing,
+    returns a token); a follow-up confirm commits exactly the proposed
+    content."""
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     t = tenant_client.make(slug="acme")
     project_id, prd_id = _seed_project(t, isolated_settings)
     before_versions = len(_versions(prd_id))
+    before = _payload(prd_id)
 
     monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc v2</h1></body></html>",
@@ -193,15 +197,30 @@ def test_route_own_project_edits_in_place(tenant_client, isolated_settings, monk
         "summary": "Tightened requirements.",
     })
 
+    # PROPOSE — pending token, nothing written.
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
         json={"instruction": "tighten requirements"},
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["edited"] is True
-    assert body["sections_changed"] == ["Requirements"]
-    assert "Doc v2" in body["prd"]["payload_md"]
+    assert body["edited"] is False
+    assert body["pending"] is True
+    assert body["mutation"]["sections_changed"] == ["Requirements"]
+    assert body["mutation"]["prd_id"] == prd_id
+    token = body["mutation"]["token"]
+    assert _payload(prd_id) == before
+    assert _versions(prd_id) == []
+
+    # CONFIRM — commits exactly the proposed content, one version snapshot.
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm", json={"token": token},
+    )
+    assert confirm.status_code == 200, confirm.text
+    cbody = confirm.json()
+    assert cbody["edited"] is True
+    assert cbody["sections_changed"] == ["Requirements"]
+    assert "Doc v2" in cbody["prd"]["payload_md"]
     assert "Doc v2" in _payload(prd_id)
     assert len(_versions(prd_id)) == before_versions + 1
 
@@ -246,13 +265,24 @@ def test_route_explicit_prd_id_applies_the_chosen_prd(
         "summary": "Tightened requirements.",
     })
 
-    resp = t.client.post(
+    # PROPOSE against the chosen PRD B — nothing written yet.
+    propose = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
         json={"instruction": "tighten requirements", "prd_id": prd_b},
     )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["edited"] is True
+    assert propose.status_code == 200, propose.text
+    pbody = propose.json()
+    assert pbody["pending"] is True
+    assert pbody["mutation"]["prd_id"] == prd_b
+    assert "Doc v2 (B)" not in _payload(prd_b)
+
+    # CONFIRM — the edit lands on PRD B only.
+    confirm = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm",
+        json={"token": pbody["mutation"]["token"]},
+    )
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["edited"] is True
     assert "Doc v2 (B)" in _payload(prd_b)
     assert len(_versions(prd_b)) == 1
     # The sibling PRD on the SAME project is untouched.
@@ -272,10 +302,12 @@ def test_route_explicit_prd_id_cross_project_denied(
 
     Mutation proof: with the gate bypassed (`assert_prd_on_project` forced
     to a no-op — the exact effect of deleting the ★ check, a throwaway
-    monkeypatch scoped to THIS test only), the SAME request WRITES to the
-    other project's PRD — RED, proving the check is load-bearing, not
-    coincidentally never reached. With the real gate restored it is refused
-    and the other project's PRD is untouched — GREEN."""
+    monkeypatch scoped to THIS test only), the SAME propose→confirm WRITES to
+    the other project's PRD — RED, proving the check is load-bearing, not
+    coincidentally never reached. With the real gate restored the propose is
+    refused (no token, no write) and the other project's PRD is untouched —
+    GREEN. The ★ gate runs at BOTH propose and confirm off the same
+    `assert_prd_on_project` symbol, so the bypass covers both steps."""
     monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     t = tenant_client.make(slug="acme")
     project_id, _ = _seed_project(t, isolated_settings, with_prd=True)
@@ -293,14 +325,19 @@ def test_route_explicit_prd_id_cross_project_denied(
     import app.project_chat_edit as project_chat_edit_mod
     from app.project_prd_gate import assert_prd_on_project as real_assert_prd_on_project
 
-    # RED — the ★ gate bypassed.
+    # RED — the ★ gate bypassed at propose AND confirm: the cross-project write
+    # goes through.
     monkeypatch.setattr(project_chat_edit_mod, "assert_prd_on_project", lambda **kw: None)
-    resp_red = t.client.post(
+    propose_red = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
         json={"instruction": "tighten requirements", "prd_id": red_target_prd},
-    )
-    assert resp_red.status_code == 200, resp_red.text
-    assert resp_red.json()["edited"] is True  # RED: the bypassed gate let the cross-project write through
+    ).json()
+    assert propose_red["pending"] is True  # RED: propose minted a token for a cross-project target
+    confirm_red = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit/confirm",
+        json={"token": propose_red["mutation"]["token"]},
+    ).json()
+    assert confirm_red["edited"] is True  # RED: the bypassed gate let the confirm write through
     assert "HIJACKED" in _payload(red_target_prd)
 
     # GREEN — restore the REAL gate function directly (a targeted re-patch,
@@ -315,6 +352,7 @@ def test_route_explicit_prd_id_cross_project_denied(
     assert resp_green.status_code == 200, resp_green.text
     body_green = resp_green.json()
     assert body_green["edited"] is False
+    assert "pending" not in body_green  # refused at propose — no token minted
     assert "only edit a PRD that's attached to this project" in body_green["answer"]
     assert "HIJACKED" not in _payload(green_target_prd)
     assert _versions(green_target_prd) == []

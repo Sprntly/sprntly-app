@@ -175,6 +175,10 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
           prefix: "gc",
           retryRun: engine.retryRun,
         }),
+      // The confirmation gate's confirm/cancel seams — the shell's mapped
+      // confirm card calls back here with (turnId, token).
+      onConfirmMutation: engine.confirmMutation,
+      onCancelMutation: engine.cancelMutation,
     },
     send: { onSubmit: composerCtl.submit, pendingSendBubble: false },
     // Error + typing indicator (engine-fed, styled) + the picker's post-select

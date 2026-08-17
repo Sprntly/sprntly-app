@@ -182,10 +182,12 @@ def test_group_edit_cross_project_and_own_project_live(scene, sb, monkeypatch):
 
     # (a) A1's caller has no way to name A2's PRD at all — the group route
     # resolves ITS OWN project's target server-side via `_resolve_prd_id`.
-    # Prove A2's PRD is genuinely untouched by A1's group edit call (the ★
-    # gate would deny it even if the target were somehow reached).
+    # Under the confirmation gate the group turn only PROPOSES; prove A2's PRD
+    # (and A1's) is genuinely untouched by the propose (the ★ gate would deny
+    # A2 even if reached).
     before_a2 = _payload(sb, scene["prd_a2"])
     before_a2_versions = _version_count(sb, scene["prd_a2"])
+    before_a1_versions = _version_count(sb, scene["prd_a1"])
 
     resp_a1 = client.post(
         f"/v1/projects/{scene['p_a1']}/group/turns",
@@ -197,16 +199,35 @@ def test_group_edit_cross_project_and_own_project_live(scene, sb, monkeypatch):
         },
     )
     assert resp_a1.status_code == 200, resp_a1.text
+    # PROPOSE writes nothing — neither A1 nor A2 has changed yet.
     assert _payload(sb, scene["prd_a2"]) == before_a2
     assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
+    assert _version_count(sb, scene["prd_a1"]) == before_a1_versions
 
-    # (b) The SAME call on A1, through the group turn path, applied against
-    # A1's own PRD and was broadcast as an assistant turn — either the live
-    # model judged the instruction an edit (payload changed, one version) or,
-    # rarely, judged it a no-op; either way A1's PRD is the only one touched.
+    # (b) The group turn posts an assistant turn. When the live model proposed
+    # a real edit it carries `reply.pending_mutation`; CONFIRM then commits it
+    # to A1's OWN PRD only (one version), leaving A2 untouched. A no-op
+    # proposal has no pending mutation and nothing to confirm.
     turns = client.get(f"/v1/projects/{scene['p_a1']}/group/turns").json()["turns"]
     assistant_turns = [t for t in turns if t["role"] == "assistant"]
     assert len(assistant_turns) >= 1, turns
 
-    after_a1_versions = _version_count(sb, scene["prd_a1"])
-    assert after_a1_versions in (0, 1)
+    pending = None
+    for at in assistant_turns:
+        pm = ((at.get("reply") or {}) or {}).get("pending_mutation")
+        if pm:
+            pending = pm
+            break
+
+    if pending:
+        confirm = client.post(
+            f"/v1/projects/{scene['p_a1']}/prd/chat-edit/confirm",
+            json={"token": pending["token"]},
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["edited"] is True
+        assert _version_count(sb, scene["prd_a1"]) == before_a1_versions + 1
+        assert _payload(sb, scene["prd_a2"]) == before_a2
+        assert _version_count(sb, scene["prd_a2"]) == before_a2_versions
+    else:
+        assert _version_count(sb, scene["prd_a1"]) == before_a1_versions

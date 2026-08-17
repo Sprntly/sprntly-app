@@ -263,6 +263,10 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onA
       // `ShellTurn.runStatus` (undefined → nothing); private has no retry seam
       // (it re-asks via the turn), so no Retry is offered.
       runStatus: (status, turn) => renderRunStatus({ status, turn, prefix: "ic" }),
+      // The confirmation gate's confirm/cancel seams — the shell's mapped
+      // confirm card calls back here with (turnId, token).
+      onConfirmMutation: engine.confirmMutation,
+      onCancelMutation: engine.cancelMutation,
     },
     send: { onSubmit: composerCtl.submit, pendingSendBubble: true },
   }
