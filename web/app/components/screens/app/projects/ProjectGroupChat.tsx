@@ -51,7 +51,7 @@ export function ProjectGroupChat({ projectId, onOpenArtifact, openPrdId }: Proje
   // Declared FIRST — both engines require it up front (they read `.current`
   // lazily, so the shell can populate it on mount without a circular pass).
   const draftApiRef = useRef<ComposerDraftApi | null>(null)
-  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId })
+  const engine = useProjectGroupThread({ projectId, draftApiRef, openPrdId, onOpenArtifact })
   const mentions = useMentionPicker({ projectId, draftApiRef })
   // The shared composer controller unifies the send producer: group's send
   // builds a `SendCommand` and hands it to `engine.post`. Attachments and

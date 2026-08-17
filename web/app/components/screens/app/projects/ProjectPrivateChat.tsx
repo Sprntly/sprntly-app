@@ -69,7 +69,7 @@ function isHistoryTurn(turn: ShellTurn): boolean {
 }
 
 export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onArtifactsChanged, openPrdId }: ProjectPrivateChatProps) {
-  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged, openPrdId })
+  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged, openPrdId, onOpenArtifact })
   // The shared composer controller (un-stubs the project composer). Private
   // rides `/v1/ask`, so BOTH attachments and skills go live: the built
   // `SendCommand` (splice + extracted attachment context) hands to `engine.send`.

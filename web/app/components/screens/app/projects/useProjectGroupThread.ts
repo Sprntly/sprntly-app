@@ -30,7 +30,7 @@ import { createElement, useCallback, useEffect, useMemo, useRef, useState, type 
 import { AssistantWaitState } from "../../../shared/AssistantWaitState"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useAuth } from "../../../../lib/auth"
-import { projectsApi, type AskResponse, type GroupTurn } from "../../../../lib/api"
+import { projectsApi, type AskResponse, type GroupTurn, type OpenArtifactCandidate } from "../../../../lib/api"
 import type { ComposerDraftApi, SendCommand, ShellTurn } from "../../../shared/chat-shell/types"
 import { spliceSkill } from "../../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
@@ -127,6 +127,12 @@ export interface UseProjectGroupThreadArgs {
    *  `null` when no PRD is open. Threaded onto every posted turn so an
    *  in-band edit request applies against the right PRD. */
   openPrdId: number | null
+  /** Opens ONE resolved artifact in the in-place drawer — the SAME handler the
+   *  transcript's chip click routes through. Wired so the agent's RESOLVED
+   *  answer to MY OWN "open the PRD" auto-opens the drawer (parity with the
+   *  private chat + main), while the chip stays for the ambiguous case and for
+   *  every other member (a group turn is broadcast; only the asker auto-opens). */
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
 }
 
 export interface UseProjectGroupThread {
@@ -160,7 +166,7 @@ export interface UseProjectGroupThread {
   retryRun?: (turn: ShellTurn | null) => void
 }
 
-export function useProjectGroupThread({ projectId, draftApiRef, openPrdId }: UseProjectGroupThreadArgs): UseProjectGroupThread {
+export function useProjectGroupThread({ projectId, draftApiRef, openPrdId, onOpenArtifact }: UseProjectGroupThreadArgs): UseProjectGroupThread {
   const auth = useAuth()
   const myUserId = auth.kind === "authed" ? auth.user.id : null
   const myName = authDisplayName(auth.kind === "authed" ? auth.user : null)
@@ -530,6 +536,46 @@ export function useProjectGroupThread({ projectId, draftApiRef, openPrdId }: Use
       }),
     [turns, myUserId],
   )
+
+  // Parity with the private chat + main: the agent's RESOLVED answer to MY OWN
+  // "open the PRD" auto-opens the drawer instead of only rendering a
+  // click-to-open chip. Guarded three ways so it fires at most once, only for
+  // the asker, and never on history: (1) a seen-set seeded with every turn
+  // present at first load, so an old resolved-open never re-pops on reload;
+  // (2) the previous turn must be MINE — the agent replied to me; a group turn
+  // is broadcast, so another member's client never opens their drawer;
+  // (3) exactly ONE candidate — a resolved single match; 2+ is the ambiguous
+  // case, which keeps its click-to-pick chips.
+  const autoOpenedRef = useRef<Set<string> | null>(null)
+  useEffect(() => {
+    if (!onOpenArtifact) return
+    // Wait for the FIRST NON-EMPTY load before seeding: `turns` starts as `[]`
+    // on mount (the async load hasn't resolved yet), and this effect's
+    // dependency array fires on that empty render too. Seeding here unconditionally
+    // would seed an EMPTY set, so the next run (when history actually loads)
+    // would treat every historical turn as unseen and auto-open from it on
+    // every reload — the exact re-pop this ref exists to prevent.
+    if (turns.length === 0) return
+    if (autoOpenedRef.current == null) {
+      autoOpenedRef.current = new Set(turns.map((t) => `${t.id}`))
+      return
+    }
+    const seen = autoOpenedRef.current
+    for (let i = 0; i < turns.length; i++) {
+      const turn = turns[i]
+      const key = `${turn.id}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (turn.role !== "assistant") continue
+      const prev = i > 0 ? turns[i - 1] : null
+      const repliedToMe =
+        !!prev && prev.role === "user" && prev.author_user_id != null && prev.author_user_id === myUserId
+      if (!repliedToMe) continue
+      const candidates = turn.reply?.open?.candidates ?? turn.open_candidates ?? []
+      if (candidates.length !== 1) continue
+      onOpenArtifact(candidates[0])
+    }
+  }, [turns, myUserId, onOpenArtifact])
 
   // These nodes carry their relocated `GroupChatExtras` classes (T3b) so the
   // folded surface styles them once — no longer the class-less bare divs T3a

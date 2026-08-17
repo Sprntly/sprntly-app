@@ -197,6 +197,13 @@ export type UseProjectPrivateThreadOpts = {
    *  when no PRD is open, in which case an edit-phrased message gets the
    *  "open a PRD" clarify rather than a guess. */
   openPrdId?: number | null
+  /** Opens ONE resolved artifact in the in-place drawer beside this chat —
+   *  the SAME handler the transcript's chip click routes through. Wired so a
+   *  RESOLVED "open the PRD" auto-opens the drawer (parity with main chat's
+   *  `openArtifactFlow`) instead of handing back a click-to-open chip. When
+   *  absent, the resolved case degrades to the chip so the artifact is still
+   *  reachable. */
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
 }
 
 export function useProjectPrivateThread(
@@ -744,11 +751,11 @@ export function useProjectPrivateThread(
         settleCardsPersisted(answer, items.length ? { artifactList: items } : {})
       }
 
-      // open_artifact — main's 1-opens / 2+-asks / 0-says-so contract,
-      // adapted to this surface's destination: a chip click opens the
-      // project's artifacts modal (there is no side panel here), so the
-      // RESOLVED case renders its single candidate as the click-to-open chip
-      // rather than auto-opening a panel.
+      // open_artifact — main's 1-opens / 2+-asks / 0-says-so contract. This
+      // surface now HAS a side panel (the in-place artifact drawer beside the
+      // chat), so the RESOLVED case AUTO-OPENS that drawer, exactly like main
+      // chat's `openArtifactFlow` (resolved → open directly, no chip). The
+      // click-to-open chip is reserved for the AMBIGUOUS case below.
       const runOpenArtifact = (open: OpenArtifactResult) => {
         const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
         if (open.status === "unsupported_type") {
@@ -759,10 +766,18 @@ export function useProjectPrivateThread(
           return
         }
         if (open.status === "resolved" && open.artifact) {
-          settleCardsPersisted(
-            `I found "${open.artifact.title}" — click it below to open it.`,
-            { openCandidates: open.candidates.length ? open.candidates : [open.artifact] },
-          )
+          // Auto-open the single confident match in the drawer via the same
+          // handler the chip click uses. Degrade to the chip only if no opener
+          // is wired, so the artifact stays reachable either way.
+          if (opts?.onOpenArtifact) {
+            opts.onOpenArtifact(open.artifact)
+            settleCardsPersisted(`Opened "${open.artifact.title}" — it's in the panel beside this chat.`, {})
+          } else {
+            settleCardsPersisted(
+              `I found "${open.artifact.title}" — click it below to open it.`,
+              { openCandidates: open.candidates.length ? open.candidates : [open.artifact] },
+            )
+          }
           return
         }
         if (open.status === "ambiguous") {

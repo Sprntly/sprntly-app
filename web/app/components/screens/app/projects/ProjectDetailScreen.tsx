@@ -44,12 +44,15 @@ import {
   type ArtifactItem,
   type DelegationCounts,
   type DelegationLedgerRow,
+  type OpenArtifactCandidate,
   type ProjectArtifactType,
   type ProjectDetail,
   type ProjectMember,
   type ProjectMemoryInsight,
   type ProjectMemorySummary,
 } from "../../../../lib/api"
+import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
+import { openArtifactCandidateAsItem } from "./artifactCandidates"
 import { ProjectMainThread } from "./ProjectMainThread"
 import { ArtifactsModal } from "./ArtifactsModal"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
@@ -222,7 +225,7 @@ export function ProjectDetailView({
   ledgerCounts: _ledgerCounts,
   ledgerRows: _ledgerRows,
   onOpenArtifacts,
-  onOpenArtifactInPlace: _onOpenArtifactInPlace,
+  onOpenArtifactInPlace,
   openArtifact,
   onCloseArtifactDrawer,
   onOpenTasks,
@@ -244,6 +247,30 @@ export function ProjectDetailView({
   // open beside the chat), in which case an edit-phrased message gets the
   // "open a PRD" clarify rather than a guess.
   const openPrdId = openArtifact?.type === "prd" ? Number(openArtifact.id) : null
+
+  // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
+  // branch, resume-conversation-first, reuse-by-prd-id and null-id guards all
+  // live in `openArtifactDestination`; this project surface supplies the
+  // DRAWER as its terminal action instead of main's panel-tab. `resumeConversation`
+  // returns false (a project's chat has no cross-conversation resume path),
+  // which lets the shared decision fall through to `openPrd` — the one real
+  // difference from main, not a fork of the decision itself. A candidate with
+  // no openable id (the shared function's own null-id guard) keeps today's
+  // browse-modal-by-type fallback rather than opening an empty drawer.
+  const onOpenArtifactCandidate = (candidate: OpenArtifactCandidate) => {
+    const opened = openArtifactDestination(candidate, {
+      openEvidence: (c) => {
+        onOpenArtifactInPlace(openArtifactCandidateAsItem(c))
+        return true
+      },
+      resumeConversation: () => false,
+      openPrd: (c, prdId) => {
+        onOpenArtifactInPlace(openArtifactCandidateAsItem(c, prdId))
+        return true
+      },
+    })
+    if (!opened) onOpenArtifacts(candidate.type)
+  }
 
   return (
     <div className={styles.shell}>
@@ -383,7 +410,7 @@ export function ProjectDetailView({
               key={project.id}
               projectId={project.id}
               activeChat={activeChat}
-              onOpenArtifact={(c) => onOpenArtifacts(c.type)}
+              onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}
               openPrdId={openPrdId}

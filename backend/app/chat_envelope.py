@@ -83,10 +83,16 @@ def enrich_chat_envelope(
         # tenant scope lives. Same posture as the classify routes themselves:
         # read-only and scoped to the caller's workspace, so a phrase can only
         # ever resolve to a document this caller already owns.
+        # `project_id`, when set, narrows the SOURCE the same way the listing
+        # legs below do — a project surface's "open the PRD" must only ever
+        # resolve against that project's own artifacts, never the whole
+        # workspace's (see the `list_artifacts` branch's identical forward).
         envelope["open"] = resolve_open_artifact(
             artifact_type=envelope.get("artifact_type") or "prd",
             query=envelope.get("artifact_query") or "",
             dataset=_dataset_for(company) if dataset is None else dataset,
+            project_id=project_id,
+            company_id=company.company_id if project_id is not None else None,
         )
         _attach_open_conversations(envelope["open"], company.company_id)
     if envelope.get("intent") == "list_artifacts":
