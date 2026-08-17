@@ -2816,6 +2816,47 @@ def answer(
         live_reads_on = bool(
             getattr(_settings, "live_connector_reads_enabled", False)
         )
+        # ── PLANNED TRACKER TURN → KG-FIRST FALLBACK ────────────────────────
+        # The regex ladder (and the tracker interceptor it hosts) is off the
+        # moment the planner claims a turn (`_regex_ladder` = `plan is None`).
+        # So a planned tracker-only turn — the planner names ["clickup"]/["jira"]
+        # for a genuine tracker query — would otherwise reach `_planned_live_
+        # context`, find no live tracker session, and false-deny with a "not
+        # read live" note and no KG block. Route it through the SAME
+        # `tracker.answer` the interceptor calls, which degrades to a KG-first
+        # read (live enrichment preserved when a session resolves). It fires
+        # ONLY when the planner routed to tracker-ONLY sources (a mixed plan
+        # would silently drop its co-planned non-tracker source) AND the
+        # QUESTION is itself a tracker query: the source alone is not enough —
+        # a plan can name a tracker as an incidental source on a non-tracker
+        # turn ("more details on the maverik meeting"), which must keep the
+        # normal planned path. Same surface-parity gate the interceptor uses;
+        # skipped for a PRD-open tab so its grounding wins. The try/except is
+        # belt-and-braces — `tracker.answer` degrades internally rather than
+        # raising — so any unexpected raise falls through to today's path.
+        from app.connector_lookup import tracker
+
+        if (
+            plan is not None
+            and not prd_context
+            and plan.sources
+            and set(plan.sources).issubset(set(tracker.TRACKERS))
+            and (
+                is_jira_lookup(routing_text, history)
+                or bool(tracker.named_trackers(routing_text))
+            )
+            and not _skip_project_connectors(scope, routing_text, history)
+        ):
+            try:
+                return tracker.answer(
+                    enterprise_id=enterprise_id,
+                    question=question,
+                    history=history,
+                )
+            except Exception:  # noqa: BLE001 — belt-and-braces; never a 500
+                logger.exception(
+                    "planned tracker seam failed; falling through to compose"
+                )
         # LOCAL LEGS ARE NOT LIVE READS, and standing them down with the live
         # ones is what made "past calls are missing" (2026-08-15) possible.
         # `_LOCAL_LEGS` (fireflies/zoom → the call index, github → synced PR
