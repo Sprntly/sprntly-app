@@ -253,3 +253,71 @@ def relayout_stories(
     if layout:
         _fill_custom_sections(enterprise_id, hydrated, layout)
     return [s.to_dict() for s in hydrated]
+
+
+def run_switch(
+    company_id: str,
+    *,
+    prd_id: Optional[int] = None,
+    ticket_set_id: Optional[int] = None,
+    stories: list[dict],
+    layout: Optional[list[dict]],
+    artifact_template_id: Optional[str],
+) -> None:
+    """The background half of POST /v1/stories/change-template: re-lay, persist,
+    clear the marker. Blocking — the route hands it to a worker thread.
+
+    The route has already run every gate (ownership, the set is `ready` with
+    tickets in it, the target format resolves to `layout`) and written the
+    in-flight marker, so this does the work and owns exactly one obligation:
+    the marker must not outlive it. The happy path clears it inside the same
+    update that lands the stories (`set_tickets_template` / `set_set_template`);
+    this function's `except` covers everything else, because a marker left
+    `running` by a raised fill is a Tickets tab that waits forever.
+
+    Never raises. A failed switch leaves the tickets exactly as they were —
+    nothing partial is written, since `relayout_stories` builds the whole new
+    array before anything is persisted — and the client learns of it by the
+    marker clearing with the format unchanged, the same way the PRD switch
+    reports its own failures.
+    """
+    label = f"prd_id={prd_id}" if prd_id is not None else f"set_id={ticket_set_id}"
+    try:
+        relaid = relayout_stories(company_id, stories, layout)
+        if prd_id is not None:
+            from app.db.prd_tickets import set_tickets_template
+
+            set_tickets_template(company_id, prd_id, relaid, artifact_template_id)
+        else:
+            from app.db.ticket_sets import set_set_template
+
+            set_set_template(
+                company_id, int(ticket_set_id), relaid, artifact_template_id
+            )
+        logger.info(
+            "ticket format switch landed %s company=%s template=%s tickets=%d",
+            label, company_id, artifact_template_id, len(relaid),
+        )
+    except Exception:  # noqa: BLE001 — a background job must not die loudly
+        logger.warning(
+            "ticket format switch failed %s company=%s template=%s — tickets "
+            "left unchanged", label, company_id, artifact_template_id,
+            exc_info=True,
+        )
+        try:
+            if prd_id is not None:
+                from app.db.prd_tickets import clear_tickets_relaying
+
+                clear_tickets_relaying(company_id, prd_id)
+            else:
+                from app.db.ticket_sets import clear_set_relaying
+
+                clear_set_relaying(company_id, int(ticket_set_id))
+        except Exception:  # noqa: BLE001
+            # The marker ages out on its own (RELAYOUT_STALE_AFTER_S), so a
+            # failed cleanup costs a stale label for a few minutes, not a
+            # permanently stuck tab.
+            logger.warning(
+                "couldn't clear the relayout marker %s company=%s", label,
+                company_id, exc_info=True,
+            )

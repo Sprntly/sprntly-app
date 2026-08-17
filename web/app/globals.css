@@ -8786,6 +8786,19 @@
     }
   }
 
+  /* Tickets panel — a format switch running in the background. Reuses
+     piq-spin rather than minting a third identical keyframe. */
+  .tickets-relaying-spinner {
+    flex: none;
+    width: 13px;
+    height: 13px;
+    border: 2px solid var(--accent);
+    border-top-color: transparent;
+    border-radius: 50%;
+    display: inline-block;
+    animation: piq-spin 0.7s linear infinite;
+  }
+
   /* Composer dock — transparent so the composer + suggestions float over the
      thread rather than sitting on a grey footer panel. */
   /* 868 − 48px padding = an 820px card, identical to `.bc-thread`'s column and

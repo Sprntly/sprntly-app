@@ -1020,7 +1020,9 @@ CREATE TABLE prd_tickets (
     error         TEXT,
     generated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     -- Which ticket format rendered the set (20260814120000_ticket_template_stamp.sql).
-    artifact_template_id TEXT
+    artifact_template_id TEXT,
+    -- An in-flight background format switch (20260817120000_ticket_relayout_marker.sql).
+    relayout TEXT
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
@@ -1042,7 +1044,9 @@ CREATE TABLE ticket_sets (
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
     -- Which ticket format rendered the set (20260814120000_ticket_template_stamp.sql).
-    artifact_template_id TEXT
+    artifact_template_id TEXT,
+    -- An in-flight background format switch (20260817120000_ticket_relayout_marker.sql).
+    relayout TEXT
 );
 CREATE INDEX ticket_sets_company_idx ON ticket_sets (company_id, id DESC);
 CREATE INDEX ticket_sets_conversation_idx ON ticket_sets (conversation_id);

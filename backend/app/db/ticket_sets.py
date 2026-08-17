@@ -27,6 +27,7 @@ import logging
 from typing import Any
 
 from app.db.client import require_client, retry_on_disconnect, utc_now
+from app.stories.relayout_state import relaying_marker as _relaying_marker
 
 logger = logging.getLogger(__name__)
 
@@ -112,16 +113,53 @@ def set_set_template(
 ) -> None:
     """Persist an in-place format switch on a standalone set: the re-laid
     stories + the new stamp. Company-filtered in the query — same posture as
-    `get_set`, and this is a WRITE, so the filter is non-negotiable."""
+    `get_set`, and this is a WRITE, so the filter is non-negotiable.
+
+    Clears `relayout` in the SAME update, for the reason `set_tickets_template`
+    does: a poller must never see the re-laid tickets alongside a marker still
+    claiming the switch is running."""
     (
         require_client().table("ticket_sets")
         .update(
             {
                 "stories": stories,
                 "artifact_template_id": artifact_template_id,
+                "relayout": None,
                 "updated_at": utc_now(),
             }
         )
+        .eq("company_id", company_id)
+        .eq("id", set_id)
+        .execute()
+    )
+
+
+@retry_on_disconnect
+def mark_set_relaying(
+    company_id: str, set_id: int, artifact_template_id: str | None,
+) -> None:
+    """Record that a format switch into `artifact_template_id` is in flight.
+
+    Written before the background task is scheduled so the state is durable
+    from the first moment. `status` stays `ready` throughout — the set still
+    HAS its tickets, and flipping it to `generating` would tell every reader a
+    generation is running (see the marker migration's header)."""
+    (
+        require_client().table("ticket_sets")
+        .update({"relayout": _relaying_marker(artifact_template_id)})
+        .eq("company_id", company_id)
+        .eq("id", set_id)
+        .execute()
+    )
+
+
+@retry_on_disconnect
+def clear_set_relaying(company_id: str, set_id: int) -> None:
+    """Drop the in-flight marker without touching the tickets — the failure
+    path. The set keeps the format it already had."""
+    (
+        require_client().table("ticket_sets")
+        .update({"relayout": None})
         .eq("company_id", company_id)
         .eq("id", set_id)
         .execute()

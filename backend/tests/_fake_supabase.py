@@ -101,10 +101,10 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks", "custom_fields"},
-    "prd_tickets":       {"stories"},
+    "prd_tickets":       {"stories", "relayout"},
     # Standalone ticket sets carry the same `stories` payload shape as
     # prd_tickets — the whole point of the second home.
-    "ticket_sets":       {"stories"},
+    "ticket_sets":       {"stories", "relayout"},
     "call_transcripts":  {"payload"},
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},

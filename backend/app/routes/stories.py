@@ -25,6 +25,7 @@ from app.stories.generate import (
     generate_user_stories,
 )
 from app.prd_runner import warm_impl_spec
+from app.stories.relayout_state import relayout_in_flight
 from app.stories.push import (
     AsanaNotConnectedError,
     ClickUpNotConnectedError,
@@ -461,12 +462,20 @@ def tickets_for_prd(
     generated from the PRD's current rendered content), it renders them with no
     LLM call. If the row is missing/stale/failed it kicks off /generate, which
     re-persists. `fresh` compares the stored content_hash to the live PRD hash.
+
+    `relaying` is the in-place format switch running in the background — the
+    tickets below it are the PREVIOUS format's, still valid and still theirs to
+    read, which is why this is reported beside a `ready`/`fresh` set rather
+    than as a status of its own. It is what lets a user who left the page and
+    came back be told the switch is still going instead of seeing the old
+    format sitting there as if the click never happened.
     """
     from app.db.prd_tickets import get_tickets, prd_hash_matches
 
     row = get_tickets(company.company_id, prd_id)
     if row is None:
         return {"status": "none", "fresh": False, "stories": []}
+    relaying = relayout_in_flight(row)
     fresh = (
         row.get("status") == "ready"
         and bool(row.get("stories"))  # an empty cached set is a failed run → retry
@@ -489,6 +498,13 @@ def tickets_for_prd(
         "artifact_template_name": _template_display_name(
             company.company_id, template_id
         ),
+        # Absent-as-false rather than a nullable object: every client reads
+        # this as "is a switch running", and the target's NAME is the only
+        # other thing worth saying while it does.
+        "relaying": relaying is not None,
+        "relaying_into_name": _template_display_name(
+            company.company_id, relaying.get("template_id")
+        ) if relaying else None,
     }
 
 
@@ -527,7 +543,7 @@ class ChangeTicketTemplateIn(BaseModel):
 
 
 @router.post("/change-template")
-def change_template(
+async def change_template(
     body: ChangeTicketTemplateIn,
     company: WorkspaceContext = Depends(require_workspace),
 ):
@@ -542,13 +558,25 @@ def change_template(
     comments stay attached. That identity preservation is why this never runs
     the generator: a fresh generation would orphan every synced issue.
 
-    Synchronous, unlike the PRD switch: the swap is instant and the fill is one
-    bounded call, so the response carries the re-laid stories directly and the
-    client re-renders — no job to poll, no `generating` state to strand.
+    Fire-and-forget, like the PRD switch. This used to do the re-lay inside the
+    request on the grounds that one bounded fill call is quick; over a real
+    ticket set it is not, and holding it in the request made the work the
+    caller's to babysit — the confirm dialog sat on "Switching…" for the
+    duration, and navigating away killed the switch. The gates all still run
+    here, synchronously, so a refusal is still an answer to the click; only the
+    re-lay itself moves to a worker thread (`relayout.run_switch`), and the
+    response returns `status: "relaying"` the moment it is scheduled.
+
+    The row stays `ready` while that runs, with the in-flight state in its own
+    `relayout` marker — a re-lay must not look like a generation, or the
+    Tickets tab's cache-first effect kicks off a real one and orphans every
+    synced issue. Readers report the marker (GET /for-prd, GET /v1/ticket-sets
+    /{id}); it ages out via RELAYOUT_STALE_AFTER_S if a restart strands it.
 
     Ordered gates, every one answered before anything is written: ownership
     (404, indistinguishable from missing) → the set must be `ready` with
-    tickets in it (409) → the target format must be usable
+    tickets in it (409) → no switch already running on it (409 — a second one
+    would race the first's write) → the target format must be usable
     (`_requested_template_id`: 404 foreign / 409 wrong-type-or-uncompiled;
     null passes through as the built-in) → already in that format is a no-op
     the response states rather than an error.
@@ -587,6 +615,17 @@ def change_template(
     if not stories:
         raise HTTPException(409, "There are no tickets to re-format yet.")
 
+    # One switch at a time. Two overlapping re-lays both read the CURRENT
+    # stories and both write the whole array back, so the loser's format wins
+    # the label and the winner's the content — a set that names one format and
+    # renders another. The second click is refused instead, and the marker
+    # ages out on its own if a restart ever strands it.
+    if relayout_in_flight(row) is not None:
+        raise HTTPException(
+            409, "These tickets are already being re-formatted — give it a "
+                 "moment.",
+        )
+
     current = row.get("artifact_template_id") or None
     if (template_id or None) == current:
         # Already true — stated, not 409'd: "make it X" when it is X is a
@@ -601,44 +640,51 @@ def change_template(
             ),
         }
 
-    from app.stories.relayout import (
-        TicketRelayoutError,
-        layout_for_template,
-        relayout_stories,
-    )
+    from app.stories.relayout import TicketRelayoutError, layout_for_template, run_switch
 
+    # Resolved BEFORE the marker goes down: an unusable stored layout is a 409
+    # the user can act on, and resolving it here means the background half
+    # cannot fail for a reason the caller should have been told about.
     try:
         layout = layout_for_template(company.company_id, template_id)
     except TicketRelayoutError as exc:
         raise HTTPException(409, str(exc))
 
-    relaid = relayout_stories(company.company_id, stories, layout)
-
+    # Durable before scheduled, so the in-flight state exists even for a client
+    # that navigates away in the same tick.
     if body.prd_id is not None:
-        from app.db.prd_tickets import set_tickets_template
+        from app.db.prd_tickets import mark_tickets_relaying
 
-        set_tickets_template(
-            company.company_id, body.prd_id, relaid, template_id
-        )
-        out_stories = _apply_lifecycle(company.company_id, body.prd_id, relaid)
+        mark_tickets_relaying(company.company_id, body.prd_id, template_id)
     else:
-        from app.db.ticket_sets import set_set_template
-        from app.routes.ticket_sets import _apply_set_lifecycle
+        from app.db.ticket_sets import mark_set_relaying
 
-        set_set_template(
-            company.company_id, body.ticket_set_id, relaid, template_id
+        mark_set_relaying(company.company_id, body.ticket_set_id, template_id)
+
+    # `to_thread` because the re-lay's fill is a blocking gateway call and this
+    # is an async route — the same shape every other background LLM job here
+    # uses. The strong ref is what keeps the task from being garbage-collected
+    # mid-flight (asyncio holds only a weak one).
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            run_switch,
+            company.company_id,
+            prd_id=body.prd_id,
+            ticket_set_id=body.ticket_set_id,
+            stories=stories,
+            layout=layout,
+            artifact_template_id=template_id,
         )
-        out_stories = _apply_set_lifecycle(
-            company.company_id, body.ticket_set_id, relaid
-        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
 
     return {
-        "status": "ready",
+        "status": "relaying",
         "artifact_template_id": template_id,
         "artifact_template_name": _template_display_name(
             company.company_id, template_id
         ),
-        "stories": out_stories,
     }
 
 
