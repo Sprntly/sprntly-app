@@ -148,6 +148,86 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
     assert out["answer"] == "sent"
 
 
+def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
+    """A bare "send to <roster member>" — NO pronoun object — must reach the
+    sixth branch too. `is_project_tool_request` alone declines this shape
+    (`_PROJECT_TOOL_DELEGATE_VERB` requires an object: "send THIS to X");
+    the roster-aware `_is_bare_send_to_roster_member` OR-clause is what
+    admits it — proven here against the REAL private scope, not a hand-
+    built one."""
+    from app.db import projects as projects_db
+
+    roster = [{"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"}]
+    monkeypatch.setattr(projects_db, "list_members", lambda project_id: roster)
+
+    dispatched = []
+
+    def _fake_loop(*, dispatch, **kw):
+        dispatched.append(dispatch("delegate_task", {"assignee": "Jay", "task_summary": "Prioritize the roadmap"}))
+        return "sent"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task", lambda **kw: "Sent the brief to Jay's chat.",
+    )
+    deltas = []
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="send to Jay to prioritize the roadmap", dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert deltas == []
+    assert dispatched == ["Sent the brief to Jay's chat."]
+    assert out["answer"] == "sent"
+
+
+def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
+    """The same bare "send ... to X" SHAPE, but X is not on the project's
+    roster — must NOT fire the gate (the one thing a pure-regex widen of
+    `_PROJECT_TOOL_DELEGATE_VERB` could not have guaranteed). Falls through
+    to the ordinary composer path and streams, same as any other declined
+    plain turn."""
+    from app.db import projects as projects_db
+
+    roster = [{"user_id": "u2", "name": "Jay Okon", "job_role": "Engineer"}]
+    monkeypatch.setattr(projects_db, "list_members", lambda project_id: roster)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    deltas = []
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        if on_delta is not None:
+            on_delta("partial-text")
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    loop_calls = {"n": 0}
+
+    def _tripwire(**kw):
+        loop_calls["n"] += 1
+        return "loop ran — must not happen for a non-member destination"
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
+    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="send the report to accounting", dataset="d",
+        scope=scope, on_delta=lambda t: deltas.append(t),
+    )
+    assert loop_calls["n"] == 0
+    assert deltas == ["partial-text"]
+    assert out["answer"] == "ok"
+
+
+def test_main_scope_bare_send_never_fires_gate(monkeypatch):
+    """AC7-shaped guard: `scope=None` (main chat) never even consults the
+    roster gate, so a bare "send to X" phrasing in main chat behaves
+    exactly as it always has — `_is_bare_send_to_roster_member` is a no-op
+    for `scope is None`."""
+    assert qa._is_bare_send_to_roster_member("send to Jay to prioritize this", None) is False
+    assert qa._is_bare_send_to_roster_member(
+        "send to Jay to prioritize this", SurfaceScope(surface=Surface.main),
+    ) is False
+
+
 def test_gate_removed_plainqa_routes_to_loop_is_red(monkeypatch):
     """AC5a MUTATION: reverting the sixth-branch guard to the un-gated build
     (`scope.extra_tools` alone, `is_project_tool_request` short-circuited to
