@@ -91,7 +91,20 @@ _QUOTE_CAPS = (60, 30, 15, 8, 4, 0)
 # The knowledge-graph section's OWN char budget — see the "Knowledge-graph
 # signal" block below for why it is a SEPARATE constant and not a slice of
 # _CORPUS_CHAR_BUDGET.
-_KG_CHAR_BUDGET = 60_000
+#
+# 60k -> 400k when the VoC retrieval preset landed. At 60k this constant was
+# decorative: retrieval handed back at most ~9k chars (2,200 tokens), so the
+# ceiling documented here as a backstop could never fire and the REAL cut
+# happened upstream, silently. Now retrieval is sized to overshoot this budget,
+# which makes this the binding one on purpose — it trims on a line boundary and
+# sets `truncated`, and the coverage line says so. The trade is deliberate: an
+# answer that leaves feedback out should be the one that admits it.
+#
+# 400k chars is ~100k tokens. Alongside the call corpus (75k) and the Slack
+# block (6k) that is ~181k of the answer model's 1M-token window — the same
+# "well inside the window" property the call budget above was sized for, at the
+# same 4-chars-per-token approximation.
+_KG_CHAR_BUDGET = 400_000
 
 _ZOOM_PROVIDER = "zoom"
 #: Display names for the live sources, for the coverage line and the
@@ -899,15 +912,22 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
 # THE TWO BUDGETS ARE SEPARATE ON PURPOSE. `_CORPUS_CHAR_BUDGET` still governs
 # live calls + uploaded docs alone and is unchanged, so a calls-only company's
 # corpus is byte-identical to what it was. The KG gets `_KG_CHAR_BUDGET` of its
-# own ON TOP (20% of the call budget; ~90k tokens all-in, still well inside the
-# answer model's window). Two independent budgets rather than one shared pool is
+# own ON TOP (~181k tokens all-in, still well inside the answer model's 1M
+# window). Two independent budgets rather than one shared pool is
 # what makes starvation impossible BY CONSTRUCTION rather than by careful
 # arithmetic: 200 calls cannot squeeze the KG to nothing, because `_fit_corpus`
 # trims quotes inside the CALL budget and never sees this one; and a huge KG
-# cannot evict a single call, because it is capped before the two are joined. In
-# practice this ceiling almost never binds — `_retrieve_kg_bundle` caps the
-# bundle at retrieval's own DEFAULT_TOKEN_BUDGET (2200 tokens, ~9k chars) — so
-# it is a backstop against a budget change upstream, not the day-to-day trim.
+# cannot evict a single call, because it is capped before the two are joined.
+#
+# THIS CEILING IS NOW THE BINDING ONE, WHICH IS THE POINT. It used to be
+# decorative: `_retrieve_kg_bundle` capped the bundle at retrieval's
+# DEFAULT_TOKEN_BUDGET (2,200 tokens, ~9k chars) long before 60k chars could
+# matter, so the real trim happened upstream with no marker and no count — a
+# tenant's feedback answer was silently built from a sample. The VoC preset
+# (`retrieval.VOC_SCALE`) lifts retrieval above this budget precisely so the cut
+# lands HERE instead, where `_cap_kg_text` trims on a line boundary, sets
+# `truncated`, and the coverage line reports it. `signals_dropped` covers the
+# residual case where retrieval still had to cut, so neither trim is silent.
 #
 # DOUBLE-COUNTING, and why the filter is provider-shaped. Fireflies and Zoom
 # calls ALSO sync into the KG through their own pullers, so one conversation can
@@ -978,6 +998,13 @@ class KgContext:
     deduped: int = 0
     #: True when the render overflowed `_KG_CHAR_BUDGET` and was cut.
     truncated: bool = False
+    #: Ranked signals RETRIEVAL cut before this module ever saw them, straight
+    #: from the bundle. Distinct from `truncated` (which is this module's own
+    #: char trim) and from `deduped` (which is a deliberate exclusion, not a
+    #: shortfall): this is the one that used to be unknowable. Under the VoC
+    #: preset it should be 0 for any realistic tenant — if it is not, the
+    #: coverage line says so rather than presenting a sample as the whole.
+    retrieval_dropped: int = 0
 
     @property
     def present(self) -> bool:
@@ -1043,13 +1070,20 @@ def build_kg_context(
         return KgContext()
     try:
         from app.ask_runner import _retrieve_kg_bundle
-        from app.graph.retrieval import render_context_section
+        from app.graph.retrieval import VOC_SCALE, render_context_section
 
-        bundle = _retrieve_kg_bundle(enterprise_id, question)
+        # THE SCALE IS THE WHOLE FIX. Same retrieval, same pair as the pinned
+        # path — see the docstring — but sized for a question whose answer IS
+        # the stored signal. Without it this call inherited the Ask defaults: at
+        # most 80 candidate signals, cut to 2,200 tokens, with no count of the
+        # remainder. "Show me all the customer feedback" was answered from
+        # whatever fit in ~9k characters, and nothing downstream could tell.
+        bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
         if not bundle:
             return KgContext()
 
         signals = list(bundle.get("signals") or [])
+        retrieval_dropped = int(bundle.get("signals_dropped") or 0)
         kept: list[dict] = []
         deduped = 0
         for sig in signals:
@@ -1065,11 +1099,11 @@ def build_kg_context(
             bundle.get(k) for k in ("themes", "decisions", "hypotheses", "outcomes")
         )
         if not kept and not has_other:
-            return KgContext(deduped=deduped)
+            return KgContext(deduped=deduped, retrieval_dropped=retrieval_dropped)
 
         rendered = render_context_section({**bundle, "signals": kept})
         if not rendered.strip():
-            return KgContext(deduped=deduped)
+            return KgContext(deduped=deduped, retrieval_dropped=retrieval_dropped)
         body, truncated = _cap_kg_text(rendered)
 
         names: list[str] = []
@@ -1081,6 +1115,7 @@ def build_kg_context(
             text=f"{_KG_SECTION_HEADER}\n\n{body}",
             signal_count=len(kept), sources=names,
             deduped=deduped, truncated=truncated,
+            retrieval_dropped=retrieval_dropped,
         )
     except Exception:  # noqa: BLE001 — one half of the corpus must never break the other
         logger.exception(
@@ -1552,6 +1587,18 @@ def _coverage_line(
             )
         if kg.truncated:
             coverage += "; stored signal truncated for space"
+        if kg.retrieval_dropped:
+            # The one caveat that used to be impossible to state. Phrased as a
+            # count of what is MISSING, not of what was read: "23 stored
+            # signals" reads as sufficiency, and the whole failure this fixes
+            # was an answer that looked complete because nothing said otherwise.
+            coverage += (
+                f"; {kg.retrieval_dropped} further stored signal"
+                f"{'s' if kg.retrieval_dropped != 1 else ''} matched but did "
+                "not fit — this is the highest-ranked portion, NOT everything "
+                "on record, and you must say so rather than presenting it as "
+                "the complete picture"
+            )
     header_parts = []
     if corpus.count:
         header_parts.append("CUSTOMER CALLS")

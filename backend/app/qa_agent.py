@@ -1089,9 +1089,15 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     Returns None when the KG yields nothing, so the caller falls through to the
     generic answer (which explains what to connect).
     """
-    from app.graph.retrieval import render_context_section
+    from app.graph.retrieval import VOC_SCALE, render_context_section
 
-    bundle = _retrieve_kg_bundle(enterprise_id, question)
+    # Same widened retrieval as the merged path (`call_digest.build_kg_context`).
+    # These two are the only callers that pass a scale, and they must pass the
+    # SAME one: this path and that one are described as "deliberately the same
+    # pair, so the two cannot drift", and a pinned `/voice-of-customer-report`
+    # returning less feedback than the unpinned question would be exactly that
+    # drift — in the direction the explicit request least expects.
+    bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
     if not bundle:
         return None
     corpus_text = render_context_section(bundle)

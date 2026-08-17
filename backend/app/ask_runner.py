@@ -1685,6 +1685,7 @@ def _retrieve_kg_bundle(
     *,
     question_embedding: list[float] | None = None,
     embedding_unavailable: bool = False,
+    scale: dict | None = None,
 ) -> dict | None:
     """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
     or None when there's no tenant context or the KG yields nothing / errors.
@@ -1695,6 +1696,14 @@ def _retrieve_kg_bundle(
     passed through to `retrieve_context` as `skip_semantic` so the KG neither
     runs kNN on a zero vector nor re-embeds a question that's already known to
     embed to nothing.
+
+    `scale` widens the retrieval for callers whose answer IS the stored signal
+    rather than one ingredient beside a document corpus — in practice the two
+    voice-of-customer paths, which pass `retrieval.VOC_SCALE`. Omitted, every
+    caller keeps the Ask-sized defaults exactly. It is threaded through this
+    function rather than around it so the merged VoC path and the pinned
+    KG-only path keep sharing one retrieval, which is the whole reason both go
+    through here (see `call_digest.build_kg_context`).
 
     Resilient by construction: a missing tenant, an empty KG, a fake backend
     with no pgvector, or any read failure all collapse to None so the caller
@@ -1710,6 +1719,7 @@ def _retrieve_kg_bundle(
             facade, enterprise_id, question,
             question_embedding=question_embedding,
             skip_semantic=embedding_unavailable,
+            **(scale or {}),
         )
     except Exception:  # noqa: BLE001 — KG must never break Ask
         logger.exception("Ask KG retrieval failed for enterprise=%s", enterprise_id)

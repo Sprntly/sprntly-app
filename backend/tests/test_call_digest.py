@@ -1375,16 +1375,25 @@ def _kg_signal(content, *, doc="slack_channels", source_type="customer_voice",
     }
 
 
-def _stub_kg(monkeypatch, signals, *, themes=None):
-    """Wire the KG half to fixtures at the retrieval seam."""
+def _stub_kg(monkeypatch, signals, *, themes=None, signals_dropped=0):
+    """Wire the KG half to fixtures at the retrieval seam.
+
+    The stubs take `**kw` because the real call now passes `scale=VOC_SCALE`.
+    They swallow it rather than asserting on it so every case below stays about
+    the merge; the scale itself is pinned once, in
+    `test_the_feedback_path_retrieves_at_voc_scale`.
+    """
     import app.ask_runner as ask_runner
 
     bundle = {
         "signals": list(signals), "themes": list(themes or []),
         "decisions": [], "hypotheses": [], "outcomes": [],
-        "kg_refs": [], "token_estimate": 100, "empty": False,
+        "kg_refs": [], "token_estimate": 100,
+        "signals_dropped": signals_dropped, "empty": False,
     }
-    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", lambda eid, q: bundle)
+    monkeypatch.setattr(
+        ask_runner, "_retrieve_kg_bundle", lambda eid, q, **kw: bundle
+    )
     return bundle
 
 
@@ -1393,7 +1402,9 @@ def _stub_no_kg(monkeypatch):
     tenant with no signal, and what every pre-merge test implicitly assumed."""
     import app.ask_runner as ask_runner
 
-    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", lambda eid, q: None)
+    monkeypatch.setattr(
+        ask_runner, "_retrieve_kg_bundle", lambda eid, q, **kw: None
+    )
 
 
 def test_calls_and_kg_both_reach_the_corpus(monkeypatch):
@@ -1654,13 +1665,93 @@ def test_coverage_line_names_the_graph_sources_it_read(monkeypatch):
     assert "3 stored signals" in p["_skill_action"]
 
 
+def test_the_feedback_path_retrieves_at_voc_scale(monkeypatch):
+    """THE REGRESSION TEST FOR THE SILENT CAP.
+
+    The merged feedback path must widen retrieval, not inherit the Ask-sized
+    defaults. Before the fix this call took whatever `_retrieve_kg_bundle`'s
+    defaults gave it — at most 80 candidate signals cut to 2,200 tokens — so
+    "show me all the customer feedback" was answered from roughly 9k characters
+    of a tenant's graph with nothing anywhere saying so.
+
+    Asserted at the seam rather than on the output because that is where the
+    regression would reappear: every case above stubs this function, so a
+    dropped `scale=` argument would break nothing else in this file.
+    """
+    from app.graph.retrieval import VOC_SCALE
+    import app.ask_runner as ask_runner
+
+    seen: dict = {}
+
+    def _capture(eid, q, **kw):
+        seen.update(kw)
+        return {
+            "signals": [_kg_signal("x")], "themes": [], "decisions": [],
+            "hypotheses": [], "outcomes": [], "kg_refs": [],
+            "token_estimate": 10, "signals_dropped": 0, "empty": False,
+        }
+
+    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", _capture)
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="what are customers saying?")
+
+    assert seen.get("scale") == VOC_SCALE, (
+        "the feedback path must retrieve at VOC scale; falling back to the Ask "
+        "defaults is the silent-truncation bug this fixes"
+    )
+
+
+def test_coverage_line_admits_when_retrieval_could_not_fit_everything(monkeypatch):
+    """The caveat that was previously impossible to state.
+
+    `token_estimate` reports what retrieval SPENT, which reads the same whether
+    the budget was generous or the bundle was clipped — so an answer built from
+    a sample looked exactly like one built from everything. With
+    `signals_dropped` threaded through, the banner has to say the part it left
+    out, and say it as a shortfall rather than a count of what it read.
+    """
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_kg(monkeypatch, [_kg_signal("a")], signals_dropped=17)
+    captured = _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="what are customers saying?")
+
+    banner = captured["input"]
+    assert "17 further stored signals matched but did not fit" in banner
+    assert "NOT everything on record" in banner
+
+
+def test_a_complete_feedback_answer_claims_no_shortfall(monkeypatch):
+    """The mirror of the case above, and the one that keeps the caveat
+    meaningful: when nothing was dropped the banner must not hedge. A warning
+    printed unconditionally is a warning users learn to ignore."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
+    monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_kg(monkeypatch, [_kg_signal("a")], signals_dropped=0)
+    captured = _stub_voc_pass(monkeypatch)
+
+    cd.answer(enterprise_id="co", question="what are customers saying?")
+
+    assert "did not fit" not in captured["input"]
+
+
 def test_a_broken_graph_read_never_costs_the_calls(monkeypatch):
     """Per-source isolation, extended to the new half: the graph failing must
     cost the answer its calls no more than a dead Zoom grant costs it the
     graph."""
     import app.ask_runner as ask_runner
 
-    def _boom(eid, q):
+    def _boom(eid, q, **kw):
         raise RuntimeError("pgvector down")
 
     monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", _boom)
