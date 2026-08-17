@@ -104,7 +104,11 @@ def fixture_ids(sb):
     member_user_id = "join-greeting-live-" + uuid.uuid4().hex[:10]
     sb.table("profiles").insert({"id": member_user_id}).execute()
 
-    yield {"project_id": project["id"], "member_user_id": member_user_id}
+    yield {
+        "project_id": project["id"],
+        "member_user_id": member_user_id,
+        "company_id": company_id,
+    }
 
     sb.table("conversations").delete().eq("project_id", project["id"]).execute()
     sb.table("project_members").delete().eq("project_id", project["id"]).execute()
@@ -113,12 +117,16 @@ def fixture_ids(sb):
 
 
 def test_real_new_membership_lands_one_greeting_turn(sb, fixture_ids):
+    from app.db.companies import slug_for_company_id
     from app.project_join_greeting import post_join_greeting
 
     project_id = fixture_ids["project_id"]
     user_id = fixture_ids["member_user_id"]
+    company_id = fixture_ids["company_id"]
 
-    post_join_greeting(project_id, user_id)
+    post_join_greeting(
+        project_id, user_id, dataset=slug_for_company_id(company_id) or "", company_id=company_id
+    )
 
     conversations = (
         sb.table("conversations")
