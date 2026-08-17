@@ -51,7 +51,10 @@ def _dataset_for(company) -> str:
     return slug_for_company_id(company.company_id) or ""
 
 
-def enrich_chat_envelope(envelope: dict, company, dataset: str | None = None) -> dict:
+def enrich_chat_envelope(
+    envelope: dict, company, dataset: str | None = None,
+    project_id: int | None = None,
+) -> dict:
     """Attach the render-data legs to one classify envelope, in place.
 
     The single enrichment step every chat surface runs on the envelope its
@@ -66,6 +69,12 @@ def enrich_chat_envelope(envelope: dict, company, dataset: str | None = None) ->
     routes) pass it through instead of paying a second lookup; when omitted
     it is resolved per leg, exactly where the pre-extraction inline code
     resolved it.
+
+    `project_id` scopes the LISTING legs (`artifact_list`/`artifact_counts`)
+    to one project's own artifacts, so a project surface's cards and counts
+    agree with its project-scoped prose instead of showing the whole
+    workspace's. When omitted (main chat) both legs keep the workspace-wide
+    listing verbatim — the default changes nothing for existing callers.
 
     Returns the same dict for call-site convenience; mutation is in place.
     """
@@ -88,14 +97,15 @@ def enrich_chat_envelope(envelope: dict, company, dataset: str | None = None) ->
         # any yet", which is an answer).
         envelope["artifact_list"] = _chat_artifact_list(
             company, envelope.get("list_kind"), envelope.get("list_limit"),
-            dataset=dataset,
+            dataset=dataset, project_id=project_id,
         )
         if envelope.get("list_mode") == "count":
             # A HOW-MANY ask: the numbers come from the FULL library, never
             # from the capped card list above — counting a 12-row page and
             # calling it the total is the lie the cap exists to avoid.
             envelope["artifact_counts"] = _chat_artifact_counts(
-                company, envelope.get("list_kind"), dataset=dataset
+                company, envelope.get("list_kind"), dataset=dataset,
+                project_id=project_id,
             )
     return envelope
 
@@ -108,7 +118,7 @@ _MAX_CHAT_ARTIFACTS = 12
 
 def _chat_artifact_list(
     company, list_kind: str | None, list_limit: int | None = None,
-    dataset: str | None = None,
+    dataset: str | None = None, project_id: int | None = None,
 ) -> list[dict]:
     """The caller's own artifacts as the chat's clickable rows.
 
@@ -119,6 +129,10 @@ def _chat_artifact_list(
     latest PRD" → 1), already gated by the planner (`constraints.top_n` — a
     positive int or nothing); it tightens the cap, never widens it — the chat
     is a picker, and two hundred cards is not an answer anyone can read.
+    `project_id`, when set, swaps the SOURCE to the project's own listing
+    (`list_artifacts_for_project` — identical row shape, filtered at the
+    source so a project artifact outside the workspace's newest page can
+    never silently vanish); everything downstream is unchanged.
     PRD rows are enriched with the conversation that produced them
     (`conversations_for_prds`) so a click can resume the PRD's own thread —
     reports, ticket sets and team documents already carry their
@@ -133,12 +147,21 @@ def _chat_artifact_list(
             dataset = _dataset_for(company)
         if not dataset:
             return []
-        from app.db.artifacts import list_artifacts_for_company
+        from app.db.artifacts import (
+            list_artifacts_for_company,
+            list_artifacts_for_project,
+        )
         from app.db.conversations import conversations_for_prds
 
-        items = list_artifacts_for_company(
-            dataset=dataset, company_id=company.company_id
-        )
+        if project_id is not None:
+            items = list_artifacts_for_project(
+                project_id=project_id, dataset=dataset,
+                company_id=company.company_id,
+            )
+        else:
+            items = list_artifacts_for_company(
+                dataset=dataset, company_id=company.company_id
+            )
         kind = (list_kind or "all").strip() or "all"
         if kind != "all":
             items = [i for i in items if i.get("type") == kind]
@@ -178,7 +201,8 @@ def _chat_artifact_list(
 
 
 def _chat_artifact_counts(
-    company, list_kind: str | None, dataset: str | None = None
+    company, list_kind: str | None, dataset: str | None = None,
+    project_id: int | None = None,
 ) -> dict | None:
     """Per-day tallies for a HOW-MANY ask ("how many PRDs today vs yesterday?").
 
@@ -187,6 +211,10 @@ def _chat_artifact_counts(
     page size as the library. Dates are the `created_at` calendar date in UTC
     (this product's timestamps are UTC throughout); `today`/`yesterday` are
     resolved server-side so the client never does timezone arithmetic.
+
+    `project_id`, when set, tallies over the project's own listing instead
+    (`list_artifacts_for_project` — same source swap as the card list, so a
+    project surface's count and cards can never disagree with each other).
 
     Shape: {kind, total, today, yesterday, by_day: [{date, count}] newest-first
     (up to 14 days that actually have artifacts)}. None on any failure — the
@@ -198,11 +226,20 @@ def _chat_artifact_counts(
             return None
         from datetime import date, timedelta
 
-        from app.db.artifacts import list_artifacts_for_company
-
-        items = list_artifacts_for_company(
-            dataset=dataset, company_id=company.company_id
+        from app.db.artifacts import (
+            list_artifacts_for_company,
+            list_artifacts_for_project,
         )
+
+        if project_id is not None:
+            items = list_artifacts_for_project(
+                project_id=project_id, dataset=dataset,
+                company_id=company.company_id,
+            )
+        else:
+            items = list_artifacts_for_company(
+                dataset=dataset, company_id=company.company_id
+            )
         kind = (list_kind or "all").strip() or "all"
         if kind != "all":
             items = [i for i in items if i.get("type") == kind]

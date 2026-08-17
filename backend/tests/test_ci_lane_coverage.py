@@ -113,6 +113,15 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "lane on every PR; this suite is the real-DB proof, run locally "
         "against the dev rig when touching these routes/helpers."
     ),
+    ("test_project_chat_cards_live.py", "RUN_PROJECT_CARDS_LIVE"): (
+        "Real local-Supabase proof that a project chat's artifact cards/"
+        "counts are project-scoped through the real five-table fan-out and "
+        "PostgREST (the regression's exact shape). Deterministic backstop: "
+        "the project-scoping tests in test_chat_envelope_shared.py cover the "
+        "same behaviour against FakeSupabaseClient and run in the fast lane "
+        "on every PR; this suite is the real-DB proof, run locally against "
+        "the dev rig when touching the envelope's listing legs."
+    ),
     ("test_project_memory_promotion.py", "RUN_PROJECT_MEMORY_PROMOTION_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the agent-"
         "promotion writer: proves the pme_one_provenance XOR check accepts a "

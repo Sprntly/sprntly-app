@@ -5911,6 +5911,14 @@ export type GroupTurn = {
      *  offer confirm/cancel. Absent on every other assistant turn. */
     pending_mutation?: { token: string; summary: string; prd_id: number } | null
   }) | null
+  /** The latest agent run-status, attached by the backend onto the HUMAN turn
+   *  whose id == the run's `source_turn_id` (already mapped to the FE
+   *  vocabulary at the DTO edge: running/done/failed/declined). Drives the
+   *  group chat's "thinking" pending state so a reply that's still generating
+   *  never flashes a false "Sprntly stayed out". Null/absent on turns with no
+   *  associated run. */
+  run_status?: "queued" | "running" | "done" | "failed" | "declined" | null
+  error_class?: string | null
 }
 
 /** Response from `POST /v1/projects/{id}/individual` — the caller's durable

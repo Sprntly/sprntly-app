@@ -50,6 +50,18 @@ function initials(name: string | null | undefined): string {
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
 }
 
+// Grace window before the declarative "Sprntly stayed out of this one." note is
+// allowed to render for a still-unanswered tail human turn. This is the BACKSTOP
+// to the primary fix (plumbing the backend `run_status` onto the ShellTurn so a
+// generating reply shows a "thinking" pending state): if that run-status never
+// reaches the client (the realtime `turn.created` broadcast fires BEFORE the run
+// row exists, and incremental `since` polls skip the human turn once the cursor
+// passes it), the note is still held silent this long so a reply that IS coming
+// lands first. Comfortably clears observed group-reply latency (~15-20s); a
+// genuine human-to-human stay-out simply shows the note this long after the
+// message, which is fine for a non-urgent informational note.
+const GROUP_STAYOUT_GRACE_MS = 25000
+
 /** A legacy assistant turn's plain `content` shaped into the minimal
  *  `AskResponse` the shared reply ladder needs — turns persisted before the
  *  full-reply column carry no key-points/citations, so those are the honest
@@ -123,8 +135,14 @@ export interface UseProjectGroupThread {
   error: string | null
   /** Whether the newest turn is a human turn still awaiting a reply (the
    *  informational "stayed out / no reply yet" arm — suppressed while a send's
-   *  own POST + reconcile is in flight). */
+   *  own POST + reconcile is in flight, while inside the stay-out grace window,
+   *  and whenever the tail is an @mention that will deterministically be
+   *  answered). */
   showStayedOut: boolean
+  /** Whether a reply to the newest human turn is (deterministically) still
+   *  coming — a tail @Sprntly mention or a backend-confirmed running/queued
+   *  run. Drives the "thinking" pending state instead of a premature stay-out. */
+  showThinking: boolean
   errorRow: ReactNode | null
   typingIndicator: ReactNode | null
   postingWaitNode: ReactNode | null
@@ -411,7 +429,47 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
   )
 
   const lastTurn = turns[turns.length - 1]
-  const showStayedOut = !!lastTurn && lastTurn.role === "user" && !posting
+  // ── "Stayed out" grace window (false-flash fix) ──
+  // The backend attaches a `run_status` onto the HUMAN turn when it schedules a
+  // reply, but incremental `since` polls skip that turn once the cursor advances
+  // past it (and the turn.created broadcast fires BEFORE the run row is
+  // inserted), so the "running" status frequently never reaches the client —
+  // leaving `lastTurn` a bare user turn and, without this gate, showing a false
+  // "Sprntly stayed out of this one." for the whole generation window (the root
+  // of the "didn't reply even on @call" complaint). Gate the note on a grace
+  // window measured from the tail human turn's OWN clock: a freshly
+  // posted/received turn (created ≈ now) is held silent until the window
+  // elapses — by which point a reply that was coming has landed and turned the
+  // tail into an assistant turn — while a genuinely old, already-settled tail
+  // (history load) is past the window immediately and shows the note at once.
+  const tailUserTurn = lastTurn && lastTurn.role === "user" ? lastTurn : null
+  const tailUserId = tailUserTurn?.id ?? null
+  const tailUserCreatedAt = tailUserTurn?.created_at ?? null
+  const [stayoutGraceElapsedId, setStayoutGraceElapsedId] = useState<number | null>(null)
+  useEffect(() => {
+    if (tailUserId == null || tailUserCreatedAt == null) return
+    const age = Date.now() - new Date(tailUserCreatedAt).getTime()
+    const remaining = GROUP_STAYOUT_GRACE_MS - age
+    if (remaining <= 0) {
+      setStayoutGraceElapsedId(tailUserId)
+      return
+    }
+    const t = setTimeout(() => setStayoutGraceElapsedId(tailUserId), remaining + 50)
+    return () => clearTimeout(t)
+  }, [tailUserId, tailUserCreatedAt])
+  const withinStayoutGrace = tailUserId != null && stayoutGraceElapsedId !== tailUserId
+  // A tail @mention (or a backend-confirmed running/queued run) is a
+  // deterministic reply: the backend ALWAYS answers an @Sprntly mention, so
+  // show a "thinking" pending state until the reply lands — and never a
+  // stay-out — which is exactly the "didn't reply even on @call" case.
+  const tailMentionsAgent = tailUserTurn != null && MENTION_RE.test(tailUserTurn.content)
+  const tailRunPending =
+    lastTurn?.run_status === "running" || lastTurn?.run_status === "queued"
+  const showThinking =
+    tailUserId != null && !posting && (tailMentionsAgent || tailRunPending)
+  const showStayedOut =
+    !!lastTurn && lastTurn.role === "user" && !posting &&
+    !tailMentionsAgent && !withinStayoutGrace
 
   // Tokens whose proposal is locally resolved (confirmed or cancelled). A
   // group turn's `reply.pending_mutation` is PERSISTED on the turn row, so
@@ -502,6 +560,13 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
           // footer shape (the engine suite asserts it); the render path now
           // reads the native fields above.
           footerData: isAgent ? { openCandidates: turn.open_candidates ?? [] } : undefined,
+          // The agent run-status the backend attaches onto the HUMAN turn whose
+          // id == the run's source_turn_id (already DB→FE-vocabulary mapped at
+          // the DTO edge: running/done/failed/declined). Plumbed onto the
+          // ShellTurn so ChatShell's `reply.runStatus` shows a "thinking"
+          // pending state while a reply is generating — instead of falsely
+          // declaring "Sprntly stayed out" before the reply has streamed in.
+          runStatus: turn.run_status ?? null,
         }
       }),
     [turns, myUserId, resolvedMutationTokens],
@@ -537,6 +602,7 @@ export function useProjectGroupThread({ projectId, draftApiRef }: UseProjectGrou
     posting,
     error,
     showStayedOut,
+    showThinking,
     errorRow,
     typingIndicator,
     postingWaitNode,

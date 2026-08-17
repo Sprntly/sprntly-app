@@ -77,8 +77,9 @@ describe("ChatShell group config", () => {
     // Sides: the peer turn is start-aligned (its own layout), me is not.
     expect(other.querySelector('[class*="otherRow"]')).toBeTruthy()
 
-    // Speaker names.
-    expect(me.textContent).toContain("You")
+    // Speaker names — the self row carries the author's REAL name (matching
+    // the main/private surfaces, which label the person by name, not "You").
+    expect(me.textContent).toContain("Ada")
     expect(other.textContent).toContain("Bo")
 
     // Role chip + human timestamp on the peer turn.
@@ -96,6 +97,22 @@ describe("ChatShell group config", () => {
 
     // Every mapped turn carries a stable data-turn-id.
     expect(container.querySelectorAll("[data-turn-id]").length).toBe(3)
+  })
+
+  it("test_group_self_bubble_light_fill_and_real_name — the viewer's own turn renders the LIGHT gcBubbleOther fill (no dark gcBubbleMe) and the author's real name, distinguished from peers by right-alignment only", () => {
+    render(<ChatShell descriptor={groupDescriptor()} turns={[selfTurn, peerTurn]} />)
+    const me = screen.getByTestId("gc-msg-me")
+    // Right-aligned self lane is preserved…
+    expect(me.className).toMatch(/gcMsgMe/)
+    // …but the bubble wears the SAME light treatment as peers (main/private
+    // parity: self is a light right-aligned bubble, not a dark colour-coded one).
+    const bubble = me.querySelector("[class*='gcBubble']")
+    expect(bubble).toBeTruthy()
+    expect(bubble!.className).toMatch(/gcBubbleOther/)
+    expect(me.querySelector("[class*='gcBubbleMe']")).toBeNull()
+    // And the speaker label is the author's real name, not a hardcoded "You".
+    expect(me.textContent).toContain("Ada")
+    expect(me.textContent).not.toContain("You")
   })
 
   it("test_group_other_row_no_undefined_class (AC7)", () => {

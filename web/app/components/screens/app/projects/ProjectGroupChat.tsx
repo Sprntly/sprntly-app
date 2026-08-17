@@ -170,7 +170,14 @@ export function ProjectGroupChat({ projectId, onOpenArtifact }: ProjectGroupChat
       // backend exposes retry); `done`/null render nothing.
       runStatus: (status, turn) =>
         renderRunStatus({
-          status: status ?? (engine.showStayedOut ? "declined" : null),
+          // Backend run-status wins when it reaches us; otherwise a tail
+          // @mention (deterministic reply) shows the "thinking" pending state,
+          // and only a settled non-mention tail past the grace window shows the
+          // quiet "stayed out" note. This is what keeps a still-generating reply
+          // from flashing a false stay-out before it streams in.
+          status:
+            status ??
+            (engine.showThinking ? "running" : engine.showStayedOut ? "declined" : null),
           turn,
           prefix: "gc",
           retryRun: engine.retryRun,

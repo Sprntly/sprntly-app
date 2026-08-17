@@ -186,17 +186,29 @@ describe("ProjectGroupChat — multi-author bubbles", () => {
     expect(within(agent).getByText("Product Coworker")).toBeTruthy()
   })
 
-  it("a human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {
+  it("a SETTLED human-to-human aside with no agent reply shows the QUIET stayed-out marker", async () => {
+    // Both turns created well past the stay-out grace window (and in order —
+    // the engine merge-sorts by created_at): a history-loaded, already-settled
+    // aside shows the note immediately (a FRESH tail is held silent while a
+    // reply may still be generating).
     groupTurnsMock.mockResolvedValue([
-      turn({ id: 1, author_user_id: "u2", author_name: "Shristi" }),
-      turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "no mention here" }),
+      turn({
+        id: 1, author_user_id: "u2", author_name: "Shristi",
+        created_at: new Date(Date.now() - 120_000).toISOString(),
+      }),
+      turn({
+        id: 2, author_user_id: "u1", author_name: "Me", content: "no mention here",
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+      }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
     await screen.findByTestId("gc-msg-me")
     // The alarming "Sprntly stayed out — no reply yet" pill is gone; the interim
     // `showStayedOut` stay-out case now renders the QUIET declined treatment
     // (visually distinct from a failure).
-    expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy()
+    // findBy: the settled note lands after the grace-elapse state commit (one
+    // extra render pass vs the old direct computation).
+    expect(await screen.findByTestId("gc-stayed-out-quiet")).toBeTruthy()
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })
 
@@ -493,9 +505,14 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
       }),
     )
     // The refetch after the POST resolves shows only the human turn — no
-    // agent reply landed (a genuine "stayed out" outcome).
+    // agent reply landed (a genuine "stayed out" outcome). Its `created_at`
+    // sits past the stay-out grace window so the settled note can show
+    // without waiting out the real-time hold.
     groupTurnsMock.mockResolvedValueOnce([
-      turn({ id: 5, content: "hi team", author_user_id: "u1", author_name: "Me" }),
+      turn({
+        id: 5, content: "hi team", author_user_id: "u1", author_name: "Me",
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+      }),
     ])
 
     const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
@@ -513,12 +530,16 @@ describe("ProjectGroupChat — stayed-out badge suppressed while posting", () =>
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
 
     await act(async () => {
-      resolvePost(turn({ id: 5, content: "hi team" }))
+      resolvePost(turn({
+        id: 5, content: "hi team",
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+      }))
       await Promise.resolve()
     })
 
-    // Posting has settled and no agent reply arrived — NOW the QUIET stay-out
-    // marker shows (the old alarming pill is gone).
+    // Posting has settled, no agent reply arrived, and the turn is past the
+    // stay-out grace window — NOW the QUIET stay-out marker shows (the old
+    // alarming pill is gone).
     await waitFor(() => expect(screen.getByTestId("gc-stayed-out-quiet")).toBeTruthy())
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()
   })

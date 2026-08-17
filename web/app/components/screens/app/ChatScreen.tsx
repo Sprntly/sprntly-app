@@ -41,6 +41,7 @@ import {
   type SlackShareResolution,
 } from "../../shared/SlackSharePreviewCard"
 import { ChatSuggestionIcon, IconDocument, IconSparkle } from "../../shared/app-icons"
+import { IconFolder } from "@tabler/icons-react"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
@@ -7140,6 +7141,39 @@ export function ChatScreen() {
               >+</button>
             </div>
             </div>
+            {/* Project signal (main-chat entry flow). When THIS chat's PRD
+                silently forked a project (`content.activeProjectId`), the header
+                morphs to say so and gives a way to jump straight into that
+                project's chat — otherwise the user gets no sign a project now
+                exists (the fork happens behind the scenes). Pinned to the
+                strip's right end beside the artifact-reopen control; hidden
+                entirely when no project is bound, so a normal chat is
+                byte-identical to before. Lands on the caller's own (individual)
+                project chat, the same target the main-chat PRD-fork nav uses. */}
+            {content.activeProjectId != null ? (
+              <button
+                type="button"
+                className="chat-project-jump"
+                data-testid="chat-open-project"
+                title="Open the project created from this chat"
+                onClick={() =>
+                  router.push(`/projects?id=${content.activeProjectId}&chat=individual`)
+                }
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  flexShrink: 0, alignSelf: "center", marginLeft: 8,
+                  height: 26, padding: "0 11px",
+                  background: "var(--surface-2, #f7f5f0)",
+                  border: "1px solid var(--line, #E8E6E0)",
+                  borderRadius: 999, cursor: "pointer",
+                  fontSize: 12, fontWeight: 500,
+                  color: "var(--ink-2, #3d3a34)", whiteSpace: "nowrap",
+                }}
+              >
+                <IconFolder size={14} />
+                <span>Open project</span>
+              </button>
+            ) : null}
             {/* The way back to a closed artifact panel. Pinned to the strip's
                 right end — outside the scrolling list — so no number of open
                 tabs and no scroll position can put it out of reach. Hidden

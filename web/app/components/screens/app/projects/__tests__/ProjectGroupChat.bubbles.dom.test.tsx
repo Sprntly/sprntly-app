@@ -82,7 +82,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     expect(screen.queryByTestId("group-chat-scroll")).toBeNull()
   })
 
-  it("test_group_multiparty_lanes_two_fills_agent_bubbleless_testids — self=me/other=peer carry TWO bubble fills; the agent turn is bubble-less via bc-agent-body; gc-msg-* testids + AGENT badge preserved", async () => {
+  it("test_group_multiparty_lanes_light_fill_agent_bubbleless_testids — self=me/other=peer both carry the LIGHT gcBubbleOther fill (self distinguished by alignment, not colour); the agent turn is bubble-less via bc-agent-body; gc-msg-* testids + AGENT badge preserved", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u2", author_name: "Shristi", author_job_role: "Design", content: "hey" }),
       turn({ id: 2, author_user_id: "u1", author_name: "Me", content: "my reply" }),
@@ -90,12 +90,14 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
 
-    // Own turn: the row-reverse `gcMsgMe` lane, bubble carries the dark `--nav`
-    // `gcBubbleMe` fill (NAMED INTENDED CHANGE: shell-owned module classes
-    // replace the pre-fold `msgMe`/`bubbleMe`).
+    // Own turn: the row-reverse `gcMsgMe` lane, bubble carries the SAME light
+    // `gcBubbleOther` fill as peers (NAMED INTENDED CHANGE: main/private
+    // parity — self is distinguished by right-alignment, not a dark
+    // colour-coded bubble).
     const me = await screen.findByTestId("gc-msg-me")
     expect(me.className).toMatch(/gcMsgMe/)
-    expect(within(me).getByText("my reply").closest("[class*='gcBubbleMe']")).toBeTruthy()
+    expect(within(me).getByText("my reply").closest("[class*='gcBubbleOther']")).toBeTruthy()
+    expect(me.querySelector("[class*='gcBubbleMe']")).toBeNull()
 
     // Peer turn: the left `gcMsgOther` lane, second fill `gcBubbleOther`.
     const other = screen.getByTestId("gc-msg-other")
@@ -111,7 +113,7 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     expect(agent.querySelector("[class*='gcBubble']")).toBeNull()
   })
 
-  it("test_group_own_message_mention_chip_has_contrast_class — an own-message @-mention chip carries the gc-mention-chip marker under .gcBubbleMe (the reproduced AA override); the CSS restores green-not-blue", async () => {
+  it("test_group_own_message_mention_chip_has_contrast_class — an own-message @-mention chip carries the gc-mention-chip marker inside the LIGHT own bubble; the base blue --info chip styling holds AA contrast on the light fill", async () => {
     groupTurnsMock.mockResolvedValue([
       turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "Ping @David about the quote" }),
     ])
@@ -119,20 +121,16 @@ describe("ProjectGroupChat — bubble alignment lanes (folded shell)", () => {
     const me = await screen.findByTestId("gc-msg-me")
     const chip = within(me).getByTestId("gc-mention-chip")
     expect(chip.textContent).toContain("@David")
-    // The stable GLOBAL marker class the AA override selector targets.
+    // The stable GLOBAL marker class override selectors can target.
     expect(chip.classList.contains("gc-mention-chip")).toBe(true)
-    // The chip sits inside the own dark `gcBubbleMe` bubble.
-    expect(chip.closest("[class*='gcBubbleMe']")).toBeTruthy()
+    // The chip sits inside the own bubble — which now wears the SAME light
+    // `gcBubbleOther` fill as peers (self is alignment-distinguished, not
+    // colour-coded), so the dark-bubble AA override no longer applies to it.
+    expect(chip.closest("[class*='gcBubbleOther']")).toBeTruthy()
+    expect(chip.closest("[class*='gcBubbleMe']")).toBeNull()
 
-    // The colour split is enforced across the folded modules: the own-bubble
-    // override (ChatShell.module.css) makes the chip green `--accent-2` inline
-    // text; the base chip (mention-picker.module.css) is the blue `--info` pill.
-    const shellCssSrc = readFileSync(join(__dirname, "../../../../shared/chat-shell/ChatShell.module.css"), "utf8")
-    expect(shellCssSrc).toMatch(/\.gcBubbleMe\s*\{[^}]*background:\s*var\(--nav\)/)
-    const ownChipBlock =
-      shellCssSrc.match(/\.gcBubbleMe\s+:global\(\.gc-mention-chip\)\s*\{[^}]*\}/)?.[0] ?? ""
-    expect(ownChipBlock).toContain("var(--accent-2)")
-    expect(ownChipBlock).not.toContain("var(--info)")
+    // On the light fill the chip keeps the base blue `--info` pill styling
+    // (mention-picker.module.css) — the same treatment peer bubbles get.
     const pickerCss = readFileSync(join(__dirname, "../mention-picker.module.css"), "utf8")
     expect(pickerCss).toMatch(/\.mentionChip\s*\{[^}]*color:\s*var\(--info\)/)
   })
@@ -193,12 +191,18 @@ describe("ProjectGroupChat — viewport pins to newest turn after history load (
 describe("ProjectGroupChat — styled group nodes carry classes, not bare divs (AC2)", () => {
   it("test_group_styled_nodes_not_bare — the presence roster and (via the engine) error/typing nodes carry their GroupChatExtras classes; the stay-out case renders the QUIET declined node", async () => {
     groupTurnsMock.mockResolvedValue([
-      turn({ id: 1, author_user_id: "u1", author_name: "Me", content: "solo aside" }),
+      // A SETTLED history turn (created well past the stay-out grace window)
+      // — a fresh turn would rightly hold the note back while a reply may
+      // still be generating.
+      turn({
+        id: 1, author_user_id: "u1", author_name: "Me", content: "solo aside",
+        created_at: new Date(Date.now() - 60_000).toISOString(),
+      }),
     ])
     render(React.createElement(ProjectGroupChat, { projectId: 101 }))
-    // A human-only last turn with no reply → the QUIET declined node renders (the
-    // honest replacement); the OLD alarming `gc-stayed-out` pill and its
-    // `.stayedOut*` classes are gone from the DOM.
+    // A human-only, long-settled last turn with no reply → the QUIET declined
+    // node renders (the honest replacement); the OLD alarming `gc-stayed-out`
+    // pill and its `.stayedOut*` classes are gone from the DOM.
     const quiet = await screen.findByTestId("gc-stayed-out-quiet")
     expect(quiet.className).toMatch(/run-quiet/)
     expect(screen.queryByTestId("gc-stayed-out")).toBeNull()

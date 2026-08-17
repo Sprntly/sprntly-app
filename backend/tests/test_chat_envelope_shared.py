@@ -268,6 +268,179 @@ def test_group_envelope_carries_open_candidates(
     assert "open_candidates" not in held
 
 
+# ─── project scoping: cards and counts match the project, not the workspace ──
+
+
+def _list_envelope(list_kind: str = "prd", list_mode: str = "count") -> dict:
+    """A classifier list-envelope stub — count mode so BOTH listing legs
+    (`artifact_list` and `artifact_counts`) attach in one pass."""
+    return {
+        "intent": "list_artifacts", "confidence": 0.9, "task": None,
+        "instruction": None, "artifact_type": None, "artifact_query": None,
+        "reason": "listing", "source": "llm",
+        "list_kind": list_kind, "list_mode": list_mode,
+    }
+
+
+def test_project_envelope_artifact_list_is_project_scoped(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The regression: a workspace with N PRDs, a project holding M<N — the
+    PROJECT chat envelope's cards must be the project's M rows (and its
+    count M), never the workspace-wide N the main surface lists. Before the
+    fix the project surface showed workspace-wide cards next to
+    project-scoped prose, and the two disagreed."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    in_project = {_seed_prd(db, title="Checkout PRD"), _seed_prd(db, title="Search PRD")}
+    outside = {_seed_prd(db, title="Billing PRD"), _seed_prd(db, title="Onboarding PRD")}
+    project_id = _seed_project(t)
+    from app.db import projects as projects_db
+
+    for pid in in_project:
+        projects_db.add_artifact(project_id, "prd", pid)
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
+    )
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "what PRDs do we have?"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {r["id"] for r in body["artifact_list"]} == in_project
+    assert not outside & {r["id"] for r in body["artifact_list"]}
+    # The HOW-MANY leg is scoped the same way — prose-count == card-count
+    # needs both, and the workspace holds 4.
+    assert body["artifact_counts"]["total"] == len(in_project) == 2
+
+
+def test_project_zero_artifacts_empty_no_leak(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """A project holding NOTHING renders nothing: empty cards, zero count —
+    never the workspace's artifacts leaking in from other projects."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    _seed_prd(db, title="Checkout PRD")
+    _seed_prd(db, title="Billing PRD")
+    project_id = _seed_project(t)  # no artifacts pinned
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
+    )
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/chat/intent",
+        json={"message": "what PRDs do we have?"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["artifact_list"] == []
+    assert body["artifact_counts"]["total"] == 0
+
+
+def test_project_envelope_idor_no_foreign_project_or_tenant(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """Project A's envelope never carries project B's artifact (same tenant)
+    nor a foreign-tenant artifact — even one whose ref was written onto
+    project A directly, bypassing the route's write-time gate: the listing
+    keeps only rows that are ALSO in the caller's own tenant fan-out."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    prd_a = _seed_prd(db, title="Checkout PRD")
+    prd_b = _seed_prd(db, title="Billing PRD")
+    foreign_prd = _seed_prd(db, dataset="other", title="Foreign PRD")
+
+    project_a = _seed_project(t, with_prd_id=prd_a)
+    from app.db import projects as projects_db
+
+    ws_id = ensure_default_workspace(t.company_id)["id"]
+    project_b = projects_db.create_project(
+        company_id=t.company_id, workspace_id=ws_id, name="Other project",
+        created_by=t.user_id,
+    )["id"]
+    projects_db.add_artifact(project_b, "prd", prd_b)
+    # A ref a write-time check should have rejected: a foreign-tenant PRD
+    # pinned straight onto project A at the db layer.
+    projects_db.add_artifact(project_a, "prd", foreign_prd)
+
+    monkeypatch.setattr(
+        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
+    )
+    resp = t.client.post(
+        f"/v1/projects/{project_a}/chat/intent",
+        json={"message": "what PRDs do we have?"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    ids = {r["id"] for r in body["artifact_list"]}
+    assert ids == {prd_a}
+    assert prd_b not in ids and foreign_prd not in ids
+    assert body["artifact_counts"]["total"] == 1
+
+
+def test_main_envelope_artifact_list_unchanged(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """MAIN chat's listing legs are byte-identical after the project-scoping
+    param landed: `routes/chat.py` passes no `project_id`, so the envelope's
+    rows/counts still come from the workspace-wide
+    `list_artifacts_for_company` path — proven by JSON equality against the
+    unchanged-path helpers AND a workspace-wide id set (a project pinning a
+    subset must not narrow main's cards)."""
+    from app.chat_envelope import _chat_artifact_counts, _chat_artifact_list
+
+    t = tenant_client.make(slug="acme")
+    set_a = _seed_set(t.company_id, title="Webhook tickets",
+                      created_at="2026-08-10T01:00:00Z")
+    set_b = _seed_set(t.company_id, title="Billing tickets",
+                      created_at="2026-08-11T01:00:00Z")
+    # A project pinning ONE of the two — main must still list BOTH.
+    from app.db import projects as projects_db
+
+    project_id = _seed_project(t)
+    projects_db.add_artifact(project_id, "ticket_set", set_a)
+
+    monkeypatch.setattr(
+        chat_route, "resolve_chat_intent",
+        lambda *a, **kw: _list_envelope(list_kind="ticket_set"),
+    )
+    resp = t.client.post("/v1/chat/intent", json={"message": "how many ticket sets?"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {r["id"] for r in body["artifact_list"]} == {set_a, set_b}
+    assert body["artifact_counts"]["total"] == 2
+    # Equality against the default (no-project_id) helper path — the exact
+    # bytes the pre-change workspace-wide path produces.
+    assert json.dumps(body["artifact_list"]) == json.dumps(
+        _chat_artifact_list(_Ctx(t.company_id), "ticket_set", None)
+    )
+    assert json.dumps(body["artifact_counts"]) == json.dumps(
+        _chat_artifact_counts(_Ctx(t.company_id), "ticket_set")
+    )
+
+
+def test_enrich_default_project_id_is_none_workspace_wide(
+    tenant_client, isolated_settings
+):
+    """Calling the enrichment WITHOUT `project_id` (every pre-existing
+    caller) stays workspace-wide: the additive default cannot narrow an
+    existing surface."""
+    from app.chat_envelope import enrich_chat_envelope
+
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["db"]
+    pinned = _seed_prd(db, title="Checkout PRD")
+    unpinned = _seed_prd(db, title="Billing PRD")
+    _seed_project(t, with_prd_id=pinned)
+
+    envelope = enrich_chat_envelope(_list_envelope(), _Ctx(t.company_id))
+    assert {r["id"] for r in envelope["artifact_list"]} == {pinned, unpinned}
+    assert envelope["artifact_counts"]["total"] == 2
+
+
 # ─── source-scan guard: enrichment attached WITHOUT a new resolver call ──────
 
 
