@@ -1275,15 +1275,6 @@ _ASK_WORDS = frozenset({
     # were. Among hundreds of calls a call-type noun names nothing; narrowing
     # BETWEEN candidates still keeps them, which is that stopword set's job.
     "demo", "demos", "check", "checkin", "standup", "huddle", "chat",
-    # FETCH VERBS AND INTERROGATIVES. These describe the request, never a call,
-    # and they only started reaching this filter when transcript nouns joined
-    # the summary verbs: "find me the transcripts" then survived as the "name"
-    # `find`, and "which calls have transcripts" as `which`/`have`, so a plural
-    # ask that names nothing was claimed by the single-call path and would have
-    # answered about ONE arbitrary call — the precise overreach documented
-    # below. A word that appears in every request cannot identify one call.
-    "find", "get", "fetch", "read", "open", "send", "which", "have", "has",
-    "there", "any", "all",
 })
 
 # Words that describe a call GENERICALLY — recency, who was on it in the
@@ -1364,6 +1355,28 @@ def _query_terms(question: str) -> list[str]:
         and w.lower() not in _GENERIC_CALL_WORDS
     ]
 
+
+# Request words stripped when deciding INTENT, and nowhere else.
+#
+# NOT added to `_ASK_WORDS`, which was the first attempt and is a real bug:
+# that set is shared with `resolve_calls`, so stripping "open" and "read" there
+# made "summarize the Open AI call" resolve to NO terms and answer "none of
+# their titles or accounts match this" — about a call sitting in the index under
+# exactly that name. A word that cannot NAME a call in a question can still be
+# half the name of one.
+#
+# Here the question is only "did this ask name anything at all?", so removing
+# fetch verbs and interrogatives is safe: they appear in every request.
+_INTENT_ONLY_STOPWORDS = frozenset({
+    "find", "fetch", "read", "open", "send", "which", "have", "has", "there",
+})
+
+# A PLURAL call noun means a set, and a set is the listing's or the digest's.
+# Without this, "send me the last 3 transcripts from Acme" matched the bare
+# `transcripts` noun, survived the window gate ("last 3" is not "last week"),
+# named an account — and was answered from exactly ONE call, which is the
+# overreach the name gate exists to prevent, arriving by a different door.
+_PLURAL_CALL_NOUN = re.compile(r"\b(?:transcripts|calls|meetings|recordings)\b", re.I)
 
 # A date the user typed, which names a call as surely as an account does. Same
 # form `select_from_candidates` already accepts when narrowing a disambiguation.
@@ -1461,10 +1474,14 @@ def is_single_call_request(question: str, history=None) -> bool:
     # A window word means they want the digest, not one call.
     if re.search(r"\b(?:last|this|past)\s+(?:week|month|quarter)\b|\ball\b", text, re.I):
         return False
+    # A set was asked for, not a call. See _PLURAL_CALL_NOUN.
+    if _PLURAL_CALL_NOUN.search(text):
+        return False
     # Something must NAME a call: an account or a distinctive title term (what
     # survives _query_terms), or a date. "our recent customer calls" survives
     # none of it — every word is a generic qualifier — and so stands down.
-    return bool(_query_terms(text)) or bool(_DATE_REFERENCE.search(text))
+    named = [t for t in _query_terms(text) if t.lower() not in _INTENT_ONLY_STOPWORDS]
+    return bool(named) or bool(_DATE_REFERENCE.search(text))
 
 
 def fetch_transcript(

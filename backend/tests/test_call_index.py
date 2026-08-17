@@ -346,6 +346,29 @@ def test_asking_for_a_named_transcript_is_a_single_call_request():
         assert ci.is_single_call_request(question), question
 
 
+def test_a_plural_transcript_ask_that_NAMES_an_account_is_still_not_one_call():
+    """Caught by review. "send me the last 3 transcripts from Acme" has no
+    listing verb, matches the bare `transcripts` noun, survives the window gate
+    ("last 3" is not "last week") and NAMES an account — so it would have been
+    answered from exactly one call. A plural noun means a set, and a set belongs
+    to the listing or the digest."""
+    for question in (
+        "send me the last 3 transcripts from Acme",
+        "transcripts for the Genworth account",
+    ):
+        assert not ci.is_single_call_request(question), question
+
+
+def test_intent_stopwords_do_not_strip_words_that_are_part_of_a_NAME():
+    """Also caught by review, and the more dangerous of the two. The first cut
+    put these words in `_ASK_WORDS`, which `resolve_calls` shares — so "the Open
+    AI call" resolved to NO terms and the answer said "none of their titles or
+    accounts match this" about a call sitting in the index under that exact
+    name. Intent stripping is local to the intent question."""
+    assert ci._query_terms("summarize the Open AI call") == ["Open"]
+    assert "Read" in ci._query_terms("what did Read AI say")
+
+
 def test_transcript_asks_still_obey_every_other_gate():
     """The new nouns buy no exemption. A window still means the digest, and a
     plural ask that names no call still belongs to the listing — otherwise this

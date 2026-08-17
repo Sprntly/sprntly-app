@@ -692,6 +692,64 @@ def test_the_cheap_call_index_listing_is_never_contested(monkeypatch):
     assert calls == [], "the listing path must not run a contest"
 
 
+def test_a_named_transcript_ask_reaches_the_single_call_leg(monkeypatch):
+    """THE ROUTING HALF, which a predicate test cannot see.
+
+    "get me the Genworth transcript" matches BOTH gates: `_LISTING_VERB` covers
+    "get" and `_CALL_NOUN` covers "transcript". The listing branch runs first,
+    so before this the question was answered with the LIST — plus the line
+    saying the index holds titles and dates and not transcripts — for a
+    question that names one call and asks for its content.
+
+    Testing this at the ladder rather than on `is_single_call_request` is the
+    point: the predicate was already right, and the answer was still wrong.
+    """
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index-listing"},
+    )
+    monkeypatch.setattr(
+        ci, "answer_single_call",
+        lambda cid, q, *, history, fresh: {"_skill_source": "call-index-single"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="get me the Genworth transcript",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index-single"
+
+
+def test_a_general_transcript_ask_still_gets_the_listing(monkeypatch):
+    """The control: naming no call, it belongs to the listing exactly as before.
+    Without this, 'prefer single-call' would be a licence to answer any
+    transcript question from one arbitrary call."""
+    import app.call_index as ci
+
+    monkeypatch.setattr(ci, "ensure_fresh", lambda cid: True)
+    monkeypatch.setattr(
+        ci, "answer_listing",
+        lambda cid, q, *, fresh: {"_skill_source": "call-index-listing"},
+    )
+    monkeypatch.setattr(
+        ci, "answer_single_call",
+        lambda cid, q, *, history, fresh: {"_skill_source": "call-index-single"},
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+
+    out = qa.answer(
+        enterprise_id="ent", question="which calls have transcripts",
+        dataset="acme",
+    )
+
+    assert out["_skill_source"] == "call-index-listing"
+
+
 def test_a_contest_failure_keeps_the_built_in(monkeypatch):
     """Fails CLOSED, the opposite of `_custom_skill_block`'s fail-open: the
     fallback here is the interception that would have run anyway, so a gateway
