@@ -135,4 +135,10 @@ export const PARITY_OPT_OUTS: ParityOptOut[] = [
     reason: "Project PRD edits render a confirm/cancel gate before writing; main chat has no such confirmation gate on its edits.",
     owner: "projects-chat",
   },
+  {
+    capability: "hostOrchestration.clientSide",
+    surface: "project_group",
+    reason: "Group chat is server-classified — it posts to the backend which classifies/answers (the group qa_agent), so it does NOT consume the client-side host-orchestration services (intent executors, next-prompts, inline classify-envelope cards). This is a sanctioned NON-consumer, not a fork; group's answer parity is delivered backend-side, not through these client hooks.",
+    owner: "projects-chat",
+  },
 ]

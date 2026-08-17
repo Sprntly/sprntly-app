@@ -166,23 +166,61 @@ export function auditComposerParity(input: ComposerParityInput): ParityViolation
  *   (b) ledger-completeness — every project↔main render/context divergence is
  *       named in `PARITY_OPT_OUTS`, or it fails closed.
  *
- * The "no local reimplementation of a shared host service" checks (executors,
- * action rows, next-prompts, inline cards, open-destination) are STUBBED here
- * and activated per service as later sub-phases land; a final pass points at
- * this same `parity-guard.ts` — the guard is EXTENDED, never forked into a
- * second file.
+ * The "no local reimplementation of a shared host service" checks — executors,
+ * action rows, next-prompts, inline cards, open-destination — are LIVE below:
+ * one pattern-(a) routine per service, each fed a source-parsed forks array by
+ * the test (a surface that re-implements a service LOCALLY instead of consuming
+ * its shared `chat-shell/` home appears in the array → violation). These are
+ * ABSOLUTE (unconditional, like the agent-reply fork): consume-not-reimplement
+ * cannot be ledgered away — a surface that legitimately does not consume a
+ * client-side host service (the group chat, server-classified) is a NON-consumer,
+ * not a fork, and simply never appears in a forks array. The guard is EXTENDED
+ * here, never forked into a second file.
  */
 export type RenderInheritanceInput = {
   /** Project surfaces whose descriptor sets `renderAgentBody:` for the agent
    *  reply — a fork of the shared ladder. Source-parsed by the test; empty on
    *  today's code (both surfaces consume the native ladder). */
   agentReplyForks: ChatSurfaceKind[]
+  /** Surfaces that re-implement the intent→executor WIRING locally (an inline
+   *  `dispatchChatIntent` executor object) instead of consuming
+   *  `useChatIntentExecutors`. Empty on real code. */
+  executorForks: ChatSurfaceKind[]
+  /** Surfaces that define a local artifact-action row component instead of the
+   *  shared `chat-shell/ChatArtifactActions`. Empty on real code. */
+  actionRowForks: ChatSurfaceKind[]
+  /** Surfaces that re-implement next-prompt fetch/state locally instead of the
+   *  shared `useNextPrompts`. Empty on real code. */
+  nextPromptForks: ChatSurfaceKind[]
+  /** Surfaces that compose their own inline insight/PRD after-node instead of
+   *  the shared `turnAfterNode`. Empty on real code. */
+  inlineCardForks: ChatSurfaceKind[]
+  /** Surfaces that re-implement the open-artifact destination decision locally
+   *  (resume-first / reuse-by-prd-id) instead of the shared
+   *  `openArtifactDestination` (or the ledgered modal divergence). Empty on
+   *  real code. */
+  openDestForks: ChatSurfaceKind[]
   /** Known project↔main render/context divergences that must EACH be ledgered
    *  (source-derived by the test, kept OUT of this pure function). */
   renderDivergences: { capability: string; surface: ChatSurfaceKind }[]
   /** The real, checked-in opt-out ledger. */
   ledger: ParityOptOut[]
 }
+
+/** The five per-service fork arms — capability + the human-readable service
+ *  name, iterated identically (pattern (a)). Kept as data so the routine bodies
+ *  never drift from one another. */
+const SERVICE_FORK_ARMS: {
+  field: "executorForks" | "actionRowForks" | "nextPromptForks" | "inlineCardForks" | "openDestForks"
+  capability: string
+  service: string
+}[] = [
+  { field: "executorForks", capability: "hostService.executors", service: "useChatIntentExecutors intent→executor wiring" },
+  { field: "actionRowForks", capability: "hostService.actionRows", service: "chat-shell/ChatArtifactActions rows" },
+  { field: "nextPromptForks", capability: "hostService.nextPrompts", service: "useNextPrompts next-prompt host hook" },
+  { field: "inlineCardForks", capability: "hostService.inlineCards", service: "turnAfterNode inline insight/PRD cards" },
+  { field: "openDestForks", capability: "hostService.openDestination", service: "openArtifactDestination open decision" },
+]
 
 export function auditRenderInheritance(input: RenderInheritanceInput): ParityViolation[] {
   const { agentReplyForks, renderDivergences, ledger } = input
@@ -196,6 +234,19 @@ export function auditRenderInheritance(input: RenderInheritanceInput): ParityVio
       surface,
       reason: `Surface "${surface}" sets renderAgentBody for the agent reply — it must consume ChatBubble's native reply ladder, not re-implement it.`,
     })
+  }
+
+  // (a′) Five per-service arms — a surface that re-implements a shared host
+  // service locally instead of consuming its `chat-shell/` home. Unconditional:
+  // consume-not-reimplement is absolute (a non-consumer never appears here).
+  for (const arm of SERVICE_FORK_ARMS) {
+    for (const surface of input[arm.field]) {
+      violations.push({
+        capability: arm.capability,
+        surface,
+        reason: `Surface "${surface}" re-implements the ${arm.service} locally — it must consume the shared chat-shell service, not fork it.`,
+      })
+    }
   }
 
   // (b) A render/context divergence between a project surface and main that is

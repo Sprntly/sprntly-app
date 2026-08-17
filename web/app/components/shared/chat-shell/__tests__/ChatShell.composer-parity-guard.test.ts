@@ -315,6 +315,67 @@ function hasAgentReplyFork(hostFile: string): boolean {
   return /\brenderAgentBody\s*:/.test(src)
 }
 
+// ── Five per-service fork detectors (consume-not-reimplement) ────────────────
+// Each returns true only when a surface re-implements the shared host service
+// LOCALLY instead of consuming its `chat-shell/` home. Real code returns false
+// for every surface (private consumes; group is a server-classified
+// non-consumer, ledgered — never a fork).
+
+/** Executors: an engine that calls `dispatchChatIntent(` with an inline
+ *  executor object instead of routing through `useChatIntentExecutors`. */
+function reimplementsExecutors(engineFile: string): boolean {
+  const src = read(projectsDir, engineFile)
+  const callsDispatch = /\bdispatchChatIntent\s*\(/.test(src)
+  const consumesHook = /\buseChatIntentExecutors\b/.test(src)
+  return callsDispatch && !consumesHook
+}
+
+/** Action rows: a host that DEFINES its own artifact-action row component
+ *  instead of importing the shared `ChatArtifactActions`/`ChatTicketSetActions`. */
+function reimplementsActionRows(hostFile: string): boolean {
+  const src = read(projectsDir, hostFile)
+  return /function\s+ChatArtifactActions\b|function\s+ChatTicketSetActions\b/.test(src)
+}
+
+/** Next-prompts: an engine that drives the next-prompt fetch/state locally
+ *  (its own `chatSuggestionsApi.next` call or `suggestionsBy…` state) without
+ *  consuming `useNextPrompts`. */
+function reimplementsNextPrompts(engineFile: string): boolean {
+  const src = read(projectsDir, engineFile)
+  const local = /chatSuggestionsApi\.next\b|suggestionsBy\w+\s*[=,]/.test(src)
+  const consumesHook = /\buseNextPrompts\b/.test(src)
+  return local && !consumesHook
+}
+
+/** Inline cards: a host that composes main's inline insight/PRD cards locally
+ *  (references `insightCardNode`/`prdQuestionsNode`) rather than the shared
+ *  `turnAfterNode` service. */
+function reimplementsInlineCards(hostFile: string): boolean {
+  const src = read(projectsDir, hostFile)
+  const local = /\binsightCardNode\b|\bprdQuestionsNode\b/.test(src)
+  const consumesShared = /\bturnAfterNode\b/.test(src) && /chat-shell\/turnAfterNode/.test(src)
+  return local && !consumesShared
+}
+
+/** Open-destination: a host that re-implements the PANEL open decision locally
+ *  (the resume-first stash `sprntly_resume_conv`) instead of opening the
+ *  artifacts modal (the ledgered divergence) or the shared decision. */
+function reimplementsOpenDest(hostFile: string): boolean {
+  const src = read(projectsDir, hostFile)
+  return /sprntly_resume_conv/.test(src)
+}
+
+function serviceForks(
+  detector: (file: string) => boolean,
+  privateFile: string,
+  groupFile: string,
+): ChatSurfaceKind[] {
+  const forks: ChatSurfaceKind[] = []
+  if (detector(privateFile)) forks.push("project_private")
+  if (detector(groupFile)) forks.push("project_group")
+  return forks
+}
+
 /** The sanctioned project↔main render/context divergences the guard tracks —
  *  each MUST be present in `PARITY_OPT_OUTS`. Kept OUT of the pure audit
  *  (mirrors `surfacesWithoutFeatures`), enumerated from the source-of-truth
@@ -338,6 +399,15 @@ function realRenderInput(): RenderInheritanceInput {
   if (hasAgentReplyFork("ProjectGroupChat.tsx")) agentReplyForks.push("project_group")
   return {
     agentReplyForks,
+    // The five per-service fork arms, each source-parsed from the two project
+    // engines/hosts. All empty on real code: private consumes the shared
+    // executor wiring; neither surface forks any host service; group is a
+    // server-classified non-consumer (ledgered), not a fork.
+    executorForks: serviceForks(reimplementsExecutors, "useProjectPrivateThread.ts", "useProjectGroupThread.ts"),
+    actionRowForks: serviceForks(reimplementsActionRows, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
+    nextPromptForks: serviceForks(reimplementsNextPrompts, "useProjectPrivateThread.ts", "useProjectGroupThread.ts"),
+    inlineCardForks: serviceForks(reimplementsInlineCards, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
+    openDestForks: serviceForks(reimplementsOpenDest, "ProjectPrivateChat.tsx", "ProjectGroupChat.tsx"),
     renderDivergences: RENDER_DIVERGENCES,
     ledger: PARITY_OPT_OUTS,
   }
@@ -419,6 +489,78 @@ describe("render-inheritance guard — net-new ledger entries (AC9)", () => {
     // The reconciliation targets DO exist.
     expect(PARITY_OPT_OUTS.some((o) => o.capability === "composer.stop")).toBe(true)
     expect(PARITY_OPT_OUTS.some((o) => o.capability === "tabs.multiConversation")).toBe(true)
+  })
+})
+
+describe("render-inheritance guard — five per-service fork arms (AC17/AC18)", () => {
+  const FORK_FIELDS = [
+    "executorForks",
+    "actionRowForks",
+    "nextPromptForks",
+    "inlineCardForks",
+    "openDestForks",
+  ] as const
+
+  it("test_auditRenderInheritance_clean_after_extraction", () => {
+    const input = realRenderInput()
+    // Sanity: NO surface re-implements any of the five host services — all five
+    // fork arrays are empty (private consumes the shared services; group is a
+    // ledgered server-classified non-consumer). An empty forks list is the
+    // whole point of consume-not-reimplement, so assert it explicitly.
+    for (const field of FORK_FIELDS) {
+      expect(input[field], `${field} must be empty on real code`).toEqual([])
+    }
+    expect(auditRenderInheritance(input)).toEqual([])
+  })
+
+  it("test_auditRenderInheritance_flags_local_executor_reimplementation", () => {
+    const base = realRenderInput()
+    const forked: RenderInheritanceInput = { ...base, executorForks: ["project_private"] }
+    const violations = auditRenderInheritance(forked)
+    expect(
+      violations.some((v) => v.capability === "hostService.executors" && v.surface === "project_private"),
+    ).toBe(true)
+    // GREEN again once the fork is cleared.
+    expect(auditRenderInheritance({ ...forked, executorForks: [] })).toEqual([])
+  })
+
+  it("test_auditRenderInheritance_flags_each_of_five_service_forks", () => {
+    const base = realRenderInput()
+    const expectedCapability: Record<(typeof FORK_FIELDS)[number], string> = {
+      executorForks: "hostService.executors",
+      actionRowForks: "hostService.actionRows",
+      nextPromptForks: "hostService.nextPrompts",
+      inlineCardForks: "hostService.inlineCards",
+      openDestForks: "hostService.openDestination",
+    }
+    for (const field of FORK_FIELDS) {
+      const forked: RenderInheritanceInput = { ...base, [field]: ["project_group"] }
+      const violations = auditRenderInheritance(forked)
+      expect(
+        violations.some(
+          (v) => v.capability === expectedCapability[field] && v.surface === "project_group",
+        ),
+        `${field} did not flag`,
+      ).toBe(true)
+      // Clearing that one field restores clean.
+      expect(auditRenderInheritance({ ...forked, [field]: [] })).toEqual([])
+    }
+  })
+
+  it("test_parity_ledger_no_duplicate_open_destination", () => {
+    // No duplicate capability×surface anywhere in the ledger, and specifically
+    // exactly one open.destination entry per surface (the open-destination
+    // extraction did NOT re-add the already-sanctioned modal divergence).
+    const seen = new Set<string>()
+    for (const o of PARITY_OPT_OUTS) {
+      const key = `${o.capability}::${o.surface}`
+      expect(seen.has(key), `duplicate ledger entry ${key}`).toBe(false)
+      seen.add(key)
+      expect(o.reason.length).toBeGreaterThan(0)
+      expect(o.owner).toBe("projects-chat")
+    }
+    const openDest = PARITY_OPT_OUTS.filter((o) => o.capability === "open.destination")
+    expect(openDest.map((o) => o.surface).sort()).toEqual(["project_group", "project_private"])
   })
 })
 
