@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -56,7 +56,7 @@ import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from
 import { SlashSkillMenu } from "../../shared/SlashSkillMenu"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 // Highlight-to-reply: one definition of how a quoted passage rides a message.
-import { buildQuotedMessage, splitQuotedSuffix } from "../../../lib/chatQuote"
+import { QUOTE_VIEWER_NAME, buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
@@ -1093,9 +1093,6 @@ export function ChatScreen() {
     setContent({ prd })
   }, [activeTabId, setContent])
   const [draft, setDraft] = useState("")
-  /** Set when a highlighted passage was just quoted in, so the layout effect
-   *  that sizes and focuses the composer knows to run — see that effect. */
-  const quoteJustInsertedRef = useRef(false)
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
@@ -2557,9 +2554,22 @@ export function ChatScreen() {
   // anyone scrolling back sees what was being discussed instead of a question
   // about "this" with no referent.
   //
-  // Appended to whatever is already typed, never replacing it: a half-written
-  // question is the user's, and highlighting a passage mid-sentence must not
-  // discard it.
+  // It PARKS as the composer's quote chip rather than being pasted into the
+  // draft as raw "> " text (changed 2026-08-17, when highlight-to-reply gave
+  // the surface a real quote affordance). Three things were wrong with the
+  // draft-injection form and all three are gone:
+  //   * the reader saw blockquote markers they never typed, in the box and
+  //     again on the sent turn, and was responsible for not breaking them;
+  //   * a LEADING "> " made the query's first token ">", which silently
+  //     defeated `skillForQuery` and the backend's slash fast-path for any
+  //     message that also pinned a skill; and
+  //   * a long passage filled the composer, pushing the question out of sight.
+  // The excerpt still travels INSIDE the message (as the trailing blockquote
+  // `buildQuotedMessage` writes at send time), so the grounding doctrine above
+  // is unchanged — only where the user sees it before sending has moved.
+  //
+  // A half-written question survives absolutely: the draft is not touched at
+  // all now, where the old form appended to it.
   useEffect(() => {
     if (pendingDocumentQuote == null) return
     const { documentId: from, excerpt } = pendingDocumentQuote
@@ -2572,33 +2582,14 @@ export function ChatScreen() {
     // paths, so "the open document" is not automatically the one the user
     // highlighted.
     if (content.documentId != null && from !== content.documentId) return
-    setDraft((prev) => {
-      const quoted = `> ${excerpt}\n\n`
-      const next = prev.trim() ? `${prev.replace(/\s+$/, "")}\n\n${quoted}` : quoted
-      return next.slice(0, DRAFT_MAX_CHARS)
-    })
-    // Resize AFTER the draft is committed, not on the next animation frame.
-    // `setDraft` from a passive effect goes through React's scheduler, so a
-    // rAF can win the race, measure `scrollHeight` against the OLD value and
-    // then PIN that height inline — leaving a 600-character quote in a
-    // one-row composer until the next keystroke re-runs the auto-grow. The
-    // flag is read by the layout effect below, which runs after the commit.
-    quoteJustInsertedRef.current = true
+    setQuote(normalizeQuote(excerpt))
+    composerRef.current?.focus()
   }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId])
 
-  // Runs after the draft above is committed, so it measures the real text.
-  useLayoutEffect(() => {
-    if (!quoteJustInsertedRef.current) return
-    quoteJustInsertedRef.current = false
-    const ta = composerRef.current
-    if (!ta) return
-    ta.style.height = "auto"
-    ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-    ta.focus()
-    // Caret at the END, so the next keystroke starts the question rather than
-    // landing inside the quotation.
-    ta.setSelectionRange(ta.value.length, ta.value.length)
-  }, [draft])
+  // (The layout effect that used to re-measure the composer after a quote was
+  // pasted into the draft is gone with the pasting: a parked chip changes the
+  // draft not at all, so there is no height to recover and no caret to rescue
+  // from inside a quotation.)
 
   useEffect(() => {
     if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return
@@ -2861,7 +2852,12 @@ export function ChatScreen() {
       turnAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
     ) => {
       const prev = conversationsRef.current
-      const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
+      // Titled on the WORDS, never the quoted excerpt. A short question with a
+      // long highlight behind it would otherwise be filed in the history rail
+      // under "> findings unsupported by adequate documentation…" — the passage
+      // it was about rather than the thing that was asked.
+      const titleSource = splitQuotedSuffix(query).body || query
+      const title = titleSource.length > 52 ? `${titleSource.slice(0, 49)}…` : titleSource
       const timeStr = new Date().toISOString()
       // The DB conversation this tab is bound to, if any. A tab resumed from
       // Chat history already carries a `dbConvId` but has NO in-memory rail
@@ -5128,7 +5124,11 @@ export function ChatScreen() {
       }
       // The tab title/handle falls back to the first attachment's name when the
       // ask itself is empty, so a doc-only send still reads sensibly in the tab.
-      const handle = displayQuery || attachments[0]?.name || "New chat"
+      // Built on the WORDS, never the quoted excerpt: the tab bar is the most
+      // visible label this message ever gets, and titling it with the passage
+      // someone highlighted names the wrong thing entirely.
+      const handle =
+        splitQuotedSuffix(displayQuery).body || displayQuery || attachments[0]?.name || "New chat"
       // Remember where we started so an extraction failure can roll the optimistic
       // turn back cleanly: remove a freshly-spawned tab (restoring the prior
       // surface) or drop just this turn + undo a New-chat rename on an existing one.
@@ -5271,9 +5271,12 @@ export function ChatScreen() {
             tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
             (await persistence.ensureConversation(targetTabId, {
               turnId: id,
-              title: displayQuery.length > 52
-                ? `${displayQuery.slice(0, 49)}…`
-                : displayQuery,
+              // Titled on the words, not the quoted excerpt — same rule as
+              // `pushPendingConversation`.
+              ...(() => {
+                const t = splitQuotedSuffix(displayQuery).body || displayQuery
+                return { title: t.length > 52 ? `${t.slice(0, 49)}…` : t }
+              })(),
               query: displayQuery,
             }))
           askConvId = convId ?? null
@@ -5524,7 +5527,14 @@ export function ChatScreen() {
     const q = turn.query.trim()
     if (!q) return
     if (turn.attachments?.length) {
-      setDraft(turn.query)
+      // Hand the WORDS back to the composer and the excerpt back to the quote
+      // chip, as two things — not the raw "> …" wire form. The composer is an
+      // editor; putting blockquote markers in it makes the user responsible for
+      // preserving syntax they never typed (the same mistake the pinned-skill
+      // chip fixed for slash triggers).
+      const { body, quote: repliedTo } = splitQuotedSuffix(turn.query)
+      setDraft(body)
+      setQuote(repliedTo)
       composerRef.current?.focus()
       return
     }
@@ -7441,15 +7451,29 @@ export function ChatScreen() {
                               ) : null}
                             </>
             )
+            // The optimistic bubble renders the message that was JUST sent, so
+            // it needs the same quote split a real turn gets — a raw
+            // "> excerpt" flashing here for the second before the real turn
+            // replaces it is the identical leak, only briefer.
+            const pendingSplit = pendingSend
+              ? splitQuotedSuffix(pendingSend.query)
+              : { body: "", quote: null }
             const pendingSendNode = pendingSendHere && pendingSend ? (
                       <ChatBubble
                         turnId="pending-send"
                         dataTestId="pending-send"
                         ariaBusy
                         user={{
+                          query: pendingSplit.body,
+                          quote: pendingSplit.quote,
+                          onOpenQuote: pendingSplit.quote
+                            ? () => setViewerAttachment({
+                                name: QUOTE_VIEWER_NAME,
+                                content: pendingSplit.quote!,
+                              })
+                            : undefined,
                           name,
                           initials: userInitials,
-                          query: pendingSend.query,
                           // Name-only and inert here, exactly as the optimistic
                           // turn renders them before extraction — no `content`/
                           // `downloadable` means ChatBubble's own card renders

@@ -90,6 +90,39 @@ describe("mapMainTurns — quoted passage", () => {
     expect(turn.user?.query).toBe("is 5 > 3 relevant here?")
     expect(turn.user?.quote).toBeNull()
   })
+
+  it("leaves no blockquote marker anywhere the user reads", () => {
+    const thread: ThreadTurn[] = [
+      {
+        id: "t1",
+        query: "Which manual is that?\n\n> findings must be documented\n> in the audit file",
+        reply: reply("The IAA's."),
+      },
+    ]
+    const [turn] = mapMainTurns(thread, makeDeps())
+    expect(turn.user?.query).not.toContain(">")
+    expect(turn.user?.quote).not.toContain(">")
+    expect(turn.user?.quote).toBe("findings must be documented\nin the audit file")
+  })
+
+  it("wires the quote to open in the viewer, since the block is clamped", () => {
+    const setViewerAttachment = vi.fn()
+    const thread: ThreadTurn[] = [
+      { id: "t1", query: "Which manual?\n\n> a long excerpt", reply: reply("a") },
+    ]
+    const [turn] = mapMainTurns(thread, makeDeps({ setViewerAttachment }))
+    expect(typeof turn.user?.onOpenQuote).toBe("function")
+    turn.user!.onOpenQuote!()
+    expect(setViewerAttachment).toHaveBeenCalledWith({
+      name: "Quoted from the answer",
+      content: "a long excerpt",
+    })
+  })
+
+  it("offers no viewer on a turn with no quote", () => {
+    const [turn] = mapMainTurns([{ id: "t1", query: "plain", reply: reply("a") }], makeDeps())
+    expect(turn.user?.onOpenQuote).toBeUndefined()
+  })
 })
 
 describe("mapMainTurns — edit-and-resend eligibility", () => {

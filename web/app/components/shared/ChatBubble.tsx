@@ -95,6 +95,12 @@ export type ChatBubbleUserBlock = {
    *  with `splitQuotedSuffix` — it is not a separate field on the wire (see
    *  `lib/chatQuote.ts` for why). Unset/null renders nothing. */
   quote?: string | null
+  /** Open the full excerpt. The block is clamped to a few lines so a long
+   *  highlight doesn't push the conversation off screen — which makes the rest
+   *  of it unreachable unless something can show it, so a caller that can open
+   *  a viewer wires this and the quote becomes a button. Unset renders the
+   *  same static blockquote, no affordance. */
+  onOpenQuote?: () => void
 }
 
 export interface ChatBubbleProps {
@@ -329,12 +335,39 @@ function UserTurnEditor({ initial, onSubmit, onCancel }: {
 }
 
 /** The quoted passage above a user message — the reply-to excerpt, rendered
- *  the way the composer parked it. */
-function UserQuote({ text }: { text: string }) {
+ *  the way the composer parked it.
+ *
+ *  Clamped to a few lines, because a quote is a pointer at a passage and a
+ *  400-word highlight would otherwise bury the question it belongs to. With
+ *  `onOpen` wired it becomes a button that shows the whole thing, so the
+ *  clamping never actually costs the reader anything; without one it stays a
+ *  plain `<blockquote>` and the DOM is what it was before. */
+function UserQuote({ text, onOpen }: { text: string; onOpen?: () => void }) {
+  if (!onOpen) {
+    return (
+      <blockquote className="bc-user-quote" data-testid="turn-quote">
+        {text}
+      </blockquote>
+    )
+  }
   return (
-    <blockquote className="bc-user-quote" data-testid="turn-quote">
-      {text}
-    </blockquote>
+    <button
+      type="button"
+      className="bc-user-quote bc-user-quote--open"
+      data-testid="turn-quote"
+      onClick={onOpen}
+      title="View the full quoted passage"
+      aria-label="View the full quoted passage"
+    >
+      <span className="bc-user-quote-text">{text}</span>
+      <span className="bc-user-quote-icon" aria-hidden>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M15 3h6v6" />
+          <path d="M10 14 21 3" />
+          <path d="M21 14v7H3V3h7" />
+        </svg>
+      </span>
+    </button>
   )
 }
 
@@ -436,7 +469,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <span className={styles.otherName}>{userHeadName}</span>
                 {userHeadExtra ?? null}
               </div>
-              {user.quote ? <UserQuote text={user.quote} /> : null}
+              {user.quote ? <UserQuote text={user.quote} onOpen={user.onOpenQuote} /> : null}
               {user.query || user.bodyNode ? (
                 <div
                   className={`bc-user-bubble ${styles.otherBubble}${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
@@ -485,7 +518,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                 })}
               </div>
             ) : null}
-            {user?.quote && !editing ? <UserQuote text={user.quote} /> : null}
+            {user?.quote && !editing ? <UserQuote text={user.quote} onOpen={user.onOpenQuote} /> : null}
             {/* Editing REPLACES the bubble rather than sitting beside it — two
                 copies of the same message on screen, one live and one stale,
                 is the state this affordance exists to get rid of. The quoted

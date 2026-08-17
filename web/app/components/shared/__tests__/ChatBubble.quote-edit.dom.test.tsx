@@ -50,6 +50,44 @@ describe("ChatBubble quoted passage", () => {
     )
     expect(view.queryByTestId("turn-quote")).toBeNull()
   })
+
+  it("never shows blockquote markers — the excerpt renders as prose", () => {
+    // The wire form is `body\n\n> excerpt`; callers split it. If a marker ever
+    // reaches this component it is a caller that skipped `splitQuotedSuffix`,
+    // and the user sees syntax they never typed.
+    const view = render(
+      <ChatBubble
+        turnId="t3"
+        agentName="Sprntly"
+        user={{ query: "Which manual?", quote: "findings must be documented" }}
+      />,
+    )
+    expect(view.getByTestId("turn-quote").textContent).not.toContain(">")
+  })
+
+  it("is a static blockquote when the caller cannot open a viewer", () => {
+    const view = render(
+      <ChatBubble turnId="t4" agentName="Sprntly" user={{ query: "q", quote: "excerpt" }} />,
+    )
+    expect(view.getByTestId("turn-quote").tagName).toBe("BLOCKQUOTE")
+  })
+
+  it("becomes a button that opens the full passage when onOpenQuote is wired", () => {
+    // The block is clamped to four lines, so without this the tail of a long
+    // highlight is unreachable.
+    const onOpenQuote = vi.fn()
+    const view = render(
+      <ChatBubble
+        turnId="t5"
+        agentName="Sprntly"
+        user={{ query: "q", quote: "a very long excerpt", onOpenQuote }}
+      />,
+    )
+    const quote = view.getByTestId("turn-quote")
+    expect(quote.tagName).toBe("BUTTON")
+    fireEvent.click(quote)
+    expect(onOpenQuote).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe("ChatBubble edit-and-resend", () => {

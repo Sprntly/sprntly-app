@@ -31,6 +31,12 @@
  *  does. */
 export const QUOTE_MAX_CHARS = 1200
 
+/** Title on the viewer a quoted passage opens in. Deliberately NOT a filename:
+ *  the excerpt is part of the message, not an attachment, so it says what it
+ *  is. Shared so the sent turn and the optimistic pending-send bubble can't
+ *  drift into naming the same overlay two different things. */
+export const QUOTE_VIEWER_NAME = "Quoted from the answer"
+
 /** Tidy a raw DOM selection into quotable text: normalize line endings, drop
  *  the leading/trailing whitespace a drag selection always picks up, collapse
  *  runs of blank lines, and cap the length. Returns "" for a selection with no

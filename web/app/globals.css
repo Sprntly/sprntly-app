@@ -7043,6 +7043,51 @@
     line-clamp: 4;
   }
 
+  /* Clickable variant — the clamp above hides the tail of a long highlight, so
+     wherever a viewer exists the block becomes a button that shows all of it.
+     The clamp moves onto the inner text node because a flex button cannot also
+     be a -webkit-box. */
+  .bc-user-quote--open {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: fit-content;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.14s, border-color 0.14s;
+  }
+
+  .bc-user-quote--open:hover {
+    background: var(--surface-4);
+  }
+
+  .bc-user-quote--open:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .bc-user-quote-text {
+    min-width: 0;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  .bc-user-quote-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    margin-top: 2px;
+    opacity: 0.5;
+  }
+
+  .bc-user-quote--open:hover .bc-user-quote-icon {
+    opacity: 1;
+  }
+
   /* Per-turn actions under a user bubble (today: edit-and-resend, offered only
      on a message that never got an answer). Hidden until the turn is hovered
      or something inside it takes focus — a row of controls under every message

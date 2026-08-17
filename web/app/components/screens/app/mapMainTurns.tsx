@@ -18,7 +18,7 @@
  */
 
 import { AGENT_NAME } from "../../../lib/agent"
-import { splitQuotedSuffix } from "../../../lib/chatQuote"
+import { QUOTE_VIEWER_NAME, splitQuotedSuffix } from "../../../lib/chatQuote"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
@@ -190,6 +190,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         initials: userInitials,
         query: queryBody,
         quote,
+        // The quote block is clamped, so the tail of a long highlight would be
+        // unreachable without this. Reuses the SAME overlay a file card opens
+        // (`AttachmentViewer` with text and no storage key) rather than
+        // inventing a second read-this-passage surface.
+        onOpenQuote: quote
+          ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote })
+          : undefined,
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,
