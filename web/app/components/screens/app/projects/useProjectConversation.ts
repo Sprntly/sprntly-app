@@ -79,7 +79,15 @@ export function useProjectConversation(
   const askStartRef = useRef<Map<string, number>>(new Map())
   const resumedTurnsRef = useRef<Set<string>>(new Set())
   const mountedRef = useRef(true)
-  useEffect(() => () => { mountedRef.current = false }, [])
+  // Reset to true on SETUP, not just false on cleanup — otherwise React
+  // StrictMode's dev mount→cleanup→remount leaves it permanently false, and the
+  // ask's `isCancelled: () => !mountedRef.current` then cancels EVERY run
+  // client-side (the backend still succeeds) → "No response was generated". Main
+  // does exactly this (ChatScreen's mountedRef effect).
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   // ── Resolve the project conversation row + hydrate its history ─────────────
   useEffect(() => {
@@ -111,7 +119,12 @@ export function useProjectConversation(
           }
         }
         restored.forEach((r) => resumedTurnsRef.current.add(r.id))
-        if (restored.length) setThread(restored)
+        // Only fill a STILL-EMPTY thread — never clobber one the user already
+        // started (a send that raced this resolve). Functional update so it reads
+        // the current state, race-free. Matches main's guarded hydrate ("only
+        // fill a still-empty tab"); an unconditional set would drop the optimistic
+        // turn (whose id `onResult` patches by), losing the answer entirely.
+        if (restored.length) setThread((prev) => (prev.length === 0 ? restored : prev))
       } catch {
         /* leave empty — a fresh/failed resolve opens an empty chat */
       } finally {
