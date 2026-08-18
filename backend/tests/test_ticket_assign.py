@@ -185,7 +185,7 @@ def test_member_fixed_question_offers_tickets(tenant_client, monkeypatch):
 def test_a_several_tickets_ask_rides_out_as_one_multi_question(
     tenant_client, monkeypatch
 ):
-    """"Assign 2 tickets to fortune" — reported with a screenshot: the popup
+    """"Assign 2 tickets to dana" — reported with a screenshot: the popup
     listed the tickets but only one could be clicked. A person-fixed question
     the model marks `multi` keeps the flag, so the card renders as
     tick-several-confirm-once; a ticket-fixed question NEVER carries it (a
@@ -304,7 +304,7 @@ def test_the_requester_rides_the_prompt_so_me_resolves(tenant_client, monkeypatc
     from app.db.client import require_client
 
     require_client().table("profiles").update({
-        "email": "fortune@acme.com", "full_name": "Fortune Tede",
+        "email": "dana@acme.com", "full_name": "Dana Reyes",
     }).eq("id", "u-invited").execute()
     seen = {}
 
@@ -319,7 +319,7 @@ def test_the_requester_rides_the_prompt_so_me_resolves(tenant_client, monkeypatc
     )
     # The requester block names the caller — id, name, email.
     assert "REQUESTER" in seen["input"]
-    assert "u-invited — Fortune Tede — fortune@acme.com" in seen["input"]
+    assert "u-invited — Dana Reyes — dana@acme.com" in seen["input"]
     # The ticket line carries what the ticket IS, not just its title.
     assert "Retry the SPF check" in seen["input"]
     assert "backend, email, Delivery" in seen["input"]

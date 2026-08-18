@@ -1052,7 +1052,7 @@ def test_folder_descendant_hits_same_target_processing_as_a_picked_file(
     try:
         result = sync_google_drive(
             company_id=company_id,
-            files=[{"id": root_id, "name": "Xometry"}],
+            files=[{"id": root_id, "name": "Contoso"}],
         )
     finally:
         for p in patches:
@@ -1107,7 +1107,7 @@ def test_folder_change_detection_add_update_remove(drive_connected, kg_kickoff):
     try:
         # 1) Only file A is in the folder.
         r1 = sync_google_drive(
-            company_id=company_id, files=[{"id": root_id, "name": "Xometry"}]
+            company_id=company_id, files=[{"id": root_id, "name": "Contoso"}]
         )
         assert {s["filename"] for s in r1.synced} == {"a.txt"}
 

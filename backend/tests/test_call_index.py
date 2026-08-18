@@ -337,9 +337,9 @@ def test_listing_questions_are_not_single_call():
 def test_asking_for_a_named_transcript_is_a_single_call_request():
     for question in (
         "find me the transcript of David Mumuni's Zoom meeting",
-        "get me the Genworth transcript",
+        "get me the Initech transcript",
         # The bare noun phrase, which is how people actually ask.
-        "transcript of the Mayer Brown call",
+        "transcript of the Vandelay Industries call",
         "what was said on the BBVA call",
         "read me the NEFCO check-in",
     ):
@@ -354,7 +354,7 @@ def test_a_plural_transcript_ask_that_NAMES_an_account_is_still_not_one_call():
     to the listing or the digest."""
     for question in (
         "send me the last 3 transcripts from Acme",
-        "transcripts for the Genworth account",
+        "transcripts for the Initech account",
     ):
         assert not ci.is_single_call_request(question), question
 

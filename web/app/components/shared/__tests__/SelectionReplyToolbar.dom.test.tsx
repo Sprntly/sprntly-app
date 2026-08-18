@@ -117,13 +117,13 @@ describe("SelectionReplyToolbar", () => {
     const host = document.createElement("div")
     host.className = "bc-agent-body"
     host.innerHTML =
-      "<p>All set — assigned:</p><ul><li>Validate SPF record → Fortune Tede</li>" +
-      "<li>Validate DKIM key → Fortune Tede</li></ul>"
+      "<p>All set — assigned:</p><ul><li>Validate SPF record → Dana Reyes</li>" +
+      "<li>Validate DKIM key → Dana Reyes</li></ul>"
     document.body.appendChild(host)
     const range = document.createRange()
     range.selectNodeContents(host)
     expect(normalizeQuote(rangeToText(range))).toBe(
-      "All set — assigned:\n\nValidate SPF record → Fortune Tede\nValidate DKIM key → Fortune Tede",
+      "All set — assigned:\n\nValidate SPF record → Dana Reyes\nValidate DKIM key → Dana Reyes",
     )
     host.remove()
   })

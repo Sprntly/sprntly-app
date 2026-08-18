@@ -2420,7 +2420,7 @@ def answer(
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
     # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
-    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # listing verb. "get me the Initech transcript" matches `_LISTING_VERB`
     # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
     # the "the index holds titles and dates, not transcripts" line — for a
     # question that names one call and asks for its content. The single-call

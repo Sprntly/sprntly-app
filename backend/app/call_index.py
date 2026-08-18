@@ -1310,9 +1310,9 @@ _GENERIC_CALL_WORDS = frozenset({
 # A verb that means the caller wants THIS call's content, not a list.
 #
 # ASKING FOR THE TRANSCRIPT IS ASKING FOR THE CONTENT, and it was missing.
-# "find me the transcript of the Genworth call" carries no summary verb, so this
+# "find me the transcript of the Initech call" carries no summary verb, so this
 # stood down, the question fell through to the listing leg, and the answer said
-# the transcripts "could not be loaded" — while "summarize the Genworth call",
+# the transcripts "could not be loaded" — while "summarize the Initech call",
 # the same call and the same data, read the transcript and answered in full.
 # Verified on staging 2026-08-16 against the same meeting, both ways.
 #
@@ -1322,7 +1322,7 @@ _GENERIC_CALL_WORDS = frozenset({
 # Zoom") that does not route either.
 #
 # The transcript nouns are matched with or without a fetch verb, because the
-# bare noun phrase is how people ask ("transcript of the Genworth call"). They
+# bare noun phrase is how people ask ("transcript of the Initech call"). They
 # are still subject to every gate below: a window word ("all the transcripts
 # from last week") still belongs to the digest, and something must still NAME a
 # call, so "find me the transcripts" alone stays with the listing.
