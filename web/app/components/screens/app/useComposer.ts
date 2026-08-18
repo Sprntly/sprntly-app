@@ -18,7 +18,7 @@
  * global Esc handler) — kept in place so effect-registration order is unchanged.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { DRAFT_MAX_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
 import { useSpeechInput } from "../../../lib/useSpeechInput"
 import type { SkillInfo } from "../../../lib/api"
@@ -35,6 +35,10 @@ export interface UseComposerDeps {
 
 export function useComposer({ showToast }: UseComposerDeps) {
   const [draft, setDraft] = useState("")
+  // The slash palette's entries — the company's own uploaded skills. Fetched by
+  // the host on mount (it owns `askApi`); this hook owns the state + the derived
+  // filtered list, so both the composer and the host's mapping read one source.
+  const [skills, setSkills] = useState<SkillInfo[]>([])
   /** Set when a highlighted passage was just quoted in, so the layout effect
    *  that sizes and focuses the composer knows to run — see that effect. */
   const quoteJustInsertedRef = useRef(false)
@@ -226,6 +230,35 @@ export function useComposer({ showToast }: UseComposerDeps) {
     openSkillPalette()
   }, [openSkillPalette])
 
+  const filteredSkills = useMemo(() => {
+    // One list now (the company's own uploads) — the built-in catalog it used
+    // to be merged ahead of is gone. Server order is newest-first.
+    return skills.filter(
+      (s) =>
+        slashFilter === "" ||
+        s.trigger.toLowerCase().includes("/" + slashFilter) ||
+        s.label.toLowerCase().includes(slashFilter) ||
+        s.description.toLowerCase().includes(slashFilter),
+    )
+  }, [skills, slashFilter])
+  const slashOpen = showSlash && filteredSkills.length > 0
+
+  /** The skill a question DETERMINISTICALLY selected, or null.
+   *
+   *  Only a leading slash trigger counts: qa_agent's fast path treats it as an
+   *  explicit selection, so naming it is a fact. What the ROUTER picked for a
+   *  plain question is not knowable here — `_skill` is written into
+   *  `ask_jobs.response` by `complete_ask_job`, so the payload is `{}` for the
+   *  whole time the wait is on screen. Rather than guess, no chip is shown.
+   *  (Surfacing the routed skill mid-run needs a `routed_skill` column; that is
+   *  a separate backend change.) */
+  const skillForQuery = useCallback((query: string): SkillInfo | null => {
+    const first = query.trim().split(/\s+/)[0]
+    if (!first || !first.startsWith("/")) return null
+    const wanted = first.toLowerCase()
+    return skills.find((s) => s.trigger.toLowerCase() === wanted) ?? null
+  }, [skills])
+
   return {
     draft, setDraft,
     quoteJustInsertedRef,
@@ -249,5 +282,8 @@ export function useComposer({ showToast }: UseComposerDeps) {
     handleComposerInput,
     handleSlashSelect,
     handlePlusMenuSelect,
+    skills, setSkills,
+    filteredSkills, slashOpen,
+    skillForQuery,
   }
 }

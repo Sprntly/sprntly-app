@@ -46,7 +46,7 @@ import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerCon
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
+  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -1109,6 +1109,9 @@ export function ChatScreen() {
     handleComposerInput,
     handleSlashSelect,
     handlePlusMenuSelect,
+    skills, setSkills,
+    filteredSkills, slashOpen,
+    skillForQuery,
   } = useComposer({ showToast })
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
@@ -1123,15 +1126,6 @@ export function ChatScreen() {
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
-  // The palette's entries — the company's own uploaded skills (PRD 1854).
-  //
-  // This used to be TWO lists merged at render time: the vendored built-in
-  // catalog from `askApi.skills()` and the company's uploads from
-  // `skillsApi.list()`. Chat no longer selects a built-in method for a turn, so
-  // the built-in half would have offered ~78 triggers that resolve to nothing;
-  // `askApi.skills()` now serves the company's own library and there is one
-  // list again.
-  const [skills, setSkills] = useState<SkillInfo[]>([])
   // Next-prompt suggestions, per tab. Fetched AFTER an answer settles, off the
   // answer path entirely: a slow, failed or never-returned request costs the
   // user nothing because the absence of suggestions is a normal, invisible
@@ -5718,18 +5712,6 @@ export function ChatScreen() {
     }
   }
 
-  const filteredSkills = useMemo(() => {
-    // One list now (the company's own uploads) — the built-in catalog it used
-    // to be merged ahead of is gone. Server order is newest-first.
-    return skills.filter(
-      (s) =>
-        slashFilter === "" ||
-        s.trigger.toLowerCase().includes("/" + slashFilter) ||
-        s.label.toLowerCase().includes(slashFilter) ||
-        s.description.toLowerCase().includes(slashFilter),
-    )
-  }, [skills, slashFilter])
-  const slashOpen = showSlash && filteredSkills.length > 0
   // Keep the highlight in range as the filtered list shrinks/grows.
   useEffect(() => {
     setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
@@ -5788,22 +5770,6 @@ export function ChatScreen() {
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
   }, [busy, viewerAttachment, slashOpen, plusMenuOpen, handleStopAsk])
-
-  /** The skill a question DETERMINISTICALLY selected, or null.
-   *
-   *  Only a leading slash trigger counts: qa_agent's fast path treats it as an
-   *  explicit selection, so naming it is a fact. What the ROUTER picked for a
-   *  plain question is not knowable here — `_skill` is written into
-   *  `ask_jobs.response` by `complete_ask_job`, so the payload is `{}` for the
-   *  whole time the wait is on screen. Rather than guess, no chip is shown.
-   *  (Surfacing the routed skill mid-run needs a `routed_skill` column; that is
-   *  a separate backend change.) */
-  const skillForQuery = useCallback((query: string): SkillInfo | null => {
-    const first = query.trim().split(/\s+/)[0]
-    if (!first || !first.startsWith("/")) return null
-    const wanted = first.toLowerCase()
-    return skills.find((s) => s.trigger.toLowerCase() === wanted) ?? null
-  }, [skills])
 
   /** The composer's one status line. A dictation problem outranks the busy hint:
    *  the busy hint answers a key you just pressed and expires on its own, while
