@@ -72,6 +72,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
+import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -4632,58 +4633,18 @@ export function ChatScreen() {
   /** "What are my PRDs?" → a reply naming the count plus the clickable cards.
    *  Mirrors postOpenArtifactReply's seeding (rail + Supabase persistence, the
    *  prose only — the cards are a live affordance riding the turn). */
-  const listArtifactsFlow = useCallback((seedQuery: string, envelope: ChatIntentEnvelope) => {
-    const items = envelope.artifact_list ?? []
-    const kind = envelope.list_kind && envelope.list_kind !== "all" ? envelope.list_kind : null
-    const kindNoun: Record<string, [string, string]> = {
-      prd: ["PRD", "PRDs"],
-      evidence: ["evidence document", "evidence documents"],
-      prototype: ["prototype", "prototypes"],
-      report: ["report", "reports"],
-      ticket_set: ["ticket set", "ticket sets"],
-      custom_artifact: ["document", "documents"],
-    }
-    const [one, many] = kind ? kindNoun[kind] ?? ["artifact", "artifacts"] : ["artifact", "artifacts"]
-    // A HOW-MANY ask leads with the NUMBERS — computed server-side over the
-    // whole library, never counted off the capped card list (the reported
-    // "12 cards for a today-vs-yesterday question" bug). The cards still
-    // render under it as the click-to-open affordance.
-    const counts = envelope.list_mode === "count" ? envelope.artifact_counts : null
-    // "your N newest", never "the N you've created": the rows are capped
-    // (backend cap, or the count the user asked for), so claiming they are
-    // everything would be wrong the moment the library outgrows the cap —
-    // the reported bug's phrasing half. The asked-for count ALSO names the
-    // request back ("your last 5 PRDs"), so an honoured ask is visible.
-    const answer = counts
-      ? [
-          `You've created ${counts.today} ${counts.today === 1 ? one : many} today and ${counts.yesterday} yesterday`,
-          counts.total > counts.today + counts.yesterday
-            ? ` — ${counts.total} in total.`
-            : ".",
-          items.length ? ` The newest are below — click one to open it with its chat.` : "",
-        ].join("")
-      : items.length === 0
-        ? `You haven't created any ${many} yet — generate one from a chat or the Top Insights brief and it'll show up here.`
-        : items.length === 1
-          ? `Here's your most recent ${one} — click it to open it with its chat.`
-          : `Here are your ${items.length} newest ${many} — click one to open it with its chat.`
+  // Main's `ActionConfig.emitTurn` — the ONE surface-specific primitive the
+  // shared action layer needs from main: place a fully-formed, settled command
+  // turn into the active tab (append / rename) or a fresh tab, then persist it
+  // client+server. A project surface supplies its own `emitTurn` (engine turns +
+  // server-only persist); the action bodies never learn which.
+  const emitCommandTurn = useCallback((turn: ThreadTurn) => {
+    const seedQuery = turn.query
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
     const activeId = activeTabIdRef.current
     const inTab = activeId && activeId !== BRIEF_TAB_ID
       ? tabsRef.current.find((t) => t.id === activeId)
       : undefined
-    const turnId =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const reply: AskResponse = {
-      answer, sources: [], follow_ups: [], key_points: [], citations: [],
-      confidence: 1, unanswered: "",
-    } as AskResponse
-    const seedTurn: ThreadTurn = {
-      id: turnId,
-      query: seedQuery,
-      reply,
-      ...(items.length ? { artifactList: items } : {}),
-    }
-    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
     let tabId: string
     if (inTab) {
       tabId = inTab.id
@@ -4691,16 +4652,22 @@ export function ChatScreen() {
         ? {
             ...t,
             title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
-            thread: [...t.thread, seedTurn],
+            thread: [...t.thread, turn],
           }
         : t))
       setDraft("")
     } else {
-      tabId = openTab(handle, [seedTurn])
+      tabId = openTab(handle, [turn])
     }
-    pushPendingConversation(turnId, seedQuery, tabId)
-    void finalizeConversationTurn(turnId, { reply }, tabId)
+    pushPendingConversation(turn.id, seedQuery, tabId)
+    if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
+
+  // The list-artifacts command now runs the SHARED action, config'd with main's
+  // emitTurn — the exact behaviour the inline body had, now shared with private.
+  const listArtifactsFlow = useCallback((seedQuery: string, envelope: ChatIntentEnvelope) => {
+    runListArtifactsAction(seedQuery, envelope, { emitTurn: emitCommandTurn })
+  }, [emitCommandTurn])
 
   // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
   // Tab spawn/route is a WRAPPER concern: no active tab (or the synthetic brief

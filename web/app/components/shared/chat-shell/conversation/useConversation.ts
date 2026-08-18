@@ -237,12 +237,14 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
       const settlePending = () => setPendingSend(null)
 
       void (async () => {
-        // Command-intent dispatch is surface-specific; when the surface reports
-        // the message HANDLED as a command, the run never starts.
+        // Command-intent dispatch runs the SHARED action layer config'd for this
+        // surface; when it reports the message HANDLED as a command, the run never
+        // starts. The engine hands it the per-conversation turn writer so a shared
+        // action can render into THIS conversation.
         const dispatch = adapterRef.current.dispatchIntent
         if (dispatch) {
           try {
-            if (await dispatch(trimmed)) {
+            if (await dispatch(trimmed, { emitTurn: (turn) => setTurns((prev) => [...prev, turn]) })) {
               settlePending()
               return
             }

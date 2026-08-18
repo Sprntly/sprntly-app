@@ -70,6 +70,15 @@ export interface ConversationClarify {
   dismiss(): void
 }
 
+/** The per-conversation handle the engine hands `dispatchIntent`, so a shared
+ *  action can write THIS conversation's turns without the engine exposing its
+ *  internals. A surface composes it with persistence before passing it to the
+ *  action's `ActionConfig.emitTurn`. */
+export interface ConversationActionContext {
+  /** Render a fully-formed, settled turn into this conversation. */
+  emitTurn(turn: ThreadTurn): void
+}
+
 /** The normalized send's extras a surface may ride on `submit`. */
 export interface ConversationSubmitOptions {
   /** Resolved attachments (extracted text + storage handle) — folded into the
@@ -172,11 +181,12 @@ export interface SurfaceAdapter {
   /** The surface's next-prompt fetch (main → `chatSuggestionsApi.next`; a project
    *  surface supplies its own thread-scoped fetch). Absent → no suggestions. */
   suggestions?: NextPromptsAdapter
-  /** Command-intent dispatch for this surface (the resolve→executor switch main
-   *  runs inline; project surfaces supply their own). `submit` calls it first and
-   *  short-circuits when it reports the message HANDLED as a command; absent → a
-   *  send is always an ask. */
-  dispatchIntent?(draft: string): Promise<boolean> | boolean
+  /** Command-intent dispatch for this surface: resolve the message's intent and,
+   *  when it is a command, run the SHARED action layer config'd for this surface
+   *  (never a re-implementation). `submit` calls it first, handing the engine's
+   *  per-conversation `ConversationActionContext`, and short-circuits the ask when
+   *  it reports the message HANDLED. Absent → every send is an ask. */
+  dispatchIntent?(draft: string, ctx: ConversationActionContext): Promise<boolean> | boolean
   /** Resolve an open clarify batch for this conversation (surface-specific: main
    *  re-enters generation, a project surface answers its gate). Absent → the
    *  clarify seam stays inert. */

@@ -23,6 +23,7 @@ import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
 import { artifactItemAsCandidate } from "./artifactCandidates"
 import type { ThreadTurn } from "../ChatScreen"
 import {
+  chatIntentApi,
   chatSuggestionsApi,
   projectsApi,
   type AskResponse,
@@ -30,6 +31,7 @@ import {
   type IndividualTurn,
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
+import { runListArtifactsAction } from "../../../shared/chat-shell/conversation/actions"
 import type { ChatPersistence } from "../../../../lib/chatPersistence"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
@@ -132,9 +134,37 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact }: ProjectPrivate
         fetchSuggestions: (conversationId, opts) =>
           chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
       },
-      // DEFERRED: command-intent dispatch (PRD/ticket generation, edit-PRD,
-      // clarify-to-generate). No-op for now → every send is a grounded ask.
-      dispatchIntent: () => false,
+      // Command-intent dispatch: resolve the intent and run the SHARED action
+      // layer config'd for this surface. list_artifacts is migrated (the same
+      // shared action main runs); every other command is still DEFERRED and
+      // falls through to a grounded ask.
+      dispatchIntent: async (draft, ctx) => {
+        const envelope = await chatIntentApi
+          .resolve(draft, { conversationId: convIdRef.current })
+          .catch(() => null)
+        if (!envelope) return false
+        if (envelope.intent === "list_artifacts" && Array.isArray(envelope.artifact_list)) {
+          runListArtifactsAction(draft, envelope, {
+            // Private's emitTurn: render into the engine's turns (ctx) + persist
+            // server-only (this branch does NOT ride /v1/ask). Never learns it's
+            // "private" — it just provides the two surface bits.
+            emitTurn: (turn) => {
+              ctx.emitTurn(turn)
+              if (turn.reply) {
+                void projectsApi
+                  .persistIndividualTurns(projectId, {
+                    clientMessageId: turn.id,
+                    question: turn.query,
+                    answer: (turn.reply as AskResponse).answer ?? "",
+                  })
+                  .catch(() => {})
+              }
+            },
+          })
+          return true
+        }
+        return false
+      },
     }),
     [projectId, callerFirstName, callerInitials, activeCompany, persistence],
   )
