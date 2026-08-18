@@ -181,15 +181,6 @@ export type ThreadTurn = {
   timedOut?: boolean
 }
 
-/** Artifact kinds a user can NAME in an open request that this panel does not
- *  render. Each one opens somewhere — just not here — so the reply names the
- *  thing they asked for rather than quietly handing back a PRD of that name. */
-const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
-  prototype: "A prototype",
-  report: "A report",
-  tickets: "Tickets",
-}
-
 type BriefMeta = { briefId: number; insightIndex: number }
 
 export type ChatTab = {
@@ -3914,54 +3905,6 @@ export function ChatScreen() {
     [openTab, pushPendingConversation, finalizeConversationTurn],
   )
 
-  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so — and a
-   *  kind this panel can't show says where it DOES live. */
-  const openArtifactFlow = useCallback(
-    (seedQuery: string, open: OpenArtifactResult) => {
-      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
-      if (open.status === "unsupported_type") {
-        // They named a real thing we simply don't render here. Substituting the
-        // PRD of the same name would hand over the wrong document with nothing
-        // to signal the swap, so name what they asked for and point at where it
-        // opens.
-        postOpenArtifactReply(
-          seedQuery,
-          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
-          [],
-        )
-        return
-      }
-      if (open.status === "resolved" && open.artifact) {
-        if (openArtifactInPanel(open.artifact, seedQuery)) return
-        // A match we cannot actually open (no usable id) is a NOT-FOUND from
-        // the user's side; saying so beats opening an empty panel.
-        postOpenArtifactReply(
-          seedQuery,
-          `I found "${open.artifact.title}" but couldn't open it — try it from the Artifacts tab.`,
-          [],
-        )
-        return
-      }
-      if (open.status === "ambiguous") {
-        postOpenArtifactReply(
-          seedQuery,
-          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
-          open.candidates,
-        )
-        return
-      }
-      // not_found. Deliberately does NOT offer to generate one: the user asked
-      // to open something, and turning that into a generation is the exact
-      // failure this action exists to prevent.
-      postOpenArtifactReply(
-        seedQuery,
-        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
-        [],
-      )
-    },
-    [openArtifactInPanel, postOpenArtifactReply],
-  )
-
   // ── One artifact-list card → its own thread ────────────────────────────────
   // The chat-side twin of ArtifactsScreen.openArtifact, per kind: an artifact
   // whose chat survives opens THAT thread (history restored, its panel over
@@ -4251,7 +4194,7 @@ export function ChatScreen() {
   // tab-orchestrator emitTurn (emitCommandTurn) + the real global content-panel
   // seam (setContent/openContentPanel/content); more per-flow deps grow here as
   // flows move in.
-  const { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow } = useConversationGeneration({
+  const { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow, openArtifactFlow } = useConversationGeneration({
     emitTurn: emitCommandTurn,
     makeHandle: makeTabHandle,
     seedGenerationTurn,
@@ -4263,6 +4206,8 @@ export function ChatScreen() {
     openContentPanel,
     content,
     showToast,
+    openArtifactInPanel,
+    postOpenArtifactReply,
   })
 
   const submitAsk = useCallback(

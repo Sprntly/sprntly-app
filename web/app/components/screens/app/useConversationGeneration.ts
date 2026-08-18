@@ -23,7 +23,7 @@ import { useCallback } from "react"
 import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
 import { clearPrdDrafts } from "../../shared/PrdInputQuestions"
 import { followTicketSetSwitch, loadTicketSet } from "../../../lib/runTicketSetGeneration"
-import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope } from "../../../lib/api"
+import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type OpenArtifactResult } from "../../../lib/api"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
 import type { AppContentState } from "../../../context/ContentContext"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
@@ -31,6 +31,14 @@ import type { ConversationHandle } from "./conversationCore"
 import type { ThreadTurn } from "./ChatScreen"
 
 type PersistedAttachment = { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }
+
+// Named artifact kinds that don't render in the shared panel — the open flow
+// says where they DO live instead of substituting the wrong document.
+const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
+  prototype: "A prototype",
+  report: "A report",
+  tickets: "Tickets",
+}
 
 export interface UseConversationGenerationDeps {
   /** Place a fully-formed settled command turn into the conversation + persist.
@@ -50,6 +58,15 @@ export interface UseConversationGenerationDeps {
   /** The create-once persistence spine (shared with the turn store) — used to
    *  ensure the conversation row exists before an artifact is attached to it. */
   persistence: ChatPersistence
+  /** Open a resolved artifact in its destination. Main: the shared side-panel
+   *  (via openArtifactDestination → tab reuse/spawn); a project slot: the
+   *  artifacts MODAL (the sanctioned per-surface destination divergence). Returns
+   *  false when the candidate has no usable id. */
+  openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
+  /** Post an assistant turn that opens NOTHING (the ambiguous / not-found /
+   *  can't-open halves of the open-artifact contract) — surface-specific tab
+   *  seeding, injected like `emitTurn`. */
+  postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
   /** Seed the optimistic pending-conversation rail entry + fire the create. */
   pushPendingConversation: (
     turnId: string,
@@ -83,6 +100,8 @@ export function useConversationGeneration({
   openContentPanel,
   content,
   showToast,
+  openArtifactInPanel,
+  postOpenArtifactReply,
 }: UseConversationGenerationDeps) {
   // "What are my PRDs?" — the rows rode the envelope; render them as clickable
   // cards on a turn (empty included: "none yet" is the listing's own honest
@@ -308,5 +327,51 @@ export function useConversationGeneration({
     })()
   }, [seedGenerationTurn, makeHandle, setContent, openContentPanel, showToast, threadContextFor, persistence])
 
-  return { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow }
+  // The whole open_artifact dispatch: 1 match opens (in the surface's
+  // destination), 2+ ask, 0 says so — and a kind this panel can't show says
+  // where it DOES live. The two destinations (`openArtifactInPanel` /
+  // `postOpenArtifactReply`) are surface-divergent by design and injected.
+  const openArtifactFlow = useCallback(
+    (seedQuery: string, open: OpenArtifactResult) => {
+      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+      if (open.status === "unsupported_type") {
+        postOpenArtifactReply(
+          seedQuery,
+          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
+          [],
+        )
+        return
+      }
+      if (open.status === "resolved" && open.artifact) {
+        if (openArtifactInPanel(open.artifact, seedQuery)) return
+        // A match we cannot actually open (no usable id) is a NOT-FOUND from
+        // the user's side; saying so beats opening an empty panel.
+        postOpenArtifactReply(
+          seedQuery,
+          `I found "${open.artifact.title}" but couldn't open it — try it from the Artifacts tab.`,
+          [],
+        )
+        return
+      }
+      if (open.status === "ambiguous") {
+        postOpenArtifactReply(
+          seedQuery,
+          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
+          open.candidates,
+        )
+        return
+      }
+      // not_found. Deliberately does NOT offer to generate one: the user asked
+      // to open something, and turning that into a generation is the exact
+      // failure this action exists to prevent.
+      postOpenArtifactReply(
+        seedQuery,
+        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
+        [],
+      )
+    },
+    [openArtifactInPanel, postOpenArtifactReply],
+  )
+
+  return { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow, openArtifactFlow }
 }
