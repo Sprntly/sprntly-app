@@ -247,12 +247,14 @@ export function ProjectDetailView({
   // browse-modal-by-type fallback rather than opening an empty drawer.
   const onOpenArtifactCandidate = (candidate: OpenArtifactCandidate) => {
     const opened = openArtifactDestination(candidate, {
-      // Evidence is DEFERRED: main opens it via the full brief `DetailState`
-      // (title/summary/metrics/evidenceSections), which a chat candidate doesn't
-      // carry — fabricating it would render a wrong panel. Return false so the
-      // shared decision falls through to the browse modal (honest, never a dead
-      // control); by-context evidence open lands in a later iteration.
-      openEvidence: () => false,
+      // Evidence — exactly like main: scope the shared panel's Evidence tab to
+      // this insight (by-context, not by-id), and it self-loads the existing
+      // evidence. The shared decision only routes here when the candidate is
+      // brief-anchored, so the (briefId, insightIndex) pair is real.
+      openEvidence: (c) => {
+        onOpenArtifactInPlace(openArtifactCandidateAsItem(c))
+        return true
+      },
       resumeConversation: () => false,
       // The PRIMARY path — exactly like main: load the PRD by id into the global
       // content store and open the shared side-panel.
@@ -822,12 +824,11 @@ export function ProjectDetailScreen({
     refetchLedgerRows()
   }, [projectId, refetchLedgerRows])
 
-  // Open a PRD in the SAME global side-panel main uses (mounted at the app root
-  // via AppShell): load it into the content store + open the "prd" tab. Exactly
-  // main's panel behaviour — tabs, streaming, open/close, resize handle — free.
-  // Non-PRD standalone opens are DEFERRED: the chat candidate returns false for
-  // evidence (→ browse modal), and the ArtifactsModal falls back to its own
-  // deep-link viewer (no in-place handler passed). No dead controls, no fork.
+  // Open a chat artifact in the SAME global side-panel main uses (mounted at the
+  // app root via AppShell) — exactly main's panel behaviour (tabs, streaming,
+  // open/close, resize handle) for free. PRD and evidence both open like main;
+  // the STANDALONE-browse open (ArtifactsModal, by-id) stays deferred — that
+  // modal passes no in-place handler and falls back to its own deep-link viewer.
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
     if (artifact.type === "prd") {
@@ -837,6 +838,20 @@ export function ProjectDetailScreen({
           openContentPanel("prd")
         }
       })
+    } else if (artifact.type === "evidence" && artifact.open.insight_index != null) {
+      // Byte-for-byte main's chat evidence-open content-set (ChatScreen's
+      // openPrdInTab evidence branch): scope the Evidence tab to this insight via
+      // `prdMeta` and clear any lingering PRD; the tab self-loads the existing
+      // evidence through the SHARED `loadEvidenceByInsight`. No DetailState is
+      // built (main builds none here either).
+      setContent({
+        detail: null,
+        prd: null,
+        prdMeta: { briefId: artifact.open.brief_id, insightIndex: artifact.open.insight_index },
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      openContentPanel("evidence")
     }
   }, [setContent, openContentPanel])
 
