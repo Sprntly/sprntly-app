@@ -62,6 +62,11 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
       setTurns((prev) => prev.map((t) => (t.id === id ? patch(t) : t))),
     [],
   )
+  // The engine-facing patch (a plain partial) the interactive card handlers use.
+  const patchTurnById = useCallback(
+    (id: string, patch: Partial<ThreadTurn>) => patchTurn(id, (t) => ({ ...t, ...patch })),
+    [patchTurn],
+  )
 
   // Busy is derived from the same immutable-Set shape `runTabAsk` toggles, so the
   // shared primitive drives it unchanged; for one conversation the set holds at
@@ -217,28 +222,30 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
   // the turn, clear busy. Persistence is the surface's (it wraps this) — the
   // engine owns only the render/busy lifecycle.
   const runActionTurn = useCallback(
-    async (query: string, worker: () => Promise<AskResponse>) => {
+    async (query: string, worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>) => {
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       setTurns((prev) => [...prev, { id, query }])
       setBusySet((prev) => addToSet(prev, conversationKey))
-      let reply: AskResponse
+      let patch: Partial<ThreadTurn> & { reply: AskResponse }
       try {
-        reply = await worker()
+        patch = await worker()
       } catch {
-        reply = {
-          answer: "Something went wrong.",
-          sources: [],
-          follow_ups: [],
-          key_points: [],
-          citations: [],
-          confidence: 1,
-          unanswered: "",
-        } as AskResponse
+        patch = {
+          reply: {
+            answer: "Something went wrong.",
+            sources: [],
+            follow_ups: [],
+            key_points: [],
+            citations: [],
+            confidence: 1,
+            unanswered: "",
+          } as AskResponse,
+        }
       }
-      patchTurn(id, (t) => ({ ...t, reply }))
+      patchTurn(id, (t) => ({ ...t, ...patch }))
       setBusySet((prev) => removeFromSet(prev, conversationKey))
-      return { turnId: id, reply }
+      return { turnId: id, reply: patch.reply }
     },
     [conversationKey, patchTurn],
   )
@@ -398,5 +405,15 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
     [hydrating],
   )
 
-  return { turns, busy, pendingSend, submit, stop, clarify, nextPrompts: engineNextPrompts, resume }
+  return {
+    turns,
+    busy,
+    pendingSend,
+    submit,
+    stop,
+    clarify,
+    nextPrompts: engineNextPrompts,
+    resume,
+    patchTurn: patchTurnById,
+  }
 }

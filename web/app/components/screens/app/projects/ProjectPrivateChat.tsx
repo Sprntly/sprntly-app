@@ -34,6 +34,7 @@ import {
 import {
   runEditPrdAction,
   runListArtifactsAction,
+  runShareToSlackAction,
   type ActionConfig,
 } from "../../../shared/chat-shell/conversation/actions"
 import type { ConversationActionContext } from "../../../shared/chat-shell/conversation/types"
@@ -140,12 +141,25 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, openPrdId, onArt
         runActionTurn: async (q, w) => {
           const { turnId, reply } = await ctx.runActionTurn(q, w)
           persist(turnId, q, reply.answer ?? "")
+          return { turnId }
         },
         contextIds: { prdId },
         // Refresh the artifacts list/count after an edit. (The OPEN drawer's own
         // content refresh is a follow-up — there is no prop to push the fresh
         // record into the drawer yet; the turn honestly reports what changed.)
         onArtifactUpdated: () => onArtifactsChanged?.(),
+        // Slack share: the document open in this chat's drawer, else the artifact
+        // the user named (server resolves by title).
+        resolveShareRef: (e) => {
+          const pid = e.prd_id ?? prdId ?? null
+          return pid != null
+            ? { prd_id: pid }
+            : { artifact_type: e.artifact_type ?? null, artifact_query: e.artifact_query ?? null }
+        },
+        // The interactive channel/document PICKER is OFF here (no dock popup on
+        // this surface yet) — a preview that needs a pick settles an honest
+        // limited note instead of a card with a dead control.
+        canPickChannel: false,
       }
     },
     [projectId, onArtifactsChanged],
@@ -192,6 +206,15 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, openPrdId, onArt
             return true
           }
           return false
+        }
+
+        if (envelope.intent === "share_to_slack") {
+          // Preview a Slack share of the open document. Send/Cancel work in the
+          // card; the channel PICKER is off here (canPickChannel: false) — a
+          // preview that needs a pick settles an honest limited note.
+          const prdId = envelope.prd_id ?? openPrdId ?? null
+          await runShareToSlackAction(draft, envelope, buildPrivateActionConfig(ctx, prdId))
+          return true
         }
 
         return false

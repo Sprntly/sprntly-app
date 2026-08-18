@@ -19,8 +19,19 @@
  * each addition a new optional field, never a surface branch.
  */
 
-import type { AskResponse, ChatIntentEnvelope, PrdRecord } from "../../../../lib/api"
+import {
+  slackShareApi,
+  type AskResponse,
+  type ChatIntentEnvelope,
+  type PrdRecord,
+  type SlackShareTargetRef,
+} from "../../../../lib/api"
+import { slackShareQuestionFor, type SlackShareQuestion } from "../../../../lib/chat/slackShareQuestion"
 import type { ThreadTurn } from "../../../screens/app/ChatScreen"
+
+/** The fields an async action settles onto its turn — always a reply, plus any
+ *  turn extras (a Slack preview card, artifact cards). */
+export type ActionTurnPatch = Partial<ThreadTurn> & { reply: AskResponse }
 
 /**
  * The per-surface configuration an action reads. The caller (main, private,
@@ -41,11 +52,12 @@ export interface ActionConfig {
    *  learns which. */
   emitTurn(turn: ThreadTurn): void
   /** Run an ASYNC command turn: seed an optimistic turn, mark busy, await the
-   *  worker's reply, settle the turn, clear busy, and persist — the surface owns
-   *  all of it (main → its tab + client persist; a project surface → the engine's
-   *  turns + server persist). The action supplies only the async work + its reply.
+   *  worker's turn-patch (reply + any extras), settle the turn, clear busy, and
+   *  persist — the surface owns all of it (main → its tab + client persist; a
+   *  project surface → the engine's turns + server persist). Returns the settled
+   *  turn id so an action can drive a follow-up (Slack's channel question).
    *  Optional: a sync-only action (list-artifacts) never needs it. */
-  runActionTurn?(query: string, worker: () => Promise<AskResponse>): Promise<void>
+  runActionTurn?(query: string, worker: () => Promise<ActionTurnPatch>): Promise<{ turnId: string }>
   /** The surface's current artifact context — which PRD / evidence / ticket-set
    *  is "open" here (main a tab's, a project surface its drawer's). Actions read
    *  their edit/target from it. */
@@ -54,6 +66,16 @@ export interface ActionConfig {
    *  one-shot refresh (main → its ContentPanel; a project surface → its drawer).
    *  NOT the streaming generation preview sink (that lands with generation). */
   onArtifactUpdated?(update: { kind: "prd"; prdId: number; record: PrdRecord }): void
+  /** Resolve which artifact a Slack share posts back — the surface's own context
+   *  first (main a tab's open document, a project surface its drawer's). */
+  resolveShareRef?(envelope: ChatIntentEnvelope): SlackShareTargetRef
+  /** Whether this surface can run the interactive channel/document PICKER (main's
+   *  dock QuestionPopup). When false, a preview that needs a pick settles an
+   *  honest limited note instead of a card with a dead control. */
+  canPickChannel?: boolean
+  /** Ask the user which channel/document (main → set the dock question). Only
+   *  reached when `canPickChannel` is true. */
+  onNeedsChannel?(turnId: string, question: SlackShareQuestion): void
 }
 
 /** Mint a turn id (crypto when available). */
@@ -96,17 +118,78 @@ export async function runEditPrdAction(instruction: string, config: ActionConfig
         // artifact view (main's panel / a project drawer).
         config.onArtifactUpdated?.({ kind: "prd", prdId, record: res.prd })
       }
-      return asReply(
-        res.sections_changed.length
-          ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
-          : res.summary ||
-              "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it.",
-      )
+      return {
+        reply: asReply(
+          res.sections_changed.length
+            ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
+            : res.summary ||
+                "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it.",
+        ),
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "something went wrong"
-      return asReply(`I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`)
+      return { reply: asReply(`I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`) }
     }
   })
+}
+
+/**
+ * "Share this PRD on Slack" — resolve the document + channel and put a PREVIEW
+ * card on screen; the post itself waits for the user's Send in the card. Lifted
+ * from main's inline `shareToSlackFlow`. Surface-specific bits are all config:
+ * which document (`resolveShareRef`), the async-turn lifecycle (`runActionTurn`),
+ * and whether this surface can run the channel/document PICKER (`canPickChannel`
+ * / `onNeedsChannel`). A surface that can't pick settles an honest limited note
+ * rather than a card with a dead Send.
+ */
+export async function runShareToSlackAction(
+  query: string,
+  envelope: ChatIntentEnvelope,
+  config: ActionConfig,
+): Promise<void> {
+  if (!config.runActionTurn || !config.resolveShareRef) return
+  const ref = config.resolveShareRef(envelope)
+  // The pick this preview still needs (if any), read after the turn settles so
+  // the surface with a picker can raise it against the settled turn.
+  let question: SlackShareQuestion | null = null
+  const { turnId } = await config.runActionTurn(query, async () => {
+    try {
+      const preview = await slackShareApi.preview(ref, {
+        channel: envelope.share_channel ?? null,
+        note: envelope.share_note ?? null,
+      })
+      const q = slackShareQuestionFor(preview)
+      // A preview that still needs a pick, on a surface that CAN'T pick, is an
+      // honest limited note — never a card with a dead Send/picker.
+      if (q && !config.canPickChannel) {
+        return {
+          reply: asReply(
+            "I found the document, but choosing a Slack channel isn't available in this chat yet — share it from the main chat and I'll post it there.",
+          ),
+        }
+      }
+      question = q
+      // The prose is deliberately short and NEVER claims a post happened — the
+      // card below it is the whole interaction.
+      const lead =
+        preview.status === "ready"
+          ? "Here's what I'll post — have a look before I send it."
+          : preview.status === "needs_channel"
+            ? "Almost — I just need to know where this should go."
+            : preview.status === "blocked"
+              ? "I can't post there yet."
+              : preview.status === "unsupported_type"
+                ? "That one can't be shared to Slack."
+                : "Which document did you mean?"
+      return { reply: asReply(lead), slackShare: { ref, preview } }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      return {
+        reply: asReply(`I couldn't set that share up — ${msg}. Nothing was posted to Slack.`),
+      }
+    }
+  })
+  if (question && config.canPickChannel) config.onNeedsChannel?.(turnId, question)
 }
 
 const KIND_NOUN: Record<string, [string, string]> = {

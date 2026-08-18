@@ -54,7 +54,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatShell } from "../../shared/chat-shell/ChatShell"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { AGENT_NAME } from "../../../lib/agent"
-import type { ChatArtifactItem, OpenArtifactCandidate, SkillInfo, TicketAssignQuestion } from "../../../lib/api"
+import { slackShareApi, type ChatArtifactItem, type OpenArtifactCandidate, type SkillInfo, type TicketAssignQuestion } from "../../../lib/api"
 import type { ChatHomeCard } from "../../../types/content"
 import type { HomeChipItem } from "../../../lib/homeChips"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
@@ -629,6 +629,40 @@ function ConversationEngineView({
     handleOpenEvidence: () => {},
     handleOpenPrd: () => {},
     handleViewPrototype: () => {},
+    // Slack share card — Send / Cancel post + settle via the engine's turn patch.
+    // No `onPickSlackShareTarget`: the channel/document PICKER is off on this
+    // surface (the action settles an honest limited note when a pick is needed),
+    // so the card never offers one.
+    onSendSlackShare: (turnId, channelId, note) => {
+      const share = turns.find((t) => t.id === turnId)?.slackShare
+      if (!share || share.resolved || share.busy) return
+      const channelName =
+        share.preview.channel?.name ??
+        (share.preview.channels ?? []).find((c) => c.id === channelId)?.name ??
+        "the channel"
+      engine.patchTurn(turnId, { slackShare: { ...share, busy: true } })
+      void slackShareApi
+        .send(share.ref, channelId, note)
+        .then(() =>
+          engine.patchTurn(turnId, {
+            slackShare: { ...share, busy: false, resolved: { outcome: "sent", channelName } },
+          }),
+        )
+        .catch((e) =>
+          engine.patchTurn(turnId, {
+            slackShare: {
+              ...share,
+              busy: false,
+              resolved: { outcome: "failed", error: e instanceof Error ? e.message : "Slack rejected the message" },
+            },
+          }),
+        )
+    },
+    onCancelSlackShare: (turnId) => {
+      const share = turns.find((t) => t.id === turnId)?.slackShare
+      if (!share) return
+      engine.patchTurn(turnId, { slackShare: { ...share, resolved: { outcome: "cancelled" } } })
+    },
   }
 
   const mainTurns = mapMainTurns(turns, mapDeps)

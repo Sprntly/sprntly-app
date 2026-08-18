@@ -78,13 +78,13 @@ export interface ConversationActionContext {
   /** Render a fully-formed, settled turn into this conversation. */
   emitTurn(turn: ThreadTurn): void
   /** Run an async command turn against this conversation: seed an optimistic
-   *  turn, mark the engine busy, await the worker's reply, settle the turn, and
-   *  clear busy. Returns the settled turn's id + reply so the caller can persist
-   *  it (server-only). The engine owns the render/busy lifecycle; persistence is
-   *  the surface's. */
+   *  turn, mark the engine busy, await the worker's turn-patch (reply + any turn
+   *  extras, e.g. a Slack preview card), settle the turn, and clear busy. Returns
+   *  the settled turn's id + reply so the caller can persist it (server-only). The
+   *  engine owns the render/busy lifecycle; persistence is the surface's. */
   runActionTurn(
     query: string,
-    worker: () => Promise<AskResponse>,
+    worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>,
   ): Promise<{ turnId: string; reply: AskResponse }>
 }
 
@@ -142,6 +142,9 @@ export interface ConversationEngine {
   busy: boolean
   /** The optimistic just-sent turn awaiting its first ack, or null. */
   pendingSend: ConversationPendingSend | null
+  /** Patch a turn in place by id — the interactive card handlers use it (a Slack
+   *  preview card flipping busy → sent/cancelled). No-op when the id is unknown. */
+  patchTurn(id: string, patch: Partial<ThreadTurn>): void
   /** Submit the composer draft as a new turn/run. `opts` carry the normalized
    *  send's extras (resolved attachments + the idempotency key) for surfaces
    *  whose send pipeline needs them (project chats ride `/v1/ask` with a

@@ -72,7 +72,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
-import { runEditPrdAction, runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
+import { runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -3283,29 +3283,31 @@ export function ChatScreen() {
   // work, settle the turn + client/server persist, clear busy. Shared by every
   // async action (edit-PRD, Slack, generation) via the action layer.
   const runActionTurnInTab = useCallback(
-    async (tabId: string, query: string, worker: () => Promise<AskResponse>) => {
+    async (tabId: string, query: string, worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>) => {
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       setTabs((prev) => prev.map((t) =>
         t.id === tabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
       setBusyTabs((prev) => addToSet(prev, tabId))
       pushPendingConversation(id, query, tabId)
-      let reply: AskResponse
+      let patch: Partial<ThreadTurn> & { reply: AskResponse }
       try {
-        reply = await worker()
+        patch = await worker()
       } catch {
-        reply = {
-          answer: "Something went wrong.",
-          sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-        } as AskResponse
+        patch = {
+          reply: {
+            answer: "Something went wrong.",
+            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+          } as AskResponse,
+        }
       }
       setTabs((prev) => prev.map((t) =>
         t.id === tabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, ...patch } : tn)) }
           : t))
-      finalizeConversationTurn(id, { reply }, tabId)
+      finalizeConversationTurn(id, { reply: patch.reply }, tabId)
       setBusyTabs((prev) => removeFromSet(prev, tabId))
-      return { turnId: id, reply }
+      return { turnId: id, reply: patch.reply }
     },
     [pushPendingConversation, finalizeConversationTurn],
   )
@@ -3641,70 +3643,10 @@ export function ChatScreen() {
     }
   }, [])
 
-  const shareToSlackFlow = useCallback(async (
-    query: string, targetTabId: string, envelope: ChatIntentEnvelope,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    const finalize = (reply: AskResponse, share?: ThreadTurn["slackShare"]) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? {
-              ...t,
-              thread: t.thread.map((tn) => tn.id === id
-                ? { ...tn, reply, ...(share ? { slackShare: share } : {}) }
-                : tn),
-            }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-
-    const tab = tabsRef.current.find((t) => t.id === targetTabId)
-    const ref = shareRefFor(envelope, tab, content.reportFocusId ?? null)
-    try {
-      const preview = await slackShareApi.preview(ref, {
-        channel: envelope.share_channel ?? null,
-        note: envelope.share_note ?? null,
-      })
-      // The prose is deliberately short and NEVER claims a post happened — the
-      // card below it is the whole interaction, and a reply that got ahead of
-      // it is exactly the failure this two-step flow exists to prevent.
-      const lead =
-        preview.status === "ready"
-          ? "Here's what I'll post — have a look before I send it."
-          : preview.status === "needs_channel"
-            ? "Almost — I just need to know where this should go."
-            : preview.status === "blocked"
-              ? "I can't post there yet."
-              : preview.status === "unsupported_type"
-                ? "That one can't be shared to Slack."
-                : "Which document did you mean?"
-      finalize(asReply(lead), { ref, preview })
-      const question = slackShareQuestionFor(preview)
-      if (question) {
-        setTabs((prev) => prev.map((t) => t.id === targetTabId
-          ? { ...t, pendingShare: { turnId: id, ...question } }
-          : t))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      // Says plainly that nothing went out. An error here is most often "Slack
-      // is not connected", and the user must not be left wondering whether a
-      // half-failed share reached the channel anyway.
-      finalize(asReply(
-        `I couldn't set that share up — ${msg}. Nothing was posted to Slack.`,
-      ))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, shareRefFor, content.reportFocusId])
+  // (The share-to-Slack PREVIEW flow moved into the shared action layer —
+  // `runShareToSlackAction`, config'd by `onShareToSlack` with main's tab/report
+  // share-ref + the dock channel picker. The interactive card handlers below —
+  // send / re-preview / question — stay here until main adopts the engine.)
 
   const sendSlackShare = useCallback(async (
     tabId: string, turnId: string, channelId: string, note: string,
@@ -5248,7 +5190,7 @@ export function ChatScreen() {
                 const tabId = activeTab!.id
                 void runEditPrdAction(instruction, {
                   emitTurn: emitCommandTurn,
-                  runActionTurn: async (q, w) => { await runActionTurnInTab(tabId, q, w) },
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
                   contextIds: { prdId },
                   onArtifactUpdated: (u) => applyPrdArtifactInTab(tabId, u),
                 })
@@ -5323,10 +5265,22 @@ export function ChatScreen() {
               },
               onShareToSlack: (env) => {
                 // "Share this PRD on my slack channel and ask the team for
-                // feedback." PREVIEWS ONLY — the flow resolves the document
-                // and the channel and puts the message on screen; the post
-                // waits for the user's confirmation in the card.
-                void shareToSlackFlow(trimmed, activeTab!.id, env)
+                // feedback." PREVIEWS ONLY — the SHARED action resolves the
+                // document + channel and puts the card on screen; the post waits
+                // for Send. Config'd with main's captured tab: async-turn, the
+                // tab/report share-ref, and the dock channel picker.
+                const tabId = activeTab!.id
+                void runShareToSlackAction(trimmed, env, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  resolveShareRef: (e) =>
+                    shareRefFor(e, tabsRef.current.find((t) => t.id === tabId), content.reportFocusId ?? null),
+                  canPickChannel: true,
+                  onNeedsChannel: (turnId, question) => {
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId ? { ...t, pendingShare: { turnId, ...question } } : t))
+                  },
+                })
                 settlePendingSend()
               },
               onAssignTickets: (instruction, prdId) => {
@@ -5469,7 +5423,7 @@ export function ChatScreen() {
       }
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, shareRefFor, content.reportFocusId, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
