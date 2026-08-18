@@ -66,4 +66,38 @@ export interface ConversationHandle {
   /** The persisted pending ask for this conversation (its id backs the
    *  best-effort backend cancel), or null when none is in flight. */
   pendingAsk(): PendingJob | null
+  /** Whether an ask is currently in flight for this conversation (main: the tab
+   *  is in the asking-set). Guards the post-answer suggestion publish so late
+   *  chips never attach to a superseded turn. */
+  isAsking(): boolean
+  /** Whether this conversation is still live (main: the tab is still open). The
+   *  other half of the suggestion late-arrival guard. */
+  exists(): boolean
 }
+
+/**
+ * The grounding params folded into every ask for one conversation — the subset
+ * of `runAskGeneration`'s options a surface pins. Main resolves a tab's
+ * conversation/PRD/evidence/ticket-set; a project surface pins its `project_id`.
+ * Absent members simply don't ride the request.
+ */
+export interface AskGrounding {
+  conversation_id?: number
+  prd_id?: number
+  project_id?: number
+  evidence_id?: number
+  ticket_set_id?: number
+}
+
+/**
+ * Resolve the conversation id + grounding for a send, at REQUEST time. Main's
+ * implementation reuses the tab's `dbConvId` (or creates the row once via the
+ * shared persistence) and layers its PRD>evidence>ticket-set priority; a project
+ * surface resolves its own conversation row and pins `project_id`. This is the
+ * ONLY surface-divergent seam the ask run injects — the run body is otherwise
+ * identical across surfaces.
+ */
+export type ResolveAskParams = (
+  key: string,
+  meta: { turnId: string; displayQuery: string },
+) => Promise<{ convId: number | null; grounding: AskGrounding }>
