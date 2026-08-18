@@ -34,7 +34,22 @@ import re
 import subprocess
 from pathlib import Path
 
-import pytest
+try:
+    import pytest
+except ModuleNotFoundError:  # pragma: no cover - the standalone CI path
+    # `.github/workflows/repo-hygiene.yml` runs this module directly, with no
+    # `pip install`, so that an unfiltered every-PR lane stays free. The only
+    # pytest surface here is one fixture decorator, so a shim is enough — and
+    # keeping the import optional is what lets the guard run in a bare
+    # interpreter, a pre-commit hook, or anywhere else without a venv.
+    class _PytestShim:
+        @staticmethod
+        def fixture(*_a, **_k):
+            def decorate(fn):
+                return fn
+            return decorate
+
+    pytest = _PytestShim()  # type: ignore[assignment]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DENYLIST = Path(__file__).parent / "fixtures" / "customer_name_denylist.txt"
@@ -392,3 +407,40 @@ def test_short_denylist_entries_do_not_increase():
         f"hash plus the stored length, so listing one publishes the name it "
         f"was meant to hide. Prefer a longer distinctive phrase."
     )
+
+
+# ── Runnable without pytest ──────────────────────────────────────────────────
+# The CI lane that matters (.github/workflows/repo-hygiene.yml) has no path
+# filter, so it runs on EVERY push and PR. That is only affordable if it
+# installs nothing, and `setup-python` gives a clean interpreter with no pytest
+# in it. So this module is executable directly:
+#
+#     python backend/tests/test_public_repo_hygiene.py
+#
+# It calls the same functions pytest does — no second implementation to drift —
+# and exits non-zero on the first failure. Also handy locally and in a
+# pre-commit hook, where nobody wants to activate a venv to check a name.
+if __name__ == "__main__":
+    import sys as _sys
+    import traceback as _tb
+
+    _fixture = _load_denylist()
+    _checks = [
+        (test_denylist_is_hashed_not_plaintext, ()),
+        (test_denylist_entries_are_well_formed_and_safe, (_fixture,)),
+        (test_short_denylist_entries_do_not_increase, ()),
+        (test_the_guard_fires_on_a_known_bad_string, (_fixture,)),
+        (test_the_guard_is_quiet_on_synthetic_names, (_fixture,)),
+        (test_known_unfixed_has_no_stale_entries, (_fixture,)),
+        (test_no_real_customer_name_in_the_tracked_repo, (_fixture,)),
+    ]
+    _failed = 0
+    for _fn, _args in _checks:
+        try:
+            _fn(*_args)
+            print(f"ok    {_fn.__name__}")
+        except AssertionError:
+            _failed += 1
+            print(f"FAIL  {_fn.__name__}\n{_tb.format_exc()}")
+    print(f"\n{len(_checks) - _failed} passed, {_failed} failed")
+    _sys.exit(1 if _failed else 0)

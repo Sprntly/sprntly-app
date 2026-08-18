@@ -42,10 +42,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      # No `pip install`. The guard imports hashlib, re, subprocess and pathlib
-      # and nothing else; pytest is the only dependency and it is preinstalled
-      # on the runner image. Keeping it dependency-free is what makes running
-      # it on every PR free.
+      # NO `pip install`, deliberately — that is what makes running this on
+      # every PR free. The module is executable directly (see its `__main__`
+      # block) and imports only hashlib, re, subprocess and pathlib, so it
+      # needs no pytest. `setup-python` hands us a clean interpreter with no
+      # pytest in it, which is how the first version of this lane failed.
       - name: Scan tracked files for real customer names
         working-directory: backend
-        run: python -m pytest tests/test_public_repo_hygiene.py -q --no-header
+        run: python tests/test_public_repo_hygiene.py
