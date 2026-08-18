@@ -4556,6 +4556,44 @@ export function ChatScreen() {
     runListArtifactsAction(seedQuery, envelope, { emitTurn: emitCommandTurn })
   }, [emitCommandTurn])
 
+  // ── The per-conversation store seam ───────────────────────────────────────
+  // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the
+  // existing tab-multiplexer accessors (turn patch, busy, stop/asking flags,
+  // pending-ask lookup) so the shared ask-core reads/writes a conversation
+  // WITHOUT hardcoding `setTabs(prev => prev.map(t => t.id === … ))`. Main's
+  // behaviour is byte-unchanged — every method is a thin 1:1 wrapper over what
+  // the run code already did; the seam only relocates WHERE the accessor is
+  // spelled. A project slot builds a single-conversation handle instead (later).
+  const makeTabHandle = useCallback(
+    (tabId: string): ConversationHandle => ({
+      key: tabId,
+      getTurns: () => tabsRef.current.find((t) => t.id === tabId)?.thread ?? [],
+      patchTurns: (update) =>
+        setTabs((prev) =>
+          prev.map((t) => {
+            if (t.id !== tabId) return t
+            // Preserve the run code's "return the SAME tab ref when the thread is
+            // untouched" semantics: only mint a new tab object when `update`
+            // actually returns a new thread array (a no-op stop returns the input
+            // array unchanged, which must not force a needless new reference).
+            const next = update(t.thread)
+            return next === t.thread ? t : { ...t, thread: next }
+          }),
+        ),
+      setBusy: (busy) =>
+        setBusyTabs((prev) => (busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))),
+      markStopped: () => {
+        stoppedTabsRef.current.add(tabId)
+      },
+      isStopped: () => stoppedTabsRef.current.has(tabId),
+      clearAsking: () => {
+        askingTabsRef.current.delete(tabId)
+      },
+      pendingAsk: () => getPendingAsk(activeCompany, tabId),
+    }),
+    [activeCompany],
+  )
+
   // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
   // Tab spawn/route is a WRAPPER concern: no active tab (or the synthetic brief
   // tab) spawns a FRESH chat tab seeded with the turn; otherwise the turn appends
@@ -4614,6 +4652,10 @@ export function ChatScreen() {
       sendQuery: string
       persistedAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     }) => {
+      // The conversation this run writes to. runTabAsk routes onResult/onError to
+      // this same `targetTabId`, so every thread mutation below (stream partials,
+      // stream-drop, settle, timeout, error) goes through this one handle.
+      const conv = makeTabHandle(targetTabId)
       pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
       setActiveConv(0)
       // (Suggestions were cleared at the top of this function, before any await
@@ -4673,28 +4715,20 @@ export function ChatScreen() {
             // place of the thinking skeleton as the model writes it. Display
             // only — onResult's authoritative reply replaces it.
             onPartial: (text) => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped
-                      // A delta arriving after a drop means the preview came
-                      // back — clear the note rather than leave it contradicting
-                      // text that is visibly moving again.
-                      ? { ...turn, partial: text, streamDropped: false }
-                      : turn),
-                }
-              ))
+              conv.patchTurns((thread) => thread.map((turn) =>
+                turn.id === id && !turn.reply && !turn.stopped
+                  // A delta arriving after a drop means the preview came
+                  // back — clear the note rather than leave it contradicting
+                  // text that is visibly moving again.
+                  ? { ...turn, partial: text, streamDropped: false }
+                  : turn))
             },
             // The live preview died mid-answer while the poll carries on. Purely
             // a display downgrade ("Finishing the answer" + a note) — the poll
             // is still authoritative and a stream failure is never an error.
             onStreamDrop: () => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
-                }
-              ))
+              conv.patchTurns((thread) => thread.map((turn) =>
+                turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn))
             },
             // Replay this tab's conversation so the model sees the prior turns
             // (history) on EVERY follow-up, not just PRD-tab chats — the backend
@@ -4722,18 +4756,13 @@ export function ChatScreen() {
           // If the answer already streamed in live, replaying the simulated
           // typewriter over the (identical) final text would type the whole
           // reply out twice — mark it as already animated.
-          const streamedTurn = tabsRef.current
-            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
+          const streamedTurn = conv.getTurns().find((turn) => turn.id === id)
           if (streamedTurn?.partial) animatedTurnIds.current.add(id)
           askStartRef.current.delete(id)
           resumedTurnsRef.current.delete(id)
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
-                : turn)
-            }
-          ))
+          conv.patchTurns((thread) => thread.map((turn) => turn.id === id
+            ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+            : turn))
           const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
           // Suggestions are fetched HERE — after the answer is on screen — and
           // deliberately not awaited by the turn: it is already complete, so a
@@ -4786,13 +4815,9 @@ export function ChatScreen() {
           // NOT a failure: the turn says the answer is still running and a
           // reload will pick it up, which the resume effect then does.
           if (e instanceof AskTimeoutError) {
-            setTabs((prev) => prev.map((t) =>
-              t.id !== tabId ? t : {
-                ...t, thread: t.thread.map((turn) => turn.id === id
-                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
-                  : turn),
-              }
-            ))
+            conv.patchTurns((thread) => thread.map((turn) => turn.id === id
+              ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+              : turn))
             return
           }
           // THE AI PROVIDER REFUSED THE REQUEST — say so, loudly. The error
@@ -4835,15 +4860,11 @@ export function ChatScreen() {
               : e instanceof Error
                 ? e.message
                 : "Something went wrong"
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              // Drop any streamed partial too: a half-answer above an error
-              // bubble would read as the reply having (partly) succeeded.
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
-                : turn)
-            }
-          ))
+          // Drop any streamed partial too: a half-answer above an error
+          // bubble would read as the reply having (partly) succeeded.
+          conv.patchTurns((thread) => thread.map((turn) => turn.id === id
+            ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
+            : turn))
           // `msg` is kept on the turn and in the persisted conversation row as
           // the RECORD of what failed. It is not what the user reads: the failed
           // turn renders fixed copy, and so does this toast. A backend detail
@@ -4855,7 +4876,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, pushPendingConversation, finalizeConversationTurn, nextPrompts.onSettled, showToast],
+    [activeCompany, makeTabHandle, pushPendingConversation, finalizeConversationTurn, nextPrompts.onSettled, showToast],
   )
 
   const submitAsk = useCallback(
@@ -5377,44 +5398,6 @@ export function ChatScreen() {
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
     },
     [activeCompany, activeTabId, attachments, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, shareRefFor, content.reportFocusId, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
-  )
-
-  // ── The per-conversation store seam (A0) ──────────────────────────────────
-  // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the
-  // existing tab-multiplexer accessors (turn patch, busy, stop/asking flags,
-  // pending-ask lookup) so the shared ask-core reads/writes a conversation
-  // WITHOUT hardcoding `setTabs(prev => prev.map(t => t.id === … ))`. Main's
-  // behaviour is byte-unchanged — every method is a thin 1:1 wrapper over what
-  // the run code already did; the seam only relocates WHERE the accessor is
-  // spelled. A project slot builds a single-conversation handle instead (later).
-  const makeTabHandle = useCallback(
-    (tabId: string): ConversationHandle => ({
-      key: tabId,
-      getTurns: () => tabsRef.current.find((t) => t.id === tabId)?.thread ?? [],
-      patchTurns: (update) =>
-        setTabs((prev) =>
-          prev.map((t) => {
-            if (t.id !== tabId) return t
-            // Preserve the run code's "return the SAME tab ref when the thread is
-            // untouched" semantics: only mint a new tab object when `update`
-            // actually returns a new thread array (a no-op stop returns the input
-            // array unchanged, which must not force a needless new reference).
-            const next = update(t.thread)
-            return next === t.thread ? t : { ...t, thread: next }
-          }),
-        ),
-      setBusy: (busy) =>
-        setBusyTabs((prev) => (busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))),
-      markStopped: () => {
-        stoppedTabsRef.current.add(tabId)
-      },
-      isStopped: () => stoppedTabsRef.current.has(tabId),
-      clearAsking: () => {
-        askingTabsRef.current.delete(tabId)
-      },
-      pendingAsk: () => getPendingAsk(activeCompany, tabId),
-    }),
-    [activeCompany],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
