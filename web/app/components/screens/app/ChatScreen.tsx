@@ -4702,6 +4702,308 @@ export function ChatScreen() {
     void finalizeConversationTurn(turnId, { reply }, tabId)
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
+  // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
+  // Tab spawn/route is a WRAPPER concern: no active tab (or the synthetic brief
+  // tab) spawns a FRESH chat tab seeded with the turn; otherwise the turn appends
+  // to — and, on a placeholder "New chat", renames — the active tab. Returns the
+  // resolved target plus the rollback anchors an extraction failure needs. The
+  // single-conversation run below is surface-agnostic and never spawns tabs.
+  const resolveSendTarget = useCallback(
+    (
+      newTurn: ThreadTurn,
+      handle: string,
+    ): {
+      targetTabId: string
+      spawnedNewTab: boolean
+      prevActiveTabId: string | null
+      prevTitle: string | null
+    } => {
+      const prevActiveTabId = activeTabId
+      const spawnedNewTab = !activeTabId || activeTabId === BRIEF_TAB_ID
+      const prevTitle = spawnedNewTab
+        ? null
+        : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
+      let targetTabId: string
+      if (spawnedNewTab) {
+        const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
+        targetTabId = openTab(title, [newTurn])
+      } else {
+        // spawnedNewTab === false guarantees a non-empty activeTabId.
+        targetTabId = activeTabId!
+        const newTitle = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
+        setTabs((prev) => prev.map((t) => {
+          if (t.id !== targetTabId) return t
+          // First message in a placeholder "New chat" tab → give it the real
+          // title from the query (rename in place; do NOT spawn a second tab).
+          const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
+          return { ...t, title, thread: [...t.thread, newTurn] }
+        }))
+      }
+      return { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle }
+    },
+    [activeTabId, openTab],
+  )
+
+  // ── The single-conversation ASK run ───────────────────────────────────────
+  // The surface-agnostic run for ONE conversation: kick the ask off (concurrent
+  // with other tabs' asks via runTabAsk), stream partial/drop deltas onto the
+  // turn, and on settle write the reply/error + persist + fetch next prompts.
+  // Extracted verbatim from submitAsk so the same run can back both main's tab
+  // multiplexer (this call) and, later, a thin single-conversation hook — the
+  // send-specific values arrive as args, everything else is the stable engine
+  // scope (refs, persistence, per-tab setters) this screen already owns.
+  const runConversationAsk = useCallback(
+    async ({ targetTabId, id, displayQuery, sendQuery, persistedAttachments }: {
+      targetTabId: string
+      id: string
+      displayQuery: string
+      sendQuery: string
+      persistedAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+    }) => {
+      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
+      setActiveConv(0)
+      // (Suggestions were cleared at the top of this function, before any await
+      // or early return — deliberately NOT here. See the note there.)
+      // The conversation id resolved inside `ask` below, captured so the
+      // post-answer suggestion fetch can reuse it without a second lookup.
+      let askConvId: number | null = null
+      // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
+      // It returns false (running nothing) if this tab already has an ask in
+      // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
+      // and routes the reply/error to the captured targetTabId. The guard, busy
+      // toggling, and cleanup (even if the tab is closed mid-flight) all live in
+      // the helper so the concurrency contract is unit-tested in one place.
+      await runTabAsk({
+        targetTabId,
+        asking: askingTabsRef.current,
+        setBusy: setBusyTabs,
+        // Fire-and-forget + poll: POST returns an ask_id, the answer keeps
+        // generating server-side, and the active ask_id is persisted per tab
+        // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
+        // resume effect instead of re-asking.
+        ask: async () => {
+          // The conversation id this ask belongs to. On a FOLLOW-UP the tab
+          // already carries it and this resolves without a round trip; on the
+          // tab's FIRST message the row is still being created —
+          // pushPendingConversation fires the create and deliberately does not
+          // await it — so reading `dbConvId` synchronously here would yield
+          // null. That is how a first-message HTML report got captured with
+          // conversation_id NULL and the Reports panel then said "No reports in
+          // this chat" (staging P1, 2026-07-30): the id is fixed at REQUEST
+          // time and nothing backfills it afterwards.
+          //
+          // `ensureConversation` shares the very same in-flight create the turn
+          // persistence uses (create-once per tab), so awaiting it costs at most
+          // the remainder of one already-issued request and never mints a second
+          // conversation. It resolves null on failure, so a create that fails
+          // still lets the ask through — exactly the previous behaviour.
+          const convId =
+            tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
+            (await persistence.ensureConversation(targetTabId, {
+              turnId: id,
+              title: displayQuery.length > 52
+                ? `${displayQuery.slice(0, 49)}…`
+                : displayQuery,
+              query: displayQuery,
+            }))
+          askConvId = convId ?? null
+          // Resolved AFTER the await — tabsRef, not the closure — so a
+          // conversation created (or a PRD that finished generating) AFTER the
+          // tab opened is still picked up. `sendQuery` carries any attached-
+          // document content; `isStopped` lets the user stop the ask.
+          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
+          return runAskGeneration(sendQuery, activeCompany, targetTabId, {
+            isCancelled: () => !mountedRef.current,
+            isStopped: () => stoppedTabsRef.current.has(targetTabId),
+            // Live token stream: the accumulating answer markdown renders in
+            // place of the thinking skeleton as the model writes it. Display
+            // only — onResult's authoritative reply replaces it.
+            onPartial: (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped
+                      // A delta arriving after a drop means the preview came
+                      // back — clear the note rather than leave it contradicting
+                      // text that is visibly moving again.
+                      ? { ...turn, partial: text, streamDropped: false }
+                      : turn),
+                }
+              ))
+            },
+            // The live preview died mid-answer while the poll carries on. Purely
+            // a display downgrade ("Finishing the answer" + a note) — the poll
+            // is still authoritative and a stream failure is never an error.
+            onStreamDrop: () => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
+                }
+              ))
+            },
+            // Replay this tab's conversation so the model sees the prior turns
+            // (history) on EVERY follow-up, not just PRD-tab chats — the backend
+            // loads history by conversation_id, so without this each ask is
+            // context-free and a follow-up like "get all in to-do status" loses
+            // the thread it was answering. It is ALSO what attaches a captured
+            // HTML report to this chat room (app/report_capture.py).
+            ...(convId != null ? { conversation_id: convId } : {}),
+            // PRD-tab chat: also send the PRD id so the answer is grounded on the
+            // open PRD + its insight/evidence/tickets/prototype.
+            ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
+            // Standalone-artifact grounding: ONE primary artifact per tab,
+            // PRD first (its context already carries evidence + tickets),
+            // then an open evidence report, then a standalone ticket set.
+            ...(targetTab?.prdId == null && targetTab?.evidenceId != null
+              ? { evidence_id: targetTab.evidenceId }
+              : {}),
+            ...(targetTab?.prdId == null && targetTab?.evidenceId == null
+              && targetTab?.ticketSetId != null
+              ? { ticket_set_id: targetTab.ticketSetId }
+              : {}),
+          })
+        },
+        onResult: (tabId, res) => {
+          // If the answer already streamed in live, replaying the simulated
+          // typewriter over the (identical) final text would type the whole
+          // reply out twice — mark it as already animated.
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
+          askStartRef.current.delete(id)
+          resumedTurnsRef.current.delete(id)
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              ...t, thread: t.thread.map((turn) => turn.id === id
+                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+                : turn)
+            }
+          ))
+          const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
+          // Suggestions are fetched HERE — after the answer is on screen — and
+          // deliberately not awaited by the turn: it is already complete, so a
+          // slow or failed request degrades to the ordinary empty state. Only
+          // the error path is handled, because there is nothing to report; a
+          // rejection and an empty list mean the same thing to the user.
+          //
+          // It DOES wait on `persisted`, though. The backend reads the thread
+          // from the database, so firing before this turn's assistant row lands
+          // would ask "what comes next?" about a conversation missing the very
+          // exchange it should continue — and on a first message the thread
+          // would look empty and abstain every time.
+          //
+          // The whole block is wrapped: `onResult` runs inside runTabAsk, which
+          // turns anything thrown here into the TURN's error path — so a
+          // synchronous fault in this optional extra would surface as "Ask
+          // failed" over an answer that actually succeeded. Nothing about a
+          // suggestion strip is worth that, and it costs one try/catch to make
+          // it structurally impossible.
+          if (askConvId != null) {
+            const convId = askConvId
+            const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
+            // Fetch-after-settle via the shared hook: waits on `persisted`,
+            // fetches through the main adapter, and publishes only if the
+            // late-arrival guard still holds (screen mounted, tab still open,
+            // no newer send in flight — else these chips belong to a superseded
+            // turn). Every fault degrades to the empty state.
+            nextPrompts.onSettled(tabId, convId, {
+              prdId,
+              ready: persisted,
+              shouldApply: () =>
+                mountedRef.current &&
+                tabsRef.current.some((t) => t.id === tabId) &&
+                !askingTabsRef.current.has(tabId),
+            })
+          }
+        },
+        onError: (tabId, e) => {
+          // Poll cancelled because the user left the chat screen mid-flight: the
+          // ask_id is still persisted, so the mount-time resume effect will
+          // re-attach and populate on return. Not a failure — no error UI/toast.
+          if (e instanceof AskCancelledError) return
+          // User hit Stop: the stopped turn is already rendered by handleStopAsk.
+          // Not a failure — no error bubble/toast.
+          if (e instanceof AskStoppedError) return
+          askStartRef.current.delete(id)
+          resumedTurnsRef.current.delete(id)
+          // The 12-minute client budget expired while the job was still
+          // generating. The ask_id is deliberately still persisted, so this is
+          // NOT a failure: the turn says the answer is still running and a
+          // reload will pick it up, which the resume effect then does.
+          if (e instanceof AskTimeoutError) {
+            setTabs((prev) => prev.map((t) =>
+              t.id !== tabId ? t : {
+                ...t, thread: t.thread.map((turn) => turn.id === id
+                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+                  : turn),
+              }
+            ))
+            return
+          }
+          // THE AI PROVIDER REFUSED THE REQUEST — say so, loudly. The error
+          // bubble carries the sentence too, but a bubble in one tab's thread
+          // is easy to scroll past, and this is a whole-account condition:
+          // every other tab and every other surface is failing the same way
+          // for the same reason. Observed 2026-08-16 with an exhausted
+          // Anthropic balance — the product degraded correctly everywhere and
+          // announced it nowhere.
+          //
+          // `persist` so it does NOT auto-dismiss: an out-of-credits account
+          // needs an admin to act, and a toast that vanishes in four seconds
+          // is indistinguishable from never having been shown.
+          const providerNotice =
+            e && typeof e === "object" && "providerNotice" in e
+              ? (e as { providerNotice?: ProviderNotice }).providerNotice
+              : undefined
+          if (providerNotice) {
+            showToast(
+              providerNoticeTitle(providerNotice),
+              providerNotice.message,
+              undefined,
+              { persist: true },
+            )
+          }
+          const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
+            ? (e.body as { detail: unknown }).detail
+            : null
+          const detailStr =
+            typeof detail === "string"
+              ? detail
+              : Array.isArray(detail)
+                ? detail
+                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
+                  .join(" · ")
+                : null
+          const msg =
+            e instanceof ApiError
+              ? detailStr || e.message
+              : e instanceof Error
+                ? e.message
+                : "Something went wrong"
+          setTabs((prev) => prev.map((t) =>
+            t.id !== tabId ? t : {
+              // Drop any streamed partial too: a half-answer above an error
+              // bubble would read as the reply having (partly) succeeded.
+              ...t, thread: t.thread.map((turn) => turn.id === id
+                ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
+                : turn)
+            }
+          ))
+          // `msg` is kept on the turn and in the persisted conversation row as
+          // the RECORD of what failed. It is not what the user reads: the failed
+          // turn renders fixed copy, and so does this toast. A backend detail
+          // string means nothing to the person who asked the question, and the
+          // 404 the tenant gate raises must not tell a foreign tenant that the
+          // row it asked for exists somewhere.
+          finalizeConversationTurn(id, { error: msg }, tabId)
+          showToast("Ask failed", WAIT_FAILED_TITLE)
+        },
+      })
+    },
+    [activeCompany, pushPendingConversation, finalizeConversationTurn, nextPrompts.onSettled, showToast],
+  )
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const trimmed = rawQuery.trim()
@@ -5087,9 +5389,6 @@ export function ChatScreen() {
       }
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      // Capture the target tab ID up-front so async callbacks always write to
-      // the right tab, even if the user switches tabs while the request is in-flight.
-      let targetTabId: string
       const hasAttachments = attachments.length > 0
       // OPTIMISTIC RENDER FIRST (the reported latency bug): the thread turn — the
       // user's message + a chip per attachment — must appear on THIS commit,
@@ -5106,32 +5405,11 @@ export function ChatScreen() {
       // The tab title/handle falls back to the first attachment's name when the
       // ask itself is empty, so a doc-only send still reads sensibly in the tab.
       const handle = displayQuery || attachments[0]?.name || "New chat"
-      // Remember where we started so an extraction failure can roll the optimistic
-      // turn back cleanly: remove a freshly-spawned tab (restoring the prior
-      // surface) or drop just this turn + undo a New-chat rename on an existing one.
-      const prevActiveTabId = activeTabId
-      const spawnedNewTab = !activeTabId || activeTabId === BRIEF_TAB_ID
-      const prevTitle = spawnedNewTab
-        ? null
-        : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
-      // No active tab, OR the active "tab" is the synthetic, thread-less brief
-      // tab → spawn a FRESH chat tab seeded with the query. A chat started from
-      // the Top Insights brief must never thread inline into it (the brief tab carries
-      // no `tabs` entry, so appending would silently no-op anyway).
-      if (spawnedNewTab) {
-        const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
-        targetTabId = openTab(title, [newTurn])
-      } else {
-        targetTabId = activeTabId
-        const newTitle = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
-        setTabs((prev) => prev.map((t) => {
-          if (t.id !== targetTabId) return t
-          // First message in a placeholder "New chat" tab → give it the real
-          // title from the query (rename in place; do NOT spawn a second tab).
-          const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
-          return { ...t, title, thread: [...t.thread, newTurn] }
-        }))
-      }
+      // Resolve (and, on a fresh/brief surface, spawn) the tab this send lands on.
+      // `prevActiveTabId`/`spawnedNewTab`/`prevTitle` are the rollback anchors an
+      // extraction failure below uses to restore the prior surface cleanly.
+      const { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle } =
+        resolveSendTarget(newTurn, handle)
       // The real turn is now on the tab, so the placeholder has been handed off.
       // Same tick as the openTab/setTabs above → React batches both into ONE
       // commit, so the swap from placeholder to turn never flickers.
@@ -5207,248 +5485,9 @@ export function ChatScreen() {
           return
         }
       }
-      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
-      setActiveConv(0)
-      // (Suggestions were cleared at the top of this function, before any await
-      // or early return — deliberately NOT here. See the note there.)
-      // The conversation id resolved inside `ask` below, captured so the
-      // post-answer suggestion fetch can reuse it without a second lookup.
-      let askConvId: number | null = null
-      // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
-      // It returns false (running nothing) if this tab already has an ask in
-      // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
-      // and routes the reply/error to the captured targetTabId. The guard, busy
-      // toggling, and cleanup (even if the tab is closed mid-flight) all live in
-      // the helper so the concurrency contract is unit-tested in one place.
-      await runTabAsk({
-        targetTabId,
-        asking: askingTabsRef.current,
-        setBusy: setBusyTabs,
-        // Fire-and-forget + poll: POST returns an ask_id, the answer keeps
-        // generating server-side, and the active ask_id is persisted per tab
-        // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
-        // resume effect instead of re-asking.
-        ask: async () => {
-          // The conversation id this ask belongs to. On a FOLLOW-UP the tab
-          // already carries it and this resolves without a round trip; on the
-          // tab's FIRST message the row is still being created —
-          // pushPendingConversation fires the create and deliberately does not
-          // await it — so reading `dbConvId` synchronously here would yield
-          // null. That is how a first-message HTML report got captured with
-          // conversation_id NULL and the Reports panel then said "No reports in
-          // this chat" (staging P1, 2026-07-30): the id is fixed at REQUEST
-          // time and nothing backfills it afterwards.
-          //
-          // `ensureConversation` shares the very same in-flight create the turn
-          // persistence uses (create-once per tab), so awaiting it costs at most
-          // the remainder of one already-issued request and never mints a second
-          // conversation. It resolves null on failure, so a create that fails
-          // still lets the ask through — exactly the previous behaviour.
-          const convId =
-            tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
-            (await persistence.ensureConversation(targetTabId, {
-              turnId: id,
-              title: displayQuery.length > 52
-                ? `${displayQuery.slice(0, 49)}…`
-                : displayQuery,
-              query: displayQuery,
-            }))
-          askConvId = convId ?? null
-          // Resolved AFTER the await — tabsRef, not the closure — so a
-          // conversation created (or a PRD that finished generating) AFTER the
-          // tab opened is still picked up. `sendQuery` carries any attached-
-          // document content; `isStopped` lets the user stop the ask.
-          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
-          return runAskGeneration(sendQuery, activeCompany, targetTabId, {
-            isCancelled: () => !mountedRef.current,
-            isStopped: () => stoppedTabsRef.current.has(targetTabId),
-            // Live token stream: the accumulating answer markdown renders in
-            // place of the thinking skeleton as the model writes it. Display
-            // only — onResult's authoritative reply replaces it.
-            onPartial: (text) => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped
-                      // A delta arriving after a drop means the preview came
-                      // back — clear the note rather than leave it contradicting
-                      // text that is visibly moving again.
-                      ? { ...turn, partial: text, streamDropped: false }
-                      : turn),
-                }
-              ))
-            },
-            // The live preview died mid-answer while the poll carries on. Purely
-            // a display downgrade ("Finishing the answer" + a note) — the poll
-            // is still authoritative and a stream failure is never an error.
-            onStreamDrop: () => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
-                }
-              ))
-            },
-            // Replay this tab's conversation so the model sees the prior turns
-            // (history) on EVERY follow-up, not just PRD-tab chats — the backend
-            // loads history by conversation_id, so without this each ask is
-            // context-free and a follow-up like "get all in to-do status" loses
-            // the thread it was answering. It is ALSO what attaches a captured
-            // HTML report to this chat room (app/report_capture.py).
-            ...(convId != null ? { conversation_id: convId } : {}),
-            // PRD-tab chat: also send the PRD id so the answer is grounded on the
-            // open PRD + its insight/evidence/tickets/prototype.
-            ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
-            // Standalone-artifact grounding: ONE primary artifact per tab,
-            // PRD first (its context already carries evidence + tickets),
-            // then an open evidence report, then a standalone ticket set.
-            ...(targetTab?.prdId == null && targetTab?.evidenceId != null
-              ? { evidence_id: targetTab.evidenceId }
-              : {}),
-            ...(targetTab?.prdId == null && targetTab?.evidenceId == null
-              && targetTab?.ticketSetId != null
-              ? { ticket_set_id: targetTab.ticketSetId }
-              : {}),
-          })
-        },
-        onResult: (tabId, res) => {
-          // If the answer already streamed in live, replaying the simulated
-          // typewriter over the (identical) final text would type the whole
-          // reply out twice — mark it as already animated.
-          const streamedTurn = tabsRef.current
-            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
-          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
-          askStartRef.current.delete(id)
-          resumedTurnsRef.current.delete(id)
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
-                : turn)
-            }
-          ))
-          const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
-          // Suggestions are fetched HERE — after the answer is on screen — and
-          // deliberately not awaited by the turn: it is already complete, so a
-          // slow or failed request degrades to the ordinary empty state. Only
-          // the error path is handled, because there is nothing to report; a
-          // rejection and an empty list mean the same thing to the user.
-          //
-          // It DOES wait on `persisted`, though. The backend reads the thread
-          // from the database, so firing before this turn's assistant row lands
-          // would ask "what comes next?" about a conversation missing the very
-          // exchange it should continue — and on a first message the thread
-          // would look empty and abstain every time.
-          //
-          // The whole block is wrapped: `onResult` runs inside runTabAsk, which
-          // turns anything thrown here into the TURN's error path — so a
-          // synchronous fault in this optional extra would surface as "Ask
-          // failed" over an answer that actually succeeded. Nothing about a
-          // suggestion strip is worth that, and it costs one try/catch to make
-          // it structurally impossible.
-          if (askConvId != null) {
-            const convId = askConvId
-            const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
-            // Fetch-after-settle via the shared hook: waits on `persisted`,
-            // fetches through the main adapter, and publishes only if the
-            // late-arrival guard still holds (screen mounted, tab still open,
-            // no newer send in flight — else these chips belong to a superseded
-            // turn). Every fault degrades to the empty state.
-            nextPrompts.onSettled(tabId, convId, {
-              prdId,
-              ready: persisted,
-              shouldApply: () =>
-                mountedRef.current &&
-                tabsRef.current.some((t) => t.id === tabId) &&
-                !askingTabsRef.current.has(tabId),
-            })
-          }
-        },
-        onError: (tabId, e) => {
-          // Poll cancelled because the user left the chat screen mid-flight: the
-          // ask_id is still persisted, so the mount-time resume effect will
-          // re-attach and populate on return. Not a failure — no error UI/toast.
-          if (e instanceof AskCancelledError) return
-          // User hit Stop: the stopped turn is already rendered by handleStopAsk.
-          // Not a failure — no error bubble/toast.
-          if (e instanceof AskStoppedError) return
-          askStartRef.current.delete(id)
-          resumedTurnsRef.current.delete(id)
-          // The 12-minute client budget expired while the job was still
-          // generating. The ask_id is deliberately still persisted, so this is
-          // NOT a failure: the turn says the answer is still running and a
-          // reload will pick it up, which the resume effect then does.
-          if (e instanceof AskTimeoutError) {
-            setTabs((prev) => prev.map((t) =>
-              t.id !== tabId ? t : {
-                ...t, thread: t.thread.map((turn) => turn.id === id
-                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
-                  : turn),
-              }
-            ))
-            return
-          }
-          // THE AI PROVIDER REFUSED THE REQUEST — say so, loudly. The error
-          // bubble carries the sentence too, but a bubble in one tab's thread
-          // is easy to scroll past, and this is a whole-account condition:
-          // every other tab and every other surface is failing the same way
-          // for the same reason. Observed 2026-08-16 with an exhausted
-          // Anthropic balance — the product degraded correctly everywhere and
-          // announced it nowhere.
-          //
-          // `persist` so it does NOT auto-dismiss: an out-of-credits account
-          // needs an admin to act, and a toast that vanishes in four seconds
-          // is indistinguishable from never having been shown.
-          const providerNotice =
-            e && typeof e === "object" && "providerNotice" in e
-              ? (e as { providerNotice?: ProviderNotice }).providerNotice
-              : undefined
-          if (providerNotice) {
-            showToast(
-              providerNoticeTitle(providerNotice),
-              providerNotice.message,
-              undefined,
-              { persist: true },
-            )
-          }
-          const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
-            ? (e.body as { detail: unknown }).detail
-            : null
-          const detailStr =
-            typeof detail === "string"
-              ? detail
-              : Array.isArray(detail)
-                ? detail
-                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                  .join(" · ")
-                : null
-          const msg =
-            e instanceof ApiError
-              ? detailStr || e.message
-              : e instanceof Error
-                ? e.message
-                : "Something went wrong"
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              // Drop any streamed partial too: a half-answer above an error
-              // bubble would read as the reply having (partly) succeeded.
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
-                : turn)
-            }
-          ))
-          // `msg` is kept on the turn and in the persisted conversation row as
-          // the RECORD of what failed. It is not what the user reads: the failed
-          // turn renders fixed copy, and so does this toast. A backend detail
-          // string means nothing to the person who asked the question, and the
-          // 404 the tenant gate raises must not tell a foreign tenant that the
-          // row it asked for exists somewhere.
-          finalizeConversationTurn(id, { error: msg }, tabId)
-          showToast("Ask failed", WAIT_FAILED_TITLE)
-        },
-      })
+      await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
