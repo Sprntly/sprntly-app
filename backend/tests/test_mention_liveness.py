@@ -410,6 +410,12 @@ def test_ledger_publishers_and_signatures_unchanged(isolated_settings):
     assert list(sig.parameters) == [
         "project_id", "assigner_user_id", "source_conversation_id",
         "source_turn_id", "roster", "dataset", "company_id", "tool_input",
+        # Added by "delegate to teammates and stop fabricating their responses"
+        # (9513cc26): the source turn's own text, so the handler quotes what was
+        # actually said instead of inventing the teammate's words. Optional and
+        # keyword-only, so every existing caller is unaffected — which is what
+        # this non-breakage guard is really asserting.
+        "source_content",
     ]
     # The new publishers exist with the documented shapes.
     assert list(inspect.signature(project_delegation._publish_member_added).parameters) == [

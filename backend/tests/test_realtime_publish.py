@@ -630,6 +630,12 @@ def test_turn_write_and_delegate_contracts_unchanged(isolated_settings, monkeypa
     assert list(sig.parameters) == [
         "project_id", "assigner_user_id", "source_conversation_id",
         "source_turn_id", "roster", "dataset", "company_id", "tool_input",
+        # Added by "delegate to teammates and stop fabricating their responses"
+        # (9513cc26): the source turn's own text, so the handler quotes what was
+        # actually said instead of inventing the teammate's words. Optional and
+        # keyword-only, so every existing caller is unaffected — which is what
+        # this non-breakage guard is really asserting.
+        "source_content",
     ]
     assert sig.return_annotation in (str, "str")
 

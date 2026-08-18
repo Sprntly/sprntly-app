@@ -18,6 +18,7 @@
  */
 
 import { AGENT_NAME } from "../../../lib/agent"
+import { QUOTE_VIEWER_NAME, splitQuotedSuffix } from "../../../lib/chatQuote"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
@@ -53,6 +54,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleStopAsk,
     submitClarifyAnswers,
     setViewerAttachment,
+    editingTurnId,
+    copiedTurnId,
+    onCopyTurn,
+    onRetryTurn,
+    onEditTurn,
+    onSubmitTurnEdit,
+    onCancelTurnEdit,
     openReportByTitle,
     openArtifactInPanel,
     openChatArtifactItem,
@@ -148,13 +156,67 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       extra: shareNode,
     })
 
+    // The passage this message was a reply to, lifted out of the stored query
+    // so it renders as a quote block above the bubble instead of as literal
+    // "> " text inside it. A turn that carries none is unaffected — every user
+    // turn ever written before quoting existed goes down this path.
+    const { body: queryBody, quote } = splitQuotedSuffix(turn.query)
+
+    // ── What can be done to this past prompt ──────────────────────────────
+    // Copy is free: it changes nothing, so any turn the user actually spoke
+    // offers it, answered or not.
+    const canCopyTurn = !!onCopyTurn && !!queryBody
+
+    // Edit and retry both RE-ASK, which rewinds the thread to this point —
+    // everything below is replaced by the new answer. That is the Claude
+    // behaviour and it is what makes editing a past prompt coherent rather than
+    // orphaning the reply underneath it. Four exclusions, each for its own
+    // reason:
+    //  * still generating — the question is live; Stop is the affordance there.
+    //  * a summary still being written — same, one rung down.
+    //  * attachments — re-sending drops them (their bytes left component state
+    //    on the original send), and quietly re-asking WITHOUT the files is a
+    //    different question. Those turns keep "Ask again", which hands the text
+    //    back to the composer instead. Same rule `handleAskAgain` already uses.
+    //  * an open clarify batch — the turn is mid-conversation with the gate,
+    //    and rewriting the question under it would strand the answers.
+    //
+    // Note what is NOT excluded any more: an ANSWERED turn. It was, while there
+    // was no way to take its answer back out of the record; the rewind
+    // (`rewindToUserTurn` → `DELETE …/turns/{id}`) is what made past prompts
+    // editable at all.
+    const canReAskTurn =
+      !!queryBody &&
+      !isGenerating &&
+      !turn.summaryPending &&
+      !turn.attachments?.length &&
+      !turn.clarify?.length
+    const canEditTurn = !!onEditTurn && canReAskTurn
+    const canRetryTurn = !!onRetryTurn && canReAskTurn
+    const isEditing = canEditTurn && editingTurnId === turn.id
+
     return {
       turnId: turn.id,
+      onCopyUserTurn: canCopyTurn ? () => onCopyTurn!(turn) : undefined,
+      copied: copiedTurnId === turn.id,
+      onRetryUserTurn: canRetryTurn ? () => onRetryTurn!(turn) : undefined,
+      onEditUserTurn: canEditTurn ? () => onEditTurn!(turn.id) : undefined,
+      editing: isEditing,
+      onSubmitEdit: isEditing ? (text: string) => onSubmitTurnEdit?.(turn, text) : undefined,
+      onCancelEdit: isEditing ? () => onCancelTurnEdit?.() : undefined,
       // Only when the user actually said something. A turn can be AGENT-ONLY.
       user: {
         name,
         initials: userInitials,
-        query: turn.query,
+        query: queryBody,
+        quote,
+        // The quote block is clamped, so the tail of a long highlight would be
+        // unreachable without this. Reuses the SAME overlay a file card opens
+        // (`AttachmentViewer` with text and no storage key) rather than
+        // inventing a second read-this-passage surface.
+        onOpenQuote: quote
+          ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote, plain: true })
+          : undefined,
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,

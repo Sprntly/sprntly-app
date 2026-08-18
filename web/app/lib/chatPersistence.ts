@@ -23,10 +23,15 @@
 import type { conversationsApi as ConversationsApi } from "./api"
 
 /** Minimal slice of conversationsApi this module needs (eases mocking in tests). */
+/** `rewindToTurn` is OPTIONAL, unlike the two writers: rewinding is a
+ *  best-effort tidy-up on two flows (edit and retry on a past prompt), so an
+ *  API surface that lacks it simply never rewinds. Requiring it would make
+ *  every existing caller and test double grow a method none of them call. */
 export type ConversationsPersistenceApi = Pick<
   typeof ConversationsApi,
   "create" | "addTurn"
->
+> &
+  Partial<Pick<typeof ConversationsApi, "rewindToTurn">>
 
 export type ChatPersistenceDeps = {
   /** Lazily resolve the conversations API (the component imports it dynamically). */
@@ -85,6 +90,18 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   // late, since whichever push finished resolving first would queue first and
   // the race would simply move.
   const appendQueues = new Map<string, Promise<unknown>>()
+
+  // The DB row id each client turn id was written as, so the conversation can
+  // later be rewound to that turn (editing or retrying a past prompt). Keyed
+  // `${tabId}:${clientTurnId}` — client turn ids are unique per tab, and keying
+  // by tab keeps parallel chats from colliding.
+  //
+  // In-memory only, and deliberately so: a persisted map of row ids would be
+  // one more thing that can go stale against the server. It covers turns THIS
+  // session sent; a thread rehydrated from history carries its own ids on the
+  // turns themselves and passes them in as `dbTurnIdHint`. Neither knowing
+  // makes `rewindToUserTurn` a no-op, never a guess.
+  const dbTurnIds = new Map<string, number>()
 
   function enqueueAppend(tabId: string, work: () => Promise<void>): Promise<void> {
     const prev = appendQueues.get(tabId) ?? Promise.resolve()
@@ -173,7 +190,9 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         })
         if (convId == null) return
         const api = await deps.getApi()
-        await api.addTurn(convId, "user", args.query, args.attachments)
+        const row = await api.addTurn(convId, "user", args.query, args.attachments)
+        const rowId = Number((row as { id?: unknown } | null)?.id)
+        if (Number.isFinite(rowId)) dbTurnIds.set(`${tabId}:${args.turnId}`, rowId)
       } catch {
         /* fire-and-forget: never break the UI on a persistence failure */
       }
@@ -227,7 +246,57 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     }
   }
 
-  return { pushUserTurn, pushAssistantTurn, resolveConvId, ensureConversation }
+  /**
+   * Rewind the persisted conversation to just before a user turn — the durable
+   * half of editing or retrying a past prompt. The server deletes that turn and
+   * every turn after it, so the record matches the thread the user is now
+   * looking at.
+   *
+   * The row id is resolved from two sources, because a turn can reach this
+   * point either way: `dbTurnIds` remembers what THIS session wrote, and
+   * `dbTurnIdHint` carries what a thread rehydrated from history already knows
+   * (`conversation_turns.id`, stamped on restore). Neither knowing means the
+   * turn was never persisted, and the rewind is correctly a no-op.
+   *
+   * Queued behind the tab's other appends (`enqueueAppend`), which is what
+   * makes the sequencing safe: it runs AFTER the write that created the row, so
+   * its id is known, and BEFORE the re-asked turn's own append, so the server
+   * sees rewind-then-add rather than racing them.
+   *
+   * Best-effort like everything else here. An unknown row id, a 409 because the
+   * thread has moved on, a network failure — all leave the record as it was and
+   * none of them reach the UI.
+   */
+  function rewindToUserTurn(
+    tabId: string,
+    clientTurnId: string,
+    dbTurnIdHint?: number | null,
+  ): Promise<void> {
+    return enqueueAppend(tabId, async () => {
+      const key = `${tabId}:${clientTurnId}`
+      try {
+        const rowId = dbTurnIds.get(key) ?? dbTurnIdHint ?? null
+        if (rowId == null) return
+        const convId = currentConvId(tabId)
+        if (convId == null) return
+        const api = await deps.getApi()
+        // OPTIONALLY called (`?.`), and the syntax is load-bearing: it is how
+        // this module says "an api without this method is fine", which is what
+        // keeps `partial-mock-guard` from demanding it of every partial mock in
+        // the repo. `create`/`addTurn` are called unconditionally precisely
+        // because a missing one there silently voids a whole suite.
+        await api.rewindToTurn?.(convId, rowId)
+      } catch {
+        /* fire-and-forget */
+      } finally {
+        // Everything from this turn on is gone server-side, so no id this
+        // session recorded at or after it can be rewound to again.
+        dbTurnIds.delete(key)
+      }
+    })
+  }
+
+  return { pushUserTurn, pushAssistantTurn, rewindToUserTurn, resolveConvId, ensureConversation }
 }
 
 export type ChatPersistence = ReturnType<typeof createChatPersistence>

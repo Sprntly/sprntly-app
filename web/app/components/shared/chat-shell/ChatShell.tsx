@@ -34,6 +34,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from "react"
 import { ChatTranscript, type ChatTranscriptTurn } from "../ChatTranscript"
 import { ChatComposer, DRAFT_MIN_CHARS } from "../ChatComposer"
+import { SelectionReplyToolbar } from "../SelectionReplyToolbar"
+import { buildQuotedMessage, splitQuotedSuffix } from "../../../lib/chatQuote"
 import { type ClarifyAnswer } from "../ClarifyQuestionsCard"
 import type { ChatShellHandle, ChatSurfaceDescriptor, ComposerDraftApi, ShellTurn } from "./types"
 import { MORE_MARKER } from "./types"
@@ -68,6 +70,13 @@ export interface ChatShellProps {
   /** Project surfaces only: invoked when a `ShellTurn.clarify` batch is
    *  skipped ("Generate now") — mirrors `onClarifySubmit`. */
   onClarifySkip?: (turnId: string) => void
+  /** MAIN ONLY: the reader highlighted a passage of an answer and pressed
+   *  Reply. The shell owns the selection toolbar for every surface, but on main
+   *  the COMPOSER is host-rendered, so the parked quote has to live in the
+   *  host's state — hence the callback. Project surfaces need no wiring: the
+   *  shell owns their composer and parks the quote itself. Unset on main
+   *  renders no toolbar at all, so a host that hasn't opted in is unchanged. */
+  onQuoteSelection?: (text: string) => void
   /** Project surfaces only, opt-in: called ONCE on mount with the shell's
    *  `ComposerDraftApi` (a method facade over the shell-owned draft/caret). The
    *  group host wires it so its mention picker can read/insert the live draft;
@@ -101,6 +110,7 @@ function ChatShellInner(
     onPickOption,
     onClarifySubmit,
     onClarifySkip,
+    onQuoteSelection,
     onDraftApiReady,
   }: ChatShellProps,
   ref: React.Ref<ChatShellHandle>,
@@ -112,9 +122,17 @@ function ChatShellInner(
   // Project-surface state (unused on the main path — declared unconditionally
   // for rules-of-hooks; none of it is read or rendered when `isMain`).
   const [draft, setDraft] = useState("")
+  // The highlighted passage parked above the input (project surfaces own it
+  // here; main's lives in the host, reached through `onQuoteSelection`).
+  const [quote, setQuote] = useState<string | null>(null)
   const projectComposerRef = useRef<HTMLTextAreaElement>(null)
   const projectFileInputRef = useRef<HTMLInputElement>(null)
   const projectViewportRef = useRef<HTMLDivElement>(null)
+  // The main thread column, mirrored into a ref object the selection toolbar
+  // can read. `refs.contentColumnRef` is a CALLBACK ref owned by the host (its
+  // ResizeObserver attaches through it), so the shell composes rather than
+  // replaces it — both are called, and the host's scroll behaviour is untouched.
+  const mainColumnRef = useRef<HTMLDivElement>(null)
   const pinnedRef = useRef(true)
   // Live mirror of the draft so `getValue()` reflects the current value even
   // between a `setDraft` and its committed render.
@@ -255,6 +273,20 @@ function ChatShellInner(
     // null, no-op handlers) — a ledgered opt-out, never a live dead button.
     const f = composer.features
 
+    // Lift a human turn's quoted excerpt out of its stored content, so the
+    // transcript renders it as a quote block ABOVE the bubble instead of as
+    // literal "> " text inside it. The host's `renderUserBody` is handed a copy
+    // of the turn carrying only the words; everything else (re-send, scroll,
+    // ids) keeps the ORIGINAL content, because the quote is part of the message
+    // that was actually sent. A turn with no quote returns the turn itself, so
+    // the overwhelmingly common path allocates nothing.
+    const liftQuote = (turn: ShellTurn): { turn: ShellTurn; quote: string | null } => {
+      if (turn.author.kind === "agent" || !turn.content) return { turn, quote: null }
+      const { body, quote } = splitQuotedSuffix(turn.content)
+      if (!quote) return { turn, quote: null }
+      return { turn: { ...turn, content: body }, quote }
+    }
+
     // A single group row (self=me / peer=other / agent) maps onto ONE
     // ChatBubble via the descriptor: the shell owns the per-kind wrapper class
     // + `gc-msg-*` testid + human timestamp + role chip + avatar + invoked-by
@@ -296,6 +328,7 @@ function ChatShellInner(
         }
       }
       const isMe = turn.author.kind === "self"
+      const lifted = liftQuote(turn)
       return {
         turnId: turn.id,
         dataTurnId: turn.id,
@@ -332,7 +365,8 @@ function ChatShellInner(
           // `bubbleClassName` fill is passed — the retired `gc*` parallel
           // bubble system is gone; self stays distinguished by right-alignment
           // (`gcMsgMe`), not colour.
-          bodyNode: transcript.renderUserBody?.(turn),
+          bodyNode: transcript.renderUserBody?.(lifted.turn),
+          quote: lifted.quote,
         },
       }
     }
@@ -357,6 +391,7 @@ function ChatShellInner(
 
       const wrapperTestId =
         turn.author.kind === "agent" && prefix ? `${prefix}-history-agent` : undefined
+      const lifted = liftQuote(turn)
 
       // A host-supplied body still overrides (the escape hatch retained for a
       // genuine host body node); WITHOUT one — the new default after private
@@ -389,7 +424,8 @@ function ChatShellInner(
         showAgent: hasAgent,
         user: hasUser
           ? {
-              bodyNode: transcript.renderUserBody?.(turn),
+              bodyNode: transcript.renderUserBody?.(lifted.turn),
+              quote: lifted.quote,
               hideHead: transcript.userHead === "hidden",
               name: turn.author.name ?? null,
               // The shared `ChatBubble` avatar monogram — engine-derived
@@ -444,9 +480,14 @@ function ChatShellInner(
     const submit = () => {
       const q = draft.trim()
       if (q.length < minChars || blocked) return
-      send.onSubmit(q)
+      // The parked quote rides the message as a trailing blockquote — see
+      // `lib/chatQuote.ts` for why it goes on the wire this way instead of as
+      // a new field. `send.onSubmit` therefore sees exactly what the reader
+      // would have got by typing the excerpt themselves.
+      send.onSubmit(buildQuotedMessage(q, quote))
       setDraft("")
       draftRef.current = ""
+      setQuote(null)
     }
 
     return (
@@ -478,6 +519,15 @@ function ChatShellInner(
               </div>
             </div>
           </div>
+          {/* Highlight-to-reply. The shell owns the composer on this path, so
+              the quote is parked in shell state directly — no host wiring. */}
+          <SelectionReplyToolbar
+            containerRef={projectViewportRef}
+            onReply={(text) => {
+              setQuote(text)
+              projectComposerRef.current?.focus()
+            }}
+          />
           <div className={frame.dockClassName ?? "bc-dock"}>
             {dock?.aboveComposer}
             <ChatComposer
@@ -524,6 +574,8 @@ function ChatShellInner(
               onRemoveSkill={f?.onRemoveSkill ?? (() => {})}
               onFileSelect={f?.onFileSelect ?? (() => {})}
               placeholder={composer.placeholder}
+              quote={quote}
+              onRemoveQuote={() => setQuote(null)}
             />
           </div>
         </main>
@@ -549,7 +601,13 @@ function ChatShellInner(
         >
           {isThread ? (
             <div className="bc-scroll">
-              <div className={frame.threadClassName ?? "bc-thread"} ref={refs?.contentColumnRef}>
+              <div
+                className={frame.threadClassName ?? "bc-thread"}
+                ref={(el) => {
+                  mainColumnRef.current = el
+                  refs?.contentColumnRef?.(el)
+                }}
+              >
                 <ChatTranscript turns={turns as ChatTranscriptTurn[]} leading={transcript.leading} />
                 {pendingSend}
               </div>
@@ -558,6 +616,18 @@ function ChatShellInner(
             frame.landing
           )}
         </div>
+
+        {/* Highlight-to-reply, scoped to the thread column (`contentColumnRef`)
+            rather than the viewport, so a selection in the landing block or
+            the dock is never mistaken for a quotable passage. Opt-in: a host
+            that passes no `onQuoteSelection` renders no toolbar and no extra
+            listeners, keeping main's DOM byte-identical. */}
+        {isThread && onQuoteSelection ? (
+          <SelectionReplyToolbar
+            containerRef={mainColumnRef}
+            onReply={onQuoteSelection}
+          />
+        ) : null}
 
         {isThread ? (
           <div className={frame.dockClassName ?? "bc-dock"}>

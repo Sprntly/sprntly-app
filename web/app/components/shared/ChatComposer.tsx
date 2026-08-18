@@ -95,6 +95,8 @@ export function ChatComposer({
   onToggleVoice,
   disableVoice,
   placeholder,
+  quote,
+  onRemoveQuote,
 }: {
   home?: boolean
   busy: boolean
@@ -138,6 +140,14 @@ export function ChatComposer({
    *  @Sprntly to hand it a task…" copy. Omitted callers (ChatScreen) get the
    *  exact original text, unchanged. */
   placeholder?: string
+  /** A passage the reader highlighted in an answer and chose to reply to,
+   *  parked above the input until they send or dismiss it. The composer only
+   *  DISPLAYS it — the caller owns the state and folds it into the outgoing
+   *  message (`buildQuotedMessage`), because what "send" means differs per
+   *  surface. Unset/null renders nothing, so every existing caller's DOM is
+   *  byte-identical. */
+  quote?: string | null
+  onRemoveQuote?: () => void
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
   // Opening the menu moves focus into it, so it is operable from the keyboard at
@@ -213,6 +223,24 @@ export function ChatComposer({
   return (
     <div className={`cx${home ? " cx--home" : ""}${busy ? " cx--busy" : ""}`}>
       {slashMenu}
+      {/* The quoted passage sits ABOVE the chips and the input — it is context
+          for what you are about to type, so it reads first, in the reading
+          order the sent turn will use. Clamped rather than scrollable: a quote
+          is a pointer at a passage, not a second copy of it. */}
+      {quote ? (
+        <div className="cx-quote" data-testid="composer-quote">
+          <p className="cx-quote-text">{quote}</p>
+          <button
+            type="button"
+            className="cx-quote-x"
+            aria-label="Remove the quoted text"
+            title="Remove the quoted text"
+            onClick={onRemoveQuote}
+          >
+            ×
+          </button>
+        </div>
+      ) : null}
       {hasHead ? (
         <div className="cx-head">
           {pinnedSkill ? (

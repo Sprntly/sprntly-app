@@ -10,6 +10,7 @@ import {
   briefApi,
   type ConversationRecord,
 } from "../../../lib/api"
+import { splitQuotedSuffix } from "../../../lib/chatQuote"
 import type { ConversationRow } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -164,6 +165,15 @@ const BRIEF_PIN_TITLES = [
 
 function normalizeTitle(s: string): string {
   return s.trim().toLowerCase()
+}
+
+/** The row's second line: what the user last SAID, without the passage they
+ *  were quoting. A quoted message carries the excerpt as a trailing blockquote
+ *  in its own text (see `lib/chatQuote.ts`), and a row whose preview is
+ *  somebody else's words tells you nothing about the conversation. */
+export function previewText(s: string | null | undefined): string {
+  if (!s) return ""
+  return splitQuotedSuffix(s).body
 }
 
 /**
@@ -513,7 +523,12 @@ export function ChatsScreen() {
       id: String(c.id),
       title: c.title,
       time: c.created_at,
-      savedTurn: { id: String(c.id), query: c.query || c.preview },
+      // The preview line is the last thing the user SAID, and a message that
+      // quoted a passage stores that excerpt as a trailing blockquote — so
+      // strip it here rather than filing the row under "> findings
+      // unsupported by adequate documentation…". Done at the display boundary,
+      // not at write time, so rows written before this also read correctly.
+      savedTurn: { id: String(c.id), query: previewText(c.query || c.preview) },
       _pinned: c.pinned,
       _agentType: c.agent_type,
       _dbId: c.id,

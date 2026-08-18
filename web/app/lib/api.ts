@@ -5179,6 +5179,18 @@ export const conversationsApi = {
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
     }),
+  /** REWIND the conversation to just before `turnId` — deletes that turn and
+   *  every turn after it. `turnId` must be a USER turn: you rewind to a
+   *  question, never into the middle of an answer.
+   *
+   *  The callers are edit-and-resend and retry on a past prompt. The thread on
+   *  screen rewinds to the point being re-asked, and the record follows, or the
+   *  same conversation reopened from history shows the old pair AND the new
+   *  one. 409 when the turn isn't in this conversation (the client's thread has
+   *  moved on) or isn't a user turn — every caller treats that as "leave it
+   *  alone". */
+  rewindToTurn: (conversationId: number, turnId: number) =>
+    api.delete(`/v1/conversations/${conversationId}/turns/${turnId}`),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------
