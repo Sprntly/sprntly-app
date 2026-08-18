@@ -35,6 +35,7 @@
 // Reduced motion: no typing, no shimmer — the current line renders whole.
 
 import { useEffect, useRef, useState } from "react"
+import { SprntlyThinkingMark } from "./SprntlyMark"
 
 // ── Copy ────────────────────────────────────────────────────────────────────
 export const WAIT_PHASE_WORKING = "Working on your question"
@@ -287,7 +288,9 @@ export function AssistantWaitState({
   return (
     <div className={`cw${compact ? " cw--compact" : ""}`}>
       <div className="cw-status">
-        <span className="cw-orb" aria-hidden />
+        <span className="cw-orb" aria-hidden>
+          <SprntlyThinkingMark size={15} />
+        </span>
         <span className="cw-phase">
           <span
             className={`cw-phase-typed${settled ? " cw-phase-held" : ""}`}

@@ -29,6 +29,7 @@
  */
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { IconSparkle } from "./app-icons"
+import { SprntlyMark } from "./SprntlyMark"
 import { AskReplyBody } from "./AskReplyBody"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import {
@@ -621,8 +622,13 @@ export function ChatBubble(props: ChatBubbleProps) {
         {showAgent ? (
           <>
             <div className="bc-agent-head">
+              {/* The agent's identity, at rest. Deliberately NOT animated:
+                  the working state belongs to the wait row directly below
+                  (`AssistantWaitState`'s mark), and two things moving in the
+                  same corner reads as a glitch rather than as progress. This
+                  chip says WHO is answering; that one says it is still going. */}
               <span className="bc-agent-mark">
-                <IconSparkle size={14} />
+                <SprntlyMark size={13} />
               </span>
               <span className="bc-agent-name">{agentName}</span>
               {agentBadge ? (

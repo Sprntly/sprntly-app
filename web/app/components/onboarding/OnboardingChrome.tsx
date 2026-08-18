@@ -3,6 +3,7 @@
 import type { ReactNode } from "react"
 import { ONBOARDING_STEP_COUNT } from "../../lib/onboarding/types"
 import { ArrowLeft, ArrowRight } from "../auth/icons"
+import { SprntlyLockup } from "../shared/SprntlyMark"
 
 /**
  * Shared chrome for the v4-styled onboarding scenes (Company / Metrics).
@@ -59,7 +60,7 @@ export function OnboardingChrome({
     <div className="onb-shell">
       <div className="onb-head">
         <span className="onb-brand">
-          sprntly<span className="dot">.</span>
+          <SprntlyLockup height={18} />
         </span>
         <div className="onb-dots" data-step={step}>
           {dots.map((d) => (

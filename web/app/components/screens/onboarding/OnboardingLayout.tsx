@@ -1,6 +1,7 @@
 "use client"
 
 import type { ReactNode } from "react"
+import { SprntlyLockup } from "../../shared/SprntlyMark"
 
 interface OnboardingLayoutProps {
   heroTitle: ReactNode
@@ -28,7 +29,7 @@ export function OnboardingLayout({
       <div className="ob-hero">
         <div className="ob-hero-inner">
           <div className="ob-logo">
-            spr<span>ntly</span>
+            <SprntlyLockup height={22} />
           </div>
           <h1 className="ob-headline">{heroTitle}</h1>
           <p className="ob-sub">{heroSub}</p>
@@ -38,7 +39,7 @@ export function OnboardingLayout({
       <div className="ob-panel">
         <div className="ob-panel-inner">
           <div className="ob-brand-mark">
-            spr<span>ntly</span>
+            <SprntlyLockup height={22} />
           </div>
           <div className="ob-step-indicator">
             {[1, 2, 3, 4, 5, 6, 7, 8].map((s) => (
