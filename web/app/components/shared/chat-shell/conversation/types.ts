@@ -31,11 +31,12 @@
 import type { AskResponse } from "../../../../lib/api"
 import type { ChatPersistence } from "../../../../lib/chatPersistence"
 import type { ClarifyAnswer, ClarifyQuestion } from "../../ClarifyQuestionsCard"
-import type {
-  ChatIntentExecutorAdapter,
-  ChatSurfaceKind,
-  ChatTranscriptTurn,
-} from "../types"
+import type { NextPromptsAdapter } from "../useNextPrompts"
+import type { ChatIntentExecutorAdapter, ChatSurfaceKind } from "../types"
+// The canonical turn model (the plan pins main's `ThreadTurn` as the one turn
+// shape). Imported here as a type only; a later cleanup relocates the definition
+// out of the main screen into this shared module.
+import type { ThreadTurn } from "../../../screens/app/ChatScreen"
 
 // ── Engine sub-shapes ────────────────────────────────────────────────────────
 
@@ -86,14 +87,28 @@ export interface ConversationResume {
 
 // ── The engine output (useConversation → ConversationEngine) ─────────────────
 
+/** The grounding params folded into every ask for this conversation — the
+ *  subset of `runAskGeneration`'s options a surface pins (main a tab's PRD /
+ *  evidence / ticket-set; a project surface its `project_id`). Absent members
+ *  simply don't ride. */
+export interface ConversationAskParams {
+  prd_id?: number
+  project_id?: number
+  evidence_id?: number
+  ticket_set_id?: number
+}
+
 /**
  * The output of `useConversation(adapter)` — the single-conversation turn/run
  * engine. Owns ONE conversation (no tab map; the main screen's tab wrapper mounts
- * one engine per active tab). CONTRACT-ONLY in Step A; implemented in Step B.
+ * one engine per tab in a later step). Implemented in Step B as a self-contained
+ * hook; main stays on its inline path until it adopts the hook.
  */
 export interface ConversationEngine {
-  /** This conversation's turns, already in the shell's render model. */
-  turns: ChatTranscriptTurn[]
+  /** This conversation's turns, in the canonical `ThreadTurn` model. The
+   *  presentation (`ConversationView`) maps them to the shell's render model —
+   *  the map is surface-specific, so it lives at the consumer, not the engine. */
+  turns: ThreadTurn[]
   /** Composer-blocking in-flight state for THIS conversation only. */
   busy: boolean
   /** The optimistic just-sent turn awaiting its first ack, or null. */
@@ -115,30 +130,43 @@ export interface ConversationEngine {
 /**
  * The ONLY per-surface seam — all NON-visual. Each of the three surfaces differs
  * here and nowhere else; the group adapter is ~identical to the private one,
- * pointed at the group's shared conversation instead of a per-user one.
- * CONTRACT-ONLY in Step A; consumed by `useConversation` in Step B and by the
- * private/group rebuilds in Steps C/D.
+ * pointed at the group's shared conversation instead of a per-user one. Consumed
+ * by `useConversation` in Step B; the private/group rebuilds supply their own in
+ * later steps.
  */
 export interface SurfaceAdapter {
-  /** Who the conversation belongs to + how the user renders. */
+  /** Who the conversation belongs to + how the user/turns are keyed. */
   identity: {
     surface: ChatSurfaceKind
     /** Normalized to a number; absent on main. */
     projectId?: number | null
     userName: string
     userInitials: string
+    /** The tenant/company scope `runAskGeneration` + job-resume key by. */
+    company: string
+    /** The stable local key for THIS conversation — main a tab id, a project
+     *  surface its thread id. The ask/poll/resume/persistence spine keys on it. */
+    conversationKey: string
   }
   /** The turn writer — main writes client+server, project surfaces write
    *  server-only; both satisfy `createChatPersistence`. */
   persistence: ChatPersistence
-  /** Loads this conversation's prior turns on mount. */
-  loadHistory(): Promise<ChatTranscriptTurn[]>
-  /** Re-attach to an already-kicked-off run after a reload. Absent on a surface
-   *  with no resumable run. */
-  resume?(): void | Promise<void>
-  /** Grounding params folded into every ask (e.g. `{ project_id }`); absent on
-   *  main. */
-  askParams?: Record<string, unknown>
+  /** Loads this conversation's prior turns on mount (canonical `ThreadTurn`). */
+  loadHistory(): Promise<ThreadTurn[]>
+  /** Grounding folded into every ask (a tab's PRD / a project's id). */
+  askParams?: ConversationAskParams
+  /** The surface's next-prompt fetch (main → `chatSuggestionsApi.next`; a project
+   *  surface supplies its own thread-scoped fetch). Absent → no suggestions. */
+  suggestions?: NextPromptsAdapter
+  /** Command-intent dispatch for this surface (the resolve→executor switch main
+   *  runs inline; project surfaces supply their own). `submit` calls it first and
+   *  short-circuits when it reports the message HANDLED as a command; absent → a
+   *  send is always an ask. */
+  dispatchIntent?(draft: string): Promise<boolean> | boolean
+  /** Resolve an open clarify batch for this conversation (surface-specific: main
+   *  re-enters generation, a project surface answers its gate). Absent → the
+   *  clarify seam stays inert. */
+  submitClarify?(turnId: string, answers: ClarifyAnswer[]): void | Promise<void>
   /** The surface's chat-intent flow bodies (endpoints per surface). Every slot
    *  optional — a surface provides only the intents it implements. */
   intentAdapter?: ChatIntentExecutorAdapter
