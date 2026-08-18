@@ -410,6 +410,11 @@ def test_ledger_publishers_and_signatures_unchanged(isolated_settings):
     assert list(sig.parameters) == [
         "project_id", "assigner_user_id", "source_conversation_id",
         "source_turn_id", "roster", "dataset", "company_id", "tool_input",
+        # Added by 9513cc26 so a delegated task carries the originating
+        # message's own text instead of the handler inventing a summary.
+        # Pinned here because this guard watches for UNINTENDED drift, and a
+        # real-but-unlisted parameter just makes it fail on every run.
+        "source_content",
     ]
     # The new publishers exist with the documented shapes.
     assert list(inspect.signature(project_delegation._publish_member_added).parameters) == [

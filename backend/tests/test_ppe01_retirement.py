@@ -5,8 +5,16 @@ project-chat propose/review write tool + its handler) — in-place editing via
 the shared `apply_chat_edit_scoped` (PCU-01 private, this ticket's group
 wiring) supersedes it on both project-chat surfaces.
 
+ALSO RETIRED, later, by e05577dc: `_resolve_prd_id` and the rest of the
+server-side edit-target resolution that enumerated a project's own PRDs. Both
+chat surfaces now bind the open-drawer PRD explicitly and apply through
+`apply_chat_edit_scoped`, so there is nothing left to infer across a project's
+PRDs. That commit removed the code and deleted the two live-edit test files
+but did not update these guards, which is why they asserted a KEEP set that no
+longer existed and held main red.
+
 KEEP (untouched): `project_prd_gate.py` (`assert_prd_on_project`), the
-surviving `_resolve_prd_id`/`project_prd_edit_enabled` in
+surviving `project_prd_edit_enabled` in
 `project_prd_patch_tool.py`, the `prd_patches` table + its DB helpers, and
 Design-Agent's own main-chat `prd_patches` propose/accept/reject flow
 (`routes/design_agent.py`'s `/prd-patches*` endpoints + the frontend
@@ -67,18 +75,24 @@ def test_importing_retired_symbols_raises():
 
     assert not hasattr(tool_mod, "PROPOSE_PROJECT_PRD_PATCH_TOOL")
     assert not hasattr(tool_mod, "handle_propose_prd_patch")
+    # Retired later by e05577dc, together with the propose flow it served.
+    assert not hasattr(tool_mod, "_resolve_prd_id")
     with pytest.raises(AttributeError):
         tool_mod.PROPOSE_PROJECT_PRD_PATCH_TOOL
     with pytest.raises(AttributeError):
         tool_mod.handle_propose_prd_patch
+    with pytest.raises(AttributeError):
+        tool_mod._resolve_prd_id
 
 
 def test_group_route_no_longer_imports_propose_symbols():
     src = (BACKEND / "app" / "routes" / "projects.py").read_text(encoding="utf-8")
     assert "PROPOSE_PROJECT_PRD_PATCH_TOOL" not in src
     assert "handle_propose_prd_patch" not in src
-    # The survivors ARE still imported (both surfaces need them).
-    assert "_resolve_prd_id" in src
+    # `_resolve_prd_id` went with them: the route binds the open-drawer PRD id
+    # explicitly now rather than inferring a target across the project's PRDs.
+    assert "_resolve_prd_id" not in src
+    # The one survivor IS still imported (both surfaces need the flag).
     assert "project_prd_edit_enabled" in src
 
 
@@ -121,12 +135,11 @@ def test_group_chat_unchanged_never_referenced_banner():
 def test_keep_set_intact():
     # Backend: the project-scope gate, the surviving resolver + flag.
     from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project, prd_on_project
-    from app.project_prd_patch_tool import _resolve_prd_id, project_prd_edit_enabled
+    from app.project_prd_patch_tool import project_prd_edit_enabled
 
     assert callable(assert_prd_on_project)
     assert callable(prd_on_project)
     assert issubclass(ProjectPrdWriteDenied, Exception)
-    assert callable(_resolve_prd_id)
     assert callable(project_prd_edit_enabled)
 
     # Backend: the shared scoped-edit callable (PCU-01/this ticket's shared writer).
@@ -164,16 +177,20 @@ def test_keep_set_intact():
 def test_ci_registry_no_stale_or_missing():
     import tests.test_ci_lane_coverage as ci_mod
 
+    # e05577dc deleted BOTH live-edit files — the propose/confirm flow they
+    # exercised no longer exists, and `test_project_prd_edit_parity.py` covers
+    # the shared editor both surfaces now use. So the registry must carry
+    # neither, and a stale entry for a deleted file is exactly what
+    # `test_ci_lane_coverage.test_no_stale_unrunnable_entries` exists to catch.
     keys = set(ci_mod._KNOWN_UNRUNNABLE)
-    assert ("test_project_individual_prd_edit_live.py", "RUN_PROJECT_PRD_EDIT_LIVE") not in keys
-    assert ("test_project_individual_prd_edit_live.py", "ANTHROPIC_API_KEY") not in keys
-    assert ("test_group_chat_prd_edit_live.py", "RUN_GROUP_CHAT_PRD_EDIT_LIVE") in keys
-    assert ("test_group_chat_prd_edit_live.py", "ANTHROPIC_API_KEY") in keys
+    for stale in (
+        "test_project_individual_prd_edit_live.py",
+        "test_group_chat_prd_edit_live.py",
+    ):
+        assert not any(f == stale for f, _ in keys), f"stale registry entry for {stale}"
+        assert not (BACKEND / "tests" / stale).exists()
 
-    live_file = BACKEND / "tests" / "test_project_individual_prd_edit_live.py"
-    assert not live_file.exists()
-    new_live_file = BACKEND / "tests" / "test_group_chat_prd_edit_live.py"
-    assert new_live_file.exists()
+    assert (BACKEND / "tests" / "test_project_prd_edit_parity.py").exists()
 
     # The registry's own ratchet test still passes (re-run here so THIS
     # ticket's registry surgery is proven, not just asserted statically).

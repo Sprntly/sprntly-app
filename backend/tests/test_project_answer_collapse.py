@@ -1214,7 +1214,14 @@ def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
     )
     # The resolved `pinned_skill` is threaded through (None here — no explicit
     # pick and the source turn carries no routable slash trigger).
-    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r", "pinned_skill": None})]
+    # `edit_target_prd_id` rides along from e05577dc's prop-drill chain: the
+    # open-drawer PRD id is bound explicitly now rather than inferred
+    # server-side across the project's PRDs. None here — no drawer open.
+    assert calls == [(
+        (1, 2, ctx, "mention"),
+        {"job_id": 99, "run_id": "r", "pinned_skill": None,
+         "edit_target_prd_id": None},
+    )]
     assert projects_route._group_reply_tasks == before  # no task was ever scheduled
 
 
@@ -1278,6 +1285,11 @@ def test_background_input_is_extensible_structure():
         # deterministic routing input (the FE's skill pick, or the source
         # turn's own trigger on a retry), also not the message.
         "source_turn_id", "client_message_id", "job_id", "run_id", "pinned_skill",
+        # Also not the message: the id of the PRD open in the drawer, bound
+        # explicitly by e05577dc so an edit-phrased mention resolves a target
+        # instead of the server inferring one across the project's PRDs. A
+        # TARGET is execution identity, so it belongs in this list.
+        "edit_target_prd_id",
     ]
     # None of these IS "the message" itself — the reply re-derives the live
     # transcript from the DB inside `_respond_as_group_agent`, so a future

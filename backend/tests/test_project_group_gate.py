@@ -1121,7 +1121,14 @@ def test_no_interjection_toggle_request_field():
     # No field that would let a client toggle whether/how the agent interjects.
     assert not (fields & {"mode", "interjection_mode", "auto_reply", "respond", "always_respond"})
     # Only the allowlisted plumbing fields are added beyond `content`.
-    assert fields <= {"content", "client_message_id", "pinned_skill", "attachments"}
+    # `prd_id` binds the PRD open in the drawer, added by e05577dc so an
+    # edit-phrased message resolves a target explicitly rather than the server
+    # inferring one across the project's PRDs. It is a TARGET, not a mode
+    # toggle, so it does not weaken what this guard is actually watching for —
+    # the assertion above still forbids every interjection/auto-reply field.
+    assert fields <= {
+        "content", "client_message_id", "pinned_skill", "attachments", "prd_id",
+    }
 
 
 # ── Real-LLM / real-DB live tier ─────────────────────────────────────────
