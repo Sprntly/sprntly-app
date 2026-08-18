@@ -1,7 +1,7 @@
 """Call index: listing intent, account derivation, and the cheap answer path.
 
 The index exists because the full-corpus digest costs ~168s and ~$0.23 per
-question (measured on Chaostrack, 22 calls) while ~98% of that is the model
+question (measured on Northwind, 22 calls) while ~98% of that is the model
 reading transcripts. These tests pin the two properties that make the saving
 real and safe:
 
@@ -76,10 +76,10 @@ def test_unrelated_questions_are_not_listings():
 
 def test_account_derives_from_the_external_domain():
     account = ci.derive_account(
-        ["pramod@chaostrack.com", "buyer@genworth.com", "rep@genworth.com"],
-        own_domains={"chaostrack.com"},
+        ["pramod@northwind.example", "buyer@vandelay.example", "rep@vandelay.example"],
+        own_domains={"northwind.example"},
     )
-    assert account == "Genworth"
+    assert account == "Vandelay"
 
 
 def test_account_is_none_for_an_internal_call():
@@ -87,15 +87,15 @@ def test_account_is_none_for_an_internal_call():
     wrong label is worse than a blank one when the model reads this as
     evidence, so guessing is not acceptable here."""
     assert ci.derive_account(
-        ["pramod@chaostrack.com", "eng@chaostrack.com"],
-        own_domains={"chaostrack.com"},
+        ["pramod@northwind.example", "eng@northwind.example"],
+        own_domains={"northwind.example"},
     ) is None
 
 
 def test_generic_mail_domains_never_become_an_account():
     assert ci.derive_account(
-        ["pramod@chaostrack.com", "someone@gmail.com"],
-        own_domains={"chaostrack.com"},
+        ["pramod@northwind.example", "someone@gmail.com"],
+        own_domains={"northwind.example"},
     ) is None
 
 
@@ -103,20 +103,20 @@ def test_most_common_external_domain_wins():
     """A call with several customer attendees and one vendor rep is labelled by
     the customer, not by whoever happens to be listed first."""
     assert ci.derive_account(
-        ["a@hartford.com", "b@hartford.com", "solo@othercorp.com"],
+        ["a@initech.example", "b@initech.example", "solo@othercorp.com"],
         own_domains=set(),
-    ) == "Hartford"
+    ) == "Initech"
 
 
 # ── the cheap answer path ────────────────────────────────────────────────────
 
-def _call(idx: int, account: str | None = "Genworth") -> ci.IndexedCall:
+def _call(idx: int, account: str | None = "Vandelay") -> ci.IndexedCall:
     return ci.IndexedCall(
         external_id=f"id-{idx}",
         title=f"Call {idx}",
         call_date=f"2026-07-2{idx}T10:00:00+00:00",
         duration_min=30.0,
-        participants=["a@genworth.com"],
+        participants=["a@vandelay.example"],
         account=account,
         summary="",
     )
@@ -129,7 +129,7 @@ def test_answer_listing_reads_the_index_and_makes_no_model_call(monkeypatch):
     assert out is not None
     assert out["_skill_source"] == "call-index"
     assert "3 calls" in out["answer"]
-    assert "Genworth" in out["answer"]
+    assert "Vandelay" in out["answer"]
 
 
 def test_answer_listing_honours_an_explicit_count(monkeypatch):
@@ -262,23 +262,23 @@ def test_rendered_line_omits_a_missing_account():
 def test_ubiquitous_domain_is_treated_as_our_own(monkeypatch):
     """The host attends every call; a customer does not. Without this, a
     workspace with no membership rows labels every call with the VENDOR's
-    domain — observed on the first Chaostrack sync, where all 485 calls came
-    back as account="Chaostrack"."""
+    domain — observed on the first Northwind sync, where all 485 calls came
+    back as account="Northwind"."""
     monkeypatch.setattr(
         "app.db.drip.list_members_with_email", lambda cid: [], raising=False
     )
     calls = [
-        {"participants": ["host@chaostrack.com", "buyer@genworth.com"]},
-        {"participants": ["host@chaostrack.com", "cto@hartford.com"]},
-        {"participants": ["host@chaostrack.com", "pm@nefco.com"]},
-        {"participants": ["host@chaostrack.com"]},
+        {"participants": ["host@northwind.example", "buyer@vandelay.example"]},
+        {"participants": ["host@northwind.example", "cto@initech.example"]},
+        {"participants": ["host@northwind.example", "pm@umbrella.example"]},
+        {"participants": ["host@northwind.example"]},
     ]
     own = ci._own_domains("ent-A", calls)
 
-    assert "chaostrack.com" in own            # on 4/4 calls -> ours
-    assert "genworth.com" not in own          # on 1/4 -> a customer
+    assert "northwind.example" in own            # on 4/4 calls -> ours
+    assert "vandelay.example" not in own          # on 1/4 -> a customer
     # ...and the derived account is therefore the customer, not us.
-    assert ci.derive_account(calls[0]["participants"], own) == "Genworth"
+    assert ci.derive_account(calls[0]["participants"], own) == "Vandelay"
 
 
 def test_ubiquity_needs_more_than_one_call(monkeypatch):
@@ -295,11 +295,11 @@ def test_ubiquity_needs_more_than_one_call(monkeypatch):
 
 def test_single_call_intent_recognised():
     for question in (
-        "Summarize Mayerbrown",
-        "summarize the Mayer Brown call",
-        "tell me about the Genworth conversation",
+        "Summarize Globexpartners",
+        "summarize the Globex Partners call",
+        "tell me about the Vandelay conversation",
         "what did we discuss with BBVA",
-        "walk me through the NEFCO check-in",
+        "walk me through the Umbrella check-in",
     ):
         assert ci.is_single_call_request(question), question
 
@@ -337,11 +337,11 @@ def test_listing_questions_are_not_single_call():
 def test_asking_for_a_named_transcript_is_a_single_call_request():
     for question in (
         "find me the transcript of David Mumuni's Zoom meeting",
-        "get me the Genworth transcript",
+        "get me the Vandelay transcript",
         # The bare noun phrase, which is how people actually ask.
-        "transcript of the Mayer Brown call",
+        "transcript of the Globex Partners call",
         "what was said on the BBVA call",
-        "read me the NEFCO check-in",
+        "read me the Umbrella check-in",
     ):
         assert ci.is_single_call_request(question), question
 
@@ -354,7 +354,7 @@ def test_a_plural_transcript_ask_that_NAMES_an_account_is_still_not_one_call():
     to the listing or the digest."""
     for question in (
         "send me the last 3 transcripts from Acme",
-        "transcripts for the Genworth account",
+        "transcripts for the Vandelay account",
     ):
         assert not ci.is_single_call_request(question), question
 
@@ -462,18 +462,18 @@ def _indexed(account, title):
 
 
 def test_resolution_matches_a_squashed_account_name(monkeypatch):
-    """The index stores 'Mayerbrown' while the title says 'Mayer Brown'. A user
+    """The index stores 'Globexpartners' while the title says 'Globex Partners'. A user
     types either. Normalizing to alphanumerics makes all three compare equal."""
     calls = [
-        _indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"),
-        _indexed("Nooks", "ChaosTrack | Nooks Q+A"),
+        _indexed("Globexpartners", "Globex Partners + Northwind Briefing"),
+        _indexed("Nooks", "Northwind | Nooks Q+A"),
         _indexed("Bbva", "Luis Saiz and Carter Hayes"),
     ]
     monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
 
-    for question in ("Summarize Mayerbrown", "summarize the Mayer Brown call"):
+    for question in ("Summarize Globexpartners", "summarize the Globex Partners call"):
         best = ci.resolve_calls("ent-A", question)
-        assert best and best[0].account == "Mayerbrown", question
+        assert best and best[0].account == "Globexpartners", question
 
 
 def test_a_general_ask_resolves_to_nothing_rather_than_to_one_call(monkeypatch):
@@ -486,8 +486,8 @@ def test_a_general_ask_resolves_to_nothing_rather_than_to_one_call(monkeypatch):
     """
     calls = [
         _indexed(None, "SE Candidate Interview"),
-        _indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"),
-        _indexed("Genworth", "Genworth Discovery"),
+        _indexed("Globexpartners", "Globex Partners + Northwind Briefing"),
+        _indexed("Vandelay", "Vandelay Discovery"),
     ]
     monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
     assert ci.resolve_calls("ent-A", "can you summarize our recent customer calls") == []
@@ -500,7 +500,7 @@ def test_a_general_ask_produces_no_single_call_answer(monkeypatch):
     whole window."""
     calls = [
         _indexed(None, "SE Candidate Interview"),
-        _indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"),
+        _indexed("Globexpartners", "Globex Partners + Northwind Briefing"),
     ]
     monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
     monkeypatch.setattr(
@@ -530,10 +530,10 @@ def test_resolution_selects_by_date(monkeypatch):
     """A date the user typed picks that day's call, the same reference form
     `select_from_candidates` already accepts in a disambiguation reply."""
     older = ci.IndexedCall(
-        "id-old", "Genworth Discovery", "2026-07-22T10:00:00+00:00", 30.0, [],
-        "Genworth", "",
+        "id-old", "Vandelay Discovery", "2026-07-22T10:00:00+00:00", 30.0, [],
+        "Vandelay", "",
     )
-    calls = [_indexed("Mayerbrown", "Mayer Brown + ChaosTrack Briefing"), older]
+    calls = [_indexed("Globexpartners", "Globex Partners + Northwind Briefing"), older]
     monkeypatch.setattr(ci, "list_calls", lambda *a, **k: calls)
     got = ci.resolve_calls("ent-A", "summarize the call on 2026-07-22")
     assert [c.external_id for c in got] == ["id-old"]
@@ -543,7 +543,7 @@ def test_resolution_returns_nothing_when_no_call_matches(monkeypatch):
     """No match must yield [] so the caller falls through — summarizing an
     arbitrary call would be worse than not answering."""
     monkeypatch.setattr(ci, "list_calls", lambda *a, **k: [_indexed("Nooks", "Nooks Q+A")])
-    assert ci.resolve_calls("ent-A", "summarize the Genworth call") == []
+    assert ci.resolve_calls("ent-A", "summarize the Vandelay call") == []
 
 
 def test_single_call_falls_through_when_transcript_is_empty(monkeypatch):
@@ -563,12 +563,12 @@ def test_single_call_summarizes_one_transcript(monkeypatch):
     whole window."""
     fetched = []
     monkeypatch.setattr(
-        ci, "list_calls", lambda *a, **k: [_indexed("Nooks", "ChaosTrack | Nooks Q+A")]
+        ci, "list_calls", lambda *a, **k: [_indexed("Nooks", "Northwind | Nooks Q+A")]
     )
     monkeypatch.setattr(
         ci, "fetch_transcript",
         lambda cid, ext: fetched.append(ext) or {
-            "title": "ChaosTrack | Nooks Q+A",
+            "title": "Northwind | Nooks Q+A",
             "summary": {"overview": "ov"},
             "sentences": [{"speaker_name": "Buyer", "text": "we need SSO"}],
         },
@@ -589,7 +589,7 @@ def test_single_call_summarizes_one_transcript(monkeypatch):
 def test_a_real_length_call_renders_complete():
     """The corpus's longest call is 880 sentences / ~58k chars. Nothing at that
     scale may be truncated — the previous 600-SENTENCE cap silently cut 3 of 10
-    recent calls, including the Mayer Brown call (609) whose summary was
+    recent calls, including the Globex Partners call (609) whose summary was
     therefore produced without its closing 9 sentences."""
     raw = {
         "title": "Long real call",
@@ -621,7 +621,7 @@ def test_truncation_keeps_the_close_and_announces_itself():
 
 # ── replying to a disambiguation ─────────────────────────────────────────────
 #
-# Reported from a live thread: "give me a summary of the call with blue cross"
+# Reported from a live thread: "give me a summary of the call with fabrikam"
 # correctly asked which of two Azblue calls, the user answered "both", and the
 # answer fell through to the KG reporting the transcripts were unavailable —
 # while they were one fetch away. The disambiguation was posing a question it
@@ -629,14 +629,14 @@ def test_truncation_keeps_the_close_and_announces_itself():
 
 def _two_azblue():
     return [
-        ci.IndexedCall("id-a", "Blue Cross Blue Shield of Arizona + ChaosTrack Sync",
+        ci.IndexedCall("id-a", "Fabrikam Health + Northwind Sync",
                        "2026-07-28T10:00:00+00:00", 47.0, [], "Azblue", ""),
-        ci.IndexedCall("id-b", "Blue Cross Blue Shield of Arizona + Briefing",
+        ci.IndexedCall("id-b", "Fabrikam Health + Briefing",
                        "2026-07-22T10:00:00+00:00", 61.0, [], "Azblue", ""),
     ]
 
 
-def _disambiguated_history(original="give me a summary of the call with blue cross"):
+def _disambiguated_history(original="give me a summary of the call with fabrikam"):
     return [
         {"role": "user", "content": original},
         {"role": "assistant",
@@ -676,10 +676,10 @@ def test_long_messages_do_not_select_by_ordinal():
 
 
 def test_the_word_one_does_not_mean_first():
-    """"the Genworth one" means an ITEM, not the first item. Mapping "one" to
+    """"the Vandelay one" means an ITEM, not the first item. Mapping "one" to
     index 0 made an unmatched narrowing term silently return the wrong call."""
     calls = _two_azblue()
-    assert ci.select_from_candidates("the Genworth one", calls) == []
+    assert ci.select_from_candidates("the Vandelay one", calls) == []
     assert ci.select_from_candidates("the sync one", calls) == [calls[0]]
 
 
@@ -710,7 +710,7 @@ def test_both_fetches_every_selected_transcript(monkeypatch):
 
 def test_selection_that_matches_nothing_falls_through(monkeypatch):
     monkeypatch.setattr(ci, "resolve_calls", lambda cid, q, **k: _two_azblue())
-    out = ci.select_from_candidates("the Genworth one", _two_azblue())
+    out = ci.select_from_candidates("the Vandelay one", _two_azblue())
     assert out == []
 
 
@@ -841,7 +841,7 @@ def test_single_call_refuses_to_answer_from_an_unsynced_index(monkeypatch):
     index is how you confidently summarize the WRONG call."""
     monkeypatch.setattr(ci, "resolve_calls", lambda *a, **k: [_call(1)])
     out = ci.answer_single_call(
-        "ent-A", "summarize the Genworth call",
+        "ent-A", "summarize the Vandelay call",
         fresh=ci.Freshness(connected=False),
     )
     assert out is None

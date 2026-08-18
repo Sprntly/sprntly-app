@@ -879,7 +879,7 @@ answer instead.
   transcripts", "which calls did we have last week"). The index answers this
   instantly; do not send a listing question anywhere else.
 - single-call-read: read ONE named call, whatever the verb. "Summarize the
-  Mayer Brown call", "more details on the Maverik meeting", "what happened on
+  Globex Partners call", "more details on the Contoso meeting", "what happened on
   the Acme call", "who was on the Thermo Fisher briefing" are all this. The
   test is that the question names ONE meeting — usually by the company or
   person on it — not that it says "summarize". If a question names a company

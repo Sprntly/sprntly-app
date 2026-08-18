@@ -110,11 +110,11 @@ def test_tracker_only_plan_nontracker_question_does_not_route(spies):
     (`named_trackers == []` AND `is_jira_lookup == False`) does NOT route to the
     seam; the ordinary compose path serves it."""
     # Guard the premise: this is exactly the existing backstop fixture shape.
-    assert tracker_mod.named_trackers("give me more details on the maverik meeting") == []
-    assert is_jira_lookup("give me more details on the maverik meeting", None) is False
+    assert tracker_mod.named_trackers("give me more details on the contoso meeting") == []
+    assert is_jira_lookup("give me more details on the contoso meeting", None) is False
     out = _answer(
         Plan(action="answer", sources=["jira"]),
-        "give me more details on the maverik meeting",
+        "give me more details on the contoso meeting",
     )
     assert out["answer"] == "FROM_COMPOSE"
     assert spies["tracker_answer"] == []
@@ -122,14 +122,14 @@ def test_tracker_only_plan_nontracker_question_does_not_route(spies):
 
 def test_existing_backstop_test_still_green(spies):
     """AC3 — the same-shaped existing backstop case (`Plan(sources=["jira"])` on the
-    maverik question) reaches the generic compose path with the seam present. The
+    contoso question) reaches the generic compose path with the seam present. The
     existing `test_qa_agent_planned_sources.py::test_the_backstop_stands_down_when_
     the_plan_named_no_call_source` runs in this blast radius and MUST stay green;
     this local mirror asserts the same stand-down so a future predicate widening
     trips here too."""
     out = _answer(
         Plan(action="answer", sources=["jira"]),
-        "give me more details on the maverik meeting",
+        "give me more details on the contoso meeting",
     )
     assert out["answer"] == "FROM_COMPOSE"
     assert spies["tracker_answer"] == []

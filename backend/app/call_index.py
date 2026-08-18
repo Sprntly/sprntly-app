@@ -2,7 +2,7 @@
 
 THE PROBLEM. `app.call_digest` answers any call question by fetching every call
 in the window from Fireflies *with full sentences*, assembling a corpus, and
-handing it to the model. Measured on Chaostrack (22 calls, 2026-08-01):
+handing it to the model. Measured on Northwind (22 calls, 2026-08-01):
 
     Fireflies metadata only     1.13 s      7.7 KB    ~2k tokens
     Fireflies with sentences    3.19 s   1461.7 KB  ~374k tokens
@@ -17,7 +17,7 @@ THE INDEX. This module keeps the 7.7 KB half in Postgres and never the
 transcripts:
 
     "which calls last week?"        -> a DB read. No fetch, no model, no cost.
-    "summarize the Genworth call"   -> resolve one id, fetch ONE transcript.
+    "summarize the Vandelay call"   -> resolve one id, fetch ONE transcript.
     "summarize last week"           -> unchanged; it genuinely needs them all.
 
 Transcripts are deliberately not stored: they are the customer's raw
@@ -130,8 +130,8 @@ def _own_domains(company_id: str, calls: Optional[list[dict]] = None) -> set[str
     1. The company's own members. Authoritative when present — but it is empty
        for any workspace whose membership rows were not populated, and then
        every call gets labelled with the vendor's own domain as the "account".
-       That is exactly what happened on the first Chaostrack sync: 485 calls
-       came back labelled `Chaostrack`.
+       That is exactly what happened on the first Northwind sync: 485 calls
+       came back labelled `Northwind`.
 
     2. UBIQUITY across the corpus. The domain attending most of the calls is
        definitionally the host, not a customer — no customer is on 90% of your
@@ -1230,7 +1230,7 @@ def answer_listing(
 #
 # The expensive path fetches EVERY call in a window. But "summarize the Mayer
 # Brown call" names ONE, and the index already holds its external_id — so we can
-# fetch that single transcript instead of 22. Measured contrast (Chaostrack):
+# fetch that single transcript instead of 22. Measured contrast (Northwind):
 # the full path is ~168s / $0.23; one call is a fraction of that.
 #
 # The failure this replaces is worse than slow. Before the index, that question
@@ -1254,7 +1254,7 @@ query Transcript($id: String!) {
 """
 
 # Words that describe the ASK rather than the call, stripped before matching so
-# "summarize the mayer brown call" is matched on "mayer brown".
+# "summarize the globex partners call" is matched on "globex partners".
 #
 # The second block is the polite/verb-particle wrapping a request carries. It
 # was missing, and "can" is why: three characters, survives the strip, and sits
@@ -1308,9 +1308,9 @@ _GENERIC_CALL_WORDS = frozenset({
 # A verb that means the caller wants THIS call's content, not a list.
 #
 # ASKING FOR THE TRANSCRIPT IS ASKING FOR THE CONTENT, and it was missing.
-# "find me the transcript of the Genworth call" carries no summary verb, so this
+# "find me the transcript of the Vandelay call" carries no summary verb, so this
 # stood down, the question fell through to the listing leg, and the answer said
-# the transcripts "could not be loaded" — while "summarize the Genworth call",
+# the transcripts "could not be loaded" — while "summarize the Vandelay call",
 # the same call and the same data, read the transcript and answered in full.
 # Verified on staging 2026-08-16 against the same meeting, both ways.
 #
@@ -1320,7 +1320,7 @@ _GENERIC_CALL_WORDS = frozenset({
 # Zoom") that does not route either.
 #
 # The transcript nouns are matched with or without a fetch verb, because the
-# bare noun phrase is how people ask ("transcript of the Genworth call"). They
+# bare noun phrase is how people ask ("transcript of the Vandelay call"). They
 # are still subject to every gate below: a window word ("all the transcripts
 # from last week") still belongs to the digest, and something must still NAME a
 # call, so "find me the transcripts" alone stays with the listing.
@@ -1333,9 +1333,9 @@ _SINGLE_SUMMARY_VERB = re.compile(
 
 
 def _norm(text: str) -> str:
-    """Lowercase alphanumerics only — so 'Mayer Brown', 'mayerbrown' and
+    """Lowercase alphanumerics only — so 'Globex Partners', 'globexpartners' and
     'Mayer-Brown' all compare equal. The index stores a squashed account
-    ('Mayerbrown') while the title carries the spaced form."""
+    ('Globexpartners') while the title carries the spaced form."""
     return re.sub(r"[^a-z0-9]", "", (text or "").lower())
 
 
@@ -1398,8 +1398,8 @@ _MIN_SUBSTRING_TERM = 4
 
 def _call_words(call: IndexedCall) -> set[str]:
     """A call's account and title as individual normalized words, for whole-word
-    matching. 'Mayer Brown + ChaosTrack Briefing' with account 'Mayerbrown'
-    yields {mayerbrown, mayer, brown, chaostrack, briefing} — so either spelling
+    matching. 'Globex Partners + Northwind Briefing' with account 'Globexpartners'
+    yields {globexpartners, mayer, brown, northwind, briefing} — so either spelling
     of the account matches on a whole word rather than on a lucky substring."""
     return {
         _norm(w)
@@ -1430,7 +1430,7 @@ def resolve_calls(company_id: str, question: str, *, limit: int = 200) -> list[I
         if on_date and (call.call_date or "").startswith(on_date):
             score += 5
         if haystack:
-            # Whole-phrase hit ("mayerbrown") is the strongest signal.
+            # Whole-phrase hit ("globexpartners") is the strongest signal.
             if len(joined) >= _MIN_SUBSTRING_TERM and joined in haystack:
                 score += 10
             for term in terms:
@@ -1452,7 +1452,7 @@ def is_single_call_request(question: str, history=None) -> bool:
 
     Two shapes qualify:
 
-      * a named ask — "summarize the Mayer Brown call"
+      * a named ask — "summarize the Globex Partners call"
       * a REPLY to our own "which one?" — "both", "the first one", a date. Such
         a reply carries no call name and no summary verb, so it matches nothing
         on its own words; only the pending disambiguation in `history` makes it
@@ -1570,7 +1570,7 @@ def _fetch_zoom_transcript(company_id: str, external_id: str) -> Optional[dict]:
 
 
 # Budget for ONE rendered transcript, in characters (~4 chars/token). The
-# longest call in the Chaostrack corpus is 880 sentences / ~58k chars / ~14.5k
+# longest call in the Northwind corpus is 880 sentences / ~58k chars / ~14.5k
 # tokens, so at 240k chars (~60k tokens) this never bites for a single call —
 # which is the point. It exists only as a backstop against a pathological
 # multi-hour recording.
@@ -1578,7 +1578,7 @@ def _fetch_zoom_transcript(company_id: str, external_id: str) -> Optional[dict]:
 # The previous cap was 600 SENTENCES, and it was wrong in the way that matters:
 # it bit on 3 of 10 recent calls (609, 651, 880 sentences), it was SILENT, and
 # it truncated the TAIL — the end of a call, which is exactly where next steps,
-# pricing agreements and commitments land. The Mayer Brown summary was produced
+# pricing agreements and commitments land. The Globex Partners summary was produced
 # from a transcript missing its last 9 sentences, and nothing in the answer said
 # so. A summary that quietly omits the close of a customer call is worse than a
 # slow one.
@@ -1704,8 +1704,8 @@ _SELECTION_STOPWORDS = frozenset({
     "calls",
 })
 # NB "one" is deliberately absent. In a reply it almost always means "item"
-# ("that one", "which one", "the Genworth one") rather than "the first" — with
-# it mapped to 0, "the Genworth one" silently selected the FIRST candidate
+# ("that one", "which one", "the Vandelay one") rather than "the first" — with
+# it mapped to 0, "the Vandelay one" silently selected the FIRST candidate
 # instead of falling through to the narrowing branch. The digit "1" is
 # unambiguous and stays.
 _ORDINALS = {
@@ -1853,7 +1853,7 @@ def answer_single_call(
     Resolves the reference against the index and fetches only those transcripts
     instead of every call in the window. Two entry paths:
 
-      * a named ask — "summarize the Mayer Brown call"
+      * a named ask — "summarize the Globex Partners call"
       * a REPLY to a previous "which one?" — "both", "the first one", a date.
         Without this second path the disambiguation was a dead end.
 

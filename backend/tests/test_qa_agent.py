@@ -702,7 +702,7 @@ def test_the_cheap_call_index_listing_is_never_contested(monkeypatch):
 def test_a_named_transcript_ask_reaches_the_single_call_leg(monkeypatch):
     """THE ROUTING HALF, which a predicate test cannot see.
 
-    "get me the Genworth transcript" matches BOTH gates: `_LISTING_VERB` covers
+    "get me the Vandelay transcript" matches BOTH gates: `_LISTING_VERB` covers
     "get" and `_CALL_NOUN` covers "transcript". The listing branch runs first,
     so before this the question was answered with the LIST — plus the line
     saying the index holds titles and dates and not transcripts — for a
@@ -725,7 +725,7 @@ def test_a_named_transcript_ask_reaches_the_single_call_leg(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
 
     out = qa.answer(
-        enterprise_id="ent", question="get me the Genworth transcript",
+        enterprise_id="ent", question="get me the Vandelay transcript",
         dataset="acme",
     )
 

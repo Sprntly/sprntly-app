@@ -345,15 +345,15 @@ def test_local_only_reads_our_tables_and_skips_the_network(
     monkeypatch.setattr(
         call_index, "resolve_calls",
         lambda eid, q: [_indexed_call("1", "2026-08-13T20:00:00+00:00",
-                                      "Maverik + ChaosTrack", "Maverik")],
+                                      "Contoso + Northwind", "Contoso")],
     )
 
     result = live_read.read_sources(
-        "co-1", ["fireflies", "slack"], query="Maverik", local_only=True,
+        "co-1", ["fireflies", "slack"], query="Contoso", local_only=True,
     )
 
     by_key = {s.key: s for s in result.sources}
-    assert "Maverik + ChaosTrack" in by_key["fireflies"].text
+    assert "Contoso + Northwind" in by_key["fireflies"].text
     # Slack was NAMED but not opened — and says so, rather than being dropped,
     # which would read as "I looked and there was nothing".
     assert stub_registry["slack"].calls == []
@@ -368,16 +368,16 @@ def test_a_call_line_names_who_was_on_it(stub_registry, monkeypatch):
     import app.call_index as call_index
 
     call = _indexed_call(
-        "1", "2026-08-13T20:00:00+00:00", "Maverik + ChaosTrack", "Maverik",
-        participants=["dtung@chaostrack.com", "daniel.hagen@maverik.com"],
+        "1", "2026-08-13T20:00:00+00:00", "Contoso + Northwind", "Contoso",
+        participants=["dtung@northwind.example", "daniel.hagen@contoso.com"],
         duration_min=51.0,
     )
     monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
 
-    result = live_read.read_sources("co-1", ["fireflies"], query="Maverik")
+    result = live_read.read_sources("co-1", ["fireflies"], query="Contoso")
 
     text = result.read[0].text
-    assert "with: dtung@chaostrack.com, daniel.hagen@maverik.com" in text
+    assert "with: dtung@northwind.example, daniel.hagen@contoso.com" in text
     assert "51 min" in text
 
 

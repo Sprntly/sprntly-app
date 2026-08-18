@@ -194,7 +194,7 @@ def test_answer_still_accepts_no_plan():
 
 # ── the single-call backstop ────────────────────────────────────────────────
 #
-# "give me more details on the maverik meeting" planned `pipeline_id: none`
+# "give me more details on the contoso meeting" planned `pipeline_id: none`
 # with `sources: [fireflies, slack]` and the reason "best answered by reading
 # Fireflies for a recorded transcript" — it knew where the answer lived and
 # still named no machinery, so the transcript was never fetched and the answer
@@ -203,7 +203,7 @@ def test_answer_still_accepts_no_plan():
 # turn the planner routed somewhere else.
 
 
-def _served(text="## Maverik + ChaosTrack\n- full transcript"):
+def _served(text="## Contoso + Northwind\n- full transcript"):
     return {
         "answer": text, "key_points": [], "citations": [],
         "confidence": 1.0, "unanswered": "", "_skill": None,
@@ -229,12 +229,12 @@ def test_a_named_call_reaches_the_transcript_even_when_the_plan_named_none(
     out = qa_agent.answer(
         plan=Plan(action="answer", sources=["fireflies", "slack"]),
         enterprise_id="ent-1",
-        question="give me more details on the maverik meeting",
+        question="give me more details on the contoso meeting",
         dataset="d",
     )
 
     assert "full transcript" in out["answer"]
-    assert seen["question"] == "give me more details on the maverik meeting"
+    assert seen["question"] == "give me more details on the contoso meeting"
 
 
 def test_the_backstop_stands_down_when_the_plan_named_no_call_source(
@@ -253,7 +253,7 @@ def test_the_backstop_stands_down_when_the_plan_named_no_call_source(
     out = qa_agent.answer(
         plan=Plan(action="answer", sources=["jira"]),
         enterprise_id="ent-1",
-        question="give me more details on the maverik meeting",
+        question="give me more details on the contoso meeting",
         dataset="d",
     )
 

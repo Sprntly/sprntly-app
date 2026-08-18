@@ -524,7 +524,7 @@ def _custom_skill_block(enterprise_id: Optional[str]) -> str:
 # The interceptions above `route()` are deterministic and answer BEFORE the
 # classifier ever runs, so a company's own uploaded skill is not merely
 # outranked there — it is never offered. Reported case: a company uploads
-# "Churn Autopsy", asks "we lost the Genworth account last month, what
+# "Churn Autopsy", asks "we lost the Vandelay account last month, what
 # happened", and `windowed_call_question` claims the turn (the question names a
 # window and the company has calls in it). They get a generic call summary. The
 # answer is not wrong — it read the right calls — it just is not their method,
@@ -2307,7 +2307,7 @@ def answer(
         #
         # ONE BACKSTOP, for the one case where "no machinery" is measurably
         # wrong: the question names a single call AND the plan named a call
-        # source. "give me more details on the maverik meeting" planned
+        # source. "give me more details on the contoso meeting" planned
         # `pipeline_id: none` with `sources: [fireflies, slack]` and reason
         # "best answered by reading Fireflies for a recorded transcript" — it
         # knew, and still picked nothing, so the transcript was never fetched
@@ -2420,7 +2420,7 @@ def answer(
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
     # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
-    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # listing verb. "get me the Vandelay transcript" matches `_LISTING_VERB`
     # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
     # the "the index holds titles and dates, not transcripts" line — for a
     # question that names one call and asks for its content. The single-call
@@ -2441,7 +2441,7 @@ def answer(
         except Exception:  # noqa: BLE001 — never let the index break the answer
             logger.exception("call-index listing failed for %s", enterprise_id)
 
-    # SINGLE named call: "summarize the Mayer Brown call". The index holds that
+    # SINGLE named call: "summarize the Globex Partners call". The index holds that
     # call's external_id, so this fetches ONE transcript instead of every call in
     # the window. Before the index this question fell through to the KG and
     # answered "you'd need to connect the recording or transcript directly (e.g.
@@ -2933,7 +2933,7 @@ def answer(
         # would silently drop its co-planned non-tracker source) AND the
         # QUESTION is itself a tracker query: the source alone is not enough —
         # a plan can name a tracker as an incidental source on a non-tracker
-        # turn ("more details on the maverik meeting"), which must keep the
+        # turn ("more details on the contoso meeting"), which must keep the
         # normal planned path. Same surface-parity gate the interceptor uses;
         # skipped for a PRD-open tab so its grounding wins. The try/except is
         # belt-and-braces — `tracker.answer` degrades internally rather than

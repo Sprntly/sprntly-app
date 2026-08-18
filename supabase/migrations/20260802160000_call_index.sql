@@ -3,7 +3,7 @@
 --
 -- WHY. Answering "summarize the customer calls from last week" today fetches
 -- EVERY call in the window from Fireflies *with full sentences*, assembles a
--- corpus, and hands it to the model. Measured on Chaostrack (22 calls):
+-- corpus, and hands it to the model. Measured on Northwind (22 calls):
 --
 --     Fireflies metadata only     1.13 s      7.7 KB   ~2k tokens
 --     Fireflies with sentences    3.19 s    1461.7 KB  ~374k tokens
@@ -17,7 +17,7 @@
 --
 -- This table stores the 7.7 KB half and never the transcripts. With it:
 --   * "which calls last week?"      -> a DB read. No fetch, no model, no cost.
---   * "summarize the Genworth call" -> resolve one id, fetch ONE transcript.
+--   * "summarize the Vandelay call" -> resolve one id, fetch ONE transcript.
 --   * "summarize last week"         -> unchanged; it genuinely needs them all.
 --
 -- Transcripts are deliberately NOT stored. They are the customer's raw

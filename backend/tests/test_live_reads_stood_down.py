@@ -70,7 +70,7 @@ def test_a_planned_turn_reads_local_legs_but_not_the_network(monkeypatch):
 
     def _planned(eid, plan, q, *, local_only=False):
         seen["local_only"] = local_only
-        return "### Recorded calls (indexed)\n- 2026-08-13 · Maverik"
+        return "### Recorded calls (indexed)\n- 2026-08-13 · Contoso"
 
     monkeypatch.setattr(qa, "_planned_live_context", _planned)
     monkeypatch.setattr(qa, "_sweep_context", _boom("_sweep_context"))
@@ -84,7 +84,7 @@ def test_a_planned_turn_reads_local_legs_but_not_the_network(monkeypatch):
 
     assert out["answer"] == "ok"
     assert captured["live_fn"] is not None
-    assert "Maverik" in captured["live_fn"]()
+    assert "Contoso" in captured["live_fn"]()
     # ...and it ran with the network half switched off.
     assert seen["local_only"] is True
     # The library thunk survives — it is a table read, not a connector call.
