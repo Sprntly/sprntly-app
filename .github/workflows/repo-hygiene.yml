@@ -1,0 +1,51 @@
+name: Repo hygiene
+
+# Fails any push or PR that puts a real customer, colleague or tenant name into
+# the tracked repo. `Sprntly/sprntly-app` is PUBLIC, so a name lands
+# world-readable the moment it merges.
+#
+# NO PATH FILTER, ON PURPOSE — the same reasoning as security-guard.yml, and
+# here it is not hypothetical. The guard lives in `backend/tests/`, so under
+# test-backend.yml's `backend/**` filter it never ran on a `web/`-only PR. Of
+# the 51 files the scrub that introduced it had to clean, 17 were under
+# `web/`: the frontend is the proven carrier, and it was the one place the
+# guard could not see. `.tsx` fixtures, `supabase/` comments, `scripts/` and
+# workflow files are all equally outside `backend/**`.
+#
+# ITS OWN WORKFLOW rather than widening test-backend.yml's filter, because
+# that would run a 45-50 minute suite on every frontend PR (see issue #1237)
+# to execute one test that takes seconds. This lane installs nothing: the
+# check is stdlib-only by design.
+#
+# Make this a REQUIRED status check in branch protection so it actually gates
+# merges — it is cheap enough to run on everything.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  repo-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The guard shells out to `git grep` to enumerate tracked files, so it
+          # needs a real repo, not a tarball export.
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No `pip install`. The guard imports hashlib, re, subprocess and pathlib
+      # and nothing else; pytest is the only dependency and it is preinstalled
+      # on the runner image. Keeping it dependency-free is what makes running
+      # it on every PR free.
+      - name: Scan tracked files for real customer names
+        working-directory: backend
+        run: python -m pytest tests/test_public_repo_hygiene.py -q --no-header

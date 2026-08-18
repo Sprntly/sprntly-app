@@ -161,6 +161,13 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     the best available outcome was prose describing how to share it by hand.
 #     Widening on v4's rule: a v9 row answers a question no v8 row was asked
 #     (where does this document GO), so the two must not be pooled.
+# COSMETIC EDITS DO NOT BUMP THIS, and that is a deliberate reading of the rule
+# above rather than an oversight. The 2026-08-18 privacy scrub changed example
+# company names inside the prompt text: the examples illustrate SHAPE ("a named
+# ask"), so no v9 row answers a different question than another v9 row, and
+# pooling them is still correct. A bump would fragment the decision log for a
+# change that cannot move a routing decision. Anything that alters what the
+# prompt ASKS still bumps.
 _PROMPT_VERSION = "ask-planner-v9"
 
 # Both picks clear the same bar the router already applies to its own two picks
