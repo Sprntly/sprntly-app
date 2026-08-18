@@ -7,13 +7,31 @@
 // change, no `[id]` segment, ever.
 //
 // The prior per-surface chat implementations (`ProjectGroupChat` /
-// `ProjectPrivateChat`) were DELETED — both project chats are being rebuilt as a
-// single configurable mount of main's actual chat. Until that lands, each side
-// of the swap renders a placeholder; the toggle scaffold + testid hosts stay so
-// the surrounding project detail chrome (the group/individual switch) is
-// unchanged and the future main-chat mounts drop straight into these slots.
+// `ProjectPrivateChat`) were DELETED and rebuilt as a SINGLE configurable mount
+// of main's ACTUAL chat: `useProjectConversation` composes the shared unit
+// (`useComposer`/`useThreadScroll`/`useMainConversation`) over a
+// single-conversation store bound to a project-scoped `conversations` row, and
+// hands the exact host-bag to the same `ConversationView` main renders per tab.
+// The group/individual switch (react-state-only, AD-P14) selects which surface
+// mounts — each is its own conversation.
 import type { OpenArtifactCandidate } from "../../../../lib/api"
+import { ConversationView } from "../ConversationView"
+import { useProjectConversation, type ProjectChatSurface } from "./useProjectConversation"
 import styles from "./ProjectMainThread.module.css"
+
+/** One project chat surface = main's chat, configured for that surface's single
+ *  conversation. A distinct component so its hook mounts/unmounts cleanly on the
+ *  group⇆individual swap. */
+function ProjectChatSurface({
+  projectId,
+  surface,
+}: {
+  projectId: number | string
+  surface: ProjectChatSurface
+}) {
+  const props = useProjectConversation(projectId, surface)
+  return <ConversationView {...props} />
+}
 
 export type ActiveChat = "group" | "individual"
 
@@ -33,16 +51,20 @@ export type ProjectMainThreadProps = {
 }
 
 /** Swaps the main pane between the group chat and the individual chat per
- *  `activeChat` — in place, no route change (AD-P14). Renders exactly one.
- *  Both bodies are placeholders pending the configurable main-chat mount. */
+ *  `activeChat` — in place, no route change (AD-P14). Renders exactly one: main's
+ *  chat, mounted on that surface's project-bound conversation. */
 export function ProjectMainThread({ projectId, activeChat }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
-      <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)} />
+      <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
+        <ProjectChatSurface projectId={projectId} surface="group" />
+      </div>
     )
   }
   return (
-    <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)} />
+    <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
+      <ProjectChatSurface projectId={projectId} surface="individual" />
+    </div>
   )
 }
 
