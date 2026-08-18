@@ -19,6 +19,7 @@ import { useRouter } from "next/navigation"
 import { IconLayoutKanban, IconMessageCircle, IconBulb } from "@tabler/icons-react"
 import { useAuth } from "../../lib/auth"
 import { useGuestSession } from "../../context/GuestSessionContext"
+import { SprntlyMark } from "./SprntlyMark"
 
 const DISABLED_NAV = [
   { label: "Top Insights", icon: <IconBulb size={18} /> },
@@ -88,10 +89,12 @@ export function GuestRail() {
   return (
     <aside className="sidebar sidebar--collapsed" aria-label="Guest navigation">
       <div className="sb-rail-header">
-        <div className="sb-rail-logo">
-          <span className="sb-rail-logo-text">
-            S<span className="sb-rail-logo-dot">.</span>
-          </span>
+        {/* The guest rail's glyph is Sprntly's own — unlike the signed-in
+            sidebar, whose chip is the WORKSPACE's initial and stays a letter.
+            A guest has no workspace, so "S." was standing in for the brand;
+            the mark is the brand. */}
+        <div className="sb-rail-logo sb-rail-logo--brand">
+          <SprntlyMark size={17} title="Sprntly" />
         </div>
       </div>
       <div className="sb-rail-nav">

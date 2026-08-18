@@ -4,6 +4,7 @@ import Link from "next/link"
 import { IconArrowUpRight } from "@tabler/icons-react"
 import { publicPath } from "../lib/public-path"
 import { DocsSearch } from "./DocsSearch"
+import { SprntlyLockup } from "../components/shared/SprntlyMark"
 
 /** Sticky top bar shared across the docs site: brand, optional search, app link. */
 export function DocsTopbar({ showSearch = true }: { showSearch?: boolean }) {
@@ -11,8 +12,12 @@ export function DocsTopbar({ showSearch = true }: { showSearch?: boolean }) {
     <header className="docs-topbar">
       <div className="docs-topbar-inner">
         <Link href={publicPath("/docs")} className="docs-brand">
+          {/* The drawn lockup. The docs site is public and is frequently the
+              first Sprntly page anyone lands on, so it should carry the brand
+              rather than the name set in the UI font with a tint on half of
+              it. */}
           <span className="docs-wordmark">
-            spr<span>ntly</span>
+            <SprntlyLockup height={19} />
           </span>
           <span className="docs-brand-tag">Docs</span>
         </Link>

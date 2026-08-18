@@ -6,6 +6,7 @@ import { useAuth } from "../../../lib/auth"
 import { useWorkspace } from "../../../context/WorkspaceContext"
 import { updateUserProfile } from "../../../lib/onboarding/store"
 import { ONBOARDING_STEP_SLUGS, ROLE_OPTIONS } from "../../../lib/onboarding/types"
+import { SprntlyLockup } from "../../shared/SprntlyMark"
 
 /**
  * Pre-onboarding PROFILE GATE — "What should we call you?".
@@ -95,7 +96,7 @@ export function YourName() {
     <div className="onb-shell">
       <div className="onb-head">
         <span className="onb-brand">
-          sprntly<span className="dot">.</span>
+          <SprntlyLockup height={18} />
         </span>
         <span className="save">
           <span className="pulse" />

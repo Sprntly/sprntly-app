@@ -13,6 +13,7 @@ import {
 } from "../../../lib/onboarding/finishOnboarding"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
 import { ArrowLeft, ArrowRight } from "../../auth/icons"
+import { SprntlyLockup } from "../../shared/SprntlyMark"
 
 /**
  * Post-wizard define-metrics sub-flow (v6 screenshot spec 2026-07-17) — the
@@ -126,7 +127,7 @@ export function DefineMetrics() {
     <div className="onb-shell">
       <div className="onb-head">
         <span className="onb-brand">
-          sprntly<span className="dot">.</span>
+          <SprntlyLockup height={18} />
         </span>
         <span className="save">
           <span className="pulse" />
