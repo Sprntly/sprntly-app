@@ -12,7 +12,6 @@ import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 import { publicPath } from "../../lib/public-path"
-import { projectsEnabled } from "../../lib/featureFlags"
 
 interface SidebarProps {
   activeCompany?: string
@@ -264,9 +263,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         <RailItem screen="brief" icon={<IconSparkles size={18} />} label="Top Insights" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="Chat history" />
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
-        {projectsEnabled() && (
-          <RailItem screen="projects" icon={<IconFolder size={18} />} label="Projects" />
-        )}
+        <RailItem screen="projects" icon={<IconFolder size={18} />} label="Projects" />
         <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
         {/* Templates is back on the rail with artifact formats — the screen now
             decides what every PRD, ticket and engineering spec Sprntly writes

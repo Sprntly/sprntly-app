@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import sys
 import uuid
@@ -58,7 +57,6 @@ from app import project_join_greeting
 from app import project_task_execution
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
-from app.project_prd_patch_tool import project_prd_edit_enabled
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
@@ -121,26 +119,9 @@ def _is_unique_violation(exc: Exception) -> bool:
     return getattr(exc, "code", None) == "23505" or "duplicate key" in str(exc).lower()
 
 
-def _projects_enabled() -> bool:
-    """Read PROJECTS_ENABLED at REQUEST TIME (never import time). Default-off;
-    never default-on in any commit. Request-time read means flipping the env
-    var takes effect without a code deploy and keeps the gate honest under
-    module reload in tests. The frontend uses a SEPARATE var,
-    NEXT_PUBLIC_PROJECTS_ENABLED; the two gate independently — THIS one is the
-    security boundary (the frontend build-time flag is not)."""
-    val = (os.environ.get("PROJECTS_ENABLED") or "").strip().lower()
-    return val in {"1", "true", "yes"}
-
-
-def _require_projects_enabled() -> None:
-    if not _projects_enabled():
-        raise HTTPException(status_code=404, detail="Not found")  # invisible, not 401/403
-
-
 router = APIRouter(
     prefix="/v1/projects",
     tags=["projects"],
-    dependencies=[Depends(_require_projects_enabled)],
 )
 
 
@@ -693,9 +674,8 @@ def project_chat_edit(
     directly through the SAME `apply_chat_edit_scoped` the main chat's
     `POST /v1/prd/{id}/chat-edit` calls, no confirm step.
 
-    Membership-gated (`_require_project_member`), THEN the request-time
-    `PROJECT_PRD_EDIT_ENABLED` rollout flag (off means no write and a no-edit
-    reply, never an error), THEN the explicit open-drawer target:
+    Membership-gated (`_require_project_member`), THEN the explicit open-drawer
+    target:
     `body.prd_id` is None when no PRD is open beside this chat, in which case
     the route returns the simple "open a PRD" clarify — never an inferred or
     auto-selected target, and never a cross-project PRD enumeration.
@@ -712,12 +692,6 @@ def project_chat_edit(
     refusal, not an error, on this route.
     """
     _require_project_member(project_id, ctx)
-
-    if not project_prd_edit_enabled():
-        return {
-            "edited": False,
-            "answer": "PRD editing from chat isn't turned on for this project yet.",
-        }
 
     resolved_client_message_id = body.client_message_id or str(uuid.uuid4())
 

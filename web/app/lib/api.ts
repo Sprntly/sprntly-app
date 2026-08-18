@@ -6128,9 +6128,8 @@ export const projectsApi = {
    *  main chat's own open-tab `prd_id`); omitted/`null` means no PRD is open,
    *  and the route returns the "open a PRD" clarify rather than a write. The
    *  route's ★ cross-project + cross-tenant gate still runs on WHATEVER id
-   *  reaches it before any write, unconditionally. Membership-gated and
-   *  `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
-   *  rather than an error. */
+   *  reaches it before any write, unconditionally. Membership-gated; a denied
+   *  target degrades to `edited: false` rather than an error. */
   prdChatEdit: (id: number | string, instruction: string, prdId?: number | null, clientMessageId?: string) =>
     api.post<ProjectChatEditResult>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
