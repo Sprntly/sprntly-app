@@ -22,9 +22,10 @@
 import { useCallback } from "react"
 import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
 import { clearPrdDrafts } from "../../shared/PrdInputQuestions"
-import { followTicketSetSwitch, loadTicketSet } from "../../../lib/runTicketSetGeneration"
+import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
 import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type OpenArtifactResult } from "../../../lib/api"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
+import type { TicketSetFailureKind } from "../../../types/content"
 import type { AppContentState } from "../../../context/ContentContext"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import type { ConversationHandle } from "./conversationCore"
@@ -38,6 +39,19 @@ const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
   prototype: "A prototype",
   report: "A report",
   tickets: "Tickets",
+}
+
+const TICKET_SET_ACK =
+  "Writing tickets for that — they'll open in the panel on the right when ready. " +
+  "Use the View Tickets button in this chat to reopen them anytime."
+
+// Toast copy per failure KIND — the kind is all the runner returns, so the words
+// live here (a toast has one line; the panel has its own SET_ERROR_COPY).
+const TICKET_SET_FAILURE_TOAST: Record<TicketSetFailureKind, string> = {
+  timeout: "That run is taking longer than expected. It may still finish — reopen this chat in a few minutes.",
+  network: "The connection dropped while the tickets were being written. Try again.",
+  notfound: "Those tickets are no longer available.",
+  failed: "The tickets couldn't be written from this conversation. Try again with more specifics.",
 }
 
 export interface UseConversationGenerationDeps {
@@ -67,6 +81,14 @@ export interface UseConversationGenerationDeps {
    *  can't-open halves of the open-artifact contract) — surface-specific tab
    *  seeding, injected like `emitTurn`. */
   postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
+  /** Mark this conversation's ticket-set as auto-opened, so main's thread-resume
+   *  probe doesn't double-read the row. Main-tab coordination; a project slot,
+   *  which has no such probe, provides a no-op (an ABSENT concept, not a
+   *  re-derivation of generation). */
+  markTicketSetAutoOpened: (key: string) => void
+  /** Post the agent-only artifact-summary turn (main: via its summary poster).
+   *  Optional-chained in main, so a no-op is a valid injection. */
+  postSummary: (key: string, kind: string, artifactId: number) => void
   /** Seed the optimistic pending-conversation rail entry + fire the create. */
   pushPendingConversation: (
     turnId: string,
@@ -102,6 +124,8 @@ export function useConversationGeneration({
   showToast,
   openArtifactInPanel,
   postOpenArtifactReply,
+  markTicketSetAutoOpened,
+  postSummary,
 }: UseConversationGenerationDeps) {
   // "What are my PRDs?" — the rows rode the envelope; render them as clickable
   // cards on a turn (empty included: "none yet" is the listing's own honest
@@ -373,5 +397,101 @@ export function useConversationGeneration({
     [openArtifactInPanel, postOpenArtifactReply],
   )
 
-  return { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow, openArtifactFlow }
+  // ── Standalone ticket sets ──────────────────────────────────────────────────
+  // The runner: mark generating, ensure the conversation exists (create-once —
+  // a ticket_sets row has no back-patch route), open the panel on the same
+  // commit, generate, then stamp the result + post the summary. Never yanks the
+  // panel from another conversation.
+  const startTicketSetRun = useCallback((
+    tabId: string,
+    task: string,
+    seed: { turnId: string; title: string; query: string } | null,
+    artifactTemplateId?: string | null,
+  ) => {
+    const conv = makeHandle(tabId)
+    conv.patchMeta({ ticketSetRunning: true, ticketSetStatus: "generating", ticketSetTask: task })
+    // This IS the conversation's ticket-set open, so main's thread-resume probe
+    // must not also fire and put a second reader on the same row.
+    markTicketSetAutoOpened(tabId)
+    void (async () => {
+      const convId = conv.dbConvId() ?? (seed ? await persistence.ensureConversation(tabId, seed) : null)
+      if (conv.isActive()) openContentPanel("tickets")
+      const result = await runTicketSetGeneration(task, convId ?? null, setContent, artifactTemplateId)
+      if (result.ok) {
+        conv.patchMeta({ ticketSetRunning: false, ticketSetId: result.set.id, ticketSetStatus: "ready" })
+        // The thread's record of what got built — the agent-only summary turn.
+        postSummary(tabId, "ticket_set", result.set.id)
+        return
+      }
+      conv.patchMeta({ ticketSetRunning: false, ticketSetStatus: "failed" })
+      showToast("Tickets unavailable", TICKET_SET_FAILURE_TOAST[result.kind])
+    })()
+  }, [makeHandle, markTicketSetAutoOpened, persistence, openContentPanel, setContent, postSummary, showToast])
+
+  // The chat's "generate tickets" command on a conversation with no PRD.
+  // Optimistic-first: the ack turn (seeded via the seam) renders on this commit,
+  // every network call happens after it.
+  const ticketSetCommandFlow = useCallback((
+    seedQuery: string,
+    task: string,
+    /** The uploaded TICKET format the user named, off the intent envelope. */
+    artifactTemplateId?: string | null,
+  ) => {
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const ack: AskResponse = {
+      answer: TICKET_SET_ACK,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
+    const { tabId } = seedGenerationTurn(seedTurn)
+    startTicketSetRun(tabId, task, {
+      turnId,
+      title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
+      query: seedQuery,
+    }, artifactTemplateId)
+  }, [seedGenerationTurn, startTicketSetRun])
+
+  // The reply-footer button: reopen a finished set, or re-run a failed one.
+  const handleTicketSetAction = useCallback(async (tabId: string) => {
+    const conv = makeHandle(tabId)
+    const tab = conv.getMeta()
+    if (!tab) return
+    if (tab.ticketSetStatus === "failed") {
+      // Re-run from the ORIGINAL request. In-session that is on the tab; after
+      // a reload it is read back off the row (`source_text`).
+      let task = tab.ticketSetTask?.trim() || content.ticketSet?.sourceText?.trim() || ""
+      if (!task && tab.ticketSetId != null) {
+        const { ticketSetsApi } = await import("../../../lib/api")
+        task = await ticketSetsApi.get(tab.ticketSetId)
+          .then((r) => r.source_text?.trim() ?? "")
+          .catch(() => "")
+      }
+      if (!task) {
+        showToast(
+          "Ask again in the chat",
+          "The original request isn't available any more — say what to break into tickets and I'll re-run it.",
+        )
+        return
+      }
+      startTicketSetRun(tabId, task, null)
+      return
+    }
+    if (tab.ticketSetId == null) return
+    // Always re-read the set rather than trusting shared content: the panel is
+    // global, and opening a PRD in the meantime clears the slice.
+    setContent({ ticketSetStandalone: false })
+    openContentPanel("tickets")
+    void loadTicketSet(tab.ticketSetId, setContent)
+  }, [makeHandle, content.ticketSet, setContent, openContentPanel, showToast, startTicketSetRun])
+
+  return {
+    listArtifactsFlow,
+    prdChangeTemplateFlow,
+    ticketsChangeTemplateFlow,
+    documentCommandFlow,
+    openArtifactFlow,
+    ticketSetCommandFlow,
+    handleTicketSetAction,
+  }
 }

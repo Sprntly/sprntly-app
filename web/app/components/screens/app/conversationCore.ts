@@ -83,6 +83,14 @@ export interface ConversationHandle {
    *  tab). Generation flows gate their content-panel writes on this so a
    *  background conversation's generation never hijacks the shared panel. */
   isActive(): boolean
+  /** This conversation's bound DB id, read fresh (main: the tab's `dbConvId`),
+   *  or null when the row doesn't exist yet — the generation flows attach an
+   *  artifact to it (or create-once when null). */
+  dbConvId(): number | null
+  /** This conversation's current per-conversation metadata (main: the tab), or
+   *  null when it no longer exists — read by the flows that branch on the
+   *  artifact state (e.g. the reply-footer re-run/reopen). */
+  getMeta(): ChatTab | null
 }
 
 /**
