@@ -44,7 +44,7 @@ import { replyToText } from "../../../../lib/chatPersistence"
 import { useNextPrompts, type NextPromptsAdapter } from "../useNextPrompts"
 import type { ClarifyAnswer } from "../../ClarifyQuestionsCard"
 import type { ThreadTurn } from "../../../screens/app/ChatScreen"
-import type { ConversationEngine, SurfaceAdapter } from "./types"
+import type { ConversationEngine, ConversationSubmitOptions, SurfaceAdapter } from "./types"
 
 /** A next-prompts adapter that fetches nothing — the default when a surface
  *  supplies no `suggestions`, so the strip is simply always empty. */
@@ -214,9 +214,12 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
 
   // ── Submit ────────────────────────────────────────────────────────────────
   const submit = useCallback(
-    (draft: string) => {
+    (draft: string, opts?: ConversationSubmitOptions) => {
       const trimmed = draft.trim()
-      if (trimmed.length < 1) return
+      const attachments = opts?.attachments ?? []
+      // A doc-only send (empty ask + attachment) is allowed; a truly empty send
+      // is a no-op.
+      if (trimmed.length < 1 && attachments.length === 0) return
       // Single-conversation in-flight guard (the primitive re-checks it too).
       if (askingRef.current.has(conversationKey)) return
 
@@ -225,8 +228,12 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
         typeof crypto !== "undefined" && crypto.randomUUID
           ? crypto.randomUUID()
           : `turn-${Date.now()}`
+      // The idempotency key the server persists this send under — the surface's
+      // own (project chats mint it in their composer) or the turn id.
+      const clientMessageId = opts?.clientMessageId ?? id
+      const attachmentNames = attachments.map((a) => ({ name: a.name }))
       const startedAt = Date.now()
-      setPendingSend({ query: trimmed, attachments: [], startedAt })
+      setPendingSend({ query: trimmed, attachments: attachmentNames, startedAt })
       const settlePending = () => setPendingSend(null)
 
       void (async () => {
@@ -245,7 +252,10 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
         }
 
         // Optimistic turn on screen, then hand the placeholder off.
-        setTurns((prev) => [...prev, { id, query: trimmed }])
+        setTurns((prev) => [
+          ...prev,
+          { id, query: trimmed, ...(attachmentNames.length ? { attachments: attachmentNames } : {}) },
+        ])
         askStartRef.current.set(id, startedAt)
         stoppedRef.current.delete(conversationKey)
         settlePending()
@@ -255,6 +265,7 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
           turnId: id,
           title,
           query: trimmed,
+          attachments,
         })
 
         await runTabAsk<AskResponse>({
@@ -281,6 +292,8 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
                 patchTurn(id, (t) =>
                   !t.reply && !t.stopped ? { ...t, streamDropped: true } : t,
                 ),
+              client_message_id: clientMessageId,
+              ...(attachments.length ? { attachments } : {}),
               ...(convId != null ? { conversation_id: convId } : {}),
               ...adapterRef.current.askParams,
             })

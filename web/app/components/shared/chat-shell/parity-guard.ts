@@ -242,7 +242,10 @@ export type RenderInheritanceInput = {
  *  detector historically only read the engine (or vice-versa). Basenames only;
  *  the test joins them against the projects dir. */
 export const PROJECT_CHAT_SURFACE_SOURCES: { surface: ChatSurfaceKind; files: string[] }[] = [
-  { surface: "project_private", files: ["ProjectPrivateChat.tsx", "useProjectPrivateThread.ts"] },
+  // project_private now runs the shared interface (ConversationView + the
+  // useConversation engine); its old dedicated engine (useProjectPrivateThread)
+  // is deleted, so the surface's only file is the thin host.
+  { surface: "project_private", files: ["ProjectPrivateChat.tsx"] },
   { surface: "project_group", files: ["ProjectGroupChat.tsx", "useProjectGroupThread.ts"] },
 ]
 

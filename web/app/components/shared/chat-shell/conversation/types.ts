@@ -29,6 +29,7 @@
  */
 
 import type { AskResponse } from "../../../../lib/api"
+import type { AttachmentRef } from "../types"
 import type { ChatPersistence } from "../../../../lib/chatPersistence"
 import type { ClarifyAnswer, ClarifyQuestion } from "../../ClarifyQuestionsCard"
 import type { NextPromptsAdapter } from "../useNextPrompts"
@@ -67,6 +68,16 @@ export interface ConversationClarify {
   submit(answers: ClarifyAnswer[]): void | Promise<void>
   /** Dismiss without answering. */
   dismiss(): void
+}
+
+/** The normalized send's extras a surface may ride on `submit`. */
+export interface ConversationSubmitOptions {
+  /** Resolved attachments (extracted text + storage handle) — folded into the
+   *  ask context server-side and shown as chips on the turn. */
+  attachments?: AttachmentRef[]
+  /** Idempotency key persisted server-side (`ask_jobs.client_message_id`); the
+   *  hook mints the turn id as the key when a surface omits it. */
+  clientMessageId?: string
 }
 
 /** Post-answer next-prompt suggestions for this one conversation. */
@@ -113,8 +124,11 @@ export interface ConversationEngine {
   busy: boolean
   /** The optimistic just-sent turn awaiting its first ack, or null. */
   pendingSend: ConversationPendingSend | null
-  /** Submit the composer draft as a new turn/run. */
-  submit(draft: string): void
+  /** Submit the composer draft as a new turn/run. `opts` carry the normalized
+   *  send's extras (resolved attachments + the idempotency key) for surfaces
+   *  whose send pipeline needs them (project chats ride `/v1/ask` with a
+   *  `client_message_id`); main omits them. */
+  submit(draft: string, opts?: ConversationSubmitOptions): void
   /** Stop the in-flight run (Esc / stop button). */
   stop(): void
   /** The open clarify gate, or null when none is holding. */

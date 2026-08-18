@@ -37,6 +37,11 @@ import type {
   RefObject,
   SetStateAction,
 } from "react"
+import { useMemo, useRef } from "react"
+import type {
+  ConversationEngine,
+  SurfaceAdapter,
+} from "../../shared/chat-shell/conversation/types"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AssistantWaitState, isLongRunningSkill } from "../../shared/AssistantWaitState"
@@ -49,7 +54,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatShell } from "../../shared/chat-shell/ChatShell"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { AGENT_NAME } from "../../../lib/agent"
-import type { SkillInfo, TicketAssignQuestion } from "../../../lib/api"
+import type { ChatArtifactItem, OpenArtifactCandidate, SkillInfo, TicketAssignQuestion } from "../../../lib/api"
 import type { ChatHomeCard } from "../../../types/content"
 import type { HomeChipItem } from "../../../lib/homeChips"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
@@ -64,7 +69,7 @@ import { type ThreadTurn } from "./ChatScreen"
  * `mapDeps` bag additionally re-supplies the fields the lifted render itself
  * reads (`name`, `busy`, `insightCardNode`, …) so they are not duplicated.
  */
-export interface ConversationViewProps {
+export interface ConversationViewHostProps {
   // ── Turn source (the mapMainTurns → ChatTranscript call) ───────────────────
   thread: ThreadTurn[]
   /** The full main turn-mapping dependency bag (incl. the share_to_slack
@@ -153,7 +158,41 @@ export interface ConversationViewProps {
   setThreadContentEl: (el: HTMLDivElement | null) => void
 }
 
+/**
+ * Engine-driven props: the target `{ engine, adapter }` shape. A surface that
+ * owns its conversation through `useConversation` (project private/group) renders
+ * `<ConversationView engine={engine} adapter={adapter} composerNode={…} />` — the
+ * same shared presentation main runs, driven by the engine instead of the
+ * transitional host-bag. Main keeps the host-bag path until it adopts the engine.
+ */
+export interface ConversationViewEngineProps {
+  engine: ConversationEngine
+  adapter: SurfaceAdapter
+  /** The surface's composer, host-rendered (project surfaces own their draft +
+   *  attachment/skill wiring via `useChatComposerController`). */
+  composerNode: ReactNode
+  /** The composer submit — the surface's normalized-send handler. */
+  onSubmit: (draft: string) => void
+  /** Extra dock content above the composer, below the shared clarify/next-prompt
+   *  surfaces (e.g. a surface-specific banner). */
+  dockAboveComposer?: ReactNode
+  /** Open-artifact destination — routes an agent turn's artifact chip/card to the
+   *  surface's own drawer/modal. */
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
+  onOpenArtifactItem?: (item: ChatArtifactItem) => void
+  /** The standalone viewport class (project surfaces use the shared standalone
+   *  scroll container; the shell owns their scrolling). */
+  viewportClassName?: string
+  /** Preserves each surface's existing test ids ("ic" | "gc"). */
+  testIdPrefix?: string
+}
+
+export type ConversationViewProps = ConversationViewHostProps | ConversationViewEngineProps
+
 export function ConversationView(props: ConversationViewProps) {
+  // Engine-driven surfaces branch off before the host-bag destructure, so main's
+  // host path is untouched (byte-identical) and the engine path is isolated.
+  if ("engine" in props) return <ConversationEngineView {...props} />
   const {
     thread,
     mapDeps,
@@ -514,6 +553,171 @@ export function ConversationView(props: ConversationViewProps) {
       turns={mainTurns}
       pendingSend={pendingSendNode}
       composerNode={renderComposer(false)}
+    />
+  )
+}
+
+/**
+ * The engine-driven presentation: renders `engine.turns` through the SAME shared
+ * transcript main uses (`mapMainTurns` → `ChatShell surface:"main"`), driven by a
+ * `ConversationEngine` instead of the host-bag. The surface-specific mapper deps
+ * are a minimal bag — no PRD-cards / insight / prototype / slack (project chats
+ * carry none of that inline); the only live wires are ask-again, stop, clarify,
+ * and artifact-open (routed to the surface's drawer via the injected callbacks).
+ */
+function ConversationEngineView({
+  engine,
+  adapter,
+  composerNode,
+  onSubmit,
+  dockAboveComposer,
+  onOpenArtifact,
+  onOpenArtifactItem,
+  viewportClassName,
+}: ConversationViewEngineProps) {
+  const animatedTurnIds = useRef<Set<string>>(new Set())
+  const askStartRef = useRef<Map<string, number>>(new Map())
+  const resumedTurnsRef = useRef<Set<string>>(new Set())
+  const viewportRef = useRef<HTMLDivElement>(null)
+
+  const { turns, busy, pendingSend, clarify } = engine
+  const { userName, userInitials } = adapter.identity
+
+  // The last still-generating turn drives the wait/stream ladder.
+  const lastLiveTurnIdx = useMemo(() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const t = turns[i]
+      if (!t.reply && !t.stopped && !t.error && !t.timedOut) return i
+    }
+    return -1
+  }, [turns])
+
+  const mapDeps: MapMainTurnsDeps = {
+    animatedTurnIds,
+    askStartRef,
+    resumedTurnsRef,
+    lastLiveTurnIdx,
+    busy,
+    activeTab: null,
+    name: userName,
+    userInitials,
+    skillForQuery: () => null,
+    ticketSetActionState: null,
+    showInsightMsg: false,
+    chatEvidenceExists: false,
+    chatPrdExists: false,
+    chatPrdCtaWaiting: false,
+    chatProtoPrdId: null,
+    chatPrototypeReady: false,
+    inlinePrdCards: false,
+    inlinePrdAnchorIdx: null,
+    insightCardNode: null,
+    prdQuestionsNode: null,
+    clarifyPopupOpen: false,
+    pendingClarifyTurn: null,
+    handleAskAgain: (turn) => {
+      const t = turns.find((x) => x.id === turn.id)
+      if (t) engine.submit(t.query)
+    },
+    handleStopAsk: engine.stop,
+    submitClarifyAnswers: (answers) => clarify?.submit(answers),
+    setViewerAttachment: () => {},
+    openReportByTitle: () => {},
+    openArtifactInPanel: (candidate) => onOpenArtifact?.(candidate),
+    openChatArtifactItem: (item) => onOpenArtifactItem?.(item),
+    handleTicketSetAction: () => {},
+    handleOpenEvidence: () => {},
+    handleOpenPrd: () => {},
+    handleViewPrototype: () => {},
+  }
+
+  const mainTurns = mapMainTurns(turns, mapDeps)
+
+  const pendingSendNode = pendingSend ? (
+    <ChatBubble
+      turnId="pending-send"
+      dataTestId="pending-send"
+      ariaBusy
+      user={{
+        name: userName,
+        initials: userInitials,
+        query: pendingSend.query,
+        attachments: pendingSend.attachments.map((a) => ({ name: a.name })),
+      }}
+      agentName={AGENT_NAME}
+      agentBadge="Product Coworker"
+      agentBodyNode={
+        <AssistantWaitState compact startedAt={pendingSend.startedAt} skillLabel={null} longSkill={false} />
+      }
+    />
+  ) : null
+
+  const leadingNode = engine.resume.hydrating ? (
+    <ChatBubble
+      turnId="chat-hydrating"
+      ariaBusy
+      agentName={AGENT_NAME}
+      agentBadge={null}
+      agentBodyNode={<AssistantThinkingSkeleton compact phase="loading conversation…" />}
+    />
+  ) : null
+
+  const dockExtras = (
+    <>
+      {clarify ? (
+        <QuestionPopup
+          questions={clarify.questions.map((cq) => ({
+            header: cq.header ?? null,
+            prompt: cq.prompt,
+            options: cq.options.map((o) => ({ label: o })),
+            skipDefault: cq.skip_default,
+          }))}
+          fallbackHeader="Details"
+          busy={clarify.busy}
+          onDismiss={() => clarify.dismiss()}
+          onComplete={(answers) => {
+            const given = answers
+              .filter((a) => !a.skipped && a.answer)
+              .map((a) => ({ prompt: a.prompt, answer: a.answer }))
+            void clarify.submit(given)
+          }}
+        />
+      ) : null}
+      <NextPromptSuggestions
+        suggestions={engine.nextPrompts.suggestions}
+        disabled={busy}
+        onPick={(p) => engine.nextPrompts.onPick(p)}
+      />
+      {dockAboveComposer}
+    </>
+  )
+
+  return (
+    <ChatShell
+      descriptor={{
+        surface: "main",
+        frame: { mode: "thread", viewportClassName },
+        refs: { viewportRef },
+        transcript: {
+          agentName: AGENT_NAME,
+          agentBadge: "Product Coworker",
+          timestamps: "none",
+          leading: leadingNode,
+          onOpenCandidate: onOpenArtifact,
+          onOpenArtifactItem,
+        },
+        composer: {
+          busyMode: "block-while-asking",
+          stop: { enabled: true, onStop: engine.stop },
+          attachments: true,
+        },
+        reply: { mode: "streamed" },
+        send: { onSubmit, pendingSendBubble: true },
+        dock: { aboveComposer: dockExtras },
+      }}
+      turns={mainTurns}
+      pendingSend={pendingSendNode}
+      composerNode={composerNode}
     />
   )
 }

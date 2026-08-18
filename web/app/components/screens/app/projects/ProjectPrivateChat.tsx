@@ -2,199 +2,239 @@
 
 // ── ProjectPrivateChat — "My chat with Sprntly" (private, per project) ──
 //
-// The thin host that renders the private project thread through the shared
-// `ChatShell`. It owns NO chat machinery of its own: `useProjectPrivateThread`
-// owns where turns come from and go (conversation binding, history, realtime,
-// classify → dispatch → ask, clarify-pick), and `ChatShell` owns what the user
-// sees and touches (the frame, the transcript, the composer, scroll,
-// esc-to-stop). This host only supplies the descriptor — the per-turn render
-// closures (markdown user body, the show-more agent body, the delegation
-// footer, the insight banner) and the composer/frame config — and forwards the
-// engine's turns + pick callback into the shell (spec §2.5).
+// The private project chat now runs the SHARED chat interface: the single-
+// conversation engine (`useConversation`) drives the SAME presentation main uses
+// (`ConversationView` → `ChatShell surface:"main"`). This host only builds the
+// private `SurfaceAdapter` (the non-visual per-surface seam — identity, server-
+// only persistence, history, ask grounding, suggestions) and its composer node.
 //
-// AD-P13a (never fork the monolith): this host imports no chat-monolith
-// container; the project-genuine dispatch primitive (`dispatchChatIntent`)
-// lives in the engine hook.
-import ReactMarkdown from "react-markdown"
-import remarkGfm from "remark-gfm"
-import { ChatShell } from "../../../shared/chat-shell/ChatShell"
-import { NextPromptSuggestions } from "../../../shared/NextPromptSuggestions"
-import { useChatComposerController, renderRunStatus } from "../../../shared/chatComposerController"
-import type { ChatSurfaceDescriptor, ShellTurn } from "../../../shared/chat-shell/types"
+// Deleted with the old `useProjectPrivateThread` engine (all confirmed dropped):
+// the delegation footer, the cross-chat insight banner, markdown-in-user-bubble,
+// the empty-state placeholder, and private's realtime lane. Command actions
+// (PRD/ticket generation, edit-PRD, clarify-to-generate) are DEFERRED — the
+// adapter's `dispatchIntent` is a no-op for now, so every send is a grounded ask.
+import { useCallback, useMemo, useRef, useState } from "react"
+import { ChatComposer } from "../../../shared/ChatComposer"
+import { ConversationView } from "../ConversationView"
+import { useConversation } from "../../../shared/chat-shell/conversation/useConversation"
+import type { SurfaceAdapter } from "../../../shared/chat-shell/conversation/types"
+import { useChatComposerController } from "../../../shared/chatComposerController"
 import shellCss from "../../../shared/chat-shell/ChatShell.module.css"
-import { AssistantThinkingSkeleton } from "../../../shared/AssistantThinkingSkeleton"
 import { artifactItemAsCandidate } from "./artifactCandidates"
-import { AGENT_BADGE, AGENT_NAME } from "../../../../lib/agent"
-import type { ChatArtifactItem, DelegationLedgerRow, OpenArtifactCandidate } from "../../../../lib/api"
-import { DelegationActions } from "./DelegationActions"
-import { useProjectPrivateThread } from "./useProjectPrivateThread"
-import extras from "./project-chat-extras.module.css"
+import type { ThreadTurn } from "../ChatScreen"
+import {
+  chatSuggestionsApi,
+  projectsApi,
+  type AskResponse,
+  type ChatArtifactItem,
+  type IndividualTurn,
+  type OpenArtifactCandidate,
+} from "../../../../lib/api"
+import type { ChatPersistence } from "../../../../lib/chatPersistence"
+import { useCompany } from "../../../../context/CompanyContext"
+import { useWorkspace } from "../../../../context/WorkspaceContext"
+import { useAuth } from "../../../../lib/auth"
 
 const COMPOSER_PLACEHOLDER = "Message Sprntly…"
 
 export type ProjectPrivateChatProps = {
   projectId: number | string
-  /** Opens the artifacts modal on a specific candidate. `OpenArtifactChips`
-   *  renders zero chips today (no candidate source on a plain `AskResponse`),
-   *  composed anyway so wiring real candidates later is additive. */
+  /** Opens the artifacts modal/drawer on a specific candidate. */
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
-  /** The cross-chat INSIGHT turn — a note surfaced from the group chat or
-   *  another member's individual chat. `source_kind` picks the copy;
-   *  omitted/`null` renders a kind-neutral note. */
+  /** DEFERRED (dropped with the old engine): the cross-chat insight banner. Kept
+   *  in the prop type so callers are unchanged; unused until re-added as shared. */
   insightNote?: { by: string; text: string; source_kind?: "group" | "individual" | null } | null
-  /** #9-count artifact invalidation: called after a client-driven generate
-   *  (`runGeneratePrd`/`runGenerateTickets`) settles its own `addArtifact` —
-   *  refreshes the host's artifacts list + count immediately, without
-   *  waiting on the realtime `artifact.added` echo. */
+  /** DEFERRED: fired after a client-driven generate settles. Unused while command
+   *  actions are stubbed. */
   onArtifactsChanged?: () => void
-  /** The PRD open in the artifact drawer beside this chat — the explicit
-   *  edit target (parity with main chat's open-tab `prd_id`). `null` when
-   *  no PRD is open. */
-  openPrdId: number | null
+  /** DEFERRED: the open-PRD edit target. Unused until edit-PRD is wired. */
+  openPrdId?: number | null
 }
 
-/** The insight banner's location phrase — derived from the ACTUAL source
- *  conversation kind (never assumed "group chat"). Neutral when unresolved. */
-function insightSourcePhrase(sourceKind: "group" | "individual" | null | undefined): string {
-  if (sourceKind === "group") return "noted this in the group chat"
-  if (sourceKind === "individual") return "noted this in a chat with Sprntly"
-  return "noted this"
+/** Pair the flat server history (alternating user / assistant rows) into the
+ *  canonical `ThreadTurn` model the shared transcript renders: a user row opens a
+ *  turn, the next assistant row fills its `reply`. A lone assistant row (a
+ *  delivered brief with no user question) renders as its own agent turn. */
+function pairHistory(rows: IndividualTurn[]): ThreadTurn[] {
+  const out: ThreadTurn[] = []
+  for (const h of rows) {
+    if (h.role === "user") {
+      out.push({ id: `history-${h.id}`, query: h.content })
+    } else {
+      const last = out[out.length - 1]
+      if (last && last.reply == null && last.query) {
+        last.reply = { answer: h.content } as AskResponse
+      } else {
+        out.push({ id: `history-${h.id}`, query: "", reply: { answer: h.content } as AskResponse })
+      }
+    }
+  }
+  return out
 }
 
-/** True for a turn that came from persisted history (vs. the current session)
- *  — the testid suffix (`-history-*` vs `-msg-*`) and body treatment split on
- *  it. The engine mints history ids as `history-<id>`. */
-function isHistoryTurn(turn: ShellTurn): boolean {
-  return turn.id.startsWith("history-")
-}
+export function ProjectPrivateChat({ projectId, onOpenArtifact }: ProjectPrivateChatProps) {
+  const { activeCompany } = useCompany()
+  const { profile } = useWorkspace()
+  const auth = useAuth()
+  const callerEmail = auth.kind === "authed" ? (auth.user.email ?? null) : null
 
-export function ProjectPrivateChat({ projectId, onOpenArtifact, insightNote, onArtifactsChanged, openPrdId }: ProjectPrivateChatProps) {
-  const engine = useProjectPrivateThread(projectId, { onArtifactsChanged, openPrdId, onOpenArtifact })
-  // The shared composer controller (un-stubs the project composer). Private
-  // rides `/v1/ask`, so BOTH attachments and skills go live: the built
-  // `SendCommand` (splice + extracted attachment context) hands to `engine.send`.
+  const callerName = useMemo(() => {
+    const full = [profile?.first_name, profile?.last_name].map((s) => s?.trim()).filter(Boolean).join(" ")
+    if (full) return full
+    if (callerEmail) {
+      const local = callerEmail.split("@")[0]
+      if (local) return local
+    }
+    return null
+  }, [profile?.first_name, profile?.last_name, callerEmail])
+  const callerFirstName = callerName?.split(/\s+/)[0] ?? ""
+  const callerInitials = callerName
+    ? callerName.split(/\s+/).slice(0, 2).map((w: string) => w[0]?.toUpperCase() ?? "").join("")
+    : ""
+
+  // Cache the resolved conversation id — bound lazily on first send (opening the
+  // chat must not create a row).
+  const convIdRef = useRef<number | null>(null)
+  const resolveConvId = useCallback(async (): Promise<number> => {
+    if (convIdRef.current != null) return convIdRef.current
+    const c = await projectsApi.individualChat(projectId)
+    convIdRef.current = c.id
+    return c.id
+  }, [projectId])
+
+  // Server-only persistence: the `/v1/ask` route persists the user+assistant
+  // pair server-side (keyed by client_message_id), so the client turn writers are
+  // no-ops; only conversation binding is real.
+  const persistence: ChatPersistence = useMemo(
+    () => ({
+      pushUserTurn: async () => {},
+      pushAssistantTurn: async () => {},
+      resolveConvId: () => resolveConvId(),
+      ensureConversation: () => resolveConvId().catch(() => null),
+    }),
+    [resolveConvId],
+  )
+
+  const adapter: SurfaceAdapter = useMemo(
+    () => ({
+      identity: {
+        surface: "project_private",
+        projectId: Number(projectId),
+        userName: callerFirstName,
+        userInitials: callerInitials,
+        company: activeCompany,
+        conversationKey: `individual-${projectId}`,
+      },
+      persistence,
+      loadHistory: () => projectsApi.individualTurns(projectId).then(pairHistory),
+      askParams: { project_id: Number(projectId) },
+      suggestions: {
+        fetchSuggestions: (conversationId, opts) =>
+          chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
+      },
+      // DEFERRED: command-intent dispatch (PRD/ticket generation, edit-PRD,
+      // clarify-to-generate). No-op for now → every send is a grounded ask.
+      dispatchIntent: () => false,
+    }),
+    [projectId, callerFirstName, callerInitials, activeCompany, persistence],
+  )
+
+  const engine = useConversation(adapter)
+
+  // The shared composer controller (attachments + skills live, private rides
+  // `/v1/ask`). Its normalized `SendCommand` hands text + resolved attachments +
+  // idempotency key to the engine.
   const composerCtl = useChatComposerController({
     scope: { surface: "project_private", projectId: Number(projectId) },
-    onCommand: engine.send,
+    onCommand: (cmd) =>
+      engine.submit(cmd.text, { attachments: cmd.attachments, clientMessageId: cmd.clientMessageId }),
     attachmentsEnabled: true,
     skillsEnabled: true,
   })
 
-  const markdownUserBody = (turn: ShellTurn) => (
-    <div data-testid={isHistoryTurn(turn) ? "ic-history-you" : "ic-msg-you"}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.content ?? ""}</ReactMarkdown>
-    </div>
+  const composerNode = (
+    <PrivateComposer
+      composerCtl={composerCtl}
+      busy={engine.busy}
+      onStop={engine.stop}
+      placeholder={COMPOSER_PLACEHOLDER}
+    />
   )
 
-  const delegationActionsFor = (turn: ShellTurn) => {
-    const delegation = turn.footerData as DelegationLedgerRow | null | undefined
-    if (!delegation) return null
-    return (
-      <div className={extras.delegationActions} data-testid="ic-brief-delegation-actions">
-        <DelegationActions
-          delegationId={delegation.delegation_id}
-          status={delegation.status}
-          viewerParty="assignee"
-          onEmit={(event, note) => engine.emitDelegation(delegation.delegation_id, event, note)}
-          compact
-        />
-      </div>
-    )
-  }
-
-  const leadingNode = (
-    <>
-      {insightNote ? (
-        <div className="bc-turn bc-turn--insight" data-testid="cross-chat-insight">
-          <span className="bc-insight-msg-kind">INSIGHT</span>
-          <span>
-            <b>{insightNote.by}</b> {insightSourcePhrase(insightNote.source_kind)}: {insightNote.text}
-          </span>
-        </div>
-      ) : null}
-      {engine.resuming ? (
-        <div data-testid="ic-resuming">
-          <AssistantThinkingSkeleton phase="Picking up where you left off…" />
-        </div>
-      ) : null}
-    </>
+  return (
+    <ConversationView
+      engine={engine}
+      adapter={adapter}
+      composerNode={composerNode}
+      onSubmit={(draft) => engine.submit(draft)}
+      onOpenArtifact={onOpenArtifact}
+      onOpenArtifactItem={(item: ChatArtifactItem) => onOpenArtifact?.(artifactItemAsCandidate(item))}
+      viewportClassName={shellCss.standaloneViewport}
+      testIdPrefix="ic"
+    />
   )
+}
 
-  const trailingNode =
-    !engine.resuming && engine.turns.length === 0 ? (
-      <div data-testid="individual-chat-empty">
-        Ask Sprntly anything about this project — it already knows what the team has covered.
-      </div>
-    ) : null
+/** Private's composer node for the shared `surface:"main"` frame — it owns its
+ *  own draft (the shell owns the draft only on the legacy `!isMain` path) and
+ *  wires the shared `ChatComposer` to the controller's feature bag, slash palette,
+ *  and normalized send. */
+function PrivateComposer({
+  composerCtl,
+  busy,
+  onStop,
+  placeholder,
+}: {
+  composerCtl: ReturnType<typeof useChatComposerController>
+  busy: boolean
+  onStop: () => void
+  placeholder: string
+}) {
+  const [draft, setDraft] = useState("")
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const localFileRef = useRef<HTMLInputElement>(null)
+  const noop = () => {}
 
-  const descriptor: ChatSurfaceDescriptor = {
-    surface: "project_private",
-    projectId: Number(projectId),
-    testIdPrefix: "ic",
-    frame: { mode: "thread", viewportClassName: shellCss.standaloneViewport },
-    transcript: {
-      agentName: AGENT_NAME,
-      agentBadge: AGENT_BADGE,
-      // "none" (was "fromTurn") — the SAME shared control main uses, so the
-      // agent turn shows no timestamp, matching main.
-      timestamps: "none",
-      userHead: "named",
-      renderUserBody: markdownUserBody,
-      // NO `renderAgentBody` override: private agent turns now render through
-      // `ChatBubble`'s native reply ladder (the shared consume-not-reimplement
-      // path group already uses), fed by the engine's `ShellTurn` state +
-      // `reply`/`openCandidates`/`artifactList`. Open-destinations route to
-      // this project's artifacts modal, same contract as group.
-      onOpenCandidate: (c: OpenArtifactCandidate) => onOpenArtifact?.(c),
-      onOpenArtifactItem: (item: ChatArtifactItem) => onOpenArtifact?.(artifactItemAsCandidate(item)),
-      turnFooter: delegationActionsFor,
-      leading: leadingNode,
-      trailing: trailingNode,
-    },
-    composer: {
-      placeholder: COMPOSER_PLACEHOLDER,
-      busyMode: "block-while-asking",
-      stop: { enabled: true, onStop: engine.stop },
-      escToStop: true,
-      voice: "default",
-      attachments: true,
-      features: composerCtl.features,
-      slashMenu: composerCtl.slashMenu,
-      onKeyDownCapture: composerCtl.onKeyDownCapture,
-      // Typed-`/` palette: the shared controller's declarative input seam.
-      onInput: composerCtl.onInput,
-    },
-    reply: {
-      mode: "streamed",
-      // The FE agent run-status consume. Dark until the backend feeds real
-      // `ShellTurn.runStatus` (undefined → nothing); private has no retry seam
-      // (it re-asks via the turn), so no Retry is offered.
-      runStatus: (status, turn) => renderRunStatus({ status, turn, prefix: "ic" }),
-    },
-    send: { onSubmit: composerCtl.submit, pendingSendBubble: true },
-    // Next-prompt pills: the SHARED `NextPromptSuggestions` strip, fed by
-    // the engine's shared `useNextPrompts` consume, keyed to this private
-    // conversation. Renders nothing (no empty container) until a turn settles
-    // with non-empty suggestions. Group opts out (ledgered) — see the guard.
-    dock: {
-      aboveComposer: (
-        <NextPromptSuggestions
-          suggestions={engine.pillSuggestions}
-          disabled={engine.busy}
-          onPick={(p) => engine.send(p)}
-        />
-      ),
-    },
+  const doSubmit = () => {
+    const hasAttachments = (composerCtl.features?.attachments.length ?? 0) > 0
+    if (!draft.trim() && !hasAttachments) return
+    composerCtl.submit(draft)
+    setDraft("")
   }
 
   return (
-    <ChatShell
-      key="project_private"
-      descriptor={descriptor}
-      turns={engine.turns}
-      onPickOption={engine.pickOption}
-      onClarifySubmit={engine.submitClarify}
-      onClarifySkip={engine.skipClarify}
+    <ChatComposer
+      busy={busy}
+      draft={draft}
+      pinnedSkill={composerCtl.features?.pinnedSkill ?? null}
+      attachments={composerCtl.features?.attachments ?? []}
+      hint={null}
+      menuOpen={composerCtl.features?.menuOpen ?? false}
+      menuActiveIndex={composerCtl.features?.menuActiveIndex ?? 0}
+      slashMenu={composerCtl.slashMenu}
+      composerRef={composerRef}
+      fileInputRef={composerCtl.features?.fileInputRef ?? localFileRef}
+      onInput={(e) => {
+        setDraft(e.target.value)
+        composerCtl.onInput(e.target.value)
+      }}
+      onKeyDown={(e) => {
+        if (composerCtl.onKeyDownCapture(e.nativeEvent)) return
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault()
+          doSubmit()
+        }
+      }}
+      onSend={doSubmit}
+      onStop={onStop}
+      onToggleMenu={composerCtl.features?.onToggleMenu ?? noop}
+      onMenuActive={composerCtl.features?.onMenuActive ?? noop}
+      onMenuSelect={composerCtl.features?.onMenuSelect ?? noop}
+      onCloseMenu={composerCtl.features?.onCloseMenu ?? noop}
+      onRemoveAttachment={composerCtl.features?.onRemoveAttachment ?? noop}
+      onRemoveSkill={composerCtl.features?.onRemoveSkill ?? noop}
+      onFileSelect={composerCtl.features?.onFileSelect ?? noop}
+      placeholder={placeholder}
     />
   )
 }
