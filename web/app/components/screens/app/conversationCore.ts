@@ -29,7 +29,7 @@
  */
 
 import type { PendingJob } from "../../../lib/jobResume"
-import type { ThreadTurn } from "./ChatScreen"
+import type { ThreadTurn, ChatTab } from "./ChatScreen"
 
 /**
  * A live handle onto ONE conversation, minted by the host (main: per tab; a
@@ -73,6 +73,16 @@ export interface ConversationHandle {
   /** Whether this conversation is still live (main: the tab is still open). The
    *  other half of the suggestion late-arrival guard. */
   exists(): boolean
+  /** Patch this conversation's per-conversation ARTIFACT metadata (the cached
+   *  PRD / evidence / ticket-set state + their generating flags). Main: a
+   *  `setTabs` field merge on this tab; a project slot: its own artifact state.
+   *  Distinct from `patchTurns` (the thread) — this is the tab-metadata slice the
+   *  generation flows write. */
+  patchMeta(partial: Partial<ChatTab>): void
+  /** Whether this conversation is the one currently SHOWN (main: the active
+   *  tab). Generation flows gate their content-panel writes on this so a
+   *  background conversation's generation never hijacks the shared panel. */
+  isActive(): boolean
 }
 
 /**

@@ -58,7 +58,7 @@ import { resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError,
 // The ONE owner of a standalone ticket-set run and of `content.ticketSet`.
 // Nothing in this file may call `storiesApi.generateFromInsight` directly —
 // see the module header for why a second caller is a second LLM bill.
-import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
+import { loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "../../../types/content"
@@ -192,7 +192,7 @@ const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
 
 type BriefMeta = { briefId: number; insightIndex: number }
 
-type ChatTab = {
+export type ChatTab = {
   id: string
   title: string
   thread: ThreadTurn[]
@@ -3099,173 +3099,6 @@ export function ChatScreen() {
     [setContent],
   )
 
-  // "Change the template to Acme" on a PRD tab: dispatch the in-place format
-  // switch (POST /v1/prd/{id}/change-template) and acknowledge in the thread —
-  // the ack posts on dispatch, like the ticket-set ack, because the re-write
-  // renders live in the panel and the thread's job is to say what started and
-  // where to look. The regeneration's OUTCOME lands as a toast (the same pair
-  // the panel's own Format control shows), read from the row's stamp: a failed
-  // regeneration is restored to `ready` with its content intact and its OLD
-  // stamp — unchanged stamp, unchanged document.
-  const prdChangeTemplateFlow = useCallback(async (
-    query: string, targetTabId: string, prdId: number,
-    templateId: string, templateName: string | null,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const label = templateName ? `“${templateName}”` : "that format"
-    let res: { status: "ready" | "generating"; unchanged?: boolean; artifact_template_id: string | null }
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      res = await prdApi.changeTemplate(prdId, templateId)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize({
-        answer: `I couldn't switch the format — ${msg}. The PRD is unchanged, and its version history is intact.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-      return
-    }
-    if (res.unchanged) {
-      finalize({
-        answer: `This PRD is already written in ${label} — nothing to change.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-      return
-    }
-    finalize({
-      answer: `Switching this PRD to ${label} — re-writing it into that structure now. It'll re-render in the panel on the right, and the previous version is saved in Version history.`,
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    // The turn is answered; the thread stays usable while the re-write runs.
-    setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-
-    // Drive the panel exactly like a first generation: stale drafts cleared (a
-    // local draft must not overwrite the re-laid-out document), the tab and
-    // panel flip to generating, and the poll + SSE stream render it live.
-    clearPrdDrafts(prdId)
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, prd: null, prdGenerating: true } : t))
-    if (targetTabId === activeTabIdRef.current) {
-      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
-      openContentPanel("prd")
-    }
-    try {
-      const { resumePrdGeneration, loadPrdById } = await import("../../../lib/runPrdGeneration")
-      const result = await resumePrdGeneration(prdId, undefined, (html) => {
-        if (targetTabId === activeTabIdRef.current) setContent({ prdPartialHtml: html })
-      })
-      const prd = result.ok
-        ? result.prd
-        // Timeout/hiccup: the backend preserved the document — reload it so the
-        // panel shows the honest state, never a blank pane.
-        : await loadPrdById(prdId).then((r) => (r.ok ? r.prd : null)).catch(() => null)
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId ? { ...t, prd, prdGenerating: false } : t))
-      if (targetTabId === activeTabIdRef.current) {
-        setContent({ prd, prdGenerating: false, prdPartialHtml: null })
-      }
-      if (result.ok && (result.prd.artifactTemplateId ?? null) === templateId) {
-        showToast("Format switched", `This PRD is now written in ${templateName || "the new format"}.`)
-      } else {
-        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
-      }
-    } catch {
-      showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
-
-  // ── Change the TICKETS' format from chat ────────────────────────────────────
-  // "Change the ticket template to Acme". The tickets counterpart of
-  // prdChangeTemplateFlow: the backend re-LAYS the existing tickets (identity,
-  // edits and tracker links preserved — never a regeneration) in the
-  // BACKGROUND, so the POST returns as soon as the switch is scheduled and the
-  // reply says it is under way rather than done. `target` is the thread's
-  // standalone set when it has one, else the tab PRD's persisted tickets —
-  // resolved by the caller, because the backend cannot see a set from a
-  // prd_id-shaped envelope.
-  const ticketsChangeTemplateFlow = useCallback(async (
-    query: string, targetTabId: string,
-    target: { ticketSetId: number } | { prdId: number },
-    templateId: string, templateName: string | null,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    const label = templateName ? `“${templateName}”` : "that format"
-    try {
-      const { storiesApi } = await import("../../../lib/api")
-      const res = await storiesApi.changeTemplate(target, templateId)
-      if (res.unchanged) {
-        finalize(asReply(`These tickets are already written in ${label} — nothing to change.`))
-        return
-      }
-      finalize(asReply(
-        `Re-laying the tickets into ${label} now — every ticket keeps its content, edits and tracker links; only the description layout changes. It carries on in the background, so you can keep working; they'll update in the panel on the right when it lands.`,
-      ))
-      // Follow the switch so the panel lands on the new format by itself. A
-      // standalone set is followed through its one owner, which marks the
-      // slice `relaying` in place — never `loadTicketSet`, which would blank
-      // tickets that are still perfectly readable. A PRD's tickets need no
-      // call at all: the Tickets tab's own poll is watching the row and owns
-      // both the re-read and the completion toast.
-      if (targetTabId === activeTabIdRef.current) {
-        if ("ticketSetId" in target) {
-          const slice = content.ticketSet
-          if (slice && slice.id === target.ticketSetId) {
-            void followTicketSetSwitch(
-              target.ticketSetId, setContent, slice, templateName,
-            ).then((landed) => {
-              if (landed) {
-                showToast("Format switched",
-                  `These tickets now use ${templateName || "the new format"}.`)
-              }
-            })
-          } else {
-            void loadTicketSet(target.ticketSetId, setContent)
-          }
-        }
-        openContentPanel("tickets")
-      }
-      showToast(
-        "Switching format",
-        `Re-laying these tickets into ${templateName || "the new format"}.`,
-      )
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize(asReply(`I couldn't switch the ticket format — ${msg}. The tickets are unchanged.`))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel,
-      showToast, content.ticketSet])
-
   // ── Assign tickets from chat ────────────────────────────────────────────────
   // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".
   // POST /v1/tickets/assign-plan resolves the sentence against the thread PRD's
@@ -4358,6 +4191,9 @@ export function ChatScreen() {
       pendingAsk: () => getPendingAsk(activeCompany, tabId),
       isAsking: () => askingTabsRef.current.has(tabId),
       exists: () => tabsRef.current.some((t) => t.id === tabId),
+      patchMeta: (partial) =>
+        setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, ...partial } : t))),
+      isActive: () => activeTabIdRef.current === tabId,
     }),
     [activeCompany],
   )
@@ -4485,10 +4321,18 @@ export function ChatScreen() {
   })
 
   // The per-conversation artifact-generation flows. Main injects its
-  // tab-orchestrator emitTurn (emitCommandTurn); the content-panel seam + more
-  // per-flow deps grow here as flows move in.
-  const { listArtifactsFlow } = useConversationGeneration({
+  // tab-orchestrator emitTurn (emitCommandTurn) + the real global content-panel
+  // seam (setContent/openContentPanel/content); more per-flow deps grow here as
+  // flows move in.
+  const { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow } = useConversationGeneration({
     emitTurn: emitCommandTurn,
+    makeHandle: makeTabHandle,
+    pushPendingConversation,
+    finalizeConversationTurn,
+    setContent,
+    openContentPanel,
+    content,
+    showToast,
   })
 
   const submitAsk = useCallback(
