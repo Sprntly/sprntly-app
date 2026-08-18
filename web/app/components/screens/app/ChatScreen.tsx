@@ -1105,6 +1105,10 @@ export function ChatScreen() {
     voiceBaseRef,
     voice, handleToggleVoice,
     handleFileSelect,
+    openSkillPalette,
+    handleComposerInput,
+    handleSlashSelect,
+    handlePlusMenuSelect,
   } = useComposer({ showToast })
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
@@ -5731,21 +5735,6 @@ export function ChatScreen() {
     setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
   }, [filteredSkills.length])
 
-  // ⌘/ (Ctrl+/ on Windows) opens the skills palette from the keyboard.
-  //
-  // Both composers have advertised this shortcut in their footer for a while and
-  // NOTHING was listening for it — there is no metaKey handler for "/" anywhere
-  // in the app. The `+` menu now points at it too ("Browse skills ⌘/"), so the
-  // hint had to become true rather than be repeated twice.
-  const openSkillPalette = useCallback(() => {
-    setSlashFromMenu(true)
-    setSlashFilter("")
-    setSlashActive(0)
-    setShowSlash(true)
-    setPlusMenuOpen(false)
-    composerRef.current?.focus()
-  }, [])
-
   const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "/") {
       e.preventDefault()
@@ -5782,53 +5771,6 @@ export function ChatScreen() {
       handleComposerSubmit()
     }
   }
-
-  const handleComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const val = e.target.value
-    setDraft(val)
-    e.target.style.height = "auto"
-    e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"
-    // Slash command detection: show dropdown when text starts with /
-    if (val.startsWith("/")) {
-      setShowSlash(true)
-      setSlashFromMenu(false)
-      setSlashFilter(val.slice(1).toLowerCase())
-      setSlashActive(0)
-    } else if (!slashFromMenu) {
-      // A palette opened by TYPING closes as soon as the draft stops being a
-      // slash command. One opened from the `+` menu or ⌘/ stays put — a person
-      // browsing skills over a half-written question would otherwise lose the
-      // list on their next keystroke.
-      setShowSlash(false)
-    }
-  }
-
-  const handleSlashSelect = (skill: SkillInfo) => {
-    setShowSlash(false)
-    setSlashFromMenu(false)
-    setSlashFilter("")
-    // Pin the skill as a removable CHIP instead of pasting "/competitive-intel "
-    // into the draft as raw text. The old behaviour handed the user a string
-    // they had to preserve character-for-character or silently lose the skill,
-    // sitting in the middle of a sentence they were about to write.
-    setPinnedSkill({ id: skill.id, label: skill.label, trigger: skill.trigger })
-    // Only a draft the palette itself put there is cleared — a question already
-    // typed survives having a skill pinned onto it.
-    setDraft((d) => (d.startsWith("/") ? "" : d))
-    composerRef.current?.focus()
-  }
-
-  // The `+` menu: Attach a file / Browse skills. The slash palette used to be
-  // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
-  // invisible to anyone who never read the footer hint.
-  const handlePlusMenuSelect = useCallback((index: number) => {
-    setPlusMenuOpen(false)
-    if (index === 0) {
-      fileInputRef.current?.click()
-      return
-    }
-    openSkillPalette()
-  }, [openSkillPalette])
 
   // Esc stops the answer. The Stop button already sits in the composer and now
   // beside the wait itself, but the fastest way out of a run you regret is the
