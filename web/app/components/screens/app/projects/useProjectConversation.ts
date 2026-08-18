@@ -31,7 +31,7 @@ import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
-  conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi,
+  conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
 } from "../../../../lib/api"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
@@ -198,17 +198,36 @@ export function useProjectConversation(
     } as ChatTab),
   }), [convKey, activeCompany])
 
+  // The project chat's ONE durable conversation row — the SAME idempotent
+  // resolver hydrate uses (get-or-create per project+surface). Every send routes
+  // its conversation id through here so a turn is NEVER written to a throwaway
+  // `conversationsApi.create` row (the old `persistence.ensureConversation`
+  // fallback) that the reload-time hydrate — which reads the project row — can't
+  // see. That fork is what made a mid-stream reload lose the whole turn, and made
+  // next-prompt suggestions query the wrong/empty conversation. Sets the ref
+  // synchronously so pushUserTurn/resolveAskParams, which run right after in the
+  // same tick, read it without waiting on the setState render.
+  const ensureProjectConv = useCallback(async (): Promise<number | null> => {
+    if (dbConvIdRef.current != null) return dbConvIdRef.current
+    try {
+      const conv = surface === "group"
+        ? await projectsApi.groupChat(projectId)
+        : await projectsApi.individualChat(projectId)
+      dbConvIdRef.current = conv.id
+      setDbConvId(conv.id)
+      return conv.id
+    } catch {
+      return null
+    }
+  }, [projectId, surface])
+
   // conversation_id, NO project_id (main chat on a project-bound row).
   const resolveAskParams = useCallback(async (
-    key: string, m: { turnId: string; displayQuery: string },
+    _key: string, _m: { turnId: string; displayQuery: string },
   ): Promise<{ convId: number | null; grounding: AskGrounding }> => {
-    const convId = dbConvIdRef.current ?? await persistence.ensureConversation(key, {
-      turnId: m.turnId,
-      title: m.displayQuery.length > 52 ? `${m.displayQuery.slice(0, 49)}…` : m.displayQuery,
-      query: m.displayQuery,
-    })
+    const convId = dbConvIdRef.current ?? await ensureProjectConv()
     return { convId: convId ?? null, grounding: convId != null ? { conversation_id: convId } : {} }
-  }, [persistence])
+  }, [ensureProjectConv])
 
   const pushPendingConversation = useCallback((
     turnId: string, query: string, key: string,
@@ -467,6 +486,13 @@ export function useProjectConversation(
     const settlePendingSend = () => composer.setPendingSend(null)
     const docFile = composer.attachments.find((a) => a.file)?.file ?? null
 
+    // Resolve the durable project conversation BEFORE anything persists or the
+    // intent resolver reads conversationId — so the user turn, the ask grounding,
+    // the assistant turn, and the suggestions fetch all land on the ONE row that
+    // hydrate reads back on reload. On every message after the first this returns
+    // synchronously (ref already set); only the first send can await.
+    await ensureProjectConv()
+
     // Clarify-first answers: a parked PRD sufficiency gate — the message IS the
     // answers (or a "generate now" skip), never a fresh command/ask.
     if (pendingClarify && !docFile) {
@@ -606,7 +632,7 @@ export function useProjectConversation(
       }
     }
     await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
-  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration])
+  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv])
 
   const handleComposerSubmit = useCallback(() => {
     const q = composer.draft.trim()
