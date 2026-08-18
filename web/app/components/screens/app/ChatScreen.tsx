@@ -41,7 +41,7 @@ import { IconFolder } from "@tabler/icons-react"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
+import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 import {
   customArtifactsApi,
@@ -50,7 +50,6 @@ import {
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
-import { useSpeechInput } from "../../../lib/useSpeechInput"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
@@ -72,6 +71,7 @@ import { ConversationView } from "./ConversationView"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
 import { useMainConversation } from "./useMainConversation"
 import { useThreadScroll } from "./useThreadScroll"
+import { useComposer } from "./useComposer"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import type { PrdRecord } from "../../../lib/api"
@@ -733,8 +733,6 @@ function AttachmentViewer({
  *  correct (one ask per tab); the silence was the bug. */
 export const BUSY_ENTER_HINT_LEAD = "Sprntly is still answering. Your message is saved — send it when the answer lands, or "
 export const BUSY_ENTER_HINT_TAIL = " to interrupt."
-/** How long the busy-Enter hint stays before clearing itself. */
-const BUSY_HINT_MS = 6000
 
 // Main's next-prompt fetch: the shared endpoint keyed by the settled
 // conversation id. A stable module const so the shared hook's fetch-after-settle
@@ -1083,36 +1081,36 @@ export function ChatScreen() {
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prd } : t))
     setContent({ prd })
   }, [activeTabId, setContent])
-  const [draft, setDraft] = useState("")
-  /** Set when a highlighted passage was just quoted in, so the layout effect
-   *  that sizes and focuses the composer knows to run — see that effect. */
-  const quoteJustInsertedRef = useRef(false)
+  // Per-conversation composer (draft, attachments, slash palette + pinned skill,
+  // `+` menu, busy hint, dictation, optimistic pending-send) — extracted verbatim
+  // into the shared unit. The skill/slash-filter wiring, the submit/input/keydown
+  // handlers, and the composer effects at other positions stay in the host below
+  // and read this hook's state through the destructure.
+  const {
+    draft, setDraft,
+    quoteJustInsertedRef,
+    pendingSend, setPendingSend,
+    showSlash, setShowSlash,
+    slashFilter, setSlashFilter,
+    slashActive, setSlashActive,
+    slashFromMenu, setSlashFromMenu,
+    pinnedSkill, setPinnedSkill,
+    plusMenuOpen, setPlusMenuOpen,
+    plusMenuActive, setPlusMenuActive,
+    composerHint, setComposerHint, showComposerHint,
+    attachments, setAttachments,
+    composerRef,
+    focusComposerNextFrame,
+    fileInputRef,
+    voiceBaseRef,
+    voice, handleToggleVoice,
+    handleFileSelect,
+  } = useComposer({ showToast })
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
-  // The message the user just sent, rendered the INSTANT they hit send.
-  //
-  // Every send now opens with an awaited backend decision (POST /v1/chat/intent —
-  // a full LLM round-trip) before ANY branch knows whether this message becomes a
-  // chat turn or a command that seeds its own turn. That await used to sit in
-  // front of every render, so the composer cleared into an empty screen for
-  // multiple seconds and the send read as dropped. This is the bridge: the user's
-  // words + a thinking skeleton, on screen on the send's own commit.
-  //
-  // Deliberately NOT a ThreadTurn and never persisted — the command flows
-  // (openPrdInTab's seedTurn, seedCommandTurn) own the real turn they seed, and a
-  // pre-rendered turn here would duplicate both the bubble and the Supabase row.
-  // Whichever branch wins renders its real turn and clears this in the SAME
-  // commit, so the handoff is invisible. `tabId` is the tab the send was aimed at
-  // (null on the landing surface) so it only shows where it was typed.
-  // `startedAt` is the wall clock of the send itself. It is handed to the real
-  // turn when the dispatch settles, so the wait's elapsed-time ladder measures
-  // ONE wait across the two mounts rather than restarting at the handoff.
-  const [pendingSend, setPendingSend] = useState<
-    { tabId: string | null; query: string; attachments: { name: string }[]; startedAt: number } | null
-  >(null)
   // Insight keys ("briefId:insightIndex") known to already have a saved evidence
   // brief — flips the chat's first action to "View Evidence" (else it offers the
   // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
@@ -1121,7 +1119,6 @@ export function ChatScreen() {
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
-  const [showSlash, setShowSlash] = useState(false)
   // The palette's entries — the company's own uploaded skills (PRD 1854).
   //
   // This used to be TWO lists merged at render time: the vendored built-in
@@ -1141,34 +1138,6 @@ export function ChatScreen() {
   // Next-prompt suggestions are owned by the shared host hook (state + retire +
   // fetch-after-settle); ChatScreen keys by tab id and injects the main fetch.
   const nextPrompts = useNextPrompts(MAIN_NEXT_PROMPTS_ADAPTER)
-  const [slashFilter, setSlashFilter] = useState("")
-  // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
-  const [slashActive, setSlashActive] = useState(0)
-  // The palette was opened from the `+` menu or ⌘/ rather than by typing "/".
-  // Typing then must not slam it shut on the first keystroke, the way the
-  // "draft no longer starts with /" rule does for a typed open.
-  const [slashFromMenu, setSlashFromMenu] = useState(false)
-  // A skill pinned onto the NEXT message. Selecting from the palette used to
-  // paste "/competitive-intel " into the draft as raw text the user had to keep
-  // intact; it is a removable chip now, and the trigger is re-attached to the
-  // query at send time so the backend's deterministic slash fast-path is
-  // unchanged.
-  const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
-  // The composer's `+` menu (Attach a file / Browse skills).
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
-  const [plusMenuActive, setPlusMenuActive] = useState(0)
-  // Transient composer hint line (role="status"), currently only the busy-Enter
-  // answer. Auto-clears so it never becomes permanent chrome.
-  const [composerHint, setComposerHint] = useState<"busy" | null>(null)
-  const composerHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const showComposerHint = useCallback((kind: "busy") => {
-    setComposerHint(kind)
-    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
-    composerHintTimerRef.current = setTimeout(() => setComposerHint(null), BUSY_HINT_MS)
-  }, [])
-  useEffect(() => () => {
-    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
-  }, [])
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -1180,11 +1149,6 @@ export function ChatScreen() {
   // Bumped whenever a resume re-attaches, purely to re-render the thread so the
   // wait picks the resumed copy up (the ref above carries no reactivity).
   const [, setResumeTick] = useState(0)
-  // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
-  // inlined as text client-side. The File feeds the PRD-import command
-  // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
-  // server-side text extraction at send time (POST /v1/ask/extract-file).
-  const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
   const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
@@ -1195,54 +1159,6 @@ export function ChatScreen() {
   // in-flight ask. The ask poller reads this (isStopped) to bail; it's cleared
   // when a fresh ask starts on that tab so a stop never leaks into the next ask.
   const stoppedTabsRef = useRef<Set<string>>(new Set())
-  const composerRef = useRef<HTMLTextAreaElement>(null)
-  // Landing on a chat tab means you can just start typing. Selecting a tab — or
-  // opening one with "+" — used to leave focus on the document body, so every
-  // switch cost an extra click in the composer before the first keystroke.
-  //
-  // Deferred a frame ON PURPOSE. There is one <textarea> with two mount points
-  // (the landing composer and the thread dock), and a tab switch can move it
-  // between them or, coming from the pinned brief tab, mount it for the first
-  // time — so the node `composerRef` holds when the click fires is often not the
-  // one that ends up on screen. React flushes a click's state updates before the
-  // next frame, so by the time this runs the ref points at the live composer.
-  const focusComposerNextFrame = useCallback(() => {
-    requestAnimationFrame(() => composerRef.current?.focus())
-  }, [])
-  const fileInputRef = useRef<HTMLInputElement>(null)
-
-  // ── Dictation ────────────────────────────────────────────────────────────
-  // Whatever was already typed when the mic was switched on. Speech APPENDS to
-  // a draft rather than replacing it, so half a typed question plus a spoken
-  // finish is one question — and the hook hands back a cumulative transcript,
-  // so this base is what makes assigning (rather than appending) safe as the
-  // interim phrase rewrites itself word by word.
-  const voiceBaseRef = useRef("")
-  const handleVoiceTranscript = useCallback((text: string) => {
-    if (!text) return
-    setDraft((voiceBaseRef.current + text).slice(0, DRAFT_MAX_CHARS))
-    // The textarea's auto-grow lives in the `change` handler, which speech never
-    // fires — without this the box stays one line tall while the words pile up
-    // out of sight.
-    const ta = composerRef.current
-    if (ta) {
-      ta.style.height = "auto"
-      ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-    }
-  }, [])
-  const voice = useSpeechInput(handleVoiceTranscript)
-  const handleToggleVoice = useCallback(() => {
-    if (voice.listening) {
-      voice.stop()
-      composerRef.current?.focus()
-      return
-    }
-    // Start speaking mid-sentence and the words join the sentence, with one
-    // space between what was typed and what was said.
-    const typed = draft.trimEnd()
-    voiceBaseRef.current = typed ? `${typed} ` : ""
-    voice.start()
-  }, [voice, draft])
 
   // Per-conversation thread-viewport scroll (pinned-follow, send/new-turn/tab
   // auto-jump, ResizeObserver) — extracted verbatim into the shared unit; the
@@ -1252,28 +1168,6 @@ export function ChatScreen() {
     activeTabId,
     pendingSend,
   })
-
-  // Attach: documents keep the real File (for the PRD-import command); plain-text
-  // formats are read as text and inlined into the next ask as context.
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files) return
-    Array.from(files).forEach((file) => {
-      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
-        setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
-        return
-      }
-      const reader = new FileReader()
-      reader.onload = () => {
-        const content = reader.result as string
-        // Keep the raw File on text attachments too — the original bytes are
-        // uploaded on send so the chip can render/download the real file later.
-        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000), file }])
-      }
-      reader.readAsText(file)
-    })
-    e.target.value = "" // reset so same file can be re-selected
-  }, [showToast])
 
   // Load the palette on mount.
   //
