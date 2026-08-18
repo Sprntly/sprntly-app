@@ -52,18 +52,27 @@ export type ProjectMainThreadProps = {
 
 /** Swaps the main pane between the group chat and the individual chat per
  *  `activeChat` — in place, no route change (AD-P14). Renders exactly one: main's
- *  chat, mounted on that surface's project-bound conversation. */
+ *  chat, mounted on that surface's project-bound conversation.
+ *
+ *  The surface component is KEYED on project+surface so toggling group⇆private
+ *  forces a fresh unmount+remount rather than a re-render in place. Without the
+ *  key React reconciles the two branches to the same `ProjectChatSurface`
+ *  position and only changes its `surface` prop; the single-conversation store
+ *  (thread/dbConvId) then persists and the previous surface's messages stay on
+ *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
+ *  resets the whole store and re-resolves the conversation, exactly like a page
+ *  load — which was already showing the correct thread. */
 export function ProjectMainThread({ projectId, activeChat }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
-        <ProjectChatSurface projectId={projectId} surface="group" />
+        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" />
       </div>
     )
   }
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      <ProjectChatSurface projectId={projectId} surface="individual" />
+      <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" />
     </div>
   )
 }
