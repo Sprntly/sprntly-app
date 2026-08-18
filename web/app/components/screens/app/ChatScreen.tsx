@@ -72,8 +72,9 @@ import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
 import { useMainConversation } from "./useMainConversation"
 import { useThreadScroll } from "./useThreadScroll"
 import { useComposer } from "./useComposer"
+import { useConversationGeneration } from "./useConversationGeneration"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
-import { runAssignTicketsAction, runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
+import { runAssignTicketsAction, runEditPrdAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -4321,12 +4322,6 @@ export function ChatScreen() {
     if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
-  // The list-artifacts command now runs the SHARED action, config'd with main's
-  // emitTurn — the exact behaviour the inline body had, now shared with private.
-  const listArtifactsFlow = useCallback((seedQuery: string, envelope: ChatIntentEnvelope) => {
-    runListArtifactsAction(seedQuery, envelope, { emitTurn: emitCommandTurn })
-  }, [emitCommandTurn])
-
   // ── The per-conversation store seam ───────────────────────────────────────
   // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the
   // existing tab-multiplexer accessors (turn patch, busy, stop/asking flags,
@@ -4487,6 +4482,13 @@ export function ChatScreen() {
     finalizeConversationTurn,
     nextPrompts,
     showToast,
+  })
+
+  // The per-conversation artifact-generation flows. Main injects its
+  // tab-orchestrator emitTurn (emitCommandTurn); the content-panel seam + more
+  // per-flow deps grow here as flows move in.
+  const { listArtifactsFlow } = useConversationGeneration({
+    emitTurn: emitCommandTurn,
   })
 
   const submitAsk = useCallback(
