@@ -13,6 +13,9 @@
 //     That is the one control in the bar that must never be hidden: it is the
 //     only thing telling anyone whether their edit reached the server. So the
 //     rest collapses behind a "More" menu instead.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
@@ -158,6 +161,51 @@ describe("PrdToolbar — the overflow menu", () => {
     fireEvent.click(view.getByTestId("prd-tool-more"))
     const notCancelled = fireEvent.mouseDown(view.getByTestId("prd-more-removeFormat"))
     expect(notCancelled).toBe(false)
+  })
+})
+
+describe("PrdToolbar — pinned to the top", () => {
+  // The bar stays put while the document scrolls under it, like the
+  // Evidence / PRD / Tickets tabs above it. Formatting controls that scroll
+  // away are unreachable exactly when they are wanted: partway down a long
+  // PRD, mid-edit.
+  //
+  // Read off globals.css — jsdom applies no layout, so `position: sticky`
+  // cannot be observed by rendering. What CAN be pinned is the rule, and the
+  // two properties that silently defeat it.
+  const css = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "globals.css"),
+    "utf8",
+  )
+  // ANCHORED to the start of a line: an unanchored `.prd-toolbar {` also
+  // matches `.main--reading .prd-toolbar {`, a padding-only override that
+  // appears earlier in the file — the first draft of this asserted against
+  // that and reported the base rule as missing everything.
+  const rule = /^\s*\.prd-toolbar \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+
+  it("is sticky to the top of the scrolling panel", () => {
+    expect(rule).toMatch(/position:\s*sticky/)
+    expect(rule).toMatch(/top:\s*0/)
+  })
+
+  it("is opaque, or the document scrolls through it", () => {
+    expect(rule).toMatch(/background:/)
+  })
+
+  it("sits under the overflow menu, so an open dropdown still draws over it", () => {
+    const z = /z-index:\s*(\d+)/.exec(rule)
+    expect(z, "the toolbar needs a stacking order against the document").not.toBeNull()
+    const menu = /^\s*\.prd-more-menu \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+    const menuZ = /z-index:\s*(\d+)/.exec(menu)
+    expect(menuZ).not.toBeNull()
+    expect(Number(z![1])).toBeLessThan(Number(menuZ![1]))
+  })
+
+  it("has no clipping ancestor — `.prd-frame` must not set overflow", () => {
+    // An `overflow` on the frame between the bar and `.prd-scroll` would kill
+    // the stickiness outright, and silently.
+    const frame = /^\s*\.prd-frame \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+    expect(frame).not.toMatch(/^\s*overflow[^:]*:/m)
   })
 })
 

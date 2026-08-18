@@ -4250,7 +4250,19 @@
     /* box-shadow: var(--shadow-md); */
   }
 
+  /* Pinned to the top of `.prd-scroll` while the document moves under it —
+     the same standing-chrome treatment the Evidence / PRD / Tickets tabs get
+     above it. Formatting controls that scroll away are unreachable exactly
+     when they are wanted: partway down a long PRD, mid-edit.
+
+     `background` is load-bearing here, not decoration: a transparent sticky bar
+     would let the document scroll through it. `z-index` sits under the
+     overflow menu (40) so an open dropdown still draws over the bar it hangs
+     from, and over the document either way. */
   .prd-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     padding: 9px 14px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--line);
