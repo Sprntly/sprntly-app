@@ -1002,6 +1002,31 @@ def create_individual_chat_route(
     return conversation
 
 
+@router.post("/{project_id}/group")
+def create_group_chat_route(
+    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
+):
+    """Get-or-create the project's ONE shared group chat (`kind='group'`,
+    scoped project_id) and return it. Idempotent per project (mirrors
+    `POST /{project_id}/individual` one level up — per-project rather than
+    per-user), with the schema's partial-unique index as the concurrency
+    backstop inside `create_group_chat`.
+
+    This is what gives the rebuilt group chat surface a real, reusable
+    `conversation_id` to thread into `/v1/ask` — the group chat is main chat
+    on this shared, project-bound conversation row (no project context sent;
+    the deleted project-scoped ask branch is not used). The
+    `POST /{project_id}/individual` docstring's reference to this route is
+    restored here after the project-chat rebuild removed it."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    logger.info(
+        "group_project_chat_created project_id=%s conversation_id=%s",
+        project_id, conversation["id"],
+    )
+    return conversation
+
+
 class PostIndividualTurnsRequest(BaseModel):
     """The owned turn-pair body for the branches with no chat-route home:
     a generate branch, a clarify settle, or a terminal outcome (error/
