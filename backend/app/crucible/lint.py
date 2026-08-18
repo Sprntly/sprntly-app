@@ -65,62 +65,96 @@ BANNED_CAUSAL_VERBS: tuple[str, ...] = (
 #: These matter more than they would in a warning-only lint: I5 is a HARD ERROR,
 #: so each false positive is a 500 on a real run, and "a lint with false
 #: positives is one somebody switches off" is how the invariant dies.
+
+#: Inflections of the spec's verbs. Same violation, different tense.
+BANNED_CAUSAL_INFLECTIONS: tuple[str, ...] = (
+    "caused", "causing", "causal factor",
+    "drove", "driving",
+    "lead to", "led to", "leading to",
+    "result in", "resulted in", "resulting in",
+    "owing to",
+    # Unambiguously causal in every use I can construct; unlike `a cause of`,
+    # there is no innocent reading of "X is a consequence of Y".
+    "a consequence of", "as a consequence of", "in consequence of",
+)
+
+# CONSIDERED AND REJECTED, because each fires on ordinary prose and I5 is a HARD
+# ERROR, so every false positive is a failed run rather than a warning:
+#
+#   contributes to   "Each account contributes to the total" — and worse, it is
+#                    this engine's own vocabulary: signals contribute to a theme
+#                    score, and GOAL_ANALYSIS.md uses that framing itself.
+#   is why           "That is why the report shows two rows."
+#   explains why     "The PRD explains why the retired sections are hidden."
+#   responsible for  "The engineer responsible for the connector is on call."
+#   attributable to  "The invoice is attributable to the July billing period."
+#   driven by        "a job driven by cron"
+#   a cause of       "A cause of concern for the team is the backlog size."
+#   drivers of       "Drivers of the new hardware ship in August."
+#   makes / produces / triggers / reduces / increases — each far more common in
+#                    prose that asserts nothing than in a causal claim.
+#
+# The head-noun assertions those were reaching for are caught by
+# CAUSAL_HEAD_NOUN below, which requires the copula AND its complement rather
+# than banning a noun and then trying to exempt every innocent use of it.
+
 CAUSAL_EXEMPTIONS: tuple[str, ...] = (
     r"\b(?:hard|disk|shared|google|storage|ssd|usb|network)\s+drives\b",
     r"\bdrives\s+(?:failed|sync|are|were|mounted|attached)\b",
-    r"\bsales\s+leads\s+to\b",
-    r"\bleads\s+to\s+(?:follow|chase|call|contact|qualify)\b",
-    r"\bresults\s+in\s+the\s+(?:toolbar|sidebar|panel|menu|tab|header)\b",
-    r"\bdue\s+to\s+(?:expire|renew|ship|start|begin|land|close|complete)\b",
-    # "The cause of the outage is still under investigation" asserts the exact
-    # OPPOSITE of a cause — it says we do not know one. The head-noun ban is
-    # about "the cause of X IS Y"; a sentence that names no Y is honest
-    # reporting and must stay legal, or the lint punishes the phrasing it wants.
-    (r"\b(?:the|a|root)\s+(?:root\s+)?caus(?:e|es)\s+of\b[^.]{0,80}?\bis\s+"
-     r"(?:still\s+)?(?:under\s+investigation|unknown|unclear|not\s+yet\s+known|"
-     r"being\s+investigated|to\s+be\s+determined|tbd)\b"),
-    (r"\b(?:the|a)\s+(?:primary\s+|main\s+|biggest\s+|largest\s+)?drivers?\s+of\b"
-     r"[^.]{0,80}?\bis\s+(?:still\s+)?"
-     r"(?:under\s+investigation|unknown|unclear|not\s+yet\s+known)\b"),
+    # "Sales leads to follow up on" — a noun phrase. Requires the following
+    # verb; the unconditional form used to swallow "Sales leads to churn".
+    r"\b(?:sales|marketing|inbound|qualified)\s+leads\s+to\s+"
+    r"(?:follow|chase|call|contact|qualify|review|action)\b",
+    # "click Results in the toolbar" — the UI word must END the clause. Without
+    # the lookahead this swallowed "results in the panel timing out", a causal
+    # claim about a UI element, which is what this product writes about most.
+    r"\bresults\s+in\s+the\s+(?:toolbar|sidebar|panel|menu|tab|header|view)\b"
+    r"(?!\s+\w)",
+    # "due to expire" — temporal, not causal. The infinitive list is the weak
+    # part of this design and is why the head-noun rule below is a regex
+    # instead: an allowlist of literal phrasings needs a new entry for every
+    # sentence a model writes.
+    r"\bdue\s+to\s+(?:be|go|run|arrive|expire|renew|ship|start|begin|land|"
+    r"close|complete|finish|launch|report|end)\b",
 )
 
-#: Extension (see module docstring). Same violation, different tense.
+#: The head-noun causal assertion, banned by SHAPE rather than by phrase.
 #:
-#: The bare nouns `cause` and `drive` are DELIBERATELY ABSENT. "Root-cause
-#: analysis", "the cause of the outage" and "a drive to reduce churn" are not
-#: causal assertions, and "Google Drive" is a connector this product syncs — so
-#: banning the bare forms would fire constantly on legitimate text. A lint with
-#: false positives is a lint somebody switches off, and a switched-off lint
-#: protects nothing. Only the forms that can only be a causal verb are listed.
-#: Head-noun causal assertions. These matter as much as the verbs and were
-#: missing: the bare nouns `cause` and `drive` are excluded above, which left
-#: "the cause of X is Y" and "the primary driver of X is Y" permanently legal
-#: while banning the weaker "X causes Y". An LLM writing findings reaches for
-#: these constructions at least as often.
-BANNED_CAUSAL_INFLECTIONS: tuple[str, ...] = (
-    "caused", "causing", "causal factor",
-    "drove", "driving", "driven by",
-    "lead to", "led to", "leading to",
-    "result in", "resulted in", "resulting in",
-    "responsible for", "attributable to", "owing to",
-    "the reason for", "the reason why",
-    # Head-noun forms.
-    "the cause of", "a cause of", "root cause of",
-    "the driver of", "the primary driver of", "a driver of", "drivers of",
-    "a consequence of", "the consequence of", "as a consequence",
-    "is why", "explains why", "explain why",
-    "contributes to",
+#: "The primary driver of churn is export latency" is a full causal claim, and
+#: banning the bare nouns `cause`/`drive` is not an option — "root-cause
+#: analysis" and "Google Drive" are everywhere in this product. So the ban
+#: requires the whole construction: head noun, its object, the copula, and a
+#: complement that is not a disclaimer.
+#:
+#: KNOWN LIMIT, stated rather than papered over: "The cause of X is unknown; it
+#: is Y" passes, because `[^.;]` stops the match at the semicolon and the
+#: second clause names no banned phrase. That is a contradictory sentence
+#: nobody writes deliberately, and catching it costs more precision than it
+#: buys.
+#: The head noun with the copula in FRONT: "X is the cause of Y", "latency is
+#: the primary driver of churn". Always an assertion — there is no reading of
+#: "is the cause of" that leaves the cause unclaimed — so unlike the bare noun
+#: this needs no complement check.
+CAUSAL_COPULA_FIRST = (
+    r"\bis\s+(?:the|a|one)\s+"
+    r"(?:primary\s+|main\s+|root\s+|major\s+|biggest\s+|largest\s+|underlying\s+)?"
+    r"(?:cause|driver)s?\s+of\b"
 )
 
-# DELIBERATELY NOT BANNED, having been considered and rejected: `makes`,
-# `produces`, `triggers`, `reduces`, `increases`. Each appears in a genuine
-# causal assertion ("slow export makes accounts churn") and in far more
-# ordinary prose that asserts nothing ("the query produces 40 rows", "the
-# webhook triggers a sync", "retention increases with tenure", "the discount
-# reduces the total"). Banning them would fire constantly, and since I5 is a
-# hard error every one of those is a failed run. The lint catches the
-# constructions that can only be causal; it is not a general NLP filter and
-# pretending otherwise would make it useless.
+CAUSAL_HEAD_NOUN = (
+    r"\b(?:the|a|its|one)\s+"
+    r"(?:primary\s+|main\s+|root\s+|biggest\s+|largest\s+|underlying\s+)?"
+    # "a cause of concern for the team is the backlog" is an idiom, not a
+    # causal claim about concern. Excluded in the RULE rather than by another
+    # span exemption, because an exemption shorter than the hit cannot contain
+    # it and so would never fire.
+    r"(?:cause|driver)s?\s+of\s+(?!concern\b|alarm\b|worry\b|complaint\b)"
+    r"[^.;]{0,80}?\bis\s+"
+    r"(?!(?:still\s+)?(?:unknown|unclear|under\s+investigation|not\s+yet\s+known|"
+    r"being\s+investigated|to\s+be\s+determined|tbd|open|undetermined)\b)"
+)
+
+
 
 #: The one strength that has earned causal language. An experiment, and nothing
 #: else — `measured` means we counted it, not that we established why.
@@ -162,6 +196,9 @@ def _pattern(phrases: tuple[str, ...]) -> re.Pattern[str]:
 _SPEC_ONLY = _pattern(BANNED_CAUSAL_VERBS)
 _WITH_INFLECTIONS = _pattern(BANNED_CAUSAL_VERBS + BANNED_CAUSAL_INFLECTIONS)
 _EXEMPT = re.compile("|".join(CAUSAL_EXEMPTIONS), re.IGNORECASE)
+_HEAD_NOUN = re.compile(
+    f"(?:{CAUSAL_HEAD_NOUN})|(?:{CAUSAL_COPULA_FIRST})", re.IGNORECASE
+)
 
 
 def _exempt_spans(text: str) -> list[tuple[int, int]]:
@@ -200,6 +237,13 @@ def lint_claim(
         for m in pattern.finditer(text)
         if not _is_exempt(m.span(), exempt)
     ))
+    if not spec_literal:
+        hits = hits + tuple(
+            " ".join(m.group(0).lower().split())
+            for m in _HEAD_NOUN.finditer(text)
+            if not _is_exempt(m.span(), exempt)
+        )
+        hits = tuple(dict.fromkeys(hits))
     if hits:
         return LintResult(ok=False, violation=hits[0], violations=hits)
     return LintResult(ok=True)

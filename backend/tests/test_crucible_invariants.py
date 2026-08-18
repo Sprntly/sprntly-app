@@ -819,3 +819,178 @@ def test_invariants_registry_is_read_only():
     """It is the text quoted in error messages and the UI."""
     with pytest.raises(TypeError):
         INVARIANTS["I3"] = "anything at all"          # type: ignore[index]
+
+
+# ══ Round 2: the evasions the PR-1229 re-review demonstrated ═════════════════
+
+@dataclasses.dataclass(frozen=True)
+class _Ranked:
+    """The shape a prioritisation stage naturally returns: the pair plus a rank."""
+    impact: Impact
+    confidence: Confidence
+    rank: int
+
+
+@pytest.mark.parametrize("shape", ["triples", "dataclass", "dict"])
+def test_i10_catches_a_rewrite_in_every_natural_return_shape(shape):
+    """The old harness unpacked `for i, c in returned` inside a try/except and
+    returned quietly on TypeError/ValueError. That escape hatch made I10
+    vacuous for the three shapes a ranking stage is MOST likely to return —
+    each verified to slip a rewritten score straight through."""
+    scored = [(an_impact(), a_confidence())]
+
+    def rewrites(items):
+        pairs = [(dataclasses.replace(i, value=1.0), c) for i, c in items]
+        if shape == "triples":
+            return [(i, c, n) for n, (i, c) in enumerate(pairs)]
+        if shape == "dataclass":
+            return [_Ranked(i, c, n) for n, (i, c) in enumerate(pairs)]
+        return {i: c for i, c in pairs}
+
+    with pytest.raises(InvariantViolation) as exc:
+        assert_scores_frozen_across(rewrites, scored)
+    assert exc.value.invariant == "I10"
+
+
+@pytest.mark.parametrize("shape", ["triples", "dataclass", "dict"])
+def test_i10_permits_those_same_shapes_when_scores_are_untouched(shape):
+    """The fix must not ban the shapes, only the rewriting."""
+    scored = [(an_impact(), a_confidence())]
+
+    def orders(items):
+        if shape == "triples":
+            return [(i, c, n) for n, (i, c) in enumerate(items)]
+        if shape == "dataclass":
+            return [_Ranked(i, c, n) for n, (i, c) in enumerate(items)]
+        return {i: c for i, c in items}
+
+    assert_scores_frozen_across(orders, scored)
+
+
+def test_i10_says_shortlist_rather_than_accusing_a_mutation():
+    """A top-N step altered nothing; blaming it for score mutation sends the
+    reader hunting for a bug that does not exist."""
+    scored = [(an_impact(), a_confidence()),
+              (dataclasses.replace(an_impact(), value=5.0), a_confidence())]
+
+    with pytest.raises(InvariantViolation) as exc:
+        assert_scores_frozen_across(lambda items: list(items)[:1], scored)
+    assert "does not add or remove" in str(exc.value)
+
+
+def test_i1_catches_a_scorer_keyed_on_the_statement_text():
+    """An out-of-band index keyed on statement text reads corroboration without
+    touching a corroboration field."""
+    index = {"Default budget sits below revealed preference.": 4}
+
+    def by_index(finding: Finding) -> Impact:
+        return _scaled(finding, 1.0 + 0.1 * index.get(finding.statement, 0))
+
+    with pytest.raises(InvariantViolation):
+        assert_impact_ignores_corroboration(by_index, a_finding())
+
+
+def test_i1_degenerate_probe_has_its_own_exception_type():
+    """A scorer that crashes on an empty tuple also raises ValueError. Without
+    a distinct type a PR7 author cannot tell "your probe is unsizeable" from
+    "your scorer broke"."""
+    from app.crucible.invariants import DegenerateProbe
+
+    unsizeable = a_finding(impact_inputs=ImpactInputs(
+        currency="accounts", affected_population=None,
+        movable_gap=None, value_per_unit=None))
+    with pytest.raises(DegenerateProbe):
+        assert_impact_ignores_corroboration(compliant_score_impact, unsizeable)
+
+
+def test_i1_refuses_a_confidence_field_it_cannot_vary():
+    """`_mutation_values` returned [] for set/str/list/dict, so a corroboration
+    field of one of those types was silently never mutated while the docstring
+    claimed every field is swept. CORROBORATION_FIELDS already names
+    set-shaped members, so this is the likely next addition."""
+    from app.crucible.invariants import DegenerateProbe, _mutation_values
+
+    # The types that used to be skipped now produce mutations...
+    for value in ("text", {"a"}, frozenset({"a"}), ["a"], {"a": 1}):
+        assert _mutation_values(value), f"no mutation for {type(value).__name__}"
+
+    # ...and anything still unvariable fails loudly rather than silently.
+    @dataclasses.dataclass(frozen=True)
+    class Exotic(ConfidenceInputs):
+        agreeing: object = object()
+
+    probe = a_finding()
+    exotic = Exotic(**dataclasses.asdict(probe.confidence_inputs))
+    with pytest.raises(DegenerateProbe, match="cannot vary"):
+        assert_impact_ignores_corroboration(
+            compliant_score_impact,
+            dataclasses.replace(probe, confidence_inputs=exotic),
+        )
+
+
+def test_frozen_types_survive_dataclasses_asdict():
+    """`asdict` walks fields and deep-copies each VALUE directly, so it hit the
+    bare mappingproxy even though __reduce_ex__ handled the object. It is the
+    traversal PR2's persistence and PR9's serialiser reach for first."""
+    impact = Impact(value=1.0, currency="accounts", affected_population=4,
+                    movable_gap=0.16, value_per_unit=None,
+                    native_units={"tickets": 2.0})
+    assert dataclasses.asdict(impact)["native_units"] == {"tickets": 2.0}
+    assert dataclasses.asdict(a_confidence())["components"] == {"strongest": 0.9}
+    assert dataclasses.asdict(a_finding())["impact_inputs"]["currency"] == "arr_dollars"
+
+
+def test_claim_is_hashable_with_a_real_raw_payload():
+    """`raw` holds the original payload on every real claim, and every fixture
+    leaves it None — so a contents-hash looks fine in the suite and raises on
+    the first real run, right where PR6 dedups with set()."""
+    claim = a_claim("zendesk", "preference")
+    real = dataclasses.replace(claim, raw={"ticket": 42, "tags": ["a", "b"]})
+
+    # Hashable at all — this is what used to raise.
+    assert isinstance(hash(real), int)
+    # Equal objects hash equal, which is the contract that actually matters.
+    assert len({real, dataclasses.replace(real)}) == 1
+    # Same id, different contents: hashes collide (hash is on id) but `__eq__`
+    # compares every field, so they are correctly two distinct objects. A set
+    # dedups identical claims, not merely same-id ones — worth pinning, because
+    # PR6 will use `set(...)` and needs to know which of the two it gets.
+    assert claim != real
+    assert len({claim, real}) == 2
+
+
+def test_render_measure_degrades_on_non_finite_rather_than_crashing():
+    """int(nan) raises ValueError and int(inf) OverflowError, at a render
+    boundary, from the module's own sanctioned formatter."""
+    assert render_measure(float("nan")) == "not measured"
+    assert render_measure(float("inf")) == "not measured"
+    assert render_measure(float("-inf")) == "not measured"
+
+
+def test_i9_a_definition_with_unresolved_conflicts_cannot_lock():
+    """Replaces a vacuous test whose fixture contained no conflicts at all, so
+    it asserted the default and proved nothing. `DefinitionConflict` was
+    constructed nowhere in the suite."""
+    from app.crucible.types import DefinitionConflict
+
+    conflicts = (
+        DefinitionConflict(metric_name="revenue", source_a="finance",
+                           definition_a="recognised", source_b="crm",
+                           definition_b="booked"),
+        DefinitionConflict(metric_name="revenue", source_a="finance",
+                           definition_a="net", source_b="board deck",
+                           definition_b="gross"),
+    )
+    candidate = a_definition(status="candidate", conflicts_found=conflicts)
+    assert len(candidate.conflicts_found) == 2
+
+    # Surfaced, never silently resolved: it cannot enter Stage 1.
+    with pytest.raises(GoalNotLockedError):
+        assert_goal_locked(candidate)
+
+    # And a human confirming one of them is what locks it — not the engine
+    # picking the more recently updated source.
+    resolved = a_definition(status="locked", origin="adopted",
+                            confirmed_by_user_at=NOW, confirmed_by_user_id="u-1",
+                            conflicts_found=conflicts)
+    assert_goal_locked(resolved)

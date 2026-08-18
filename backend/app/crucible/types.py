@@ -10,8 +10,11 @@ using anything in it:
 says prioritisation reads frozen scores and never writes back — "the reason to
 do something first must not change how big we said it was". A frozen dataclass
 turns that from a rule people remember into an `AttributeError`. Mapping fields
-are wrapped in `MappingProxyType` on construction for the same reason; a frozen
-dataclass otherwise leaves a dict field wide open.
+become a `FrozenDict` on construction for the same reason — a frozen dataclass
+otherwise leaves a dict field wide open — and `FrozenDict` is a `dict` subclass
+rather than a `MappingProxyType` so that `hash`, `deepcopy`, `pickle`, `json`
+and `dataclasses.asdict` all keep working. See its docstring for why the proxy
+could not.
 
 **`None` is not zero.** Every "not measured" value is `None` and stays `None`
 (I3). Coercing these is the most common way an analytics system misleads, and
@@ -35,42 +38,44 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping, Optional, Sequence
 
 
-class _FrozenMapping:
-    """Pickle, deepcopy and hashing for a frozen dataclass holding a proxy.
+class FrozenDict(dict):
+    """An immutable mapping that is still a `dict`.
 
-    `MappingProxyType` is what makes these types genuinely immutable — a frozen
-    dataclass with a plain `dict` field is not frozen where it matters. It costs
-    three capabilities people reasonably assume a frozen dataclass has, and each
-    one fails at a call site far from the cause with a `TypeError` naming
-    `dict`:
+    Replaces `MappingProxyType` for every mapping field below. The proxy made
+    the objects genuinely immutable and cost three capabilities in exchange —
+    `hash`, `deepcopy`/`pickle`, and `dataclasses.asdict` — and only the first
+    two can be bought back on the owning class. `asdict` cannot: it walks the
+    fields itself and deep-copies each VALUE directly, so it hits the bare
+    proxy and raises `TypeError: cannot pickle 'mappingproxy' object` even when
+    the mapping is empty, no matter what `__deepcopy__` the dataclass defines.
+    That is the traversal PR2's persistence (`asdict(finding)` into jsonb) and
+    PR9's response serialiser reach for first.
 
-      * `hash()` — the generated `__hash__` hashes the field tuple, and a proxy
-        is unhashable. Each class below defines its own `__hash__` over a sorted
-        projection instead; a `__hash__` defined in the class BODY survives
-        `@dataclass`, one inherited from a mixin does not.
-      * `deepcopy` / `pickle` — both route through `__reduce_ex__`, and a proxy
-        cannot be pickled. `__getstate__` unwraps to plain dicts on the way out
-        and `__setstate__` re-freezes on the way back in.
-
-    Without this, PR6 deduping candidates with `set(findings)` or PR9 taking a
-    `deepcopy` of scored state before a prioritisation pass would each blow up
-    at runtime, and the message would point nowhere near this file.
+    Being a real `dict` subclass fixes all three at once: `asdict` rebuilds it
+    as its own type, `deepcopy` and `pickle` work because dicts do, `json`
+    serialises it, and the mutators below still refuse. Immutability is
+    enforced by overriding every mutating method rather than by wrapping.
     """
 
-    def __getstate__(self) -> dict:
-        state = {}
-        for f in dataclasses.fields(self):          # type: ignore[arg-type]
-            value = getattr(self, f.name)
-            state[f.name] = dict(value) if isinstance(value, MappingProxyType) else value
-        return state
+    __slots__ = ()
 
-    def __setstate__(self, state: dict) -> None:
-        for key, value in state.items():
-            object.__setattr__(self, key, value)
-        # Re-apply the freeze the constructor would have applied.
-        post_init = getattr(self, "__post_init__", None)
-        if post_init is not None:
-            post_init()
+    def _immutable(self, *_a, **_k):
+        raise TypeError(
+            "FrozenDict is immutable — Crucible score objects are frozen so "
+            "that prioritisation cannot write back to them (I10)."
+        )
+
+    __setitem__ = __delitem__ = _immutable          # type: ignore[assignment]
+    pop = popitem = clear = update = setdefault = _immutable  # type: ignore[assignment]
+
+    def __hash__(self) -> int:                       # type: ignore[override]
+        return hash(tuple(sorted(self.items())))
+
+    def __copy__(self) -> "FrozenDict":
+        return self                                  # immutable: sharing is safe
+
+    def __reduce__(self):
+        return (type(self), (dict(self),))
 
 
 def _hashable(mapping: Mapping) -> tuple:
@@ -192,6 +197,11 @@ def render_measure(value: Optional[float], suffix: str = "") -> str:
     """
     if value is None:
         return NOT_MEASURED
+    if not math.isfinite(value):
+        # A non-finite value is a computation that went wrong, not a
+        # measurement. `int(value)` below would raise ValueError/OverflowError
+        # at a render boundary; degrade instead of crashing the run.
+        return NOT_MEASURED
     if value == int(value):
         return f"{int(value):,d}{suffix}"
     if abs(value) < 1:
@@ -209,12 +219,12 @@ GoalOrigin = Literal["adopted", "elicited"]
 
 
 @dataclass(frozen=True)
-class PopulationFilter(_FrozenMapping):
+class PopulationFilter:
     segments: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     estimated_size: Optional[int] = None      # None = not measured (I3)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "segments", MappingProxyType(dict(self.segments)))
+        object.__setattr__(self, "segments", FrozenDict(self.segments))
 
     def __hash__(self) -> int:
         return hash((_hashable(self.segments), self.estimated_size))
@@ -287,7 +297,15 @@ class GoalDefinition:
 
 @dataclass(frozen=True)
 class Claim:
-    """The atom. Every piece of evidence, from any source, normalises to this."""
+    """The atom. Every piece of evidence, from any source, normalises to this.
+
+    Hashable on IDENTITY, not on contents: `raw` holds the original payload —
+    an arbitrary dict on every real claim — so hashing the field tuple raises
+    `TypeError: unhashable type: 'dict'`. Every test fixture leaves `raw` at
+    None, so a contents-hash looks fine in the suite and fails on the first
+    real run, which is exactly the shape of bug worth closing before PR6 dedups
+    claims with `set(...)`.
+    """
     id: str
     assertion: str
     type: ClaimType
@@ -310,6 +328,12 @@ class Claim:
             raise ValueError(f"Unknown claim type {self.type!r}")
         if self.strength not in EVIDENCE_STRENGTHS:
             raise ValueError(f"Unknown evidence strength {self.strength!r}")
+
+    def __hash__(self) -> int:
+        # `id` is the claim's identity; two claims with the same id ARE the same
+        # claim. Consistent with the generated `__eq__`, which compares every
+        # field: equal claims share an id, so they hash equal.
+        return hash(self.id)
 
     @property
     def strength_score(self) -> float:
@@ -336,7 +360,7 @@ class AssumedParam:
 # ── The I1 split: what each scorer is allowed to see ─────────────────────────
 
 @dataclass(frozen=True)
-class ImpactInputs(_FrozenMapping):
+class ImpactInputs:
     """Everything `score_impact` may read.
 
     Nothing here reveals how many sources agree, and that omission IS invariant
@@ -358,7 +382,7 @@ class ImpactInputs(_FrozenMapping):
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "native_units", MappingProxyType(dict(self.native_units))
+            self, "native_units", FrozenDict(self.native_units)
         )
 
     def __hash__(self) -> int:
@@ -395,7 +419,7 @@ class ConfidenceInputs:
 # ── Scored outputs — frozen, because Stage 10 must not write back (I10) ──────
 
 @dataclass(frozen=True)
-class Impact(_FrozenMapping):
+class Impact:
     value: Optional[float]                    # None = not sizeable (I3)
     currency: GoalCurrency
     affected_population: Optional[float]
@@ -406,7 +430,7 @@ class Impact(_FrozenMapping):
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "native_units", MappingProxyType(dict(self.native_units))
+            self, "native_units", FrozenDict(self.native_units)
         )
 
     def __hash__(self) -> int:
@@ -416,7 +440,7 @@ class Impact(_FrozenMapping):
 
 
 @dataclass(frozen=True)
-class Confidence(_FrozenMapping):
+class Confidence:
     band: ConfidenceBand
     score: float                              # internal only, NEVER rendered
     weakest_leg: Literal["problem", "solution"]
@@ -431,7 +455,7 @@ class Confidence(_FrozenMapping):
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self, "components", MappingProxyType(dict(self.components))
+            self, "components", FrozenDict(self.components)
         )
 
     def __hash__(self) -> int:

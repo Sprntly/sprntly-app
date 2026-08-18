@@ -65,6 +65,15 @@ INVARIANTS: Mapping[str, str] = MappingProxyType({
 })
 
 
+class DegenerateProbe(ValueError):
+    """The probe handed to a property harness cannot test what it claims.
+
+    Its own class so a PR7 author can tell "your probe is unsizeable" from
+    "your scorer raised ValueError on an empty tuple" — both used to surface as
+    a bare ValueError from the same call.
+    """
+
+
 class InvariantViolation(AssertionError):
     """A named invariant was broken. Always carries which one."""
 
@@ -110,6 +119,15 @@ def _mutation_values(value):
         return [0.0, value + 0.97]
     if value is None:
         return [0.0, 1.0]
+    if isinstance(value, str):
+        return ["", "__probe_value__"]
+    if isinstance(value, (set, frozenset)):
+        empty = type(value)()
+        return [empty, type(value)({"__probe_a__", "__probe_b__", "__probe_c__"})]
+    if isinstance(value, list):
+        return [[], ["__probe_a__", "__probe_b__", "__probe_c__"]]
+    if isinstance(value, dict):
+        return [{}, {"__probe_a__": 1, "__probe_b__": 2}]
     return []
 
 
@@ -126,6 +144,9 @@ _FINDING_MUTATIONS: tuple[tuple[str, object], ...] = (
     ("adjudication", "single_authoritative"),
     ("adjudication", "corroborated"),
     ("adjudication", "no_authoritative_source"),
+    # An out-of-band index keyed on the statement text is another way to read
+    # corroboration without touching a corroboration field.
+    ("statement", "__probe_statement__"),
 )
 
 
@@ -168,7 +189,7 @@ def assert_impact_ignores_corroboration(
     """
     baseline = score_impact(finding)
     if baseline.value is None:
-        raise ValueError(
+        raise DegenerateProbe(
             "assert_impact_ignores_corroboration needs a probe finding whose "
             "impact is sizeable; this one scores None, so every mutation would "
             "also score None and the check would pass without testing anything. "
@@ -189,7 +210,18 @@ def assert_impact_ignores_corroboration(
     counter = 0
     conf = finding.confidence_inputs
     for f in dataclasses.fields(conf):
-        for substitute in _mutation_values(getattr(conf, f.name)):
+        value = getattr(conf, f.name)
+        substitutes = _mutation_values(value)
+        if not substitutes:
+            # A field this harness cannot vary is a field a scorer can read for
+            # free. The docstring promises every field is swept; if that stops
+            # being true, fail here rather than quietly narrowing the check.
+            raise DegenerateProbe(
+                f"ConfidenceInputs.{f.name} has type {type(value).__name__}, which "
+                f"_mutation_values cannot vary, so I1 would not be tested against "
+                f"it. Add a case to _mutation_values."
+            )
+        for substitute in substitutes:
             counter += 1
             mutated_conf = dataclasses.replace(conf, **{f.name: substitute})
             check(
@@ -524,19 +556,66 @@ def assert_scores_frozen_across(
 
     if returned is None:
         return
-    try:
-        returned_pairs = [(repr(i), repr(c)) for i, c in returned]
-    except (TypeError, ValueError):
-        # A step returning something that is not a sequence of pairs (a plain
-        # ordering of ids, say) has nothing to compare, and that is fine.
+
+    # WALK the return value for scores rather than unpacking it as pairs.
+    #
+    # The previous version did `for i, c in returned` inside a try/except and
+    # returned quietly on TypeError/ValueError, on the theory that a step
+    # returning something other than pairs "has nothing to compare". That
+    # escape hatch made the check vacuous for the three shapes a prioritisation
+    # stage is MOST likely to return, each verified to slip a rewritten score
+    # straight through: `[(impact, confidence, rank), …]` (ValueError, three
+    # values to unpack), a list of `Ranked` dataclasses (TypeError), and
+    # `{impact: confidence}` (TypeError). Attaching a rank to each pair is the
+    # obvious output of a stage whose entire job is ranking.
+    found: list[str] = []
+
+    def walk(node: Any, depth: int = 0) -> None:
+        if depth > 6 or len(found) > 10_000:
+            return
+        if isinstance(node, (Impact, Confidence)):
+            found.append(repr(node))
+            return
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                walk(getattr(node, f.name), depth + 1)
+            return
+        if isinstance(node, Mapping):
+            for key, value in node.items():
+                walk(key, depth + 1)
+                walk(value, depth + 1)
+            return
+        if isinstance(node, (list, tuple, set, frozenset)):
+            for item in node:
+                walk(item, depth + 1)
+
+    walk(returned)
+    if not found:
+        # Genuinely nothing to compare — a step returning an ordering of ids,
+        # for instance. The in-place check above still applied.
         return
-    if sorted(returned_pairs) != sorted(before):
-        added = sorted(set(returned_pairs) - set(before))
-        raise InvariantViolation(
-            "I10",
-            f"prioritisation returned scores that differ from its input by more "
-            f"than order — {len(added)} altered item(s), first: {added[:1]}.",
-        )
+
+    expected: list[str] = []
+    for impact, confidence in scored:
+        expected.extend((repr(impact), repr(confidence)))
+
+    if sorted(found) != sorted(expected):
+        missing = sorted(set(expected) - set(found))
+        extra = sorted(set(found) - set(expected))
+        if extra:
+            detail = (
+                f"{len(extra)} score(s) in the return value are not in the "
+                f"input — prioritisation rewrote them. First: {extra[0][:160]}"
+            )
+        else:
+            # Not a mutation: a shortlist, a duplication, a dropped item. Say so
+            # rather than accusing the step of altering a score it never touched.
+            detail = (
+                f"the returned set holds {len(found)} score(s) against the "
+                f"input's {len(expected)}; {len(missing)} missing. Prioritisation "
+                f"orders, it does not add or remove."
+            )
+        raise InvariantViolation("I10", detail)
 
 
 # ── Shared helper: per-claim-type decay (used by confidence, never by impact) ─
