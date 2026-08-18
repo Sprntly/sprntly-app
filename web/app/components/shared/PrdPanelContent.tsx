@@ -396,13 +396,26 @@ export function PrdPanelContent({
 
       <div className="prd-frame">
         {/* The disabled no-document toolbar shown in the empty / generating /
-            streaming states (there's no PRD to edit yet). Once a markdown PRD is
-            loaded its toolbar comes from the shared PrdMarkdownEditor below; a
-            v3 HTML PRD is edited natively in the iframe (no execCommand toolbar);
-            and a guest never sees an edit control (AC15). */}
+            streaming states (there's no PRD to edit yet), and a guest never
+            sees an edit control (AC15). A markdown PRD's toolbar comes from
+            PrdMarkdownEditor below; the v3 HTML PRD gets its own, right here. */}
         {!prd && !guestSession && <PrdToolbar hasDoc={false} saveStatus={saveStatus} exec={() => {}} />}
         {prd && isHtmlPrd ? (
           <>
+            {/* The HTML PRD used to be editable but had NO toolbar: the
+                placeholder above vanished the moment a document arrived, so the
+                formatting controls appeared while generating and were gone by
+                the time there was anything to format. Same `PrdToolbar` the
+                markdown editor uses; the commands are forwarded into the
+                iframe's own document, which is where the selection lives (see
+                `PrdHtmlHandle.exec`). Guests still get none. */}
+            {!guestSession && (
+              <PrdToolbar
+                hasDoc
+                saveStatus={saveStatus}
+                exec={(cmd, value) => { htmlViewRef.current?.exec(cmd, value) }}
+              />
+            )}
             {/* Key on the HTML so a scoped edit (e.g. answering a "User input
                 needed" question — same prd_id, new document) forces a remount:
                 PrdHtmlView resolves its initial doc once per key, so without this

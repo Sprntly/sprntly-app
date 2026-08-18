@@ -4259,10 +4259,94 @@
     justify-content: space-between;
   }
 
+  /* The tool row shrinks; the save status does NOT (see `.prd-status`). At the
+     narrowest panel width — the artifact drawer open on a laptop — this scrolls
+     rather than clipping, so no control is ever unreachable even before the
+     "More" menu is opened. */
+  /* `0 1 auto`: shrinks when the panel is narrow, but never GROWS to fill the
+     bar. Growing pushed the "More" trigger to the right edge, against the save
+     status, when it belongs at the end of the tools it overflows from. */
   .prd-tools-l {
     display: flex;
     gap: 3px;
     align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .prd-tools-l::-webkit-scrollbar { display: none; }
+
+  /* Overflow menu — everything that isn't reached for constantly. */
+  .prd-more {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    /* Outside the scrolling row (which would clip the dropdown) but visually
+       part of it — this is what keeps the trigger beside Table. */
+    margin-left: 3px;
+  }
+
+  .prd-more-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 40;
+    min-width: 178px;
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+    box-shadow: var(--shadow-lg, 0 10px 30px rgba(10, 25, 18, 0.14));
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* A menu opened from a control on the LEFT of the bar hangs left, so it
+     doesn't shoot off toward the middle of the panel. */
+  .prd-more-menu--left {
+    right: auto;
+    left: 0;
+  }
+
+  .prd-more-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .prd-more-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    flex: none;
+    color: var(--ink-3);
+  }
+
+  .prd-more-item:hover .prd-more-icon { color: var(--ink); }
+
+  /* The style menu's trigger reads as a dropdown rather than a button. */
+  .prd-tool-styletrigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .prd-more-item:hover {
+    background: var(--surface-3);
+    color: var(--ink);
   }
 
   .prd-tool {
@@ -4287,7 +4371,16 @@
     margin: 0 4px;
   }
 
+  /* NEVER shrinks and never scrolls away. This is the only thing in the bar
+     that tells anyone whether their edit reached the server, so it outranks
+     every formatting control for space. */
   .prd-status {
+    flex: 0 0 auto;
+    /* `auto` rather than a fixed gap: takes the slack the tool row no longer
+       claims, so the status stays pinned right while "More" stays left. */
+    margin-left: auto;
+    padding-left: 12px;
+    white-space: nowrap;
     font-size: 11px;
     color: var(--muted);
     display: flex;

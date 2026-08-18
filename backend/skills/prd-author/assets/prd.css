@@ -4,7 +4,9 @@
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font-size:15px;line-height:1.55;padding:24px 16px 80px}
 .frame{max-width:780px;margin:0 auto}
-.page{position:relative;background:var(--page);border:1px solid #DDDBD3;border-radius:2px;box-shadow:0 1px 2px rgba(31,36,31,.06),0 14px 36px rgba(31,36,31,.08);padding:64px 72px 76px;caret-color:var(--green)}
+/* Flat on the panel: no card border, radius or lift. The PRD is the page,
+   not a sheet of paper sitting on a desk. */
+.page{position:relative;background:var(--page);padding:8px 4px 56px;caret-color:var(--green)}
 .page ::selection{background:#DCEEE4}
 .page[contenteditable]:focus{outline:none}
 .page > *:hover{outline:1px dashed #A8CBB8;outline-offset:6px;border-radius:2px;cursor:text}
@@ -12,8 +14,12 @@ body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font
 h1{font:600 33px/1.2 'Spectral',serif;letter-spacing:-.01em;margin-bottom:10px;padding-right:110px}
 .byline{font:500 12.5px/1 'IBM Plex Mono',monospace;color:var(--sub);margin-bottom:34px}
 .byline .bk{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin-right:9px}
-.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:30px 0 8px;padding-top:18px;border-top:1px solid var(--rule)}
-.eyebrow:first-of-type{border-top:none;padding-top:0;margin-top:0}
+/* Section labels are separated by SPACE, not by a rule. The border-top here
+   drew a line above every one of Context / Problem / Evidence / Users / Goal,
+   which is what made the document read as a stack of panels instead of as one
+   continuous page. A template that wants a divider can still draw its own. */
+.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:34px 0 8px}
+.eyebrow:first-of-type{margin-top:0}
 p{margin-bottom:8px}
 .term{border-bottom:1.5px dotted #B9B5A6}
 ul{list-style:none}
@@ -57,4 +63,4 @@ ul.inputs .box{width:13px;height:13px;border:1.5px solid #B9B5A6;border-radius:3
 .riskiest p{margin:6px 0 0}
 .pre{margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule);font-size:13.5px;color:var(--sub);font-style:italic}
 @media(max-width:640px){.page{padding:34px 22px 44px}.goal .row{grid-template-columns:1fr}h1{padding-right:0;padding-top:34px}}
-@media print{body{background:#fff;padding:0}.page{border:none;box-shadow:none;padding:20px}.page > *:hover{outline:none}}
+@media print{body{background:#fff;padding:0}.page{padding:20px}.page > *:hover{outline:none}}
