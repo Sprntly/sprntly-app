@@ -9,6 +9,62 @@ export function stripLeadingFence(s: string): string {
   return s.replace(/^\s*```[a-zA-Z]*\r?\n?/, "")
 }
 
+/**
+ * The typography the streaming document starts in, written into the iframe
+ * BEFORE any model markup.
+ *
+ * Why this exists: an artifact's HTML carries its own `<style>` block, and mid
+ * stream that block has usually not arrived yet — so the first paragraphs of a
+ * generating PRD rendered in the BROWSER'S defaults, which is Times at 16px on
+ * a bare white page. The document being written looked nothing like the product
+ * it was being written into, then reflowed once its stylesheet landed.
+ *
+ * Written FIRST, and that ordering is the whole design: these are plain element
+ * selectors, so the model's own `<style>` — arriving later in the same document
+ * — wins on source order the moment it exists. This is a floor for the
+ * unstyled window, never an override of the artifact's finished design.
+ *
+ * The font is imported rather than assumed: `@font-face` rules from the parent
+ * document do not cross into a child browsing context, so naming Geist alone
+ * would silently fall back. The import gives the real face when it resolves and
+ * the stack behind it keeps the text in a system sans — the point is that it is
+ * never Times — if it doesn't.
+ */
+const BASE_DOC_STYLE = `<style>
+  @import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&display=swap');
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    padding: 18px 20px;
+    background: #fff;
+    color: #3D4A43;
+    font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+  p, li { font-size: 14px; line-height: 1.7; margin: 0 0 10px; }
+  ul, ol { margin: 6px 0 10px; padding-left: 20px; }
+  /* Same rule the chat answer follows: a sub-header is a label on the prose
+     under it, at body size, separated by space rather than by scale. */
+  h1, h2, h3, h4, h5, h6 {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
+    font-weight: 600;
+    color: #15201B;
+    letter-spacing: normal;
+    margin: 1em 0 0.25em;
+  }
+  h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }
+  strong { color: #15201B; font-weight: 600; }
+  code, pre {
+    font-family: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12.5px;
+  }
+  table { border-collapse: collapse; font-size: 13.5px; }
+  th, td { border: 1px solid #12201a17; padding: 6px 9px; text-align: left; }
+</style>`
+
 // How close to the bottom the panel must be for us to keep following the stream.
 // Scrolling further up than this reads as "I'm looking at something" and stops
 // the auto-follow until the user returns to the bottom.
@@ -92,6 +148,11 @@ export function StreamingHtmlPreview({
     try {
       if (!written || !html.startsWith(written)) {
         cdoc.open()
+        // The base typography goes in on every OPEN — the fresh start and the
+        // restart-from-zero path both land here. It is deliberately NOT added
+        // to `writtenRef`, which tracks only the model's own accumulating
+        // document so the suffix comparison below stays exact.
+        cdoc.write(BASE_DOC_STYLE)
         cdoc.write(html)
       } else if (html.length > written.length) {
         cdoc.write(html.slice(written.length))

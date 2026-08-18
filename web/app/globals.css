@@ -10043,24 +10043,42 @@
     margin: 0.5em 0;
   }
 
-  .ai-bar-reply-answer h2 {
-    font-family: var(--font-display);
-    font-size: 18px;
+  /* Sub-headers in an answer are PART OF THE PROSE — a label on the paragraph
+     under them — not a document's heading scale. They now render at the
+     surface's own body size and weight, separated by space rather than by
+     size, so a `##` reads as a turn in the conversation instead of a title
+     dropped into it.
+
+     ALL SIX LEVELS, deliberately. Only `h2`/`h3` were ever styled here, so a
+     `#` or `####` in an answer fell through to the BROWSER defaults — an `h1`
+     is 2em bold with 0.67em margins — which is the loudest version of exactly
+     the problem this fixes, and the easiest to hit, since a model writing a
+     structured answer often opens with `#`.
+
+     `inherit` for family/size/line-height rather than hard values: this block
+     is shared by the chat thread (14px, `.bc-agent-body`) and the AI bar
+     (13px), and pinning a number here would silently un-scale one of them. */
+  .ai-bar-reply-answer h1,
+  .ai-bar-reply-answer h2,
+  .ai-bar-reply-answer h3,
+  .ai-bar-reply-answer h4,
+  .ai-bar-reply-answer h5,
+  .ai-bar-reply-answer h6 {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
     font-weight: 600;
     color: var(--ink);
-    letter-spacing: -0.005em;
-    margin: 1.1em 0 0.4em;
+    letter-spacing: normal;
+    margin: 1em 0 0.25em;
   }
 
-  .ai-bar-reply-answer h3 {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--ink);
-    margin: 1em 0 0.3em;
-  }
-
+  .ai-bar-reply-answer h1:first-child,
   .ai-bar-reply-answer h2:first-child,
-  .ai-bar-reply-answer h3:first-child {
+  .ai-bar-reply-answer h3:first-child,
+  .ai-bar-reply-answer h4:first-child,
+  .ai-bar-reply-answer h5:first-child,
+  .ai-bar-reply-answer h6:first-child {
     margin-top: 0;
   }
 
