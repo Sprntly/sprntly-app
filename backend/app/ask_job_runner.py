@@ -88,54 +88,6 @@ def _private_roster_block(roster: list[dict]) -> str:
     return "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
 
 
-def _build_private_scope(
-    *, project_id: int, conversation_id: int | None, user_id: str | None,
-) -> SurfaceScope:
-    """Construct the `SurfaceScope` for a project-private ask — the six
-    project tools (4 read tools + delegate_task + execute_task), the
-    relocated system text + roster, and the assigner identity
-    (`user_id`/`conversation_id`) delegation attribution depends on
-    (#1174). Best-effort roster fetch (AD-P7): a read failure degrades to an
-    empty roster rather than breaking the ask."""
-    from app import project_delegation, project_task_execution
-    from app.db import projects as projects_db
-    from app.project_group_context import _instructions_block, read_tools
-
-    try:
-        roster = projects_db.list_members(project_id)
-    except Exception:  # noqa: BLE001 — best-effort, AD-P7
-        roster = []
-    try:
-        instructions = projects_db.get_instructions(project_id)
-    except Exception:  # noqa: BLE001 — best-effort, AD-P7
-        instructions = None
-    system_addendum = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
-    instr_block = _instructions_block(instructions)
-    if instr_block:
-        system_addendum = f"{system_addendum}\n\n{instr_block}"
-    post_turn = (
-        (lambda content: post_individual_turn(conversation_id, "assistant", content))
-        if conversation_id is not None else None
-    )
-    return SurfaceScope(
-        surface=Surface.project_private,
-        project_id=project_id,
-        system_addendum=system_addendum,
-        extra_tools=(
-            project_delegation.DELEGATE_TASK_TOOL,
-            project_task_execution.EXECUTE_TASK_TOOL,
-            *read_tools(),
-        ),
-        roster=tuple(roster),
-        assigner_identity={
-            "assigner_user_id": user_id,
-            "source_conversation_id": conversation_id,
-        },
-        post_turn=post_turn,
-        capabilities={"streaming": True, "cancel": True},
-    )
-
-
 @dataclass
 class ExecutionOutcome:
     """Contract A — the one result shape every execution surface (main,
@@ -452,23 +404,9 @@ def _run_sync(
     )
     history_token = ask_runner.set_active_history(history)
 
-    # Project-scoped individual chat (`project_id is not None`): the sixth
-    # ladder branch inside `qa_agent.answer()` owns the turn via the SAME
-    # `_single_shot` call below — no fork, no second call site. Constructing
-    # `SurfaceScope(project_private, ...)` here (once) is the collapse's
-    # entire private-surface change: `_single_shot` already wires
-    # `on_delta`/`is_cancelled`/`on_route`/`on_phase` into `answer()`, and
-    # `answer()` honours them on the composer path exactly as it does for
-    # main chat — a scoped ask that engages `scope.extra_tools` takes the
-    # sixth branch instead and does not stream (AC5; matches how main
-    # chat's own tracker/ticket/connector-lookup turns behave today). `None`
-    # for every non-project ask — byte-identical to before this change.
-    scope = (
-        _build_private_scope(
-            project_id=project_id, conversation_id=conversation_id, user_id=user_id,
-        )
-        if project_id is not None else None
-    )
+    # The project-private surface scope was removed with the project chats;
+    # every ask now runs `qa_agent.answer()` on the main (unscoped) path.
+    scope = None
 
     def _single_shot() -> dict:
         return qa_agent.answer(
@@ -627,37 +565,6 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
-        # Individual project chat (build spec §5.3): promote a durable insight
-        # into project memory + ingest inbound task-status — gated on a
-        # project-scoped ask, so a non-project ask is byte-for-byte unaffected.
-        if project_id is not None and conversation_id is not None and user_id is not None:
-            # Persist the assistant's OWN answer (AC1) — owned, idempotent,
-            # linked to this run via ask_job_id (a resumed poll reuses the
-            # same ask_id, so it can't duplicate this row). Best-effort: the
-            # authoritative answer already lives in `ask_jobs.response`, so a
-            # persist failure here never breaks the already-stored answer.
-            from app.db.conversations import post_owned_individual_assistant_turn
-
-            try:
-                post_owned_individual_assistant_turn(
-                    project_id=project_id,
-                    user_id=user_id,
-                    content=payload.get("answer", ""),
-                    ask_job_id=ask_id,
-                )
-            except Exception:  # noqa: BLE001 — best-effort, AD-P7
-                logger.warning(
-                    "failed to persist individual-chat assistant turn "
-                    "ask_id=%s project_id=%s", ask_id, project_id, exc_info=True,
-                )
-
-            from app.project_memory import maybe_promote_turn
-
-            transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
-            maybe_promote_turn(project_id, conversation_id, transcript)
-            from app.delegation_status_ingest import maybe_ingest_status
-
-            maybe_ingest_status(project_id, conversation_id, user_id, question)
 
     outcome = await run_execution_job(
         job_id=ask_id,

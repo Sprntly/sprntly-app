@@ -140,7 +140,6 @@ vi.mock("../useRealtimeChannel", () => ({
 }))
 
 import { ProjectDetailScreen } from "../ProjectDetailScreen"
-import { ProjectPrivateChat } from "../ProjectPrivateChat"
 import type {
   ProjectDetail,
   ArtifactItem,
@@ -340,83 +339,3 @@ describe("degradation + channel scoping (AC-8, AC-9)", () => {
   })
 })
 
-// ── AC-6: inline brief-turn affordance goes live ──
-describe("brief-turn affordance — live update (AC-6)", () => {
-  it("test_brief_turn_actions_update_on_delegation_event: the matched brief turn reflects the new status", async () => {
-    individualTurnsMock.mockResolvedValue([iturn({ id: 7, content: "Ship onboarding by Friday." })])
-    // Completed → the assignee has no actions yet (terminal, per LEGAL_ACTIONS).
-    assignedRows = [row({ delegation_id: 5, delivered_turn_id: 7, status: "completed", bucket: "done" })]
-
-    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
-    await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
-    await waitFor(() => expect(ledgerMock).toHaveBeenCalled())
-    expect(screen.queryByTestId("delegation-action-in_progress")).toBeNull()
-    expect(screen.queryByTestId("delegation-action-completed")).toBeNull()
-
-    // The task moves back to `assigned` (e.g. a fresh hand-off) → the live
-    // event flips this turn's affordance open again.
-    await act(async () => {
-      lastHandlers().onEvent("delegation.event", { delegation_id: 5, status: "assigned" })
-      await Promise.resolve()
-    })
-
-    expect(await screen.findByTestId("delegation-action-in_progress")).toBeTruthy()
-    expect(screen.getByTestId("delegation-action-completed")).toBeTruthy()
-  })
-
-  it("ignores a delegation.event for a turn not rendered in this thread", async () => {
-    individualTurnsMock.mockResolvedValue([iturn({ id: 7 })])
-    assignedRows = [row({ delegation_id: 5, delivered_turn_id: 7, status: "assigned", bucket: "open" })]
-
-    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
-    await waitFor(() => expect(screen.getByTestId("ic-history-agent")).toBeTruthy())
-    await waitFor(() => expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy())
-
-    await act(async () => {
-      // A different delegation, not on any rendered turn — must not throw or
-      // mutate the rendered affordance.
-      lastHandlers().onEvent("delegation.event", { delegation_id: 999, status: "completed" })
-      await Promise.resolve()
-    })
-    // The rendered turn's affordance is untouched.
-    expect(screen.getByTestId("delegation-action-in_progress")).toBeTruthy()
-  })
-})
-
-// ── AC-10: non-breakage of brief.delivered + send path ──
-describe("non-breakage (AC-10)", () => {
-  it("test_send_path_and_brief_delivered_unchanged: brief.delivered still appends and send still runs", async () => {
-    individualTurnsMock.mockResolvedValue([])
-    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
-    await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(101))
-
-    // R1-05 brief.delivered still appends a live turn.
-    await act(async () => {
-      lastHandlers().onEvent("brief.delivered", iturn({ id: 42, content: "A brand-new brief." }))
-    })
-    expect(await screen.findByText("A brand-new brief.")).toBeTruthy()
-
-    // The send path is untouched.
-    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
-    await act(async () => {
-      fireEvent.change(textarea, { target: { value: "still a normal question" } })
-    })
-    await act(async () => {
-      fireEvent.click(screen.getByLabelText("Send"))
-    })
-    expect(runAskGenerationMock).toHaveBeenCalledWith(
-      "still a normal question",
-      "acme",
-      "project-individual-101",
-      expect.objectContaining({ project_id: 101, conversation_id: 9001 }),
-    )
-  })
-
-  it("ProjectPrivateChat subscribes only its own per-user channel (AC-9)", async () => {
-    render(React.createElement(ProjectPrivateChat, { projectId: 101, openPrdId: null }))
-    await waitFor(() => expect(individualTurnsMock).toHaveBeenCalledWith(101))
-    const topics = realtimeSpy.mock.calls.map((c) => c[0])
-    expect(topics.every((t) => t === "project:101:user:u1")).toBe(true)
-    expect(topics).not.toContain("project:101")
-  })
-})
