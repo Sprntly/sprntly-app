@@ -1,5 +1,6 @@
 import Link from "next/link"
 import { publicPath } from "../../lib/public-path"
+import { SprntlyLockup } from "../shared/SprntlyMark"
 
 export type LegalSection = {
   id: string
@@ -35,7 +36,7 @@ export function LegalDocument({
     <div className="legal-page">
       <header className="legal-header">
         <Link href={publicPath("/")} className="legal-brand">
-          spr<span>ntly</span>
+          <SprntlyLockup height={20} />
         </Link>
       </header>
 
