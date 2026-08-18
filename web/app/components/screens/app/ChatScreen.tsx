@@ -71,6 +71,7 @@ import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
+import type { ConversationHandle } from "./conversationCore"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import type { PrdRecord } from "../../../lib/api"
@@ -5378,6 +5379,44 @@ export function ChatScreen() {
     [activeCompany, activeTabId, attachments, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, shareRefFor, content.reportFocusId, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
   )
 
+  // ── The per-conversation store seam (A0) ──────────────────────────────────
+  // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the
+  // existing tab-multiplexer accessors (turn patch, busy, stop/asking flags,
+  // pending-ask lookup) so the shared ask-core reads/writes a conversation
+  // WITHOUT hardcoding `setTabs(prev => prev.map(t => t.id === … ))`. Main's
+  // behaviour is byte-unchanged — every method is a thin 1:1 wrapper over what
+  // the run code already did; the seam only relocates WHERE the accessor is
+  // spelled. A project slot builds a single-conversation handle instead (later).
+  const makeTabHandle = useCallback(
+    (tabId: string): ConversationHandle => ({
+      key: tabId,
+      getTurns: () => tabsRef.current.find((t) => t.id === tabId)?.thread ?? [],
+      patchTurns: (update) =>
+        setTabs((prev) =>
+          prev.map((t) => {
+            if (t.id !== tabId) return t
+            // Preserve the run code's "return the SAME tab ref when the thread is
+            // untouched" semantics: only mint a new tab object when `update`
+            // actually returns a new thread array (a no-op stop returns the input
+            // array unchanged, which must not force a needless new reference).
+            const next = update(t.thread)
+            return next === t.thread ? t : { ...t, thread: next }
+          }),
+        ),
+      setBusy: (busy) =>
+        setBusyTabs((prev) => (busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))),
+      markStopped: () => {
+        stoppedTabsRef.current.add(tabId)
+      },
+      isStopped: () => stoppedTabsRef.current.has(tabId),
+      clearAsking: () => {
+        askingTabsRef.current.delete(tabId)
+      },
+      pendingAsk: () => getPendingAsk(activeCompany, tabId),
+    }),
+    [activeCompany],
+  )
+
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
   // The composer's Send button becomes a Stop button while the active tab's ask
   // is generating. Stopping is deliberate (unlike a background unmount): it
@@ -5387,34 +5426,34 @@ export function ChatScreen() {
   const handleStopAsk = useCallback(() => {
     const tabId = activeTabId
     if (!tabId) return
+    const conv = makeTabHandle(tabId)
     // 1) Signal the running poller to bail — it clears the persisted ask_id (so a
     //    remount won't resume) and rejects with AskStoppedError, which onError
     //    swallows. Checked on the poll's next tick.
-    stoppedTabsRef.current.add(tabId)
+    conv.markStopped()
     // 2) Best-effort backend cancel: the worker polls the job status between LLM
     //    steps and aborts before the expensive answer call when it lands early.
-    const pending = getPendingAsk(activeCompany, tabId)
+    const pending = conv.pendingAsk()
     if (pending) {
       const askId = Number(pending.id)
       if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
     }
     // 3) Reclaim the composer immediately rather than waiting for the poll's next
     //    tick (runTabAsk's finally also clears these — the double-clear is safe).
-    askingTabsRef.current.delete(tabId)
-    setBusyTabs((prev) => removeFromSet(prev, tabId))
+    conv.clearAsking()
+    conv.setBusy(false)
     // 4) Replace the in-flight turn's thinking skeleton with a muted stopped note.
     //    The in-flight turn is the last one still awaiting a reply.
-    setTabs((prev) => prev.map((t) => {
-      if (t.id !== tabId) return t
+    conv.patchTurns((thread) => {
       let idx = -1
-      for (let i = t.thread.length - 1; i >= 0; i--) {
-        const turn = t.thread[i]
+      for (let i = thread.length - 1; i >= 0; i--) {
+        const turn = thread[i]
         if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
       }
-      if (idx === -1) return t
-      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined } : turn) }
-    }))
-  }, [activeTabId, activeCompany, setBusyTabs])
+      if (idx === -1) return thread
+      return thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined } : turn)
+    })
+  }, [activeTabId, makeTabHandle])
 
   // "Ask again" on a stopped / timed-out / failed turn — the surface used to be
   // a dead end at all three.
