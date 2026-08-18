@@ -25,11 +25,13 @@ import styles from "./ProjectMainThread.module.css"
 function ProjectChatSurface({
   projectId,
   surface,
+  onOpenArtifact,
 }: {
   projectId: number | string
   surface: ProjectChatSurface
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
 }) {
-  const props = useProjectConversation(projectId, surface)
+  const props = useProjectConversation(projectId, surface, onOpenArtifact)
   return <ConversationView {...props} />
 }
 
@@ -62,17 +64,17 @@ export type ProjectMainThreadProps = {
  *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
  *  resets the whole store and re-resolves the conversation, exactly like a page
  *  load — which was already showing the correct thread. */
-export function ProjectMainThread({ projectId, activeChat }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
-        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" />
+        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} />
       </div>
     )
   }
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" />
+      <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" onOpenArtifact={onOpenArtifact} />
     </div>
   )
 }
