@@ -21,10 +21,12 @@
 
 import {
   slackShareApi,
+  ticketDataApi,
   type AskResponse,
   type ChatIntentEnvelope,
   type PrdRecord,
   type SlackShareTargetRef,
+  type TicketAssignQuestion,
 } from "../../../../lib/api"
 import { slackShareQuestionFor, type SlackShareQuestion } from "../../../../lib/chat/slackShareQuestion"
 import type { ThreadTurn } from "../../../screens/app/ChatScreen"
@@ -32,6 +34,13 @@ import type { ThreadTurn } from "../../../screens/app/ChatScreen"
 /** The fields an async action settles onto its turn — always a reply, plus any
  *  turn extras (a Slack preview card, artifact cards). */
 export type ActionTurnPatch = Partial<ThreadTurn> & { reply: AskResponse }
+
+/** An interactive question an action raises in the surface's dock (main's
+ *  QuestionPopup): which Slack channel, or which ticket assignments to confirm.
+ *  A surface with no dock picker (`canAskInDock: false`) never receives one. */
+export type DockQuestion =
+  | { kind: "slack_channel"; question: SlackShareQuestion }
+  | { kind: "assign"; questions: TicketAssignQuestion[]; applied: string[] }
 
 /**
  * The per-surface configuration an action reads. The caller (main, private,
@@ -69,13 +78,14 @@ export interface ActionConfig {
   /** Resolve which artifact a Slack share posts back — the surface's own context
    *  first (main a tab's open document, a project surface its drawer's). */
   resolveShareRef?(envelope: ChatIntentEnvelope): SlackShareTargetRef
-  /** Whether this surface can run the interactive channel/document PICKER (main's
-   *  dock QuestionPopup). When false, a preview that needs a pick settles an
-   *  honest limited note instead of a card with a dead control. */
-  canPickChannel?: boolean
-  /** Ask the user which channel/document (main → set the dock question). Only
-   *  reached when `canPickChannel` is true. */
-  onNeedsChannel?(turnId: string, question: SlackShareQuestion): void
+  /** Whether this surface can run an interactive dock question (main's dock
+   *  QuestionPopup — a Slack channel pick, a ticket-assignment confirm). When
+   *  false, an action that would ask settles an honest limited note instead of a
+   *  card/turn with a dead control. */
+  canAskInDock?: boolean
+  /** Raise a dock question for a turn (main → set its `pendingShare` /
+   *  `pendingAssign`). Only reached when `canAskInDock` is true. */
+  onDockQuestion?(turnId: string, question: DockQuestion): void
 }
 
 /** Mint a turn id (crypto when available). */
@@ -159,9 +169,9 @@ export async function runShareToSlackAction(
         note: envelope.share_note ?? null,
       })
       const q = slackShareQuestionFor(preview)
-      // A preview that still needs a pick, on a surface that CAN'T pick, is an
+      // A preview that still needs a pick, on a surface that CAN'T ask, is an
       // honest limited note — never a card with a dead Send/picker.
-      if (q && !config.canPickChannel) {
+      if (q && !config.canAskInDock) {
         return {
           reply: asReply(
             "I found the document, but choosing a Slack channel isn't available in this chat yet — share it from the main chat and I'll post it there.",
@@ -189,7 +199,93 @@ export async function runShareToSlackAction(
       }
     }
   })
-  if (question && config.canPickChannel) config.onNeedsChannel?.(turnId, question)
+  if (question && config.canAskInDock) config.onDockQuestion?.(turnId, { kind: "slack_channel", question })
+}
+
+/**
+ * "Assign the login ticket to Dave" — plan the assignment from the PRD's tickets
+ * (`config.contextIds.prdId`), apply every unambiguous pair immediately, and — on
+ * a surface that can ask — raise the remaining choices as a dock question the
+ * user steps through. Lifted from main's inline `assignTicketsFlow`. A surface
+ * that can't ask (`canAskInDock: false`) applies what it can and settles an
+ * honest note for the rest rather than a dead popup.
+ */
+export async function runAssignTicketsAction(
+  query: string,
+  instruction: string,
+  config: ActionConfig,
+): Promise<void> {
+  const prdId = config.contextIds?.prdId ?? null
+  if (prdId == null || !config.runActionTurn) return
+  const box: { pending: { questions: TicketAssignQuestion[]; applied: string[] } | null } = { pending: null }
+  const { turnId } = await config.runActionTurn(query, async () => {
+    try {
+      const plan = await ticketDataApi.assignPlan(prdId, instruction)
+      // Sequential on purpose: a handful of writes at most, and a per-ticket
+      // failure must be attributable to its ticket rather than lost in a race.
+      const applied: string[] = []
+      const failed: string[] = []
+      for (const a of plan.assignments) {
+        try {
+          await ticketDataApi.saveFields(a.ticket_key, { assignee: a.assignee })
+          applied.push(`“${a.ticket_title}” → ${a.assignee.display_name || a.assignee.email || "them"}`)
+        } catch {
+          failed.push(a.ticket_title)
+        }
+      }
+      const noteLine = [
+        plan.note,
+        failed.length
+          ? `I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+      if (plan.questions.length) {
+        if (config.canAskInDock) {
+          box.pending = { questions: plan.questions, applied }
+          const lead = applied.length ? `Done so far:\n${applied.map((l) => `- ${l}`).join("\n")}\n\n` : ""
+          const qWord =
+            plan.questions.length === 1 ? "one more answer" : `${plan.questions.length} quick answers`
+          return {
+            reply: asReply(
+              `${noteLine ? `${noteLine}\n\n` : ""}${lead}I need ${qWord} to finish — pick below; I'll apply everything once you've been through them.`,
+            ),
+          }
+        }
+        // No dock picker here — apply what's unambiguous and say the rest needs
+        // a choice this surface can't collect yet (honest, never a dead popup).
+        const lead = applied.length ? `Assigned:\n${applied.map((l) => `- ${l}`).join("\n")}\n\n` : ""
+        return {
+          reply: asReply(
+            `${noteLine ? `${noteLine}\n\n` : ""}${lead}The rest need a choice I can't collect in this chat yet — finish them from the main chat.`,
+          ),
+        }
+      }
+      if (applied.length || noteLine) {
+        return {
+          reply: asReply(
+            `${applied.length ? `Assigned:\n${applied.map((l) => `- ${l}`).join("\n")}` : ""}${applied.length && noteLine ? "\n\n" : ""}${noteLine}`,
+          ),
+        }
+      }
+      return {
+        reply: asReply(
+          "I couldn't work out that assignment — try naming the ticket and the person, e.g. “assign the login ticket to Dave”.",
+        ),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      return { reply: asReply(`I couldn't plan that assignment — ${msg}. No tickets were changed.`) }
+    }
+  })
+  if (box.pending && config.canAskInDock) {
+    config.onDockQuestion?.(turnId, {
+      kind: "assign",
+      questions: box.pending.questions,
+      applied: box.pending.applied,
+    })
+  }
 }
 
 const KIND_NOUN: Record<string, [string, string]> = {

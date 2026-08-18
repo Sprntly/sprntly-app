@@ -32,6 +32,7 @@ import {
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
 import {
+  runAssignTicketsAction,
   runEditPrdAction,
   runListArtifactsAction,
   runShareToSlackAction,
@@ -156,10 +157,10 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, openPrdId, onArt
             ? { prd_id: pid }
             : { artifact_type: e.artifact_type ?? null, artifact_query: e.artifact_query ?? null }
         },
-        // The interactive channel/document PICKER is OFF here (no dock popup on
-        // this surface yet) — a preview that needs a pick settles an honest
-        // limited note instead of a card with a dead control.
-        canPickChannel: false,
+        // The interactive dock question (channel pick, assign confirm) is OFF
+        // here (no dock popup on this surface yet) — an action that would ask
+        // settles an honest limited note instead of a dead control.
+        canAskInDock: false,
       }
     },
     [projectId, onArtifactsChanged],
@@ -210,11 +211,22 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact, openPrdId, onArt
 
         if (envelope.intent === "share_to_slack") {
           // Preview a Slack share of the open document. Send/Cancel work in the
-          // card; the channel PICKER is off here (canPickChannel: false) — a
+          // card; the channel PICKER is off here (canAskInDock: false) — a
           // preview that needs a pick settles an honest limited note.
           const prdId = envelope.prd_id ?? openPrdId ?? null
           await runShareToSlackAction(draft, envelope, buildPrivateActionConfig(ctx, prdId))
           return true
+        }
+
+        if (envelope.intent === "assign_tickets") {
+          // Assign the open PRD's tickets. Unambiguous pairs apply; the picker for
+          // the rest is off here (canAskInDock: false) → an honest limited note.
+          const prdId = envelope.prd_id ?? openPrdId ?? null
+          if (prdId != null && envelope.instruction) {
+            await runAssignTicketsAction(draft, envelope.instruction, buildPrivateActionConfig(ctx, prdId))
+            return true
+          }
+          return false
         }
 
         return false

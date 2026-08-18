@@ -72,7 +72,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
-import { runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
+import { runAssignTicketsAction, runEditPrdAction, runListArtifactsAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -3503,72 +3503,10 @@ export function ChatScreen() {
   // picks stay local until the last question settles, then `completeAssign`
   // writes them all and posts the summary (owner directive: finish all the
   // questions before anything is sent).
-  const assignTicketsFlow = useCallback(async (
-    query: string, targetTabId: string, prdId: number, instruction: string,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    try {
-      const plan = await ticketDataApi.assignPlan(prdId, instruction)
-      // Sequential on purpose: a handful of writes at most, and a per-ticket
-      // failure must be attributable to its ticket rather than lost in a race.
-      const applied: string[] = []
-      const failed: string[] = []
-      for (const a of plan.assignments) {
-        try {
-          await ticketDataApi.saveFields(a.ticket_key, { assignee: a.assignee })
-          applied.push(`“${a.ticket_title}” → ${a.assignee.display_name || a.assignee.email || "them"}`)
-        } catch {
-          failed.push(a.ticket_title)
-        }
-      }
-      const noteLine = [
-        plan.note,
-        failed.length
-          ? `I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`
-          : "",
-      ].filter(Boolean).join(" ")
-      if (plan.questions.length) {
-        setTabs((prev) => prev.map((t) => t.id === targetTabId
-          ? { ...t, pendingAssign: { questions: plan.questions, applied, turnId: id } }
-          : t))
-        const lead = applied.length
-          ? `Done so far:\n${applied.map((l) => `- ${l}`).join("\n")}\n\n`
-          : ""
-        const qWord = plan.questions.length === 1 ? "one more answer" : `${plan.questions.length} quick answers`
-        finalize(asReply(
-          `${noteLine ? `${noteLine}\n\n` : ""}${lead}I need ${qWord} to finish — pick below; I'll apply everything once you've been through them.`,
-        ))
-      } else if (applied.length || noteLine) {
-        finalize(asReply(
-          `${applied.length ? `Assigned:\n${applied.map((l) => `- ${l}`).join("\n")}` : ""}${applied.length && noteLine ? "\n\n" : ""}${noteLine}`,
-        ))
-      } else {
-        finalize(asReply(
-          "I couldn't work out that assignment — try naming the ticket and the person, e.g. “assign the login ticket to Dave”.",
-        ))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize(asReply(`I couldn't plan that assignment — ${msg}. No tickets were changed.`))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation])
+  // (The ticket-assignment flow moved into the shared action layer —
+  // `runAssignTicketsAction`, config'd by `onAssignTickets` with main's captured
+  // tab + the dock assign question. `completeAssign`/`cancelAssign` below still
+  // apply the popup's answers, unchanged, until main adopts the engine.)
 
   // ── share_to_slack ────────────────────────────────────────────────────────
   //
@@ -5275,20 +5213,34 @@ export function ChatScreen() {
                   runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
                   resolveShareRef: (e) =>
                     shareRefFor(e, tabsRef.current.find((t) => t.id === tabId), content.reportFocusId ?? null),
-                  canPickChannel: true,
-                  onNeedsChannel: (turnId, question) => {
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "slack_channel") return
                     setTabs((prev) => prev.map((t) =>
-                      t.id === tabId ? { ...t, pendingShare: { turnId, ...question } } : t))
+                      t.id === tabId ? { ...t, pendingShare: { turnId, ...question.question } } : t))
                   },
                 })
                 settlePendingSend()
               },
               onAssignTickets: (instruction, prdId) => {
-                // Change who OWNS tickets. dispatchChatIntent's own guard
-                // (ctx.hasEditTarget && envelope.instruction) already ensures
-                // prdId is non-null and an instruction is present before this
-                // executor ever runs.
-                void assignTicketsFlow(trimmed, activeTab!.id, prdId!, instruction)
+                // Change who OWNS tickets — the SHARED action, config'd with
+                // main's captured tab + the dock question for the choices the
+                // plan couldn't settle. dispatchChatIntent's guard already
+                // ensured prdId + instruction are present.
+                const tabId = activeTab!.id
+                void runAssignTicketsAction(trimmed, instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  contextIds: { prdId },
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "assign") return
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId
+                        ? { ...t, pendingAssign: { questions: question.questions, applied: question.applied, turnId } }
+                        : t))
+                  },
+                })
                 settlePendingSend()
               },
               // No resolvable edit/format/assign target/instruction, no open
@@ -5423,7 +5375,7 @@ export function ChatScreen() {
       }
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, shareRefFor, content.reportFocusId, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
+    [activeCompany, activeTabId, attachments, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, shareRefFor, content.reportFocusId, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
