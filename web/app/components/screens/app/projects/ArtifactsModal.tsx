@@ -410,10 +410,10 @@ export function ArtifactsModal({
   open: boolean
   initialFilter?: ProjectArtifactType
   onClose: () => void
-  /** AD-HOC: open the artifact IN-PLACE beside the chat (no route change). When
-   *  provided, this supersedes the old deep-link `router.push` — the Projects
-   *  screen mounts a self-contained `ProjectArtifactDrawer` that renders the
-   *  real body. Falls back to the deep-link navigation when absent. */
+  /** Open the artifact IN-PLACE (no route change) when provided. The Projects
+   *  screen currently OMITS this (standalone-browse in-place open is deferred),
+   *  so the modal falls back to the deep-link viewer — an honest fallback, never
+   *  a dead control. Chat-driven PRD opens go straight to the shared panel. */
   onOpenInPlace?: (a: ArtifactItem) => void
   /** Fired after the folded Add-artifact view attaches artifact(s) — the
    *  parent re-fetches so the top-bar "Artifacts(N)" count updates. The modal
