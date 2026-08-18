@@ -31,16 +31,17 @@ import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
-  conversationsApi, prdApi, chatIntentApi, askApi,
+  conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
 } from "../../../../lib/api"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
+import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
-import { type ClarifyAnswer } from "../../../shared/ClarifyQuestionsCard"
+import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
@@ -82,7 +83,7 @@ export function useProjectConversation(
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
   const { content, setContent } = useContent()
-  const { openContentPanel } = useNavigation()
+  const { openContentPanel, showToast } = useNavigation()
   const name = profileDisplayName(profile) || "You"
   const userInitials = name.slice(0, 2).toUpperCase()
 
@@ -179,7 +180,10 @@ export function useProjectConversation(
     markStopped: () => { stoppedRef.current = true },
     isStopped: () => stoppedRef.current,
     clearAsking: () => { askingRef.current.delete(convKey) },
-    pendingAsk: () => null,
+    // Same as main's handle: the persisted in-flight ask_id, keyed by this
+    // conversation. handleStopAsk reads it to cancel the server job by id, and
+    // the mount-time resume effect reads it to re-attach after a reload.
+    pendingAsk: () => getPendingAsk(activeCompany, convKey),
     isAsking: () => askingRef.current.has(convKey),
     exists: () => true,
     patchMeta: (partial) => setMeta((prev) => ({ ...prev, ...partial })),
@@ -192,7 +196,7 @@ export function useProjectConversation(
       briefMeta: null, insightBody: null, prd: null, prdId: null, evidence: null,
       prdGenerating: false, evidenceGenerating: false, ...metaRef.current,
     } as ChatTab),
-  }), [convKey])
+  }), [convKey, activeCompany])
 
   // conversation_id, NO project_id (main chat on a project-bound row).
   const resolveAskParams = useCallback(async (
@@ -221,11 +225,17 @@ export function useProjectConversation(
     return Promise.resolve()
   }, [persistence])
 
-  const nextPromptsAdapter: NextPromptsAdapter = useMemo(() => ({ fetchSuggestions: async () => [] }), [])
+  // Same adapter as main (MAIN_NEXT_PROMPTS_ADAPTER): the shared next-prompts
+  // hook drives the fetch off the conversation's db id; the project surface just
+  // supplies the real backend call instead of the empty stub it shipped with.
+  const nextPromptsAdapter: NextPromptsAdapter = useMemo(() => ({
+    fetchSuggestions: (conversationId, opts) =>
+      chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
+  }), [])
   const nextPrompts = useNextPrompts(nextPromptsAdapter)
 
   // ── The shared unit ────────────────────────────────────────────────────────
-  const composer = useComposer({ showToast: () => {} })
+  const composer = useComposer({ showToast })
   const scroll = useThreadScroll({ thread, activeTabId: convKey, pendingSend: composer.pendingSend })
   const engine = useMainConversation({
     makeHandle, activeKey: convKey, activeCompany, askingRef,
@@ -238,7 +248,7 @@ export function useProjectConversation(
     getPrdId: () => metaRef.current.prdId ?? null,
     mountedRef, animatedTurnIds, askStartRef, resumedTurnsRef,
     pushPendingConversation, setActiveConv: () => {}, finalizeConversationTurn,
-    nextPrompts, showToast: () => {},
+    nextPrompts, showToast,
   })
 
   // ── Single-conversation generation seams + the shared flows ────────────────
@@ -282,10 +292,88 @@ export function useProjectConversation(
   const gen = useConversationGeneration({
     emitTurn, makeHandle, seedGenerationTurn, threadContextFor, persistence,
     pushPendingConversation, finalizeConversationTurn,
-    setContent, openContentPanel, content, showToast: () => {},
+    setContent, openContentPanel, content, showToast,
     openArtifactInPanel, postOpenArtifactReply,
     markTicketSetAutoOpened: () => {}, postSummary: () => {},
   })
+
+  // ── Skills palette: the company's own uploaded skills (main parity) ─────────
+  // Same fetch main runs on mount; an empty result correctly yields an empty
+  // palette rather than dead built-in triggers the backend won't honour.
+  useEffect(() => {
+    askApi.skills().then((r) => composer.setSkills(r.skills)).catch(() => composer.setSkills([]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Resume an orphaned in-flight ASK across reload (single-conversation) ────
+  // Mirrors main's per-tab resume effect for this one conversation. A chat Ask
+  // is fire-and-forget: the ask_id is persisted (askScope(convKey)) but the
+  // awaiting poll + asking/busy markers are not. Once hydration has restored the
+  // still-awaiting user turn, re-attach the poll by id (NOT re-POST) and restore
+  // the "asking…" UX. Runs once per mount.
+  const resumedAskRef = useRef(false)
+  useEffect(() => {
+    if (hydrating || resumedAskRef.current) return
+    const pending = getPendingAsk(activeCompany, convKey)
+    if (!pending) return
+    const askId = Number(pending.id)
+    if (!Number.isFinite(askId)) return
+    // Re-attach only when the last turn is still awaiting a reply — the marker
+    // that survives in the persisted (hydrated) thread.
+    const last = threadRef.current[threadRef.current.length - 1]
+    if (!last || last.reply !== undefined || last.error !== undefined || last.stopped) return
+    if (askingRef.current.has(convKey)) return
+    resumedAskRef.current = true
+    const turnId = last.id
+    // Restore the optimistic asking/busy UX for this conversation.
+    askingRef.current.add(convKey)
+    busySetRef.current = new Set(busySetRef.current).add(convKey)
+    setBusy(true)
+    stoppedRef.current = false
+    resumedTurnsRef.current.add(turnId)
+    askStartRef.current.set(turnId, Date.now())
+    const patchTurn = (updater: (t: ThreadTurn) => ThreadTurn) =>
+      setThread((prev) => prev.map((t) => (t.id === turnId ? updater(t) : t)))
+    void (async () => {
+      try {
+        const res = await resumeAskGeneration(
+          askId, activeCompany, convKey,
+          () => !mountedRef.current,
+          () => stoppedRef.current,
+          // Re-attached mid-generation: the stream's replay frame catches the
+          // preview up with everything already written, then live deltas.
+          (text) => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, partial: text, streamDropped: false } : t)),
+          () => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, streamDropped: true } : t)),
+        )
+        // If it streamed, mark animated BEFORE the reply lands so the typewriter
+        // doesn't re-reveal text already read (main's `hasFreshReply` reasoning).
+        const streamed = threadRef.current.find((t) => t.id === turnId)
+        if (streamed?.partial) animatedTurnIds.current.add(turnId)
+        patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }))
+        void finalizeConversationTurn(turnId, { reply: res }, convKey)
+      } catch (e) {
+        // Unmounted again mid-resume: leave the persisted ask so the NEXT mount
+        // re-attaches; don't write an error.
+        if (e instanceof AskCancelledError) return
+        // User stopped the resumed ask: rendered by handleStopAsk, not a failure.
+        if (e instanceof AskStoppedError) return
+        if (e instanceof AskTimeoutError) {
+          patchTurn((t) => ({ ...t, timedOut: true, partial: undefined, streamDropped: undefined }))
+          return
+        }
+        const msg = e instanceof Error ? e.message : "Something went wrong"
+        patchTurn((t) => ({ ...t, error: msg, streamDropped: undefined }))
+        void finalizeConversationTurn(turnId, { error: msg }, convKey)
+      } finally {
+        askStartRef.current.delete(turnId)
+        resumedTurnsRef.current.delete(turnId)
+        askingRef.current.delete(convKey)
+        busySetRef.current = new Set([...busySetRef.current].filter((k) => k !== convKey))
+        setBusy(false)
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hydrating, activeCompany, convKey, finalizeConversationTurn])
 
   // ── Generate-PRD + the clarify/sufficiency wizard (thin single-conv opener) ─
   const runProjectClarifiedGeneration = useCallback((rawTask: string, sourceDocs: { name: string; content: string }[] | undefined, userMessage: string) => {
@@ -339,13 +427,23 @@ export function useProjectConversation(
       return
     }
     const turnId = newId()
-    setThread((prev) => [...prev, {
-      id: turnId, query: userMessage,
-      clarify: questions.map((q) => ({ prompt: q.prompt, header: q.header ?? null, options: q.options, skip_default: q.skip_default ?? null })),
-    }])
+    const clarify = questions.map((q) => ({ prompt: q.prompt, header: q.header ?? null, options: q.options, skip_default: q.skip_default ?? null }))
+    // Match main's clarify turn shape (settleCommandAck): the questions ARE the
+    // reply, so the turn carries a real `reply` alongside `.clarify`. Without it
+    // `!reply` is true and the shared bubble falls through to its dead-end
+    // "No response was generated for this message." note ABOVE the wizard —
+    // exactly the state main avoids by settling the reply onto the command turn.
+    const reply = {
+      answer: clarifyQuestionsText(clarify),
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    setThread((prev) => [...prev, { id: turnId, query: userMessage, reply, clarify }])
     setPendingClarify({ task, sourceDocs, turnId })
-    setMeta((prev) => ({ ...prev, prdCommandThinking: false }))
+    // `meta.pendingClarify` is what the mapped `activeTab.pendingClarify` reads,
+    // which drives `clarifyGateOpen` → the inline clarify card renders (main parity).
+    setMeta((prev) => ({ ...prev, prdCommandThinking: false, pendingClarify: { task, sourceDocs, turnId } }))
     pushPendingConversation(turnId, userMessage, convKey)
+    void finalizeConversationTurn(turnId, { reply }, convKey)
   }, [convKey, pushPendingConversation, runProjectClarifiedGeneration])
 
   const submitClarifyAnswers = useCallback((answers: ClarifyAnswer[]) => {
