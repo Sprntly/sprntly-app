@@ -6054,17 +6054,6 @@ export const projectsApi = {
    *  the caller's memberships by the backend — no `dataset`/company arg
    *  (tenancy rides the `X-Workspace-Id` header, `ask.py`'s pattern). */
   list: () => api.get<{ projects: ProjectListItem[] }>("/v1/projects").then((r) => r.projects),
-  /** Get-or-create THIS caller's durable individual project chat (a real
-   *  `conversations` row, `kind='individual'`, per user+project). Returns the
-   *  conversation — its `id` is the `conversation_id` the project individual
-   *  chat mount binds to and threads into main's unscoped `/v1/ask`. */
-  individualChat: (id: number | string) =>
-    api.post<ConversationRecord>(`/v1/projects/${encodeURIComponent(String(id))}/individual`, {}),
-  /** Get-or-create the project's ONE shared group chat (a real `conversations`
-   *  row, `kind='group'`, per project). Returns the conversation — its `id` is
-   *  what the group chat mount binds to. */
-  groupChat: (id: number | string) =>
-    api.post<ConversationRecord>(`/v1/projects/${encodeURIComponent(String(id))}/group`, {}),
   /** Create a project — manual (blank) or from-artifact/PRD-auto (`origin`).
    *  `prd_id` is only meaningful for `origin: "prd_auto"` — the create-
    *  modal's "Auto · from PRD" tab sends the forked PRD's id so the server
@@ -6283,6 +6272,12 @@ export const projectsApi = {
    *  reuses the SAME `conversation_id`. */
   individualChat: (id: number | string) =>
     api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
+  /** Get-or-create the project's ONE shared group chat (a real `conversations`
+   *  row, `kind='group'`, per project) and return it — its `id` is what the
+   *  rebuilt group chat mount binds to and threads into main's unscoped
+   *  `/v1/ask`. Mirrors `individualChat` one level up (per-project vs per-user). */
+  groupChat: (id: number | string) =>
+    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/group`),
   /** Load-on-open read of the caller's own individual project chat (create-if-
    *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
    *  `since` omitted fetches the whole history. Empty (never a crash) when

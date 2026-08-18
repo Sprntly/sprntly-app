@@ -25,19 +25,19 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
-import { useCompany } from "../../../context/CompanyContext"
-import { createChatPersistence } from "../../../lib/chatPersistence"
-import { conversationsApi, projectsApi, type AskResponse } from "../../../lib/api"
-import { resolveAttachmentRefs } from "../../../lib/buildSendCommand"
-import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
+import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
+import { useCompany } from "../../../../context/CompanyContext"
+import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
+import { conversationsApi, projectsApi, type AskResponse } from "../../../../lib/api"
+import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
+import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
 import { useComposer } from "../useComposer"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
 import type { ConversationHandle, AskGrounding } from "../conversationCore"
 import type { ThreadTurn } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
-import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
+import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
 
 export type ProjectChatSurface = "individual" | "group"
 
@@ -55,8 +55,8 @@ export function useProjectConversation(
   const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
-  const name = profileDisplayName(profile)
-  const userInitials = (name || "You").slice(0, 2).toUpperCase()
+  const name = profileDisplayName(profile) || "You"
+  const userInitials = name.slice(0, 2).toUpperCase()
 
   // ── The single-conversation store ─────────────────────────────────────────
   const [thread, setThread] = useState<ThreadTurn[]>([])
@@ -123,7 +123,7 @@ export function useProjectConversation(
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
   const persistence = useMemo(() => createChatPersistence({
-    getApi: () => import("../../../lib/api").then((m) => m.conversationsApi),
+    getApi: () => import("../../../../lib/api").then((m) => m.conversationsApi),
     getTabConvId: () => dbConvIdRef.current,
     getTabPrdId: () => null,
     setTabConvId: (_key, convId) => { setDbConvId(convId) },
@@ -180,7 +180,7 @@ export function useProjectConversation(
   const finalizeConversationTurn = useCallback((
     turnId: string, updates: { reply?: AskResponse; error?: string }, key: string,
   ): Promise<void> => {
-    if (updates.reply) return persistence.pushAssistantTurn(key, turnId, updates.reply)
+    if (updates.reply) return persistence.pushAssistantTurn(key, replyToText(updates.reply))
     return Promise.resolve()
   }, [persistence])
 

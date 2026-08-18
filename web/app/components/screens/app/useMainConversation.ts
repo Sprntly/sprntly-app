@@ -29,7 +29,8 @@ import {
   AskStoppedError,
   AskTimeoutError,
 } from "../../../lib/runAskGeneration"
-import { ApiError, askApi, providerNoticeTitle, type AskResponse, type ProviderNotice } from "../../../lib/api"
+import { ApiError, askApi, type AskResponse } from "../../../lib/api"
+import { providerNoticeTitle, type ProviderNotice } from "../../../lib/providerLimitNotice"
 import { WAIT_FAILED_TITLE } from "../../shared/AssistantWaitState"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"

@@ -26,7 +26,7 @@ import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "..
 import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type OpenArtifactResult } from "../../../lib/api"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
 import type { TicketSetFailureKind } from "../../../types/content"
-import type { AppContentState } from "../../../context/ContentContext"
+import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import type { ConversationHandle } from "./conversationCore"
 import type { ThreadTurn } from "./ChatScreen"
@@ -87,8 +87,9 @@ export interface UseConversationGenerationDeps {
    *  re-derivation of generation). */
   markTicketSetAutoOpened: (key: string) => void
   /** Post the agent-only artifact-summary turn (main: via its summary poster).
-   *  Optional-chained in main, so a no-op is a valid injection. */
-  postSummary: (key: string, kind: string, artifactId: number) => void
+   *  Optional-chained in main, so a no-op is a valid injection. `kind` matches
+   *  the host poster's artifact-kind union. */
+  postSummary: (key: string, kind: "prd" | "evidence" | "prototype" | "ticket_set", artifactId: number) => void
   /** Seed the optimistic pending-conversation rail entry + fire the create. */
   pushPendingConversation: (
     turnId: string,
