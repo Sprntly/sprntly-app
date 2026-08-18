@@ -31,7 +31,12 @@ import {
   type IndividualTurn,
   type OpenArtifactCandidate,
 } from "../../../../lib/api"
-import { runListArtifactsAction } from "../../../shared/chat-shell/conversation/actions"
+import {
+  runEditPrdAction,
+  runListArtifactsAction,
+  type ActionConfig,
+} from "../../../shared/chat-shell/conversation/actions"
+import type { ConversationActionContext } from "../../../shared/chat-shell/conversation/types"
 import type { ChatPersistence } from "../../../../lib/chatPersistence"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
@@ -74,7 +79,7 @@ function pairHistory(rows: IndividualTurn[]): ThreadTurn[] {
   return out
 }
 
-export function ProjectPrivateChat({ projectId, onOpenArtifact }: ProjectPrivateChatProps) {
+export function ProjectPrivateChat({ projectId, onOpenArtifact, openPrdId, onArtifactsChanged }: ProjectPrivateChatProps) {
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
   const auth = useAuth()
@@ -117,6 +122,35 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact }: ProjectPrivate
     [resolveConvId],
   )
 
+  // Private's ActionConfig for the shared action layer: render into the engine's
+  // turns (via the engine-provided ctx) + persist server-only, plus the open-PRD
+  // context and the drawer refresh. The action bodies read these; they never
+  // learn the surface.
+  const buildPrivateActionConfig = useCallback(
+    (ctx: ConversationActionContext, prdId: number | null): ActionConfig => {
+      const persist = (id: string, question: string, answer: string) =>
+        void projectsApi
+          .persistIndividualTurns(projectId, { clientMessageId: id, question, answer })
+          .catch(() => {})
+      return {
+        emitTurn: (turn) => {
+          ctx.emitTurn(turn)
+          if (turn.reply) persist(turn.id, turn.query, (turn.reply as AskResponse).answer ?? "")
+        },
+        runActionTurn: async (q, w) => {
+          const { turnId, reply } = await ctx.runActionTurn(q, w)
+          persist(turnId, q, reply.answer ?? "")
+        },
+        contextIds: { prdId },
+        // Refresh the artifacts list/count after an edit. (The OPEN drawer's own
+        // content refresh is a follow-up — there is no prop to push the fresh
+        // record into the drawer yet; the turn honestly reports what changed.)
+        onArtifactUpdated: () => onArtifactsChanged?.(),
+      }
+    },
+    [projectId, onArtifactsChanged],
+  )
+
   const adapter: SurfaceAdapter = useMemo(
     () => ({
       identity: {
@@ -135,38 +169,35 @@ export function ProjectPrivateChat({ projectId, onOpenArtifact }: ProjectPrivate
           chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
       },
       // Command-intent dispatch: resolve the intent and run the SHARED action
-      // layer config'd for this surface. list_artifacts is migrated (the same
-      // shared action main runs); every other command is still DEFERRED and
-      // falls through to a grounded ask.
+      // layer config'd for this surface. list_artifacts + edit_prd are migrated
+      // (the same shared actions main runs); every other command is still
+      // DEFERRED and falls through to a grounded ask.
       dispatchIntent: async (draft, ctx) => {
         const envelope = await chatIntentApi
           .resolve(draft, { conversationId: convIdRef.current })
           .catch(() => null)
         if (!envelope) return false
+
         if (envelope.intent === "list_artifacts" && Array.isArray(envelope.artifact_list)) {
-          runListArtifactsAction(draft, envelope, {
-            // Private's emitTurn: render into the engine's turns (ctx) + persist
-            // server-only (this branch does NOT ride /v1/ask). Never learns it's
-            // "private" — it just provides the two surface bits.
-            emitTurn: (turn) => {
-              ctx.emitTurn(turn)
-              if (turn.reply) {
-                void projectsApi
-                  .persistIndividualTurns(projectId, {
-                    clientMessageId: turn.id,
-                    question: turn.query,
-                    answer: (turn.reply as AskResponse).answer ?? "",
-                  })
-                  .catch(() => {})
-              }
-            },
-          })
+          runListArtifactsAction(draft, envelope, buildPrivateActionConfig(ctx, null))
           return true
         }
+
+        if (envelope.intent === "edit_prd") {
+          // Edit the PRD open in this chat's drawer (parity with main's open-tab
+          // PRD). No open PRD → nothing to edit; fall through to a grounded ask.
+          const prdId = envelope.prd_id ?? openPrdId ?? null
+          if (prdId != null && envelope.instruction) {
+            await runEditPrdAction(envelope.instruction, buildPrivateActionConfig(ctx, prdId))
+            return true
+          }
+          return false
+        }
+
         return false
       },
     }),
-    [projectId, callerFirstName, callerInitials, activeCompany, persistence],
+    [projectId, callerFirstName, callerInitials, activeCompany, persistence, openPrdId, onArtifactsChanged, buildPrivateActionConfig],
   )
 
   const engine = useConversation(adapter)

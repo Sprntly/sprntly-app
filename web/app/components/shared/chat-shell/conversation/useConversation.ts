@@ -212,6 +212,37 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
     }
   }, [company, conversationKey, onResult, onError])
 
+  // ── Async command turn (the shared action layer's runActionTurn) ──────────
+  // Seed an optimistic turn, mark busy, await the command's async work, settle
+  // the turn, clear busy. Persistence is the surface's (it wraps this) — the
+  // engine owns only the render/busy lifecycle.
+  const runActionTurn = useCallback(
+    async (query: string, worker: () => Promise<AskResponse>) => {
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      setTurns((prev) => [...prev, { id, query }])
+      setBusySet((prev) => addToSet(prev, conversationKey))
+      let reply: AskResponse
+      try {
+        reply = await worker()
+      } catch {
+        reply = {
+          answer: "Something went wrong.",
+          sources: [],
+          follow_ups: [],
+          key_points: [],
+          citations: [],
+          confidence: 1,
+          unanswered: "",
+        } as AskResponse
+      }
+      patchTurn(id, (t) => ({ ...t, reply }))
+      setBusySet((prev) => removeFromSet(prev, conversationKey))
+      return { turnId: id, reply }
+    },
+    [conversationKey, patchTurn],
+  )
+
   // ── Submit ────────────────────────────────────────────────────────────────
   const submit = useCallback(
     (draft: string, opts?: ConversationSubmitOptions) => {
@@ -244,7 +275,12 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
         const dispatch = adapterRef.current.dispatchIntent
         if (dispatch) {
           try {
-            if (await dispatch(trimmed, { emitTurn: (turn) => setTurns((prev) => [...prev, turn]) })) {
+            if (
+              await dispatch(trimmed, {
+                emitTurn: (turn) => setTurns((prev) => [...prev, turn]),
+                runActionTurn,
+              })
+            ) {
               settlePending()
               return
             }
@@ -305,7 +341,7 @@ export function useConversation(adapter: SurfaceAdapter): ConversationEngine {
         })
       })()
     },
-    [conversationKey, company, nextPrompts, patchTurn, onResult, onError],
+    [conversationKey, company, nextPrompts, patchTurn, onResult, onError, runActionTurn],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

@@ -72,7 +72,8 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
-import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
+import { runEditPrdAction, runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
+import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -3277,46 +3278,51 @@ export function ChatScreen() {
   // skeleton optimistically, then confirms which sections changed and refreshes
   // the panel with the server's updated document — the same refresh contract
   // the input-question answer flow uses.
-  const prdChatEditFlow = useCallback(async (instruction: string, targetTabId: string, prdId: number) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query: instruction }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, instruction, targetTabId)
-    const finalize = (reply: AskResponse) => {
+  // Main's `ActionConfig.runActionTurn` — the async command-turn lifecycle for a
+  // captured tab: seed the optimistic turn, mark busy, await the command's async
+  // work, settle the turn + client/server persist, clear busy. Shared by every
+  // async action (edit-PRD, Slack, generation) via the action layer.
+  const runActionTurnInTab = useCallback(
+    async (tabId: string, query: string, worker: () => Promise<AskResponse>) => {
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
+        t.id === tabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
+      setBusyTabs((prev) => addToSet(prev, tabId))
+      pushPendingConversation(id, query, tabId)
+      let reply: AskResponse
+      try {
+        reply = await worker()
+      } catch {
+        reply = {
+          answer: "Something went wrong.",
+          sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+        } as AskResponse
+      }
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId
           ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
           : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      const res = await prdApi.chatEdit(prdId, instruction)
-      if (res.sections_changed.length) {
-        // The scoped edit produced a fresh document — drop stale local drafts so
-        // the panel shows the server copy, then push it into the tab + panel.
-        clearPrdDrafts(prdId)
-        const prd = prdStateFromRecord(res.prd)
-        setTabs((prev) => prev.map((t) => (t.id === targetTabId ? { ...t, prd } : t)))
-        if (targetTabId === activeTabIdRef.current) setContent({ prd })
-      }
-      const answer = res.sections_changed.length
-        ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
-        : res.summary ||
-          "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it."
-      finalize({ answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize({
-        answer: `I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent])
+      finalizeConversationTurn(id, { reply }, tabId)
+      setBusyTabs((prev) => removeFromSet(prev, tabId))
+      return { turnId: id, reply }
+    },
+    [pushPendingConversation, finalizeConversationTurn],
+  )
+
+  // Main's `ActionConfig.onArtifactUpdated` — apply a freshly-edited PRD to the
+  // captured tab + (if it's active) the ContentPanel. The panel-apply that used
+  // to live inline in `prdChatEditFlow`.
+  const applyPrdArtifactInTab = useCallback(
+    (tabId: string, update: { kind: "prd"; prdId: number; record: PrdRecord }) => {
+      // Drop stale local drafts so the panel shows the server copy.
+      clearPrdDrafts(update.prdId)
+      const prd = prdStateFromRecord(update.record)
+      setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, prd } : t)))
+      if (tabId === activeTabIdRef.current) setContent({ prd })
+    },
+    [setContent],
+  )
 
   // "Change the template to Acme" on a PRD tab: dispatch the in-place format
   // switch (POST /v1/prd/{id}/change-template) and acknowledge in the thread —
@@ -5236,7 +5242,16 @@ export function ChatScreen() {
                 settlePendingSend()
               },
               onEditPrd: (instruction, prdId) => {
-                void prdChatEditFlow(instruction, activeTab!.id, prdId!)
+                // The SHARED edit-PRD action, config'd with main's captured tab:
+                // async-turn (its tab + client persist), the open PRD id, and the
+                // panel-apply. Same behaviour the inline flow had, now shared.
+                const tabId = activeTab!.id
+                void runEditPrdAction(instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: async (q, w) => { await runActionTurnInTab(tabId, q, w) },
+                  contextIds: { prdId },
+                  onArtifactUpdated: (u) => applyPrdArtifactInTab(tabId, u),
+                })
                 settlePendingSend()
               },
               onOpenArtifact: (open) => {
@@ -5454,7 +5469,7 @@ export function ChatScreen() {
       }
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
+    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, emitCommandTurn, runActionTurnInTab, applyPrdArtifactInTab, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow, resolveSendTarget, runConversationAsk],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

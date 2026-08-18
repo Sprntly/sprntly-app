@@ -19,13 +19,20 @@
  * each addition a new optional field, never a surface branch.
  */
 
-import type { ChatIntentEnvelope } from "../../../../lib/api"
-import type { AskResponse } from "../../../../lib/api"
+import type { AskResponse, ChatIntentEnvelope, PrdRecord } from "../../../../lib/api"
 import type { ThreadTurn } from "../../../screens/app/ChatScreen"
 
 /**
  * The per-surface configuration an action reads. The caller (main, private,
  * group) supplies the surface-specific bits; the action logic is identical.
+ *
+ * Grows by field as higher-coupling actions land — each a new primitive, NEVER a
+ * surface branch. So far:
+ *  - `emitTurn`        — synchronous settled turn (list-artifacts).
+ *  - `runActionTurn`   — the async command-turn lifecycle (edit, Slack, generate…).
+ *  - `contextIds`      — the surface's current artifact context (which PRD is open).
+ *  - `onArtifactUpdated` — discrete "the document changed, show the new one".
+ * (The STREAMING generation preview sink lands with generation, later.)
  */
 export interface ActionConfig {
   /** Place a fully-formed, SETTLED turn into THIS conversation — render + persist.
@@ -33,11 +40,73 @@ export interface ActionConfig {
    *  project surface → the engine's turns + server-only persist. The action never
    *  learns which. */
   emitTurn(turn: ThreadTurn): void
+  /** Run an ASYNC command turn: seed an optimistic turn, mark busy, await the
+   *  worker's reply, settle the turn, clear busy, and persist — the surface owns
+   *  all of it (main → its tab + client persist; a project surface → the engine's
+   *  turns + server persist). The action supplies only the async work + its reply.
+   *  Optional: a sync-only action (list-artifacts) never needs it. */
+  runActionTurn?(query: string, worker: () => Promise<AskResponse>): Promise<void>
+  /** The surface's current artifact context — which PRD / evidence / ticket-set
+   *  is "open" here (main a tab's, a project surface its drawer's). Actions read
+   *  their edit/target from it. */
+  contextIds?: { prdId?: number | null; evidenceId?: number | null; ticketSetId?: number | null }
+  /** Apply a freshly-changed artifact to the surface's artifact view — a DISCRETE
+   *  one-shot refresh (main → its ContentPanel; a project surface → its drawer).
+   *  NOT the streaming generation preview sink (that lands with generation). */
+  onArtifactUpdated?(update: { kind: "prd"; prdId: number; record: PrdRecord }): void
 }
 
 /** Mint a turn id (crypto when available). */
 function newTurnId(): string {
   return typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+}
+
+/** A plain agent reply from a prose answer (a command's acknowledgement). */
+function asReply(answer: string): AskResponse {
+  return {
+    answer,
+    sources: [],
+    follow_ups: [],
+    key_points: [],
+    citations: [],
+    confidence: 1,
+    unanswered: "",
+  } as AskResponse
+}
+
+/**
+ * "Make this PRD shorter" / "add a risks section" — apply a scoped chat-edit to
+ * the PRD open on this surface (`config.contextIds.prdId`), acknowledge what
+ * changed in the thread, and hand the fresh document to the surface's artifact
+ * view. Extracted verbatim from main's inline `prdChatEditFlow`; the only
+ * surface-specific bits — the async-turn lifecycle, which PRD is open, and where
+ * the updated document renders — are all `config`.
+ */
+export async function runEditPrdAction(instruction: string, config: ActionConfig): Promise<void> {
+  const prdId = config.contextIds?.prdId ?? null
+  // The dispatch guard only routes here with an edit target; a null is a safe
+  // no-op rather than an unscoped edit.
+  if (prdId == null || !config.runActionTurn) return
+  await config.runActionTurn(instruction, async () => {
+    try {
+      const { prdApi } = await import("../../../../lib/api")
+      const res = await prdApi.chatEdit(prdId, instruction)
+      if (res.sections_changed.length) {
+        // The scoped edit produced a fresh document — hand it to the surface's
+        // artifact view (main's panel / a project drawer).
+        config.onArtifactUpdated?.({ kind: "prd", prdId, record: res.prd })
+      }
+      return asReply(
+        res.sections_changed.length
+          ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
+          : res.summary ||
+              "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it.",
+      )
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      return asReply(`I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`)
+    }
+  })
 }
 
 const KIND_NOUN: Record<string, [string, string]> = {

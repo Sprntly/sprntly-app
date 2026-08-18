@@ -77,6 +77,15 @@ export interface ConversationClarify {
 export interface ConversationActionContext {
   /** Render a fully-formed, settled turn into this conversation. */
   emitTurn(turn: ThreadTurn): void
+  /** Run an async command turn against this conversation: seed an optimistic
+   *  turn, mark the engine busy, await the worker's reply, settle the turn, and
+   *  clear busy. Returns the settled turn's id + reply so the caller can persist
+   *  it (server-only). The engine owns the render/busy lifecycle; persistence is
+   *  the surface's. */
+  runActionTurn(
+    query: string,
+    worker: () => Promise<AskResponse>,
+  ): Promise<{ turnId: string; reply: AskResponse }>
 }
 
 /** The normalized send's extras a surface may ride on `submit`. */
