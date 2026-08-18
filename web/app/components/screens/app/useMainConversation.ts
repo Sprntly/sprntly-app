@@ -33,6 +33,7 @@ import { ApiError, askApi, providerNoticeTitle, type AskResponse, type ProviderN
 import { WAIT_FAILED_TITLE } from "../../shared/AssistantWaitState"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
+import type { ThreadTurn } from "./ChatScreen"
 
 type PersistedAttachment = { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }
 
@@ -98,6 +99,13 @@ export interface MainConversation {
   /** Stop the active conversation's in-flight ask: reclaim the composer at once,
    *  mark the in-flight turn `stopped`, and best-effort backend-cancel. */
   handleStopAsk: () => void
+  /** The async command-turn lifecycle for one conversation (the action layer's
+   *  `runActionTurn`): seed → busy → await worker → settle + persist → idle. */
+  runActionTurnInTab: (
+    tabId: string,
+    query: string,
+    worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>,
+  ) => Promise<{ turnId: string; reply: AskResponse }>
 }
 
 export function useMainConversation(deps: UseMainConversationDeps): MainConversation {
@@ -360,5 +368,38 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
     })
   }, [activeKey, makeHandle])
 
-  return { runConversationAsk, handleStopAsk }
+  // ── The async command-turn lifecycle for one conversation ─────────────────
+  // Seed the optimistic turn, mark busy, await the command's async work, settle
+  // the turn + client/server persist, clear busy. Shared by every async action
+  // (edit-PRD, Slack, generation) via the action layer — the ActionConfig's
+  // `runActionTurn`. Operates purely through the handle + persistence, so it is
+  // surface-agnostic; the caller passes the already-resolved conversation key.
+  const runActionTurnInTab = useCallback(
+    async (tabId: string, query: string, worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>) => {
+      const conv = makeHandle(tabId)
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      conv.patchTurns((thread) => [...thread, { id, query }])
+      conv.setBusy(true)
+      pushPendingConversation(id, query, tabId)
+      let patch: Partial<ThreadTurn> & { reply: AskResponse }
+      try {
+        patch = await worker()
+      } catch {
+        patch = {
+          reply: {
+            answer: "Something went wrong.",
+            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+          } as AskResponse,
+        }
+      }
+      conv.patchTurns((thread) => thread.map((tn) => (tn.id === id ? { ...tn, ...patch } : tn)))
+      finalizeConversationTurn(id, { reply: patch.reply }, tabId)
+      conv.setBusy(false)
+      return { turnId: id, reply: patch.reply }
+    },
+    [makeHandle, pushPendingConversation, finalizeConversationTurn],
+  )
+
+  return { runConversationAsk, handleStopAsk, runActionTurnInTab }
 }

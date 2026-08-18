@@ -3084,40 +3084,6 @@ export function ChatScreen() {
   // skeleton optimistically, then confirms which sections changed and refreshes
   // the panel with the server's updated document — the same refresh contract
   // the input-question answer flow uses.
-  // Main's `ActionConfig.runActionTurn` — the async command-turn lifecycle for a
-  // captured tab: seed the optimistic turn, mark busy, await the command's async
-  // work, settle the turn + client/server persist, clear busy. Shared by every
-  // async action (edit-PRD, Slack, generation) via the action layer.
-  const runActionTurnInTab = useCallback(
-    async (tabId: string, query: string, worker: () => Promise<Partial<ThreadTurn> & { reply: AskResponse }>) => {
-      const id =
-        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      setTabs((prev) => prev.map((t) =>
-        t.id === tabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-      setBusyTabs((prev) => addToSet(prev, tabId))
-      pushPendingConversation(id, query, tabId)
-      let patch: Partial<ThreadTurn> & { reply: AskResponse }
-      try {
-        patch = await worker()
-      } catch {
-        patch = {
-          reply: {
-            answer: "Something went wrong.",
-            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-          } as AskResponse,
-        }
-      }
-      setTabs((prev) => prev.map((t) =>
-        t.id === tabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, ...patch } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply: patch.reply }, tabId)
-      setBusyTabs((prev) => removeFromSet(prev, tabId))
-      return { turnId: id, reply: patch.reply }
-    },
-    [pushPendingConversation, finalizeConversationTurn],
-  )
-
   // Main's `ActionConfig.onArtifactUpdated` — apply a freshly-edited PRD to the
   // captured tab + (if it's active) the ContentPanel. The panel-apply that used
   // to live inline in `prdChatEditFlow`.
@@ -4504,7 +4470,7 @@ export function ChatScreen() {
   // injects its exact tab machinery + the grounding seam, so behaviour is
   // byte-unchanged; `runConversationAsk`/`handleStopAsk` are destructured back
   // into the same names, leaving submitAsk / mapDeps / the Esc handler untouched.
-  const { runConversationAsk, handleStopAsk } = useMainConversation({
+  const { runConversationAsk, handleStopAsk, runActionTurnInTab } = useMainConversation({
     makeHandle: makeTabHandle,
     activeKey: activeTabId,
     activeCompany,
