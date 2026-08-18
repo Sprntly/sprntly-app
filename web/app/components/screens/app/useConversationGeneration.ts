@@ -23,7 +23,8 @@ import { useCallback } from "react"
 import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
 import { clearPrdDrafts } from "../../shared/PrdInputQuestions"
 import { followTicketSetSwitch, loadTicketSet } from "../../../lib/runTicketSetGeneration"
-import type { AskResponse, ChatIntentEnvelope } from "../../../lib/api"
+import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope } from "../../../lib/api"
+import type { ChatPersistence } from "../../../lib/chatPersistence"
 import type { AppContentState } from "../../../context/ContentContext"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import type { ConversationHandle } from "./conversationCore"
@@ -38,6 +39,17 @@ export interface UseConversationGenerationDeps {
   emitTurn: (turn: ThreadTurn) => void
   /** Mint the handle onto a conversation by key (main: `makeTabHandle`). */
   makeHandle: (key: string) => ConversationHandle
+  /** Seed a settled command-acknowledgement turn and resolve its conversation.
+   *  Main: the tab-orchestrator `seedGenerationTurn` (reuse active-or-spawn tab,
+   *  rename, clear composer, persist); a project slot: single-conversation
+   *  append + server-only persist. Returns the resolved key + its bound DB id. */
+  seedGenerationTurn: (seedTurn: ThreadTurn) => { tabId: string; dbConvId: number | null }
+  /** The conversation's turn/answer history as grounding context for a document
+   *  generation. Main reads the tab's thread; a project slot its own. */
+  threadContextFor: (key: string) => string
+  /** The create-once persistence spine (shared with the turn store) — used to
+   *  ensure the conversation row exists before an artifact is attached to it. */
+  persistence: ChatPersistence
   /** Seed the optimistic pending-conversation rail entry + fire the create. */
   pushPendingConversation: (
     turnId: string,
@@ -62,6 +74,9 @@ export interface UseConversationGenerationDeps {
 export function useConversationGeneration({
   emitTurn,
   makeHandle,
+  seedGenerationTurn,
+  threadContextFor,
+  persistence,
   pushPendingConversation,
   finalizeConversationTurn,
   setContent,
@@ -236,5 +251,62 @@ export function useConversationGeneration({
   }, [makeHandle, pushPendingConversation, finalizeConversationTurn, setContent, openContentPanel,
       showToast, content.ticketSet])
 
-  return { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow }
+  // Write a team document from this chat and open it in the right panel. Mirrors
+  // the ticket-set flow: seed a settled acknowledgement (via the injected seam),
+  // then start the work — so the exchange survives a reload and reads like every
+  // other command.
+  const documentCommandFlow = useCallback((
+    seedQuery: string,
+    envelope: ChatIntentEnvelope,
+  ) => {
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const kind = envelope.artifact_kind?.trim() || "document"
+    const ack: AskResponse = {
+      answer: `Writing your ${kind} — it will open in the panel on the right.`,
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
+    // Seed via the surface's seam; `dbConvId` is the tab's bound conversation
+    // (null on a fresh tab, mirroring the old inline `convId = inTab.dbConvId`).
+    const { tabId, dbConvId } = seedGenerationTurn(seedTurn)
+
+    void (async () => {
+      try {
+        // THE CONVERSATION HAS TO EXIST BEFORE THE DOCUMENT DOES. On a tab's
+        // first message `dbConvId` is null (the create was fired, not awaited),
+        // so a document stored then would orphan from its thread. `ensureConversation`
+        // shares that very in-flight create (create-once), and uses the SAME
+        // title `seedGenerationTurn` persisted (49-char truncation) so a create
+        // race can't rename the row.
+        const attachTo = dbConvId ?? await persistence.ensureConversation(tabId, {
+          turnId,
+          title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
+          query: seedQuery,
+        })
+        const created = await customArtifactsApi.generate({
+          kind,
+          // THE GROUNDING — without it the generator writes a skeleton listing
+          // what it doesn't know, for a subject discussed in the thread above.
+          task: envelope.task?.trim() || seedQuery,
+          context: threadContextFor(tabId),
+          conversation_id: attachTo,
+        })
+        // NEVER OPEN THIS CONVERSATION'S DOCUMENT OVER SOMEONE ELSE'S: the
+        // round trips mean the user may have moved on, and this pair is
+        // unconditional. The document is attached to its conversation, so
+        // returning re-opens it through useThreadDocumentSync.
+        if (!makeHandle(tabId).isActive()) return
+        setContent({ documentId: created.id, documentGenerating: true })
+        openContentPanel("document")
+      } catch {
+        showToast(
+          "Couldn't start that document",
+          "Please try again, or create one from Artifacts.",
+        )
+      }
+    })()
+  }, [seedGenerationTurn, makeHandle, setContent, openContentPanel, showToast, threadContextFor, persistence])
+
+  return { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow }
 }

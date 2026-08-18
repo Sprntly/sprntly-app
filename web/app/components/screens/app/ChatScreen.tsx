@@ -3421,6 +3421,46 @@ export function ChatScreen() {
       ? t : undefined
   }, [])
 
+  // ── The generation-turn SEED seam (tab-orchestrator, main-provided) ─────────
+  // The shared entry every command-generation flow uses to land its settled
+  // acknowledgement turn: reuse the active tab if it's a plain chat (never a
+  // PRD/insight-bound one, which `reusableActiveTab` declines so a generation
+  // can't hijack a bound tab), else spawn a fresh chat tab; rename a placeholder,
+  // append the turn, clear the composer, and persist rail+Supabase. Returns the
+  // resolved conversation key + its bound DB conversation id (null on a fresh
+  // tab). This is the EXACT block the flows used to inline — kept verbatim so
+  // main is byte-identical; it is injected into the generation flows as a seam so
+  // a project slot provides its own single-conversation version at wiring time.
+  const seedGenerationTurn = useCallback((seedTurn: ThreadTurn): { tabId: string; dbConvId: number | null } => {
+    const inTab = reusableActiveTab()
+    const seedQuery = seedTurn.query
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+    let tabId: string
+    let dbConvId: number | null = null
+    if (inTab) {
+      tabId = inTab.id
+      dbConvId = inTab.dbConvId ?? null
+      setTabs((prev) => prev.map((t) => t.id === inTab.id
+        ? {
+            // First message in a placeholder "New chat" tab → take the real
+            // title from the command, exactly as submitAsk's own rename does.
+            ...t,
+            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+            thread: [...t.thread, seedTurn],
+          }
+        : t))
+      setDraft("")
+    } else {
+      // No reusable tab (the landing, the brief tab, or a PRD/insight tab whose
+      // binding must not be disturbed) → the command opens its own chat tab.
+      tabId = openTab(handle, [seedTurn])
+    }
+    // Rail + Supabase, so the exchange survives a reload like any other turn.
+    pushPendingConversation(seedTurn.id, seedQuery, tabId)
+    void finalizeConversationTurn(seedTurn.id, seedTurn.reply ? { reply: seedTurn.reply } : {}, tabId)
+    return { tabId, dbConvId }
+  }, [reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn])
+
   // ── Standalone ticket sets: the chat entry point ───────────────────────────
   // "Break this into tickets" in a chat with NO PRD. Before this the request
   // fell through to the ask agent, which answered with the user-stories skill's
@@ -3571,119 +3611,6 @@ export function ChatScreen() {
   }, [
     reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
     startTicketSetRun,
-  ])
-
-  /** Write a team document from this chat and open it in the right panel.
-   *
-   *  Mirrors `ticketSetCommandFlow`: seed a turn with an acknowledgement, put
-   *  it on the rail and in Supabase, THEN start the work — so the exchange
-   *  survives a reload and reads like every other command. */
-  const documentCommandFlow = useCallback((
-    seedQuery: string,
-    envelope: ChatIntentEnvelope,
-  ) => {
-    const inTab = reusableActiveTab()
-    const turnId =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const kind = envelope.artifact_kind?.trim() || "document"
-    const ack: AskResponse = {
-      answer: `Writing your ${kind} — it will open in the panel on the right.`,
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
-    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
-    let tabId: string
-    let convId: number | null = null
-    if (inTab) {
-      tabId = inTab.id
-      convId = inTab.dbConvId ?? null
-      setTabs((prev) => prev.map((t) => t.id === inTab.id
-        ? {
-            ...t,
-            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
-            thread: [...t.thread, seedTurn],
-          }
-        : t))
-      setDraft("")
-    } else {
-      // Sent from the landing or a PRD/insight tab whose binding must not be
-      // disturbed → the command opens its own chat tab, rather than writing a
-      // document that belongs to no thread at all.
-      tabId = openTab(handle, [seedTurn])
-    }
-    pushPendingConversation(turnId, seedQuery, tabId)
-    void finalizeConversationTurn(turnId, { reply: ack }, tabId)
-
-    void (async () => {
-      try {
-        // THE CONVERSATION HAS TO EXIST BEFORE THE DOCUMENT DOES.
-        //
-        // `convId` above is read synchronously off the tab, and on a tab's
-        // FIRST message that is null: `pushPendingConversation` fires the
-        // create and deliberately does not await it. So the most common path
-        // there is — ask a brand-new chat for a leadership update — stored the
-        // document with `conversation_id` NULL, orphaning it from the thread
-        // that asked for it. `useThreadDocumentSync` then could not re-attach
-        // it on reload or on coming back to the thread, and the panel had
-        // nothing to show.
-        //
-        // Exactly the defect #969 fixed for reports and the ticket-set flow
-        // fixed for its own rows, with the same instrument: `ensureConversation`
-        // shares the very same in-flight create the turn persistence just fired
-        // (create-once per tab), so awaiting it costs at most the remainder of
-        // one already-issued request and never mints a second conversation. It
-        // resolves null on failure, which leaves an unlinked document — still
-        // generated, still readable in the library — rather than no document.
-        const attachTo = convId ?? await persistence.ensureConversation(tabId, {
-          turnId,
-          // THE SAME TITLE `pushPendingConversation` WOULD HAVE USED, not the
-          // tab's `handle`. Whichever of the two calls wins the create race
-          // names the stored row, and this one now usually wins — so a
-          // different truncation here (37 chars vs 49) would silently rename
-          // the conversation in Chat history for this flow alone, leaving the
-          // in-session rail and the reloaded list disagreeing about the same
-          // thread.
-          title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
-          query: seedQuery,
-        })
-        const created = await customArtifactsApi.generate({
-          kind,
-          task: envelope.task?.trim() || seedQuery,
-          // THE GROUNDING. Without this the generator takes its
-          // "CONTEXT: none was supplied" branch and writes a structural
-          // skeleton that lists what it does not know — for a request whose
-          // whole subject was discussed in the thread above it. The planner's
-          // `task` is a brief, not the evidence behind it.
-          context: threadContextFor(tabId),
-          conversation_id: attachTo,
-        })
-        // NEVER OPEN THIS TAB'S DOCUMENT OVER SOMEONE ELSE'S THREAD. The
-        // create + generate round trips mean the user can have moved on by
-        // now, and this pair is unconditional: it would put chat A's document
-        // in front of whoever is reading chat B.
-        //
-        // The clear-on-switch used to paper over that — B gaining its own
-        // conversation id wiped the stray id — but a conversation coming into
-        // existence is no longer treated as a switch (that is the fix above),
-        // so the guard has to be stated where the assumption actually lives.
-        // The same rule `startTicketSetRun` already follows.
-        //
-        // Nothing is lost by skipping it: the document is now attached to its
-        // conversation, so returning to this thread re-opens it through
-        // `useThreadDocumentSync`.
-        if (activeTabIdRef.current !== tabId) return
-        setContent({ documentId: created.id, documentGenerating: true })
-        openContentPanel("document")
-      } catch {
-        showToast(
-          "Couldn't start that document",
-          "Please try again, or create one from Artifacts.",
-        )
-      }
-    })()
-  }, [
-    reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
-    setContent, openContentPanel, showToast, threadContextFor, persistence,
   ])
 
   /** The reply-footer button: reopen a finished set, or re-run a failed one. */
@@ -4324,9 +4251,12 @@ export function ChatScreen() {
   // tab-orchestrator emitTurn (emitCommandTurn) + the real global content-panel
   // seam (setContent/openContentPanel/content); more per-flow deps grow here as
   // flows move in.
-  const { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow } = useConversationGeneration({
+  const { listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow } = useConversationGeneration({
     emitTurn: emitCommandTurn,
     makeHandle: makeTabHandle,
+    seedGenerationTurn,
+    threadContextFor,
+    persistence,
     pushPendingConversation,
     finalizeConversationTurn,
     setContent,
