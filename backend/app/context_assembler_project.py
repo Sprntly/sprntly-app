@@ -151,10 +151,15 @@ class ProjectContextAssembler:
         # re-fetch). The constants/helper are imported (not reimplemented) from
         # `app.ask_job_runner`, where they still live on this commit.
         #
-        # Group surface stays instructions-only for now: group depth routing is
-        # deferred (group runs as main chat), and no trivially-additive group
-        # scope-system helper exists on this commit to fold in, so composing one
-        # would mean building group routing machinery — explicitly out of scope.
+        # Both surfaces fold in the depth guidance so the model gets WHEN/HOW
+        # guidance for delegate_task / edit_prd + the roster block (free-text
+        # assignee → member), not just the project facts. The private and group
+        # scope-systems carry the SAME behavioral contract re-cast for their
+        # register. The tools + `assigner_identity` (= the requesting human,
+        # `req.user_id`) already ride the returned scope below; this is the
+        # guidance that makes the model actually delegate on a human's request
+        # (group parity — the group agent previously got the tools but not the
+        # guidance, so it could answer/do the task itself instead of delegating).
         if surface == Surface.project_private:
             from app.ask_job_runner import (
                 _PRIVATE_SCOPE_SYSTEM,
@@ -164,10 +169,17 @@ class ProjectContextAssembler:
             system_addendum = (
                 f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
             )
-            if instr_block:
-                system_addendum = f"{system_addendum}\n\n{instr_block}"
         else:
-            system_addendum = instr_block
+            from app.ask_job_runner import (
+                _GROUP_SCOPE_SYSTEM,
+                _private_roster_block,
+            )
+
+            system_addendum = (
+                f"{_GROUP_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
+            )
+        if instr_block:
+            system_addendum = f"{system_addendum}\n\n{instr_block}"
 
         # `post_turn` — the execute-task progress writer. RELOCATED in shape from
         # `_build_private_scope`: the private surface's turn writer, bound to the
