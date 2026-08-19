@@ -1085,6 +1085,26 @@ export function useProjectConversation(
   }, [pendingClarify, thread])
   const clarifyPopupOpen = !!pendingClarifyTurn && !clarifyPopupDismissed[pendingClarifyTurn.id]
 
+  // Esc stops this conversation's streaming answer — parity with main's
+  // ChatScreen Esc handler. The per-turn Stop button already fires
+  // `engine.handleStopAsk`; this is the missing keybinding, nothing more.
+  //
+  // It yields to anything that owns Esc more locally, closing that first: the
+  // attachment viewer, the slash palette, the `+` menu (main's three), plus this
+  // surface's own dock popups (assign / share / clarify). Only when none is open
+  // does Esc cancel the answer.
+  useEffect(() => {
+    if (!busy) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      if (viewerAttachment || composer.slashOpen || composer.plusMenuOpen) return
+      if (pendingAssign || pendingShare || clarifyPopupOpen) return
+      engine.handleStopAsk()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [busy, viewerAttachment, composer.slashOpen, composer.plusMenuOpen, pendingAssign, pendingShare, clarifyPopupOpen, engine.handleStopAsk])
+
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
