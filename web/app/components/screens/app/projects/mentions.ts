@@ -41,6 +41,24 @@ export function mentionsAgent(content: string): boolean {
   return new RegExp(`@${AGENT_MENTION}\\b`, "i").test(content)
 }
 
+/** Remove the AGENT invoke token (`@Sprntly`, case-insensitive, at a word
+ *  boundary) from `content`, collapsing the whitespace it leaves behind.
+ *
+ *  The `@Sprntly` mention is an ADDRESSING token — "this turn is for the agent"
+ *  — NOT part of the command the user is issuing. It must be stripped before the
+ *  message is interpreted as a command (intent classification + generation task
+ *  extraction), or the addressing token pollutes what the planner reads: a
+ *  "@Sprntly generate a PRD titled X" send has the agent word sitting in front of
+ *  the verb the classifier keys off. The DISPLAYED/persisted user turn keeps the
+ *  mention verbatim (so the `@Sprntly` chip still renders) — this is only for the
+ *  command-interpretation copy. People-mentions (`@Ada`) are left untouched. */
+export function stripAgentMention(content: string): string {
+  return content
+    .replace(new RegExp(`@${AGENT_MENTION}\\b`, "gi"), " ")
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
 /**
  * The active `@…` token being typed at `caret`, or `null`.
  *

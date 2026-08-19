@@ -62,7 +62,8 @@ import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/Clarif
 import { useComposer } from "../useComposer"
 import { personAvatarStyle } from "./avatarColor"
 import { MentionBubble } from "./MentionBubble"
-import { mentionsAgent } from "./mentions"
+import { mentionsAgent, stripAgentMention } from "./mentions"
+import { AGENT_NAME } from "../../../../lib/agent"
 import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { useThreadScroll } from "../useThreadScroll"
@@ -509,8 +510,17 @@ export function useProjectConversation(
       // Stamp this send's identity key so the post is idempotent (a retry
       // replays the original turn) and so the turn — and the reply that
       // inherits the same key server-side — are recognised as this poster's
-      // own realtime echo.
-      const cmid = cmidByTurnIdRef.current.get(turnId)
+      // own realtime echo. The plain-ask send pre-binds this key in `submitAsk`;
+      // a COMMAND/GENERATION send (prd/tickets/document flows) reaches here with
+      // no bound key, so mint+register one HERE — otherwise the generation user
+      // turn posts with NO cmid and its own realtime echo isn't recognised
+      // (re-rendered) and it isn't broadcast-correlated like the plain path.
+      let cmid = cmidByTurnIdRef.current.get(turnId)
+      if (!cmid) {
+        cmid = newId()
+        cmidByTurnIdRef.current.set(turnId, cmid)
+        mySentCmidsRef.current.add(cmid)
+      }
       void projectsApi.postGroupTurn(projectId, query, {
         ...(attachments && attachments.length ? { attachments } : {}),
         ...(cmid ? { client_message_id: cmid } : {}),
@@ -881,10 +891,20 @@ export function useProjectConversation(
       : undefined
 
     if (!trimmed.startsWith("/")) {
+      // COMMAND INTERPRETATION COPY (group @Sprntly only): strip the agent
+      // addressing token before the message is read as a COMMAND. `@Sprntly` is
+      // "this turn is for the agent", NOT part of the instruction — but left in
+      // place it sits in front of the verb the intent classifier keys off
+      // ("@Sprntly generate a PRD…"), which is exactly the intersection that
+      // silently failed to dispatch (mention + a generation intent). The
+      // displayed/persisted user turn keeps `trimmed` verbatim so the `@Sprntly`
+      // chip still renders; only the planner-facing copy and the generation task
+      // use the stripped text. Non-group / no-mention sends are unchanged.
+      const commandText = isGroup && mentionsAgent(trimmed) ? stripAgentMention(trimmed) : trimmed
       const attachedForIntent = earlyExtracted?.some((t) => t)
         ? composer.attachments.map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`).join("\n\n").slice(0, 100000)
         : null
-      const intentMessage = attachedForIntent ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}` : trimmed
+      const intentMessage = attachedForIntent ? `${commandText}\n\n[Attached files]\n${attachedForIntent}` : commandText
       // The PRD open beside this chat — main sends its tab's PRD as the planner
       // hint (`tabPrdId`), which the route turns into "Active tab: PRD #X ‹title›
       // is open" so "open/share/edit the PRD" resolves to it. This surface's
@@ -947,7 +967,7 @@ export function useProjectConversation(
                 setContent({ prd: metaRef.current.prd, prdMeta: metaRef.current.briefMeta })
                 openContentPanel("tickets"); settlePendingSend(); return
               }
-              gen.ticketSetCommandFlow(trimmed, env.task?.trim() || trimmed, env.artifact_template_id)
+              gen.ticketSetCommandFlow(trimmed, env.task?.trim() || commandText, env.artifact_template_id)
               settlePendingSend()
             },
             onEditPrd: (instruction, prdId) => {
@@ -978,7 +998,7 @@ export function useProjectConversation(
                 settlePendingSend()
                 return
               }
-              void runProjectGeneratePrd(trimmed, env.task ?? trimmed, sourceDocs)
+              void runProjectGeneratePrd(trimmed, env.task ?? commandText, sourceDocs)
               settlePendingSend()
             },
             onChangeTemplate: (env, prdId) => {
