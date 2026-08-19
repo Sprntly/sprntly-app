@@ -428,26 +428,15 @@ def run_task_followup_cycle() -> dict:
     """One pass of the autonomous task follow-up sweep. Per-task error
     isolation; safe to call repeatedly (idempotent send-ledger). Gated at
     the scheduler level by `settings.task_followup_enabled` +
-    `settings.scheduler_enabled`; this function additionally re-checks the
-    request-time Projects gate itself (`routes.projects._projects_enabled`)
-    so a dark-Projects environment makes zero LLM calls even if a stray
-    call reaches this function directly.
+    `settings.scheduler_enabled`. (Projects itself is GA — there is no
+    longer a request-time Projects master switch to re-check here.)
 
     Returns a small summary dict for logging + tests:
     `{due, finalized, pinged, rescheduled, escalated, emailed, skipped}`."""
-    # Imported here (not at module load) so the test config reload +
-    # request-time env read are in effect, mirroring every other cycle
-    # wrapper in this codebase.
-    from app.routes.projects import _projects_enabled
-
     summary = {
         "due": 0, "finalized": 0, "pinged": 0, "rescheduled": 0,
         "escalated": 0, "emailed": 0, "skipped": 0,
     }
-
-    if not _projects_enabled():
-        logger.info("task-followup: Projects disabled — skipping cycle")
-        return summary
 
     now = datetime.now(timezone.utc)
     try:

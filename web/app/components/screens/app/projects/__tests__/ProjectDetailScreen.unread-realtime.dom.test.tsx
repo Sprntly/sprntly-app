@@ -103,7 +103,17 @@ vi.mock("../useRealtimeChannel", () => ({
 }))
 
 import { ProjectDetailScreen } from "../ProjectDetailScreen"
+import { ContentProvider } from "../../../../../context/ContentContext"
 import type { ProjectDetail, ArtifactItem, ProjectMemorySummary } from "../../../../../lib/api"
+
+// `ProjectDetailScreen` now consumes `useContent()`, so it must render under a
+// real `ContentProvider` (mirroring the reference DOM tests, e.g.
+// `useArtifactUrlSync.dom.test.tsx`). `useNavigation()` is already satisfied by
+// this file's module-level `NavigationContext` mock above, so only the content
+// provider needs standing up here.
+function renderWithContent(node: React.ReactElement) {
+  return render(React.createElement(ContentProvider, null, node))
+}
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
 
@@ -157,7 +167,7 @@ async function renderReady() {
   memorySummaryMock.mockResolvedValue(MEMORY)
   memoryInsightMock.mockResolvedValue(null)
   await act(async () => {
-    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
   })
   await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
 }
@@ -302,7 +312,7 @@ describe("ProjectDetailScreen — poll fallback / degradation (AC-4)", () => {
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
 
-    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -326,7 +336,7 @@ describe("ProjectDetailScreen — poll fallback / degradation (AC-4)", () => {
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
 
-    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -354,7 +364,7 @@ describe("ProjectDetailScreen — poll fallback / degradation (AC-4)", () => {
     memoryInsightMock.mockResolvedValue(null)
     individualUnreadMock.mockResolvedValue({ unread: false, latest_turn_id: null, last_read_turn_id: 0 })
 
-    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     await act(async () => {
       await Promise.resolve()
     })
@@ -396,7 +406,7 @@ describe("ProjectDetailScreen — non-breakage (AC-5, AC-6, AC-7)", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    const { unmount } = render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    const { unmount } = renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     await act(async () => {
       await Promise.resolve()
     })

@@ -14,19 +14,38 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-// A mount-counting stand-in for the private arm — a fresh mount increments the
-// counter, so a remount (not just a prop re-render) is observable.
+// A mount-counting stand-in for the chat surface — a fresh mount increments the
+// counter, so a remount (not just a prop re-render) is observable. Post-rewrite
+// both arms mount main's shared renderer (`ConversationView`) via the shared
+// `useProjectConversation` controller, so the counter lives on the mocked
+// `ConversationView` and the controller/mention hooks are stubbed to keep this a
+// pure keying/remount test (no Workspace/Content providers needed).
 let mountCount = 0
-vi.mock("../ProjectPrivateChat", () => ({
-  ProjectPrivateChat: () => {
+vi.mock("../useProjectConversation", () => ({
+  useProjectConversation: () => ({
+    viewerAttachment: null,
+    setViewerAttachment: vi.fn(),
+    mentionPickerNode: null,
+    mentionPickerOpen: false,
+    composerRef: { current: null },
+  }),
+}))
+vi.mock("../../ConversationView", () => ({
+  ConversationView: () => {
     React.useEffect(() => {
       mountCount += 1
     }, [])
-    return React.createElement("div", { "data-testid": "priv" }, "private")
+    return React.createElement("div", { "data-testid": "priv" }, "surface")
   },
 }))
-vi.mock("../ProjectGroupChat", () => ({
-  ProjectGroupChat: () => React.createElement("div", null, "group"),
+vi.mock("../../../../shared/AttachmentViewer", () => ({
+  AttachmentViewer: () => null,
+}))
+vi.mock("../MentionPickerOverlay", () => ({
+  MentionPickerOverlay: () => null,
+}))
+vi.mock("../useMentionNotifications", () => ({
+  useMentionNotifications: () => ({ unreadCount: 0, clear: vi.fn() }),
 }))
 
 import { ProjectMainThread } from "../ProjectMainThread"

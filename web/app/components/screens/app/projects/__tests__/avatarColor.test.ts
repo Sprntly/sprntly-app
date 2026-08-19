@@ -42,19 +42,29 @@ describe("personAvatarStyle — determinism + stability (AC-9)", () => {
     expect(nameOnly.background).toBeTruthy()
   })
 
-  it("the @Sprntly agent avatar is never routed through this helper (source scan) — RETARGETED to the engine post-fold", () => {
-    // Post-fold the pre-fold host's `styles.aiMark` scan went VACUOUS (the thin
-    // host has no aiMark → indexOf(-1) → empty slice → passes proving nothing).
-    // The agent avatar now renders bubble-less through ChatBubble; the group
-    // engine (`useProjectGroupThread`) is where a turn's `avatarStyle` is
-    // assigned, and it deliberately sets an AGENT turn's `avatarStyle` to
-    // `undefined` (never personAvatarStyle) — only human self/peer turns get a
-    // per-person tint. Assert that guard exists where the logic now lives.
-    const engineSrc = readFileSync(join(__dirname, "../useProjectGroupThread.ts"), "utf8")
-    expect(engineSrc).toContain("avatarStyle: isAgent ? undefined : personAvatarStyle(")
-    // Non-vacuous negative: the aiMark scan is gone (the host is thin) — the
-    // agent avatar is not colour-keyed anywhere in the host.
-    const hostSrc = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
-    expect(hostSrc).not.toContain("styles.aiMark")
+  it("the @Sprntly agent avatar is never routed through this helper (source scan) — RETARGETED to the shared conversation engine", () => {
+    // The per-surface group engine (`useProjectGroupThread` / `ProjectGroupChat`)
+    // was DELETED and folded into the shared `useProjectConversation`. That is
+    // now where a group turn's `avatarStyle` is assigned. The exclusion holds by
+    // structure: an ASSISTANT (agent) turn returns EARLY with only `{ query,
+    // reply }` — no `author`, no `avatarStyle` — while `personAvatarStyle` is
+    // called exactly once, on the HUMAN peer branch keyed off `author_user_id`.
+    // So the agent avatar can never receive a per-person tint.
+    const engineSrc = readFileSync(join(__dirname, "../useProjectConversation.ts"), "utf8")
+
+    // The single person-tint call is keyed to a HUMAN author.
+    const tintCalls = engineSrc.match(/personAvatarStyle\(/g) ?? []
+    expect(tintCalls).toHaveLength(1)
+    expect(engineSrc).toContain("personAvatarStyle(gt.author_user_id, gt.author_name)")
+
+    // Non-vacuous negative: the agent/assistant turn short-circuits BEFORE the
+    // person-tint call — the exclusion is a structural early-return, not an
+    // afterthought. (If the assistant branch were removed or moved below the
+    // tint call, this ordering assertion fails.)
+    const assistantIdx = engineSrc.indexOf('gt.role === "assistant"')
+    const tintIdx = engineSrc.indexOf("personAvatarStyle(gt.author_user_id")
+    expect(assistantIdx).toBeGreaterThan(-1)
+    expect(tintIdx).toBeGreaterThan(-1)
+    expect(assistantIdx).toBeLessThan(tintIdx)
   })
 })

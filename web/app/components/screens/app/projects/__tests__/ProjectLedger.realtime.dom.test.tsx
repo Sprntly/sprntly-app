@@ -144,6 +144,7 @@ vi.mock("../useRealtimeChannel", () => ({
 }))
 
 import { ProjectDetailScreen } from "../ProjectDetailScreen"
+import { ContentProvider } from "../../../../../context/ContentContext"
 import type {
   ProjectDetail,
   ArtifactItem,
@@ -226,13 +227,20 @@ function perUserHandlers() {
   return handlersForTopic("project:101:user:u1")
 }
 
+// `ProjectDetailScreen` now consumes `useContent()`, so it must render under a
+// real `ContentProvider` (`useNavigation()` is already satisfied by this file's
+// module-level `NavigationContext` mock).
+function renderWithContent(node: React.ReactElement) {
+  return render(React.createElement(ContentProvider, null, node))
+}
+
 async function renderDetailReady() {
   getMock.mockResolvedValue(PROJECT)
   artifactsMock.mockResolvedValue(ARTIFACTS)
   memorySummaryMock.mockResolvedValue(MEMORY)
   memoryInsightMock.mockResolvedValue(null)
   await act(async () => {
-    render(React.createElement(ProjectDetailScreen, { projectId: "101" }))
+    renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
   })
   await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
 }

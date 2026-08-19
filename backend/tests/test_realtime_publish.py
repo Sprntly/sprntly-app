@@ -186,10 +186,13 @@ def test_group_publish_payload_is_shaped_dto(isolated_settings, monkeypatch, fak
     # raw-row-only column leaks. run_status is None here (broadcast happens
     # before any run is scheduled for this human turn). `reply` rides the
     # whitelist for assistant turns (the full structured reply); on a human
-    # turn it is simply None.
+    # turn it is simply None. `client_message_id` is a deliberately-whitelisted
+    # DTO field (the send-identity key the poster uses to dedup its own realtime
+    # echo) — None on turns written before the key existed.
     assert set(payload.keys()) == {
         "id", "role", "content", "author_user_id", "author_name",
-        "author_job_role", "created_at", "reply", "run_status", "error_class",
+        "author_job_role", "created_at", "client_message_id", "reply",
+        "run_status", "error_class",
     }
     assert payload["reply"] is None
     assert payload["run_status"] is None
