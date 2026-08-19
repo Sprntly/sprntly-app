@@ -258,6 +258,91 @@ def _load_history(
         return []
 
 
+# How many of the most-recent group turns to fold into the agent's history — a
+# sane recent-turns cap so a long-running group thread can't grow the prompt
+# unboundedly (the per-turn clamp is applied downstream in
+# `qa_agent._render_history`, unchanged, exactly as for `_load_history`).
+_GROUP_HISTORY_TURNS = 30
+
+
+def _load_group_history(
+    conversation_id: int | None,
+    project_id: int | None,
+    user_id: str,
+    exclude_client_message_id: str | None,
+) -> list[dict]:
+    """Prior GROUP thread turns [{role, content}] for the @Sprntly reply, oldest
+    first, so the group agent sees what teammates said — NOT the owner-gated
+    `_load_history` (a group conversation's `user_id` is only its creator, so a
+    non-creator member's reply would get empty history and the creator's would
+    be author-stripped). Read from the group turn store (`list_group_turns`,
+    author-enriched), with the author folded into each user turn's content so
+    the model knows who said what without changing the `[{role, content}]` shape
+    the downstream render expects.
+
+    MEMBERSHIP-GATED (IDOR boundary): this runs in the ROUTE, BEFORE the
+    assembler's 403, and `list_group_turns` itself only guards `kind='group'`,
+    NOT membership — so a non-member of the project gets `[]`, never another
+    team's thread. Same check the assembler uses (`is_project_member`).
+
+    Excludes the CURRENT turn: Feature #1 posts the user's turn to the group
+    store BEFORE this ask fires, so `list_group_turns` already contains it. The
+    ask carries that turn's `client_message_id`; drop the matching turn (it is
+    passed as the question, so injecting it as history too would duplicate it).
+    Falls back to dropping the trailing user turn if no key is available.
+
+    Bounded to the most recent `_GROUP_HISTORY_TURNS`. Best-effort: no id/
+    project, non-member, or any read error → `[]` (history must never break the
+    reply)."""
+    if not conversation_id or project_id is None:
+        return []
+    try:
+        from app.db.conversations import list_group_turns
+        from app.db.projects import is_project_member
+
+        # IDOR boundary — a non-member reads nothing.
+        if not is_project_member(project_id, user_id):
+            return []
+
+        turns = list_group_turns(conversation_id)  # author-enriched DTOs
+        excluded_by_key = False
+        out: list[dict] = []
+        for t in turns:
+            if (
+                exclude_client_message_id
+                and t.get("client_message_id") == exclude_client_message_id
+            ):
+                excluded_by_key = True
+                continue  # the current turn — passed as the question, not history
+            content = (t.get("content") or "").strip()
+            if not content:
+                continue
+            role = t.get("role") or "user"
+            if role == "user":
+                # Fold the author into the content so the model reads a
+                # multi-party transcript ("Name (role): message") without
+                # changing the {role, content} shape. Agent turns stay plain
+                # (they are Sprntly's own voice).
+                author = t.get("author_name") or "Someone"
+                job_role = t.get("author_job_role")
+                prefix = f"{author} ({job_role})" if job_role else author
+                content = f"{prefix}: {content}"
+            out.append({"role": role, "content": content})
+
+        # Fallback current-turn exclusion: if the ask carried no key to match on,
+        # the current message is still the most-recent turn — drop a trailing
+        # user turn so the question isn't duplicated into history.
+        if not excluded_by_key and not exclude_client_message_id and out and out[-1]["role"] == "user":
+            out.pop()
+
+        return out[-_GROUP_HISTORY_TURNS:]
+    except Exception:  # noqa: BLE001 — history must never break the reply
+        logger.warning(
+            "group history load failed conversation_id=%s", conversation_id
+        )
+        return []
+
+
 def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
     """Resolve the pre-warm cache for this question, applying the same waiting +
     synthetic-delay behavior the old synchronous endpoint did. Returns the
@@ -341,7 +426,23 @@ async def ask(
     from app.timing import timed
 
     with timed("route:ask.history"):
-        history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+        # GROUP surface: load PRIOR thread history from the group turn store
+        # (membership-gated, author-attributed) instead of the owner-gated
+        # `_load_history` — so the @Sprntly reply sees what teammates said. Only
+        # the `surface == "group"` branch changes; main/private keep
+        # `_load_history` exactly, byte-identical.
+        _hist_ctx = body.context_source if isinstance(body.context_source, dict) else None
+        _hist_params = (_hist_ctx or {}).get("params") or {}
+        if _hist_ctx and _hist_ctx.get("kind") == "project" and _hist_params.get("surface") == "group":
+            _hist_proj = _hist_params.get("project_id")
+            history = _load_group_history(
+                body.conversation_id,
+                int(_hist_proj) if _hist_proj is not None else None,
+                company.user_id,
+                body.client_message_id,
+            )
+        else:
+            history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
