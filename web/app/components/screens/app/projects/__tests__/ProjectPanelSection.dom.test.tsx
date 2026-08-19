@@ -84,7 +84,7 @@ const PROJECT: ProjectDetail = {
 }
 
 const MEMORY: ProjectMemorySummary = {
-  summary_md: "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds.",
+  summary_md: "A Contoso-driven redesign of on-demand quoting — a priced quote in under 60 seconds.",
   entry_count: 24,
   stale: false,
 }
@@ -124,7 +124,7 @@ describe("ProjectPanelSection — load states", () => {
     // Memory teaser — count + first-sentence extraction.
     expect(screen.getByTestId("memory-card").textContent).toContain("24")
     expect(screen.getByTestId("memory-teaser").textContent).toContain(
-      "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds.",
+      "A Contoso-driven redesign of on-demand quoting — a priced quote in under 60 seconds.",
     )
     // Relabel (C1) + summary-only (C2): no Add button, no "insight" copy.
     expect(screen.getByTestId("memory-card").querySelector("h4")?.textContent?.trim()).toBe("Memory")

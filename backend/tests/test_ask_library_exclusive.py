@@ -63,7 +63,7 @@ def test_a_library_only_ask_reads_no_index_no_kg_no_corpus(
     fake_llm["payload"] = _payload()
 
     ask_runner.compose_ask_answer(
-        "asurion", "can you list the templates i have", enterprise_id="co-1",
+        "tailspin", "can you list the templates i have", enterprise_id="co-1",
         library_context_fn=lambda: LIBRARY_BLOCK, library_only=True,
     )
 
@@ -93,7 +93,7 @@ def test_a_mixed_plan_keeps_every_reader_it_asked_for(
     fake_llm["payload"] = _payload()
 
     ask_runner.compose_ask_answer(
-        "asurion", "which template fits the billing feedback?",
+        "tailspin", "which template fits the billing feedback?",
         enterprise_id="co-1",
         library_context_fn=lambda: LIBRARY_BLOCK, library_only=False,
     )
@@ -117,7 +117,7 @@ def test_a_prd_tab_ask_still_receives_the_library_block(
     fake_llm["payload"] = _payload()
 
     ask_runner.compose_ask_answer(
-        "asurion", "can you list the templates i have", enterprise_id="co-1",
+        "tailspin", "can you list the templates i have", enterprise_id="co-1",
         prd_context="CURRENT PRD CONTEXT\nThe Quitino-formatted PRD.",
         library_context_fn=lambda: LIBRARY_BLOCK, library_only=True,
     )
@@ -143,7 +143,7 @@ def test_a_prd_tab_ask_without_a_library_block_is_byte_identical_to_before(
     fake_llm["payload"] = _payload()
 
     ask_runner.compose_ask_answer(
-        "asurion", "what are the requirements?", enterprise_id="co-1",
+        "tailspin", "what are the requirements?", enterprise_id="co-1",
         prd_context="CURRENT PRD CONTEXT\nThe document.",
     )
 

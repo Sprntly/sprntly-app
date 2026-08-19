@@ -42,8 +42,11 @@ dist/
 build/
 .vercel/
 
-# Design Agent generated artifacts (not source-of-truth)
-backend/data/plotline/
+# Design Agent generated artifacts (not source-of-truth).
+# Per-company generated data dirs are ignored wholesale rather than listed by
+# name — naming one here identifies that customer in a public repo. Already
+# tracked files under backend/data/ are unaffected; .gitignore never untracks.
+backend/data/*/
 backend/data/prototypes/
 web/public/prototype-bundles
 branch_structure.json

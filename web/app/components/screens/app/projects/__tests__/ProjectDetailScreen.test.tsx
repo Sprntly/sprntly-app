@@ -224,7 +224,7 @@ const ARTIFACTS: ArtifactItem[] = [
   {
     type: "evidence",
     id: 2,
-    title: "Xometry call",
+    title: "Contoso call",
     status: "ready",
     created_at: hoursAgo(70),
     source: { brief_id: 1, week_label: null, insight_index: null },
@@ -243,7 +243,7 @@ const ARTIFACTS: ArtifactItem[] = [
 
 const MEMORY: ProjectMemorySummary = {
   summary_md:
-    "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
+    "A Contoso-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
   entry_count: 24,
   stale: false,
 }

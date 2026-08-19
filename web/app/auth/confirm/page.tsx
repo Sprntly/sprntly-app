@@ -14,7 +14,7 @@ import {
 import { AuthShell } from "../../components/auth/AuthShell"
 
 /**
- * Scanner-proof auth-link landing (2026-07-22 Freezing Point incident).
+ * Scanner-proof auth-link landing (2026-07-22 link-prefetch incident).
  *
  * Emailed auth links used to be the raw Supabase /auth/v1/verify URL, which
  * is single-use and consumed by a bare GET — corporate mail scanners

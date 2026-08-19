@@ -86,10 +86,10 @@ describe("browser-frame chrome (AC1)", () => {
 
   it("test_url_bar_shows_slug_then_default — slug prop wins; default fills when omitted", () => {
     const withSlug = renderViewer({
-      urlSlug: "sprntly.com/plotline/call-sheet-builder",
+      urlSlug: "sprntly.com/tyrell/call-sheet-builder",
     })
     expect(withSlug).toContain(
-      ">sprntly.com/plotline/call-sheet-builder</span>",
+      ">sprntly.com/tyrell/call-sheet-builder</span>",
     )
     const withDefault = renderViewer()
     expect(withDefault).toContain(`>${DEFAULT_URL_SLUG}</span>`)

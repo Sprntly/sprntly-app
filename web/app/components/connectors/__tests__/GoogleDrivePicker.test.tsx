@@ -172,9 +172,9 @@ describe("GoogleDrivePickerView", () => {
   })
 
   it("surfaces a sync failure message in the alert region", () => {
-    const html = render({ error: "Xometry: is a folder" })
+    const html = render({ error: "Contoso: is a folder" })
     expect(html).toContain('role="alert"')
-    expect(html).toContain("Xometry: is a folder")
+    expect(html).toContain("Contoso: is a folder")
   })
 })
 
@@ -185,18 +185,18 @@ describe("syncFailureMessage", () => {
   })
 
   it("formats a single failure", () => {
-    expect(syncFailureMessage([{ name: "Xometry", error: "is a folder" }])).toBe(
-      "Xometry: is a folder",
+    expect(syncFailureMessage([{ name: "Contoso", error: "is a folder" }])).toBe(
+      "Contoso: is a folder",
     )
   })
 
   it("appends a count for multiple failures", () => {
     expect(
       syncFailureMessage([
-        { name: "Xometry", error: "is a folder" },
+        { name: "Contoso", error: "is a folder" },
         { name: "archive.zip", error: "Unsupported file type (application/zip)" },
       ]),
-    ).toBe("Xometry: is a folder (+1 more)")
+    ).toBe("Contoso: is a folder (+1 more)")
   })
 
   it("ignores malformed entries", () => {

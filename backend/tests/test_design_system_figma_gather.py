@@ -997,7 +997,7 @@ def test_frame_background_hex_visible_fill_takes_precedence():
 
 
 def test_frame_background_hex_uses_background_color_when_fills_invisible():
-    """The Plotline case: fills=[white invisible] + backgroundColor=black.
+    """The Tyrell case: fills=[white invisible] + backgroundColor=black.
     _frame_background_hex must return the backgroundColor hex (#000000), not None.
     """
     frame = {
@@ -1045,7 +1045,7 @@ def test_frame_background_hex_no_background_color_returns_none():
     assert _frame_background_hex(frame_invisible) is None
 
 
-# ── Dark-canvas single-frame classification (the Plotline scenario) ───────────
+# ── Dark-canvas single-frame classification (the Tyrell scenario) ───────────
 
 
 def test_dominant_board_class_dark_frame_via_background_color():
@@ -1056,7 +1056,7 @@ def test_dominant_board_class_dark_frame_via_background_color():
     After the fix, _frame_background_hex finds the black backgroundColor and the
     frame drives is_dark=True + theme_background=#000000.
     """
-    # Simulate the Plotline case: 1210×1214 ≈ 1.47M area, invisible white fill, black bg.
+    # Simulate the Tyrell case: 1210×1214 ≈ 1.47M area, invisible white fill, black bg.
     frame = {
         "id": "call-sheet-builder-1",
         "type": "FRAME",
@@ -1128,7 +1128,7 @@ def test_dark_canvas_picks_light_foreground_over_mid_gray():
     off_white_text = _text_node("Inter", 700, off_white, area=800.0)
     mid_gray_text = _text_node("Inter", 400, mid_gray, area=1200.0)
 
-    # Dark frame via backgroundColor (the Plotline shape).
+    # Dark frame via backgroundColor (the Tyrell shape).
     top_frame = {
         "id": "dark-canvas",
         "type": "FRAME",
@@ -1192,7 +1192,7 @@ def test_foreground_falls_back_to_area_when_no_background():
     become color_candidates and trigger the layer-4 backstop.  In that scenario the
     contrast-aware path takes over (see test_layer4_backstop_fires_when_all_frames_
     and_page_are_transparent for the content-fill backstop test and
-    test_plotline_scenario_page_canvas_dark_foreground_off_white for the foreground
+    test_tyrell_scenario_page_canvas_dark_foreground_off_white for the foreground
     cascade).
     """
     # Completely empty frame — no children, no fills, no page backgroundColor.
@@ -1222,7 +1222,7 @@ def test_foreground_falls_back_to_area_when_no_background():
 
 def test_color_dict_to_hex_opaque_dict_returns_hex():
     """A fully-opaque {r,g,b,a} dict (components 0..1) converts to #rrggbb."""
-    # Plotline page canvas: {0.118, 0.118, 0.118, a:1} → #1e1e1e
+    # Tyrell page canvas: {0.118, 0.118, 0.118, a:1} → #1e1e1e
     result = _color_dict_to_hex({"r": 0.118, "g": 0.118, "b": 0.118, "a": 1.0})
     assert result is not None
     assert result.startswith("#")
@@ -1248,7 +1248,7 @@ def test_color_dict_to_hex_non_dict_returns_none():
 
 
 def test_transparent_frame_on_dark_page_canvas_classifies_dark():
-    """The Plotline shape: frame fills=[white invisible], frame backgroundColor alpha=0,
+    """The Tyrell shape: frame fills=[white invisible], frame backgroundColor alpha=0,
     page backgroundColor = {0.118, 0.118, 0.118, a:1.0} (#1e1e1e).
 
     Layers 1 and 2 return None (transparent frame).  Layer 3 reads the page canvas
@@ -1256,7 +1256,7 @@ def test_transparent_frame_on_dark_page_canvas_classifies_dark():
     in the dark family (luminance < 128).
     """
     frame = {
-        "id": "plotline-frame",
+        "id": "tyrell-frame",
         "type": "FRAME",
         "absoluteBoundingBox": {"x": 0, "y": 0, "width": 1210.0, "height": 1214.0},
         # Invisible fill — layer 1 skips it.
@@ -1443,7 +1443,7 @@ def test_layer4_backstop_fires_when_all_frames_and_page_are_transparent():
 def test_layer4_does_not_fire_when_layer3_resolves():
     """When layer 3 (page canvas) resolves a background, layer 4 must not override it.
 
-    This is the Plotline production path: layer 3 fires, layer 4 is skipped.
+    This is the Tyrell production path: layer 3 fires, layer 4 is skipped.
     """
     dark_fill = _hex_fill("#d4af37")  # a light-ish accent fill; if layer 4 ran it
     # could win — but layer 3 should win and this content fill must not become
@@ -1481,11 +1481,11 @@ def test_layer4_does_not_fire_when_layer3_resolves():
     assert result["theme_is_dark"] is True
 
 
-# ── Plotline full scenario: foreground cascades to off-white on dark canvas ───
+# ── Tyrell full scenario: foreground cascades to off-white on dark canvas ───
 
 
-def test_plotline_scenario_page_canvas_dark_foreground_off_white():
-    """End-to-end Plotline scenario with page canvas as background source.
+def test_tyrell_scenario_page_canvas_dark_foreground_off_white():
+    """End-to-end Tyrell scenario with page canvas as background source.
 
     Frame: invisible fill, alpha-0 backgroundColor (layers 1+2 yield None).
     Page canvas: {0.118, 0.118, 0.118, a:1} → #1e1e1e via layer 3.
@@ -1503,7 +1503,7 @@ def test_plotline_scenario_page_canvas_dark_foreground_off_white():
     mid_gray_text = _text_node("Inter", 400, mid_gray, area=1200.0)  # higher area
 
     frame = {
-        "id": "plotline-frame",
+        "id": "tyrell-frame",
         "type": "FRAME",
         "absoluteBoundingBox": {"x": 0, "y": 0, "width": 1210.0, "height": 1214.0},
         "fills": [_solid_fill(1.0, 1.0, 1.0, visible=False)],
@@ -1521,7 +1521,7 @@ def test_plotline_scenario_page_canvas_dark_foreground_off_white():
 
     _assert_well_formed(result)
     assert result["theme_is_dark"] is True, (
-        "Plotline scenario must resolve dark (layer 3 page canvas = #1e1e1e)"
+        "Tyrell scenario must resolve dark (layer 3 page canvas = #1e1e1e)"
     )
     assert result["theme_background"] == "#1e1e1e", (
         f"theme_background must be #1e1e1e (page canvas); got {result['theme_background']}"

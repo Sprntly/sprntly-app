@@ -203,7 +203,7 @@ def test_answer_still_accepts_no_plan():
 # turn the planner routed somewhere else.
 
 
-def _served(text="## Maverik + ChaosTrack\n- full transcript"):
+def _served(text="## Maverik + Northwind\n- full transcript"):
     return {
         "answer": text, "key_points": [], "citations": [],
         "confidence": 1.0, "unanswered": "", "_skill": None,
