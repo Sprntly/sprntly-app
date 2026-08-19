@@ -279,9 +279,18 @@ def _send_alert(connection_rows: list[dict]) -> None:
         by_recipient.setdefault(to, []).append(row)
 
     if unrouted:
-        logger.warning(
-            "connector_health: %d disconnected connector(s) had no resolvable "
-            "owner email and no fallback configured — logged only",
+        # ERROR, not warning. With owner alerts off (the default) the admin
+        # address is the ONLY recipient, so an empty one turns "the owner is
+        # emailed" into "nobody is emailed" — and a disconnected row is never
+        # re-alerted on later sweeps, because it is already `disconnected`. That
+        # makes this single line the entire lifetime signal for a tenant whose
+        # ingest has silently stopped. It says what to set, because the person
+        # reading the journal at 03:00 should not have to find that out.
+        logger.error(
+            "connector_health: %d disconnected connector(s) alerted NOBODY — "
+            "no recipient is configured. Set CONNECTOR_HEALTH_ALERT_EMAIL (or "
+            "SIGNIN_MONITOR_ALERT_EMAIL) on this deployment; until then a "
+            "broken connector degrades KG ingest with no notification at all.",
             unrouted,
         )
 

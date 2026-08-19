@@ -287,21 +287,59 @@ def test_by_default_no_owner_is_emailed_and_the_admin_gets_it(monkeypatch):
 
 
 def test_by_default_owner_emails_are_never_even_looked_up(monkeypatch):
-    """Not just unused — not read. With owner alerts off there is no reason to
-    pull a customer's staff addresses out of `profiles` only to discard them."""
+    """Not just unused — not READ. With owner alerts off there is no reason to
+    pull a customer's staff addresses out of `profiles` only to discard them.
+
+    ASSERTS ON A CALL RECORD, not on an exception. The first version stubbed the
+    lookup with a function that raised `AssertionError` — which is an
+    `Exception`, and the opt-in branch wraps the lookup in `except Exception`.
+    So the exact regression this test names (someone deletes the
+    `if settings.connector_health_alert_owners:` guard while keeping the
+    surrounding try, which is verbatim the pre-PR shape) would have been
+    swallowed: the stub raises, the handler logs, `owner_emails = {}`, routing
+    falls to the admin address, and the test passes green while production
+    reads a customer's staff emails on every hourly sweep.
+    """
     monkeypatch.setattr(settings, "resend_api_key", "re_key")
     monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
     _patch_send(monkeypatch)
 
     import app.db.profiles as profiles_db
-
-    def _boom(ids):
-        raise AssertionError("profiles must not be read when owner alerts are off")
-
-    monkeypatch.setattr(profiles_db, "emails_for_user_ids", _boom)
+    calls: list = []
+    monkeypatch.setattr(
+        profiles_db, "emails_for_user_ids",
+        lambda ids: (calls.append(ids), {})[1],
+    )
     connector_health._send_alert(
         [{**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"}]
     )
+    assert calls == [], "profiles was read despite owner alerts being off"
+
+
+def test_that_lookup_assertion_would_survive_the_except_clause(monkeypatch):
+    """Proves the point above rather than asserting it in a comment.
+
+    A stub that RAISES cannot detect the regression, because the code path it
+    would land in catches Exception. This test documents that by showing the
+    swallow is real — if the handler ever stops catching, this fails and the
+    call-record test above becomes belt-and-braces rather than the only guard.
+    """
+    monkeypatch.setattr(settings, "connector_health_alert_owners", True)
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+
+    def _raises(ids):
+        raise AssertionError("boom")
+
+    monkeypatch.setattr(profiles_db, "emails_for_user_ids", _raises)
+    # Does NOT propagate — it is caught, logged, and routing continues.
+    connector_health._send_alert(
+        [{**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"}]
+    )
+    assert [s["to"] for s in sent] == ["ops@sprntly.ai"]
 
 
 def test_with_owners_off_and_no_admin_address_nothing_is_sent(monkeypatch):
