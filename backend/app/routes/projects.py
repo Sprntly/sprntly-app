@@ -58,6 +58,7 @@ from app import project_task_execution
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.realtime import publish_broadcast
+from app.project_group_realtime import publish_group_turn_created
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.delegation_status_ingest import maybe_ingest_status
@@ -999,6 +1000,81 @@ def create_group_chat_route(
         project_id, conversation["id"],
     )
     return conversation
+
+
+class PostGroupTurnRequest(BaseModel):
+    """A human turn posted to the shared group chat. Author is resolved
+    SERVER-side from `ctx.user_id` (never trusted from the client) and stamped
+    onto the row so `list_group_turns` can attribute it; `attachments` are the
+    resolved attachment texts riding the send. `client_message_id` is accepted
+    for wire parity with the individual surface (a future double-submit
+    backstop); it is NOT yet a persisted idempotency key on this route — the
+    agent reply here comes from the shared `/v1/ask` mount, not a server
+    scheduler, so no `ask_jobs` run is minted at post time (mount-not-
+    scheduler)."""
+
+    content: str = Field(min_length=1)
+    client_message_id: str | None = None
+    attachments: list | None = None
+
+
+@router.get("/{project_id}/group/turns")
+def list_group_turns_route(
+    project_id: int,
+    since: int | None = None,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Load/poll read of the shared group chat: turns after `since` (a turn-id
+    cursor), ascending, each carrying `author_name`/`author_job_role` (the
+    agent's own turns carry `author_user_id: null` and render as Sprntly).
+    Empty (not 404) when the group chat hasn't been created yet — a legitimate
+    read state, not an error (mirrors `list_individual_turns_route`)."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.get_group_chat(project_id)
+    if not conversation:
+        return {"turns": []}
+    return {"turns": conversations_db.list_group_turns(conversation["id"], since=since)}
+
+
+@router.post("/{project_id}/group/turns")
+def post_group_turn_route(
+    project_id: int,
+    payload: PostGroupTurnRequest,
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Persist ONE human turn into the shared group chat (create-if-absent) and
+    broadcast it so every member sees it live. Author is stamped server-side
+    from `ctx.user_id` — this is what gives a multi-author group thread its
+    attribution, and what lets a non-owner member post at all (the generic
+    owner-only `/v1/conversations/{id}/turns` write cannot).
+
+    Mount-not-scheduler: this route does NOT run the interjection gate or
+    schedule an agent reply. The @Sprntly reply comes from the shared `/v1/ask`
+    mount the surface already drives; its answer is persisted + broadcast at
+    ask completion (`ask_job_runner`), keyed on the same `context_source`."""
+    _require_project_member(project_id, ctx)
+    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    turn = conversations_db.post_group_turn(
+        conversation["id"],
+        ctx.user_id,
+        payload.content,
+        attachments=payload.attachments,
+    )
+    logger.info(
+        "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
+        project_id, conversation["id"], turn.get("id") if turn else None,
+    )
+    publish_group_turn_created(project_id, conversation["id"], turn)
+    # Return the author-enriched DTO (not the raw row) so the poster can
+    # reconcile its optimistic turn to the durable server id/attribution.
+    if turn:
+        shaped = conversations_db.list_group_turns(
+            conversation["id"], since=turn["id"] - 1
+        )
+        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
+        if dto is not None:
+            return dto
+    return turn
 
 
 class PostIndividualTurnsRequest(BaseModel):
