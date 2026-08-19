@@ -521,29 +521,10 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "bool(ANTHROPIC_API_KEY)) and is unrunnable in any CI lane on either "
         "count. See that entry for the deterministic fast-lane backstops."
     ),
-    ("test_project_intent_route_live.py", "RUN_PROJECT_INTENT_LIVE"): (
-        "Real local-Supabase + real-LLM round-trip for "
-        "POST /v1/projects/{id}/chat/intent — the private project chat's "
-        "classify path, through the REAL route: a project with exactly one "
-        "attached PRD, an edit-phrased message classifies edit_prd carrying "
-        "the server-resolved prd_id, proving the _NEEDS_PRD downgrade "
-        "(chat_intent.py:431) does not fire against a REAL model's output. "
-        "Needs BOTH a live LLM (resolve_chat_intent calls the model) and a "
-        "real Postgres fan-out (list_artifacts_for_project) a fake "
-        "in-memory store cannot exercise. Deterministic backstop runs every "
-        "PR in the fast lane: test_project_intent_route.py covers the "
-        "route's own gate order (membership / server-vs-client target / "
-        "envelope shape) with resolve_chat_intent monkeypatched; this suite "
-        "is the real-LLM+real-DB proof, run locally against the dev rig "
-        "when touching this route."
-    ),
-    ("test_project_intent_route_live.py", "ANTHROPIC_API_KEY"): (
-        "Same live test as RUN_PROJECT_INTENT_LIVE above — resolve_chat_intent "
-        "calls a real LLM in addition to the env flag, so it is gated on BOTH "
-        "(_RUN_LIVE = RUN_PROJECT_INTENT_LIVE=='1' and "
-        "bool(ANTHROPIC_API_KEY)) and is unrunnable in any CI lane on either "
-        "count. See that entry for the deterministic fast-lane backstop."
-    ),
+    # (The `test_project_intent_route_live.py` entries were removed with the
+    # deleted `POST /v1/projects/{id}/chat/intent` route — the project classify
+    # now rides the main `/v1/chat/intent`; its enrichment/IDOR is covered
+    # deterministically by test_chat_envelope_shared.py.)
     ("test_mention_liveness_live.py", "RUN_MENTION_LIVENESS_LIVE"): (
         "Needs a real local Supabase Realtime (the running Realtime service + "
         "a live websocket) to prove a `member.added` published through the "
