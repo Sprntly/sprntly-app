@@ -113,6 +113,18 @@ export type ThreadTurn = {
     initials?: string | null
     avatarStyle?: CSSProperties | null
   }
+  /** Project GROUP surface: a user message that was POSTED to the shared thread
+   *  with the agent intentionally NOT addressed — a multi-member group turn that
+   *  does not `@Sprntly`-mention it (the 2-mode response gate's post-only branch),
+   *  or its hydrated/replayed form. The agent was never going to reply, so this
+   *  turn renders with NO agent block at all — no thinking state, and crucially
+   *  no "No response was generated" placeholder (which reads like a failure). It
+   *  is a peer-style silent post; the viewer's own head/alignment are unchanged.
+   *  This is distinct from a genuinely dropped reply (e.g. a clarify state lost on
+   *  reload), which SHOULD still surface as a real no-response. Unset on main,
+   *  private, solo groups, and `@Sprntly`-tagged group turns → default agent
+   *  rendering, byte-identical to before. */
+  postedOnly?: boolean
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders

@@ -231,7 +231,12 @@ export function useProjectConversation(
     // positively differs. If selfUserId is not yet resolved, NEVER render the
     // viewer's own message as a peer — fall through to the default self render.
     const isPeer = !!selfUserId && !!gt.author_user_id && gt.author_user_id !== selfUserId
-    if (!isPeer) return { id, query: gt.content }
+    // The viewer's OWN group user turn. In the row-per-turn group model the
+    // agent's reply (if any) is a SEPARATE assistant row, so a user row never
+    // carries an agent block — `postedOnly` drops it, matching the live gate's
+    // post-only branch and preventing a reload from resurrecting the
+    // "No response was generated" placeholder under a past untagged post.
+    if (!isPeer) return { id, query: gt.content, postedOnly: true }
     const authorName = gt.author_name || "Someone"
     return {
       id,
@@ -868,7 +873,7 @@ export function useProjectConversation(
         } catch { persistedAttachments = undefined }
       }
       setThread((prev) => [...prev, {
-        id, query: trimmed,
+        id, query: trimmed, postedOnly: true,
         ...(persistedAttachments ? { attachments: persistedAttachments }
           : hasAttachments ? { attachments: composer.attachments.map((a) => ({ name: a.name })) } : {}),
       }])

@@ -185,6 +185,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         humanAlign: "start" as const,
         showAgent: false,
       } : {}),
+      // A GROUP post the agent was never addressed on (2-mode gate's post-only
+      // branch — multi-member, untagged — or its hydrated form). The viewer's
+      // OWN such message keeps its default right-aligned head, but drops the
+      // agent block entirely so it never renders the "No response was generated"
+      // placeholder for a turn that was intentionally silent. Peer posts already
+      // suppress the agent block via `author` above.
+      ...(turn.postedOnly && !turn.author ? { showAgent: false } : {}),
       agentName: AGENT_NAME,
       agentBadge: "Product Coworker",
       isLast,
