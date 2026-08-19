@@ -549,6 +549,18 @@ export function useProjectConversation(
           { hasEditTarget: targetPrdId != null, editTargetPrdId: targetPrdId, ticketsTarget },
           useChatIntentExecutors({
             onGenerateTickets: (env) => {
+              if (docFile) {
+                // Doc + "make tickets": import the doc as a PRD, then break it
+                // into tickets — the shared panel flow, openTickets on (main
+                // parity: its onGenerateTickets docFile branch does the same).
+                composer.setAttachments([])
+                gen.importDocCommandFlow(docFile, {
+                  company: activeCompany, openTickets: true, seedQuery: trimmed,
+                  artifactTemplateId: env.artifact_template_id,
+                })
+                settlePendingSend()
+                return
+              }
               if (metaRef.current.prd) {
                 setContent({ prd: metaRef.current.prd, prdMeta: metaRef.current.briefMeta })
                 openContentPanel("tickets"); settlePendingSend(); return
@@ -572,7 +584,18 @@ export function useProjectConversation(
             },
             onOpenArtifact: (open) => { gen.openArtifactFlow(trimmed, open); settlePendingSend() },
             onGeneratePrd: (env) => {
-              if (docFile) { settlePendingSend(); return } // import-from-doc: main-only PRD tab wiring; deferred
+              if (docFile) {
+                // Doc + "make a PRD": import it via the shared panel flow —
+                // streams into the global ContentPanel, same end-result as main's
+                // tab-based import (the network + stream primitives are shared).
+                composer.setAttachments([])
+                gen.importDocCommandFlow(docFile, {
+                  company: activeCompany, openTickets: false, seedQuery: trimmed,
+                  artifactTemplateId: env.artifact_template_id,
+                })
+                settlePendingSend()
+                return
+              }
               void runProjectGeneratePrd(trimmed, env.task ?? trimmed, sourceDocs)
               settlePendingSend()
             },
@@ -644,7 +667,7 @@ export function useProjectConversation(
       }
     }
     await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
-  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv])
+  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany])
 
   const handleComposerSubmit = useCallback(() => {
     const q = composer.draft.trim()

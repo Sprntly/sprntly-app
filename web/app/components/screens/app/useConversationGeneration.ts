@@ -352,6 +352,112 @@ export function useConversationGeneration({
     })()
   }, [seedGenerationTurn, makeHandle, setContent, openContentPanel, showToast, threadContextFor, persistence])
 
+  // A document attached to a "make a PRD" command is the chat entry to the
+  // PRD-IMPORT flow: upload the file to POST /v1/prd/import — the same conversion
+  // the Artifacts "Upload PRD" button uses (parse to text, faithful re-layout
+  // into our PRD format) — then stream the imported PRD into the shared panel.
+  // This is the PANEL counterpart of main's tab-based `importPrdCommandFlow`:
+  // same shared primitives (`prdApi.importDoc` + `resumePrdGeneration`), driven
+  // through the injected content-panel seam so the artifact lands wherever the
+  // surface's panel lives.
+  //
+  // OPTIMISTIC-FIRST, like every other command: the ack turn + panel spinner
+  // render on THIS commit (via the seam); the import POST + poll run AFTER, in
+  // the async block — never awaited before the first render, so a big deck can't
+  // clear the composer and leave the chat blank for the multi-second call.
+  // `openTickets` ("convert this doc into tickets") kicks the user-stories job
+  // the moment the PRD is ready and lands the panel on the Tickets tab.
+  const importDocCommandFlow = useCallback((
+    file: File,
+    opts: {
+      /** The company slug the PRD belongs to (importDoc's `dataset`). */
+      company: string
+      openTickets: boolean
+      seedQuery: string
+      /** The uploaded format the user named. Easy to miss on THIS path and the
+       *  most important to get right: attaching a file to "create a PRD using our
+       *  Acme format" dispatches an IMPORT, so a format dropped here is a document
+       *  silently written in a different one. */
+      artifactTemplateId?: string | null
+    },
+  ) => {
+    const turnId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    // The exact acks main's `commandAckReply` produces for the import kind, so the
+    // thread reads identically on both surfaces.
+    const ack: AskResponse = {
+      answer: opts.openTickets
+        ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
+        : "Importing your document as a PRD — it'll open in the panel on the right when ready.",
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    const seedTurn: ThreadTurn = { id: turnId, query: opts.seedQuery, reply: ack }
+    // Seed via the surface's seam; `dbConvId` is the conversation's bound row
+    // (null on a fresh one, mirroring the inline path's `convId = inTab.dbConvId`).
+    const { tabId, dbConvId } = seedGenerationTurn(seedTurn)
+    const conv = makeHandle(tabId)
+    conv.patchMeta({ prdGenerating: true })
+    if (conv.isActive()) {
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+    }
+
+    void (async () => {
+      // Stream the re-laid-out draft as it renders — only while this conversation
+      // still owns the panel.
+      const onPartial = (html: string) => {
+        if (makeHandle(tabId).isActive()) setContent({ prdPartialHtml: html })
+      }
+      try {
+        const { prdApi, storiesApi } = await import("../../../lib/api")
+        const { resumePrdGeneration } = await import("../../../lib/runPrdGeneration")
+        // THE CONVERSATION HAS TO EXIST BEFORE THE PRD DOES. On a fresh
+        // conversation `dbConvId` is null (the create was fired, not awaited);
+        // passing the id to importDoc binds the chat to the PRD server-side, so
+        // leaving the page mid-import can't orphan it (the same bind
+        // generateFromTask does). `ensureConversation` shares that in-flight
+        // create (create-once) and reuses the SAME title `seedGenerationTurn`
+        // persisted (49-char truncation) so a create race can't rename the row.
+        const attachTo = dbConvId ?? await persistence.ensureConversation(tabId, {
+          turnId,
+          title: opts.seedQuery.length > 52 ? `${opts.seedQuery.slice(0, 49)}…` : opts.seedQuery,
+          query: opts.seedQuery,
+        })
+        const start = await prdApi.importDoc(file, opts.company, attachTo, opts.artifactTemplateId)
+        // Stamp the now-known prd_id immediately so a reload past this point can
+        // resume the run and the View PRD affordance has something to open.
+        conv.patchMeta({ prdId: start.prd_id })
+        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
+        // NEVER OPEN THIS CONVERSATION'S PRD OVER ANOTHER ONE: the round trips
+        // mean the user may have moved on.
+        if (!makeHandle(tabId).isActive()) return
+        if (result.ok) {
+          conv.patchMeta({ prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false })
+          setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
+          // "convert this doc into tickets": the user asked for TICKETS — kick the
+          // user-stories generation NOW (fire-and-forget; the backend dedups
+          // in-flight jobs) so work starts before the Tickets tab even mounts,
+          // then land the panel on Tickets.
+          if (opts.openTickets) {
+            void storiesApi.generate(result.prd.prd_id).catch(() => {})
+            openContentPanel("tickets")
+          }
+          // The thread's record of what got built — the agent-only summary turn
+          // (a no-op on a surface with no poster).
+          postSummary(tabId, "prd", result.prd.prd_id)
+        } else {
+          conv.patchMeta({ prdGenerating: false })
+          setContent({ prdGenerating: false, prdPartialHtml: null })
+          showToast("PRD unavailable", result.message.slice(0, 200))
+        }
+      } catch {
+        conv.patchMeta({ prdGenerating: false })
+        if (makeHandle(tabId).isActive()) setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("Couldn't import that document", "Please try again, or import one from Artifacts.")
+      }
+    })()
+  }, [seedGenerationTurn, makeHandle, persistence, setContent, openContentPanel, showToast, postSummary])
+
   // The whole open_artifact dispatch: 1 match opens (in the surface's
   // destination), 2+ ask, 0 says so — and a kind this panel can't show says
   // where it DOES live. The two destinations (`openArtifactInPanel` /
@@ -491,6 +597,7 @@ export function useConversationGeneration({
     prdChangeTemplateFlow,
     ticketsChangeTemplateFlow,
     documentCommandFlow,
+    importDocCommandFlow,
     openArtifactFlow,
     ticketSetCommandFlow,
     handleTicketSetAction,
