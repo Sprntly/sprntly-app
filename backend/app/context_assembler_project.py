@@ -196,16 +196,28 @@ class ProjectContextAssembler:
                 )
             )
 
+        # `complete_task` is GROUP-only: the assignee reporting their task done
+        # in the shared thread is where the deterministic ledger-write tool is
+        # needed. The private surface already records completion via the
+        # `delegation_status_ingest` classifier at its own turn seam, so adding
+        # the tool there would double-drive that path — keep private unchanged.
+        completion_tools = (
+            (project_delegation.COMPLETE_TASK_TOOL,)
+            if surface == Surface.project_group
+            else ()
+        )
         return SurfaceScope(
             surface=surface,
             project_id=project_id,
             context_payload=block,
             system_addendum=system_addendum,
-            # The 6 project tools, stable order: delegate + execute + the 4
-            # shared read tools. Non-empty `extra_tools` is the on-switch the
-            # sixth branch gates on (along with its intent gate).
+            # The project tools, stable order: delegate (+ complete, group
+            # only) + execute + the 4 shared read tools. Non-empty
+            # `extra_tools` is the on-switch the sixth branch gates on (along
+            # with its intent gate).
             extra_tools=(
                 project_delegation.DELEGATE_TASK_TOOL,
+                *completion_tools,
                 project_task_execution.EXECUTE_TASK_TOOL,
                 *read_tools(),
             ),

@@ -36,7 +36,14 @@ from app.db.conversations import (
     list_individual_turns,
     post_individual_turn,
 )
-from app.db.delegation_events import record_event, status_dto
+from app.db.delegation_events import (
+    OPEN_STATES,
+    is_legal_transition,
+    list_status_for_assignee,
+    load_delegation_for_authz,
+    record_event,
+    status_dto,
+)
 from app.db.delegation_followups import upsert_followup
 from app.db.project_delegations import record_delegation
 from app.db.projects import _match_keys, is_project_member, resolve_member
@@ -521,6 +528,20 @@ def handle_delegate_task(
 
         assignee = res["member"]
 
+        # Self-delegation guard: `delegate_task` is a cross-user hand-off (the
+        # module's whole premise). A delegation whose assignee resolves to the
+        # asker themselves is never a real hand-off — it's a model misfire,
+        # most often a spurious delegate_task call fired ALONGSIDE a
+        # complete_task on a "this task is done" turn (observed live: a
+        # completion report minted a Bob→Bob row before completing it). Decline
+        # deterministically so the ledger is never polluted with a self-row,
+        # regardless of how the model behaves.
+        if assignee.get("user_id") == assigner_user_id:
+            return (
+                "That task would be assigned to you — I only hand tasks off to "
+                "OTHER teammates. Tell me who should take it."
+            )
+
         # DOUBLE GATE (AD-P16/AD-P18) — the load-bearing IDOR check. Never
         # trust a resolved id as a substitute for a live re-check: verify
         # BOTH the assigner and the resolved assignee are actual members of
@@ -619,3 +640,143 @@ def handle_delegate_task(
             "delegation_failed project_id=%s error=%s", project_id, type(exc).__name__
         )
         return "I hit a problem handing that off — nothing was sent."
+
+
+# ── Completion: the assignee signals a delegated task is DONE ─────────────────
+COMPLETE_TASK_TOOL = {
+    "name": "complete_task",
+    "description": (
+        "Call this when the person you are talking to says THEY have finished, "
+        "completed, or are done with a task that was delegated TO THEM — "
+        "\"I'm done with the pricing one-pager\", \"finished that\", \"sent it "
+        "over\", \"the review is done\". This records the completion on the "
+        "task ledger. Only for the speaker's OWN assigned task — never mark "
+        "someone else's task done, and do NOT call this for a plain question, "
+        "an FYI, a request to START work, or when someone merely mentions a "
+        "task without saying it is finished. This tool ACTUALLY records the "
+        "completion and returns confirmation text — you must call it (not just "
+        "say \"noted\") for the ledger to update. If you are not sure which "
+        "task they mean, still call it with your best description of the task "
+        "they named; the tool will ask them to clarify if it can't tell."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_summary": {
+                "type": "string",
+                "description": (
+                    "the task the speaker is reporting finished, as they refer "
+                    "to it (a short phrase — 'the pricing one-pager', 'that "
+                    "review')"
+                ),
+            },
+        },
+        "required": ["task_summary"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _score_task_match(task_ref: str, summary: str) -> int:
+    """Cheap token-overlap score between the speaker's reference and a
+    delegation's stored summary — enough to disambiguate when the assignee
+    has more than one open task. No LLM: word-overlap on lowercased tokens."""
+    ref = set(re.findall(r"[a-z0-9]+", (task_ref or "").lower()))
+    tgt = set(re.findall(r"[a-z0-9]+", (summary or "").lower()))
+    if not ref or not tgt:
+        return 0
+    _stop = {"the", "a", "an", "task", "this", "that", "it", "for", "to", "of", "and", "with"}
+    return len((ref & tgt) - _stop)
+
+
+def handle_complete_task(
+    *,
+    project_id: int,
+    completer_user_id: str | None,
+    tool_input: dict,
+) -> str:
+    """Best-effort dispatch handler for the `complete_task` tool — never
+    raises (AD-P7). The assignee (the current speaker) has signalled a
+    delegated task is done; write the terminal `completed` event so the
+    derived status reflects it, and return the AUTHORITATIVE confirmation
+    string (which overrides the model's free text, mirroring
+    `handle_delegate_task`) so the reply is truthful — it only says "marked
+    done" when a `completed` row was actually written.
+
+    Deterministic where the classifier (`delegation_status_ingest`) is fuzzy:
+    resolves the speaker's OWN open delegations, matches the named task, and
+    writes the event directly. Duplicate-safe: a repeat "done" finds the task
+    already `completed` (no longer an OPEN state) and reports it truthfully
+    without writing a second event; the `is_legal_transition` guard is the
+    belt to that brace."""
+    try:
+        if not completer_user_id:
+            return "I couldn't tell who's reporting this done, so I can't record it — try again."
+        if not is_project_member(project_id, completer_user_id):
+            return "I can only update tasks for members of this project."
+
+        rows = list_status_for_assignee(project_id, completer_user_id)
+        open_rows = [r for r in rows if r.get("status") in OPEN_STATES]
+        if not open_rows:
+            # Either nothing was ever assigned to them, or their task(s) are
+            # already closed — say so plainly rather than inventing a write.
+            closed = [r for r in rows if r.get("status") == "completed"]
+            if closed:
+                return "That task is already marked done on the ledger — nothing to change."
+            return "I don't see an open task assigned to you to mark done."
+
+        task_ref = (tool_input.get("task_summary") or "").strip()
+        if len(open_rows) == 1:
+            target = open_rows[0]
+        else:
+            scored = sorted(
+                open_rows, key=lambda r: _score_task_match(task_ref, r.get("task_summary", "")),
+                reverse=True,
+            )
+            best = _score_task_match(task_ref, scored[0].get("task_summary", ""))
+            runner = _score_task_match(task_ref, scored[1].get("task_summary", "")) if len(scored) > 1 else 0
+            if best == 0 or best == runner:
+                names = "; ".join(f"\"{r.get('task_summary', '')}\"" for r in open_rows)
+                return f"Which one did you finish? You have these open: {names}."
+            target = scored[0]
+
+        delegation_id = target["delegation_id"]
+        current = target.get("status") or "assigned"
+        if not is_legal_transition(current, "completed"):
+            return f"That task is already {current} on the ledger — nothing to change."
+
+        record_event(
+            delegation_id=delegation_id, event="completed", actor_user_id=completer_user_id
+        )
+        logger.info(
+            "delegation_completed project_id=%s delegation_id=%s actor=%s",
+            project_id, delegation_id, completer_user_id,
+        )
+        # Ledger liveness: publish the shaped completed status DTO to BOTH
+        # parties' per-user channels (best-effort, AD-P22) so the Task ledger
+        # updates live for the assigner and the assignee alike.
+        try:
+            fact = load_delegation_for_authz(delegation_id) or {}
+            assigner_id = fact.get("assigner_user_id")
+            dto = status_dto(delegation_id)
+            if dto is not None and assigner_id:
+                _publish_delegation_event(
+                    project_id=project_id,
+                    assigner_user_id=assigner_id,
+                    assignee_user_id=completer_user_id,
+                    dto=dto,
+                )
+        except Exception as exc:  # noqa: BLE001 — best-effort, AD-P22: never blocks the write
+            logger.warning(
+                "delegation_complete_publish_failed delegation_id=%s error_class=%s",
+                delegation_id, type(exc).__name__,
+            )
+        summary = (target.get("task_summary") or "").strip()
+        if summary:
+            return f"Got it — I've marked \"{summary}\" as done on the ledger."
+        return "Got it — I've marked that task as done on the ledger."
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
+        logger.warning(
+            "delegation_complete_failed project_id=%s error=%s", project_id, type(exc).__name__
+        )
+        return "I couldn't record that as done just now — try again."

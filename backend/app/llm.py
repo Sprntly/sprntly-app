@@ -649,6 +649,7 @@ def run_tool_loop(
     max_iters: int = 5,
     user_cacheable_prefix: str | None = None,
     meta_out: dict | None = None,
+    force_tool: str | None = None,
 ) -> str:
     """Run a manual tool-use loop until the model stops calling tools.
 
@@ -656,6 +657,15 @@ def run_tool_loop(
     `dispatch(name, input) -> str` and fed back as a `tool_result`. Returns the
     model's final text. `meta_out` (if given) captures usage from the LAST turn.
     Bounded by `max_iters` so a misbehaving model can't loop forever.
+
+    `force_tool` (optional): the name of a tool the model MUST call on the
+    FIRST turn (`tool_choice={"type":"tool"}`). Used by the project group
+    tool-loop's forcing pass — when a turn clearly asks to delegate/complete a
+    task but the model narrated a bare "I'll do it" promise without calling the
+    tool, a second pass with `force_tool` set guarantees the tool actually
+    fires (so the ledger/handoff really happens) instead of ending on the
+    promise. Only the FIRST turn is forced; subsequent turns revert to auto so
+    the model can produce its closing text.
 
     This is the shared, single-chokepoint tool loop (same retry/concurrency gate
     as every other call). Used by the paths that need the model to REACH a live
@@ -674,7 +684,13 @@ def run_tool_loop(
     system_param = base["system"]
     messages = base["messages"]
     final_text = ""
-    for _ in range(max_iters):
+    for _i in range(max_iters):
+        # Force the named tool on the FIRST turn only; auto thereafter.
+        extra = (
+            {"tool_choice": {"type": "tool", "name": force_tool}}
+            if force_tool and _i == 0
+            else {}
+        )
         msg = _create_with_retries(
             client,
             model=model,
@@ -682,6 +698,7 @@ def run_tool_loop(
             system=system_param,
             messages=messages,
             tools=tools,
+            **extra,
         )
         _capture_meta(meta_out, msg, model)
         text = "".join(
