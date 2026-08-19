@@ -594,12 +594,17 @@ export function ProjectArtifactsDrawer({
 
   const handleOpenRow = useCallback(
     (a: ArtifactItem) => {
-      // PRD/evidence open IN-PLACE beside the project chat (the same shared panel
-      // main uses) via the project surface's seam — NOT `/?prd=`, which is MAIN
-      // chat and would navigate the user out of the project. The in-place handler
-      // also closes this drawer (it clears the project's rail-modal state).
-      if ((a.type === "prd" || a.type === "evidence") && onOpenInPlace) {
-        onOpenInPlace(a)
+      // PRD and evidence are IN-PANEL artifacts: they open in the SAME shared
+      // side-panel main uses, beside the project chat, via the project surface's
+      // in-place seam — which also closes this drawer (it clears the project's
+      // rail-modal state). This is a HARD invariant: a PRD/evidence row must NEVER
+      // reach the `/?prd=`/`/?evidence=` deep-link, because those land on the MAIN
+      // workspace chat (`/`) and open a NEW main chat tab, yanking the user out of
+      // the project (the reported defect). So we short-circuit unconditionally —
+      // if the in-place seam is somehow absent we no-op rather than fall back to
+      // that main deep-link.
+      if (a.type === "prd" || a.type === "evidence") {
+        onOpenInPlace?.(a)
         return
       }
       // prototype (`/prototype?prd=`) and custom_artifact (`documentPath`) have
