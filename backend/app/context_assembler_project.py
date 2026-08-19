@@ -101,19 +101,19 @@ class ProjectContextAssembler:
             )
             block = ""
 
-        # ── Project instructions → system_addendum ───────────────────────────
-        # Single-sourced format both surfaces use (`_instructions_block`); goes
-        # on `system_addendum`, never `context_payload`. Best-effort.
-        system_addendum = ""
+        # ── Project instructions block ───────────────────────────────────────
+        # Single-sourced format both surfaces use (`_instructions_block`); folded
+        # into `system_addendum` below (never `context_payload`). Best-effort.
+        instr_block = ""
         try:
             from app.db import projects as projects_db
             from app.project_group_context import _instructions_block
 
-            system_addendum = _instructions_block(
+            instr_block = _instructions_block(
                 projects_db.get_instructions(project_id)
             )
         except Exception:  # noqa: BLE001 — best-effort
-            system_addendum = ""
+            instr_block = ""
 
         # ── Depth tools (the breadth → depth flip) ───────────────────────────
         # Populate `extra_tools` with the 6 project tools so the EXISTING sixth
@@ -139,6 +139,35 @@ class ProjectContextAssembler:
             roster = projects_db.list_members(project_id)
         except Exception:  # noqa: BLE001 — best-effort, AD-P7
             roster = []
+
+        # ── system_addendum composition ──────────────────────────────────────
+        # Ported verbatim in COMPOSITION from `b09801dd^:app/ask_job_runner.
+        # _build_private_scope`: the private surface folds the relocated
+        # tool-usage system guidance (`_PRIVATE_SCOPE_SYSTEM`, which itself already
+        # appends `PROJECT_TOOL_NUDGE`) + the roster block + the project
+        # instructions, so the model gets WHEN/HOW guidance for delegate_task /
+        # execute_task / edit-in-place alongside the 6 depth tools — not just the
+        # facts. Reuses the `roster` fetched just above for the sidecars (no
+        # re-fetch). The constants/helper are imported (not reimplemented) from
+        # `app.ask_job_runner`, where they still live on this commit.
+        #
+        # Group surface stays instructions-only for now: group depth routing is
+        # deferred (group runs as main chat), and no trivially-additive group
+        # scope-system helper exists on this commit to fold in, so composing one
+        # would mean building group routing machinery — explicitly out of scope.
+        if surface == Surface.project_private:
+            from app.ask_job_runner import (
+                _PRIVATE_SCOPE_SYSTEM,
+                _private_roster_block,
+            )
+
+            system_addendum = (
+                f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
+            )
+            if instr_block:
+                system_addendum = f"{system_addendum}\n\n{instr_block}"
+        else:
+            system_addendum = instr_block
 
         # `post_turn` — the execute-task progress writer. RELOCATED in shape from
         # `_build_private_scope`: the private surface's turn writer, bound to the
