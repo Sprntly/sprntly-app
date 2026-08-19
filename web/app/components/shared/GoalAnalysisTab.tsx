@@ -169,7 +169,9 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       // else would ever ask it again.
       setPollKey((k) => k + 1)
     } catch {
-      setError("Could not confirm that definition.")
+      // The most important click in the feature. A silent no-op here reads as
+      // a dead button.
+      setError("Could not start the analysis. Try confirming again.")
     } finally {
       setConfirming(false)
     }
@@ -178,11 +180,20 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   if (error && !run) return <p className="ga-error">{error}</p>
   if (!run) return <p className="ga-loading">Loading…</p>
 
+  // A BANNER, not a replacement. Making `error` short-circuit the whole panel
+  // threw away a loaded run to show one line; making it unreachable once a run
+  // existed was the opposite mistake and left the user with a frozen panel and
+  // no explanation. It sits above whatever the run last showed.
+  const banner = error ? (
+    <p className="ga-error" role="status" data-testid="goal-error">{error}</p>
+  ) : null
+
   // ── The I9 gate. Not a loading state — a question. ───────────────────────
   if (run.status === "awaiting_confirmation") {
     const proposed = run.prioritisation?.proposed_definition
     return (
       <div className="ga" data-testid="goal-confirm">
+        {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-ask">
           {run.prioritisation?.ask ||
@@ -219,6 +230,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   if (run.status === "failed") {
     return (
       <div className="ga" data-testid="goal-failed">
+        {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-error">
           {ERROR_COPY[run.error_code ?? ""] || "This run did not finish."}
@@ -230,6 +242,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   if (run.status !== "ready") {
     return (
       <div className="ga" data-testid="goal-running">
+        {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-loading">
           Reading {run.claim_count || 0} claims…
@@ -240,6 +253,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
 
   return (
     <div className="ga" data-testid="goal-ready">
+      {banner}
       <p className="ga-goal">{run.goal_text}</p>
 
       {/* Degradations first. A note explaining that a third of the evidence

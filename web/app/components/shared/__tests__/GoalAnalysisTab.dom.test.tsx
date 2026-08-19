@@ -273,3 +273,48 @@ describe("transient failure", () => {
       expect(screen.getByText(/Lost contact/)).toBeTruthy())
   })
 })
+
+
+describe("the error is visible without destroying the panel", () => {
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
+  afterEach(() => vi.useRealTimers())
+
+  it("a run that loaded and THEN went down still says so", async () => {
+    // The regression the first fix introduced: `error && !run` made the
+    // message unreachable once a run existed, so the panel simply froze on
+    // its last status with no explanation. The fixture the old suite never
+    // had — a run that loads first and fails after.
+    get.mockResolvedValueOnce({ ...RUN, status: "running" })
+       .mockRejectedValue(new Error("down"))
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    await vi.advanceTimersByTimeAsync(15_000)
+    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
+    // And the run it had is still on screen underneath.
+    expect(screen.getByTestId("goal-running")).toBeTruthy()
+  })
+
+  it("a failed confirm is not a silent no-op", async () => {
+    // The most important click in the feature.
+    get.mockResolvedValue({
+      ...RUN, status: "awaiting_confirmation",
+      prioritisation: { ask: "?", proposed_definition: "net revenue" },
+    })
+    confirm.mockRejectedValue(new Error("500"))
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-confirm")
+    fireEvent.click(screen.getByText("Confirm and analyse"))
+    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
+  })
+
+  it("a recovered poll clears the warning", async () => {
+    get.mockResolvedValueOnce({ ...RUN, status: "running" })
+       .mockRejectedValueOnce(new Error("blip"))
+       .mockResolvedValue(RUN)
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    await vi.advanceTimersByTimeAsync(9_500)
+    await waitFor(() => expect(screen.getByTestId("goal-ready")).toBeTruthy())
+    expect(screen.queryByTestId("goal-error")).toBeNull()
+  })
+})

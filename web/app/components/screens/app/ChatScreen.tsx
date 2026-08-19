@@ -1198,6 +1198,11 @@ export function ChatScreen() {
   // run instead of posting a turn, so it cannot ride on `pinnedSkill` (which
   // splices a slash trigger into the query and sends it to the ask path).
   const [goalMode, setGoalMode] = useState(false)
+  // The run currently on screen, readable without making it an effect
+  // dependency — the restore below has to know whether the user started one
+  // while its request was in flight, and depending on `content` would re-fire
+  // the restore on every unrelated content change.
+  const goalRunRef = useRef<number | null>(null)
   // A passage of an answer the reader highlighted and pressed Reply on, parked
   // above the input until they send or dismiss it. Host state (not the shell's)
   // because main renders its own composer; the shell reports the selection
@@ -6478,15 +6483,32 @@ export function ChatScreen() {
   // Gated on the flag, so an unenrolled company never pays a request (or
   // collects a 403) on every thread switch.
   useEffect(() => {
+    // Mirrors the content reset above: the thread changed, so whatever run was
+    // on screen belongs to the previous one. Clearing the ref too is what lets
+    // the restore below run for the NEW thread instead of seeing a stale id
+    // and declining.
+    goalRunRef.current = null
     if (!goalAnalysisOn || activeConvId == null) return
     let live = true
     void (async () => {
       try {
         const { runs } = await goalAnalysisApi.list()
         if (!live) return
-        // Newest first from the server; take this thread's most recent.
-        const mine = runs.find((r) => r.conversation_id === activeConvId)
-        if (mine) setContent({ goalRunId: mine.id })
+        // Newest first from the server; take this thread's most recent that is
+        // still worth showing. A `failed` or `cancelled` run must NOT reopen
+        // the panel: it would pin an undismissable red tab to that thread for
+        // as long as the run row exists, with nothing the reader can do about
+        // it. It stays reachable from the run's own history.
+        const mine = runs.find(
+          (r) => r.conversation_id === activeConvId
+            && r.status !== "failed" && r.status !== "cancelled",
+        )
+        if (!live || !mine) return
+        // Never clobber a run the user started while this request was in
+        // flight — the restore would yank the panel back to an older one.
+        if (goalRunRef.current != null) return
+        goalRunRef.current = mine.id
+        setContent({ goalRunId: mine.id })
       } catch {
         // A failed restore is a missing panel, not a broken chat. The run row
         // survives and the listing will be tried again on the next switch.
@@ -6507,6 +6529,7 @@ export function ChatScreen() {
       const run = await goalAnalysisApi.start(goalText, {
         ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
       })
+      goalRunRef.current = run.id
       setContent({ goalRunId: run.id })
       openContentPanel("goal")
     } catch (e) {
