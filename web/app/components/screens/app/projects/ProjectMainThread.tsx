@@ -16,6 +16,7 @@
 // mounts — each is its own conversation.
 import type { OpenArtifactCandidate } from "../../../../lib/api"
 import { ConversationView } from "../ConversationView"
+import { AttachmentViewer } from "../../../shared/AttachmentViewer"
 import { useProjectConversation, type ProjectChatSurface } from "./useProjectConversation"
 import styles from "./ProjectMainThread.module.css"
 
@@ -31,8 +32,20 @@ function ProjectChatSurface({
   surface: ProjectChatSurface
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
 }) {
-  const props = useProjectConversation(projectId, surface, onOpenArtifact)
-  return <ConversationView {...props} />
+  // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
+  // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
+  // surface root — mirroring how ChatScreen mounts the same component beside its
+  // own conversation view. Everything else is the exact `ConversationViewProps`.
+  const { viewerAttachment, setViewerAttachment, ...viewProps } =
+    useProjectConversation(projectId, surface, onOpenArtifact)
+  return (
+    <>
+      <ConversationView {...viewProps} />
+      {viewerAttachment ? (
+        <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
+      ) : null}
+    </>
+  )
 }
 
 export type ActiveChat = "group" | "individual"

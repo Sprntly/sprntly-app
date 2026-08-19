@@ -60,6 +60,20 @@ import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
 
 export type ProjectChatSurface = "individual" | "group"
 
+/** The attachment overlay's state shape — main keeps this on ChatScreen; the
+ *  project surface owns its own copy and hands it to the host to render the
+ *  SHARED `AttachmentViewer`. */
+export type ViewerAttachment = { name: string; content: string; key?: string | null; mime?: string | null }
+
+/** The host-bag `useProjectConversation` returns: the exact `ConversationViewProps`
+ *  main renders, plus the project surface's own attachment-viewer state so its
+ *  host can mount the shared `AttachmentViewer` alongside `ConversationView`
+ *  (main renders that component at its own root instead — see ChatScreen). */
+export type ProjectConversationProps = ConversationViewProps & {
+  viewerAttachment: ViewerAttachment | null
+  setViewerAttachment: (a: ViewerAttachment | null) => void
+}
+
 type PendingClarify = { task: string; sourceDocs?: { name: string; content: string }[]; turnId: string }
 type PendingAssign = { questions: TicketAssignQuestion[]; applied: string[]; turnId: string }
 type PendingShare = { turnId: string; kind: "channel" | "target"; header: string; prompt: string; options: { label: string; description?: string | null; value: string }[] }
@@ -91,7 +105,7 @@ export function useProjectConversation(
   projectId: number | string,
   surface: ProjectChatSurface,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
-): ConversationViewProps {
+): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
@@ -111,6 +125,11 @@ export function useProjectConversation(
   const [pendingClarify, setPendingClarify] = useState<PendingClarify | null>(null)
   const [pendingAssign, setPendingAssign] = useState<PendingAssign | undefined>(undefined)
   const [pendingShare, setPendingShare] = useState<PendingShare | undefined>(undefined)
+  // The attachment overlay's own state — the project surface's copy of the
+  // state main keeps on ChatScreen. The click handler (mapDeps.setViewerAttachment)
+  // sets it; the host (ProjectMainThread) renders the SHARED AttachmentViewer from
+  // it, mirroring how ChatScreen mounts the same component at its own root.
+  const [viewerAttachment, setViewerAttachment] = useState<ViewerAttachment | null>(null)
   const [clarifyPopupDismissed, setClarifyPopupDismissed] = useState<Record<string, boolean>>({})
   const [questionDockEl, setQuestionDockEl] = useState<HTMLDivElement | null>(null)
   const threadRef = useRef<ThreadTurn[]>(thread)
@@ -177,6 +196,21 @@ export function useProjectConversation(
     })()
     return () => { cancelled = true }
   }, [projectId, surface])
+
+  // ── Mirror this conversation into the shared content store (main parity) ────
+  // Main's ChatScreen stamps `content.conversationId` with the active tab's
+  // conversation id; the shared `useThreadReportsSync` (AppShell) reads it to
+  // fetch that thread's captured reports, and the global `ContentPanel` gates
+  // its Reports tab on `threadReportsConversationId === conversationId`. The
+  // project surface never set it, so a report answer here had no reports list
+  // to open into. Stamp it with THIS chat's durable row so the same shared
+  // report path lights up, and clear it on unmount/surface-swap so a stale
+  // project conversation can never claim another surface's reports.
+  useEffect(() => {
+    if (dbConvId == null) return
+    setContent({ conversationId: dbConvId })
+    return () => { setContent({ conversationId: null }) }
+  }, [dbConvId, setContent])
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
   const persistence = useMemo(() => createChatPersistence({
@@ -620,7 +654,16 @@ export function useProjectConversation(
               void runShareToSlackAction(trimmed, env, {
                 emitTurn,
                 runActionTurn: (q, w) => engine.runActionTurnInTab(convKey, q, w),
-                resolveShareRef: (e) => ({ kind: "prd", prdId: (e.prd_id ?? metaRef.current.prdId) ?? null } as unknown as import("../../../../lib/api").SlackShareTargetRef),
+                // A REAL `SlackShareTargetRef` (the shipped shape used `{ kind,
+                // prdId }`, force-cast — keys the share/preview endpoint ignores,
+                // so even the PRD open in the panel never reached a valid target).
+                // Point it at the PRD open beside this chat the way main's
+                // `shareRefFor` uses the tab's PRD: the envelope's resolved id,
+                // else this conversation's own PRD, else the shared panel's open
+                // PRD (`content.prd`).
+                resolveShareRef: (e): SlackShareTargetRef => ({
+                  prd_id: e.prd_id ?? metaRef.current.prdId ?? content.prd?.prd_id ?? null,
+                }),
                 canAskInDock: true,
                 onDockQuestion: (turnId, question) => {
                   if (question.kind !== "slack_channel") return
@@ -742,6 +785,31 @@ export function useProjectConversation(
       conversation_title: a.source.conversation_title || null,
     })
   }, [onOpenArtifact])
+
+  // ── Open the report a chat turn is about, from its title (main parity) ──────
+  // Main's `openReportByTitle` verbatim, over THIS conversation's report list:
+  // the reply carries no report id (capture runs after the answer, deliberately),
+  // so the title is the join key — matched exactly, then leniently (case/space,
+  // then either side a prefix of the other). The list comes from the shared
+  // `content.threadReports`, which `useThreadReportsSync` fetches for the
+  // conversation id we stamp above; guarded by that same stamp so a not-yet-
+  // landed (or foreign) list is treated as "no match" rather than the wrong doc.
+  const openReportByTitle = useCallback((title: string) => {
+    const reports = content.threadReportsConversationId === dbConvIdRef.current
+      ? (content.threadReports ?? [])
+      : []
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
+    const want = norm(title)
+    const match =
+      reports.find((r) => r.title === title) ??
+      reports.find((r) => norm(r.title) === want) ??
+      reports.find((r) => {
+        const have = norm(r.title)
+        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
+      })
+    if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
+    openContentPanel("reports")
+  }, [content.threadReports, content.threadReportsConversationId, setContent, openContentPanel])
 
   // ── Slack share: the interactive card + dock steps (main-parity) ───────────
   // The PREVIEW is seeded by the shared `runShareToSlackAction` (onShareToSlack
@@ -938,17 +1006,19 @@ export function useProjectConversation(
     inlinePrdCards: false, inlinePrdAnchorIdx: null, insightCardNode: null, prdQuestionsNode: null,
     clarifyPopupOpen, pendingClarifyTurn,
     handleAskAgain, handleStopAsk: engine.handleStopAsk,
-    submitClarifyAnswers, setViewerAttachment: () => {},
-    openReportByTitle: () => {}, openArtifactInPanel: (c) => onOpenArtifact?.(c), openChatArtifactItem,
+    submitClarifyAnswers, setViewerAttachment,
+    openReportByTitle, openArtifactInPanel: (c) => onOpenArtifact?.(c), openChatArtifactItem,
     handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd,
     handleViewPrototype: () => {}, handlePrototypeSettled: () => {},
     onSendSlackShare: sendSlackShare, onCancelSlackShare: cancelSlackShareCard, onPickSlackShareTarget: repreviewSlackShare,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, sendSlackShare, cancelSlackShareCard, repreviewSlackShare])
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
   return {
     thread, mapDeps,
+    // The attachment overlay's state, for the host to render the shared viewer.
+    viewerAttachment, setViewerAttachment,
     draft: composer.draft, pinnedSkill: composer.pinnedSkill, attachments: composer.attachments,
     composerHintNode,
     plusMenuOpen: composer.plusMenuOpen, plusMenuActive: composer.plusMenuActive,
