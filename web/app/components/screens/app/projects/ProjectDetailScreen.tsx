@@ -377,8 +377,7 @@ export function ProjectDetailView({
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
               <>
-                Open to all members. Sprntly uses <b>smart interjection</b> — jumps in when a
-                turn is for it, stays out otherwise.
+                Open to all members. Sprntly <b>replies to every message</b> here.
               </>
             ) : (
               <>
