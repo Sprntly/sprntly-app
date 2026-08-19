@@ -326,7 +326,17 @@ def test_known_unfixed_has_no_stale_entries(denylist):
         if not path.is_file():
             stale.append(f"{rel}: file no longer exists")
             continue
+        # CONTENT **AND** PATH, matching the main scan exactly. With content
+        # alone the two tests become mutually unsatisfiable at the very next
+        # step of issue #1238: scrub a corpus file's contents but not yet its
+        # directory name, and the main scan still needs the carve-out (the slug
+        # is in the path) while this one demands it be dropped (no content
+        # hit). Neither state green, and the guard's own advice points the
+        # wrong way.
         hits = _hits_in(path.read_text(errors="ignore"), buckets, max_words)
+        hits |= _hits_in(
+            str(rel).replace("/", " ").replace("_", " "), buckets, max_words
+        )
         present = {hashlib.sha256(h.encode()).hexdigest() for h in hits}
         gone = allowed - present
         if gone:
@@ -425,15 +435,31 @@ if __name__ == "__main__":
     import traceback as _tb
 
     _fixture = _load_denylist()
-    _checks = [
-        (test_denylist_is_hashed_not_plaintext, ()),
-        (test_denylist_entries_are_well_formed_and_safe, (_fixture,)),
-        (test_short_denylist_entries_do_not_increase, ()),
-        (test_the_guard_fires_on_a_known_bad_string, (_fixture,)),
-        (test_the_guard_is_quiet_on_synthetic_names, (_fixture,)),
-        (test_known_unfixed_has_no_stale_entries, (_fixture,)),
-        (test_no_real_customer_name_in_the_tracked_repo, (_fixture,)),
-    ]
+
+    # DERIVED from the module, never hand-listed. A hand-maintained list means a
+    # test added next month runs under pytest and is silently absent from the
+    # every-PR lane — on a web-only PR, the case this workflow exists for, it
+    # would not run at all and nothing would go red to say so. This module
+    # argues against derived allowlists elsewhere; "which assertions actually
+    # run in CI" is the one place that argument cuts the other way.
+    import inspect as _inspect
+
+    _checks = []
+    for _name, _obj in sorted(globals().items()):
+        if not _name.startswith("test_") or not callable(_obj):
+            continue
+        _params = _inspect.signature(_obj).parameters
+        if not _params:
+            _checks.append((_obj, ()))
+        elif list(_params) == ["denylist"]:
+            _checks.append((_obj, (_fixture,)))
+        else:
+            print(f"SKIP  {_name}: unknown fixture {list(_params)}")
+            raise SystemExit(
+                f"{_name} takes {list(_params)}, which the standalone runner "
+                f"cannot supply. Add support here rather than letting the "
+                f"every-PR lane silently skip it."
+            )
     _failed = 0
     for _fn, _args in _checks:
         try:

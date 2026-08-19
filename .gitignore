@@ -20,16 +20,8 @@ venv/
 *.db-shm
 *.db-wal
 
-# Corpus data — generated/uploaded files per dataset (never commit client data).
-# Excluded at FILE level, not directory level: `backend/data/*/` stops git
-# descending at all, so no later negation can re-include anything inside. That
-# mattered — the demo corpus IS tracked, and issue #1238's step 3 moves it to a
-# new directory, which would have `git add`ed nothing and failed silently.
-# Markdown is the corpus format; everything generated is another extension.
-backend/data/*/*
-!backend/data/*/*.md
-!backend/data/*/_reference/
-!backend/data/*/_reference/*.md
+# Corpus data — generated/uploaded files per dataset (never commit client data)
+backend/data/*/
 !backend/data/.gitkeep
 
 # Claude Code local state
@@ -51,6 +43,10 @@ build/
 .vercel/
 
 # Design Agent generated artifacts (not source-of-truth).
+# Per-company generated data dirs are ignored wholesale rather than listed by
+# name — naming one here identifies that customer in a public repo. Already
+# tracked files under backend/data/ are unaffected; .gitignore never untracks.
+backend/data/*/
 backend/data/prototypes/
 web/public/prototype-bundles
 branch_structure.json
