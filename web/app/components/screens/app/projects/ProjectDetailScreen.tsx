@@ -31,7 +31,7 @@
 // same-tenant non-member, 404 for a foreign-tenant/absent project. Both are
 // rendered as an in-chrome "can't open this" state, never a crash or blank
 // screen.
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AppLayout } from "../AppLayout"
@@ -43,6 +43,7 @@ import { PROJECTS_PATH } from "../../../../lib/routes"
 import {
   ApiError,
   projectsApi,
+  prdApi,
   type ArtifactItem,
   type DelegationCounts,
   type DelegationLedgerRow,
@@ -452,6 +453,7 @@ export function ProjectDetailView({
           open={artifactsDrawerOpen}
           initialFilter={artifactsDrawerFilter}
           onClose={onCloseArtifactsDrawer}
+          onOpenInPlace={onOpenArtifactInPlace}
           onArtifactsChanged={refetchArtifacts}
         />
       </div>
@@ -500,6 +502,17 @@ export function ProjectDetailScreen({
   const auth = useAuth()
   const router = useRouter()
   const searchParams = useSearchParams()
+  // The `?prd=` this route was (re)loaded WITH — captured once during the FIRST
+  // render, before any effect (in particular `useArtifactUrlSync`'s drawer→URL
+  // reflect, which strips the param while no PRD is yet open) can clear it. The
+  // restore effect below re-opens that PRD IN-PLACE on the project surface, so a
+  // refresh of `/projects?…&prd=` lands back here with the PRD open instead of
+  // being routed to `/` (main) by the global hook (which now bows out of the
+  // CONSUME on `/projects` — see useArtifactUrlSync's `consumeDisabled`).
+  const initialPrdParamRef = useRef<string | null | undefined>(undefined)
+  if (initialPrdParamRef.current === undefined) {
+    initialPrdParamRef.current = searchParams?.get("prd") ?? null
+  }
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
@@ -862,20 +875,58 @@ export function ProjectDetailScreen({
     refetchLedgerRows()
   }, [projectId, refetchLedgerRows])
 
-  // Open a chat artifact in the SAME global side-panel main uses (mounted at the
-  // app root via AppShell) — exactly main's panel behaviour (tabs, streaming,
-  // open/close, resize handle) for free. PRD and evidence both open like main;
-  // the STANDALONE-browse open (ArtifactsModal, by-id) stays deferred — that
-  // modal passes no in-place handler and falls back to its own deep-link viewer.
+  // Load a PRD by its internal id into the SAME global side-panel main uses
+  // (mounted at the app root via AppShell) and open the panel on the "prd" tab.
+  // Extracted from `onOpenArtifactInPlace` so the URL-restore effect below can
+  // reuse the EXACT same terminal action (no second content-set path to drift).
+  const openPrdInPanelById = useCallback((prdId: number) => {
+    void loadPrdById(prdId).then((r) => {
+      if (r.ok) {
+        setContent({ prd: r.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+        openContentPanel("prd")
+      }
+    })
+  }, [setContent, openContentPanel])
+
+  // One-shot restore: on (re)load of `/projects?…&prd=<id|public_id>`, re-open
+  // that PRD IN-PLACE beside the project chat. The global `useArtifactUrlSync`
+  // no longer consumes `?prd=` here (it would route to `/`/main), so the project
+  // surface owns the restore — the panel comes back on THIS surface, never a main
+  // tab. Waits for the project shell to be ready so the panel opens over a live
+  // surface; accepts both the canonical `public_id` (uuid) and the still-valid
+  // legacy bare-integer id, exactly as `useArtifactUrlSync` does.
+  const restoredPrdRef = useRef(false)
+  useEffect(() => {
+    if (restoredPrdRef.current) return
+    if (state.status !== "ready") return
+    const raw = initialPrdParamRef.current
+    if (!raw) {
+      restoredPrdRef.current = true
+      return
+    }
+    restoredPrdRef.current = true
+    const asInt = Number(raw)
+    if (Number.isInteger(asInt) && asInt > 0) {
+      openPrdInPanelById(asInt)
+      return
+    }
+    void prdApi
+      .resolveIdByPublicId(raw)
+      .then(({ id }) => openPrdInPanelById(id))
+      .catch(() => {
+        // Unknown/foreign public_id — no content, no crash (mirrors
+        // useArtifactUrlSync's own 404 handling).
+      })
+  }, [state.status, openPrdInPanelById])
+
+  // Open a chat artifact in the SAME global side-panel main uses — exactly main's
+  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD
+  // and evidence both open like main; the STANDALONE-browse open (ArtifactsModal,
+  // by-id) stays deferred.
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
     if (artifact.type === "prd") {
-      void loadPrdById(artifact.open.prd_id).then((r) => {
-        if (r.ok) {
-          setContent({ prd: r.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
-          openContentPanel("prd")
-        }
-      })
+      openPrdInPanelById(artifact.open.prd_id)
     } else if (artifact.type === "evidence" && artifact.open.insight_index != null) {
       // Byte-for-byte main's chat evidence-open content-set (ChatScreen's
       // openPrdInTab evidence branch): scope the Evidence tab to this insight via
@@ -891,7 +942,7 @@ export function ProjectDetailScreen({
       })
       openContentPanel("evidence")
     }
-  }, [setContent, openContentPanel])
+  }, [setContent, openContentPanel, openPrdInPanelById])
 
   const onRemoveMember = useCallback((member: HumanMember) => {
     setRemoveError(null)

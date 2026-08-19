@@ -505,12 +505,19 @@ export function ProjectArtifactsDrawer({
   open,
   initialFilter,
   onClose,
+  onOpenInPlace,
   onArtifactsChanged,
 }: {
   projectId: number | string
   open: boolean
   initialFilter?: ProjectArtifactType
   onClose: () => void
+  /** Open a PRD/evidence row IN-PLACE in the shared side-panel beside the
+   *  project chat (the project surface's own seam), instead of the deep-link
+   *  `artifactHref` — which for a PRD is `/?prd=` = MAIN chat, navigating the
+   *  user OUT of the project. PRD/evidence route here; prototype/document rows
+   *  (their own standalone routes, not the beside-chat panel) still deep-link. */
+  onOpenInPlace?: (a: ArtifactItem) => void
   /** Fired after the add view attaches artifact(s) — the parent re-fetches so
    *  the top-bar "Artifacts(N)" count updates. The drawer refreshes its OWN
    *  list internally as well. */
@@ -564,11 +571,23 @@ export function ProjectArtifactsDrawer({
 
   const handleOpenRow = useCallback(
     (a: ArtifactItem) => {
+      // PRD/evidence open IN-PLACE beside the project chat (the same shared panel
+      // main uses) via the project surface's seam — NOT `/?prd=`, which is MAIN
+      // chat and would navigate the user out of the project. The in-place handler
+      // also closes this drawer (it clears the project's rail-modal state).
+      if ((a.type === "prd" || a.type === "evidence") && onOpenInPlace) {
+        onOpenInPlace(a)
+        return
+      }
+      // prototype (`/prototype?prd=`) and custom_artifact (`documentPath`) have
+      // their OWN standalone routes — not the beside-chat panel — so those keep
+      // the deep-link open. Types with no url-param entry (report/ticket_set)
+      // aren't rendered as openable rows at all.
       const href = artifactHref(a)
       if (!href) return
       router.push(href)
     },
-    [router],
+    [router, onOpenInPlace],
   )
 
   const handleAdded = useCallback(() => {
