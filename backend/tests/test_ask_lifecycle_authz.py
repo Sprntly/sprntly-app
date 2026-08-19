@@ -293,6 +293,10 @@ def test_member_count_failure_fails_closed(
 def test_mentions_agent_word_boundary():
     assert ask_route._mentions_agent("@Sprntly help me") is True
     assert ask_route._mentions_agent("hey @sprntly") is True
+    # Case-insensitive across every casing (migrated from the deleted
+    # test_group_chat_turns.py::test_mention_case_insensitive — the group
+    # @Sprntly gate now lives on the /v1/ask mount, not the group POST).
+    assert ask_route._mentions_agent("@SPRNTLY assign this to Fortune") is True
     assert ask_route._mentions_agent("@sprntlybot is a different handle") is False
     assert ask_route._mentions_agent("no mention here") is False
     assert ask_route._mentions_agent(None) is False
