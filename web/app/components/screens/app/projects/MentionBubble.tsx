@@ -11,8 +11,12 @@ import remarkGfm from "remark-gfm"
 import { parseMentionChips } from "./mentions"
 import styles from "./MentionBubble.module.css"
 
-export function MentionBubble({ content }: { content: string }): ReactNode {
-  const segments = parseMentionChips(content)
+export function MentionBubble(
+  { content, knownNames }: { content: string; knownNames?: readonly string[] },
+): ReactNode {
+  // `knownNames` (project member display names + the agent) lets a multi-word
+  // mention like "@Bob Baker" chip as one unit instead of only "@Bob".
+  const segments = parseMentionChips(content, knownNames)
   return (
     <span className={styles.mentionText}>
       {segments.map((seg, i) => {

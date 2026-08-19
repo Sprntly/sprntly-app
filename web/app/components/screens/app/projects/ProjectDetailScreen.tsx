@@ -250,6 +250,12 @@ export function ProjectDetailView({
   onCloseArtifactsDrawer,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
+  // The human member display names — threaded to the group chat so a multi-word
+  // `@mention` chip ("@Bob Baker") wraps the FULL name, not only its first word.
+  const memberNames = useMemo(
+    () => humans.map((m) => m.name).filter((n): n is string => !!n && n.trim().length > 0),
+    [humans],
+  )
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
   // branch, resume-conversation-first, reuse-by-prd-id and null-id guards all
   // live in `openArtifactDestination`; this project surface supplies the
@@ -424,6 +430,7 @@ export function ProjectDetailView({
               projectId={project.id}
               projectName={project.name}
               humanMemberCount={humans.length}
+              memberNames={memberNames}
               activeChat={activeChat}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}

@@ -128,6 +128,7 @@ export function useProjectConversation(
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
   projectName?: string,
   humanMemberCount?: number,
+  memberNames?: readonly string[],
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
   const { activeCompany } = useCompany()
@@ -1358,6 +1359,15 @@ export function useProjectConversation(
     return () => window.removeEventListener("keydown", onKey)
   }, [busy, viewerAttachment, composer.slashOpen, composer.plusMenuOpen, pendingAssign, pendingShare, clarifyPopupOpen, engine.handleStopAsk])
 
+  // The display names a group `@mention` chip can wrap as ONE unit — the
+  // project's human members plus the agent. Longest-match in `parseMentionChips`
+  // uses this so "@Bob Baker" chips whole instead of only "@Bob" (defect: a
+  // multi-word display name chipped only its first word).
+  const mentionKnownNames = useMemo<string[]>(
+    () => [AGENT_NAME, ...(memberNames ?? [])].filter((n) => !!n && n.trim().length > 0),
+    [memberNames],
+  )
+
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
@@ -1376,8 +1386,8 @@ export function useProjectConversation(
     onSendSlackShare: sendSlackShare, onCancelSlackShare: cancelSlackShareCard, onPickSlackShareTarget: repreviewSlackShare,
     // Group: route the user body through the mention-chip renderer (@user chips
     // + @Sprntly agent chip). Individual/main leave it undefined → plain query.
-    renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query }) : undefined,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup])
+    renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query, knownNames: mentionKnownNames }) : undefined,
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
