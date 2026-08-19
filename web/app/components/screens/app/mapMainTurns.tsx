@@ -72,6 +72,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onCancelSlackShare,
     onPickSlackShareTarget,
     handlePrototypeSettled,
+    renderUserBody,
   } = deps
 
   return thread.map((turn, idx): ChatTranscriptTurn => {
@@ -205,9 +206,18 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       onSubmitEdit: isEditing ? (text: string) => onSubmitTurnEdit?.(turn, text) : undefined,
       onCancelEdit: isEditing ? () => onCancelTurnEdit?.() : undefined,
       // Only when the user actually said something. A turn can be AGENT-ONLY.
+      // A turn that CARRIES an `author` is a project-group PEER's message: its
+      // head shows the peer's own name/initials/tint (precomputed by the group
+      // adapter), not the current viewer's. Absent (main, private, and the
+      // viewer's OWN group turns) → the viewer's name/initials, exactly as
+      // before. Data-driven: no author ⇒ byte-identical to the pre-change map.
       user: {
-        name,
-        initials: userInitials,
+        // A turn that CARRIES an `author` is a project-group PEER's message: its
+        // head shows the peer's own name/initials/tint; absent (main, private,
+        // own group turns) → the viewer's, exactly as before.
+        name: turn.author ? turn.author.name : name,
+        initials: turn.author ? (turn.author.initials ?? turn.author.name.slice(0, 2).toUpperCase()) : userInitials,
+        ...(turn.author?.avatarStyle ? { avatarStyle: turn.author.avatarStyle } : {}),
         query: queryBody,
         quote,
         // The quote block is clamped, so the tail of a long highlight would be
@@ -217,6 +227,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         onOpenQuote: quote
           ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote, plain: true })
           : undefined,
+        // Per-surface user-body override (project GROUP → mention chips). Only
+        // for a turn that HAS query text, so an agent-only turn (query === "")
+        // never grows an empty user body. Unset on main/private → plain query.
+        ...(renderUserBody && turn.query ? { bodyNode: renderUserBody(turn) } : {}),
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,
@@ -224,6 +238,25 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         onOpenAttachment: (a) =>
           setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime }),
       },
+      // Multi-party attribution (project-group peers only): a peer turn renders
+      // start-aligned with a `${name} (${role})` head + tinted avatar, via
+      // ChatBubble's EXISTING multi-party arm, and with NO agent block — the
+      // peer's message is its own bubble; Sprntly's reply (if any) is a separate
+      // author-less turn. Unset for every single-author turn, so main/private
+      // and the viewer's own turns keep the default right-aligned rendering.
+      ...(turn.author ? {
+        speaker: turn.author.name,
+        role: turn.author.role ?? null,
+        humanAlign: "start" as const,
+        showAgent: false,
+      } : {}),
+      // A GROUP post the agent was never addressed on (2-mode gate's post-only
+      // branch — multi-member, untagged — or its hydrated form). The viewer's
+      // OWN such message keeps its default right-aligned head, but drops the
+      // agent block entirely so it never renders the "No response was generated"
+      // placeholder for a turn that was intentionally silent. Peer posts already
+      // suppress the agent block via `author` above.
+      ...(turn.postedOnly && !turn.author ? { showAgent: false } : {}),
       agentName: AGENT_NAME,
       agentBadge: "Product Coworker",
       isLast,

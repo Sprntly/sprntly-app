@@ -343,6 +343,11 @@ export async function runAskGeneration(
      *  `askApi.start`; the server persists them onto the user turn and folds
      *  them into the answer's question (project branch only). */
     attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+    /** Pluggable context source ({kind, params}) — passed straight through to
+     *  `askApi.start`. A surface's own context assembler on the wire; the
+     *  project surfaces send `{ kind: "project", params: { project_id, surface } }`.
+     *  Membership-gated server-side. */
+    context_source?: { kind: string; params?: Record<string, unknown> }
     isCancelled?: () => boolean
     isStopped?: () => boolean
     onPartial?: OnAskPartial

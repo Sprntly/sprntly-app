@@ -1866,6 +1866,18 @@ def _try_scoped_tool_answer(
     # narration the user sees is grounded in the tool's actual return, never
     # in the model's own claim.
     edit_prd_narrations: list[str] = []
+    # Captures every `delegate_task` dispatch's handoff confirmation, in call
+    # order. `delegate_task` is a TERMINAL action: `_GROUP_SCOPE_SYSTEM`'s
+    # "once you call delegate_task ... you are DONE" contract says the turn
+    # ends on the plain handoff, and the agent must NOT then also answer the
+    # underlying question in the teammate's place. But `run_tool_loop` always
+    # grants the model a post-tool turn, and guidance ALONE does not stop the
+    # model from composing a substantive answer there. So — exactly as with
+    # `edit_prd` above — when `delegate_task` was called this turn, the LAST
+    # captured confirmation (authored by the handler to reflect the real
+    # outcome: delivered, declined, or ambiguous) OVERRIDES the model's free
+    # text below, mechanically terminating the turn on the handoff.
+    delegate_task_narrations: list[str] = []
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1888,7 +1900,7 @@ def _try_scoped_tool_answer(
         if name == "delegate_task":
             from app import project_delegation
 
-            return project_delegation.handle_delegate_task(
+            narration = project_delegation.handle_delegate_task(
                 project_id=scope.project_id,
                 assigner_user_id=assigner_user_id,
                 source_conversation_id=identity.get("source_conversation_id"),
@@ -1904,6 +1916,8 @@ def _try_scoped_tool_answer(
                 # the agent was looking at can never drift.
                 source_content=user,
             )
+            delegate_task_narrations.append(narration)
+            return narration
         if name == "execute_task":
             from app import project_task_execution
 
@@ -1946,7 +1960,21 @@ def _try_scoped_tool_answer(
             return None
         raise
 
-    if edit_prd_narrations:
+    if delegate_task_narrations:
+        # Once you delegate, you're DONE. `delegate_task` is a terminal
+        # handoff: the turn must end on the plain confirmation, never on a
+        # substantive answer the model composed for the underlying question
+        # in the teammate's place (which `run_tool_loop`'s post-tool turn is
+        # otherwise free to produce — guidance alone does not stop it). The
+        # handler's own confirmation is authoritative regardless of outcome
+        # (delivered, declined, or an ambiguity/who-did-you-mean prompt), so
+        # it OVERRIDES the model's free text — mechanical enforcement of the
+        # `_GROUP_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
+        # below. Last call wins, matching the `edit_prd` precedent. (Checked
+        # before `edit_prd`: when no delegation occurred this list is empty
+        # and the `edit_prd` path below is reached byte-for-byte unchanged.)
+        text = delegate_task_narrations[-1]
+    elif edit_prd_narrations:
         # Ground the final answer in the tool's real outcome (the critical
         # fix): never let the model's own free-text final turn override an
         # `edit_prd` call's actual result. Last call wins — mirrors "the

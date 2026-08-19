@@ -497,6 +497,12 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
                 "author_user_id": author_id,
                 "author_name": name,
                 "author_job_role": job_role,
+                # The send-identity key: on a human turn it is the poster's own
+                # idempotency key; on the agent reply it is the SAME key the
+                # originating ask carried. Exposed (unlike `attachments`) so the
+                # poster can recognise its own turn/reply realtime echo and not
+                # double-render it. Null on turns written before the key existed.
+                "client_message_id": t.get("client_message_id"),
                 "created_at": t["created_at"],
                 # The FULL structured reply (assistant turns persisted after
                 # the `reply` column landed); None renders from `content`.
@@ -577,6 +583,7 @@ def post_group_turn(
     role: str = "user",
     reply: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    client_message_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Insert one turn into a group chat. Human turn: pass the poster's
     `author_user_id` (role defaults to 'user'). Agent turn (on an
@@ -598,6 +605,19 @@ def post_group_turn(
     reply can fold them into its question. The read DTO's whitelist still
     strips them from every group read/broadcast.
 
+    `client_message_id` (both roles): the send-identity key.
+      * Human turn — the IDEMPOTENCY key: a double-submit carrying the SAME
+        (conversation_id, role='user', client_message_id) returns the EXISTING
+        turn instead of inserting a second one, with the partial-unique
+        `conversation_turns_client_msg_uidx` as the concurrency backstop (the
+        SAME index individual owned turns use — it is role-partial, so a user
+        turn and the agent reply below can share one key without colliding).
+      * Agent turn — the CORRELATION key: the reply is stamped with the SAME
+        key its originating ask (and user turn) carried, so a member who posted
+        the message can recognise the reply's realtime echo as its own and not
+        double-render it. The read DTO exposes it (unlike `attachments`) so the
+        client can correlate.
+
     Refuses (returns None, no write) when `conversation_id` does not
     resolve to a `kind='group'` row — mirrors `list_group_turns`'
     isolation guard (R4/§9)."""
@@ -614,6 +634,15 @@ def post_group_turn(
     if not conv:
         return None
 
+    # Idempotency (human sends): a retry/double-submit with the same key replays
+    # the original turn rather than posting a second one.
+    if client_message_id is not None:
+        existing = _find_owned_turn(
+            conversation_id, role, client_message_id=client_message_id
+        )
+        if existing is not None:
+            return existing
+
     row_payload: dict[str, Any] = {
         "conversation_id": conversation_id,
         "role": role,
@@ -622,11 +651,26 @@ def post_group_turn(
     }
     if attachments:
         row_payload["attachments"] = attachments
-    resp = (
-        client.table("conversation_turns")
-        .insert(row_payload)
-        .execute()
-    )
+    if client_message_id is not None:
+        row_payload["client_message_id"] = client_message_id
+    try:
+        resp = (
+            client.table("conversation_turns")
+            .insert(row_payload)
+            .execute()
+        )
+    except APIError as exc:
+        # A concurrent send with the same key won the race — the partial-unique
+        # backstop refused this insert; replay the row it wrote.
+        if client_message_id is not None and _is_unique_violation(
+            exc, "conversation_turns_client_msg_uidx"
+        ):
+            existing = _find_owned_turn(
+                conversation_id, role, client_message_id=client_message_id
+            )
+            if existing is not None:
+                return existing
+        raise
     client.table("conversations").update({"updated_at": utc_now()}).eq(
         "id", conversation_id
     ).execute()

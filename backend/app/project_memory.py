@@ -253,6 +253,18 @@ acknowledgements ("thanks", "sounds good", "got it"), plain questions with \
 no answer yet, or ephemeral status updates ("still looking into it", \
 "will check tomorrow") — for these, set action to "none".
 
+A DECISION the team reaches in this excerpt is a FIRST-CLASS durable \
+insight — capture it. A choice made, a direction set, a tradeoff resolved, \
+a plan agreed ("we'll go with X", "let's use Y instead of Z", "decided to \
+ship without W", "the call is to...") all count, whether a teammate stated \
+it or Sprntly confirmed it in its own reply. Fold the decision into project \
+memory as a "new" (or "update") entry like any other insight — there is NO \
+separate decisions log. Write `body` as a DISTILLED one-to-two sentence \
+statement of WHAT was decided and, briefly, why; never copy the deciding \
+line verbatim, and never include personal or off-topic detail from the \
+conversation — a distilled decision keeps teammates informed without \
+flooding the shared memory.
+
 Sprntly's OWN descriptions of what IT can do, what Sprntly the product can \
 do, or its role/capabilities/meta-behaviour — for example "I'm your project \
 agent", "I can edit the PRD", "here's what I can do", "I can read your \

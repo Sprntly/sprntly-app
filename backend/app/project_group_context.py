@@ -49,6 +49,13 @@ _ARTIFACT_CONTENT_CHARS = 8000
 # the format/cap can never drift between the two callers.
 _INSTRUCTIONS_CHARS = 2000
 
+# How many of the most-recent GROUP-chat turns to fold into the PRIVATE
+# surface's context block (breadth) so a private ask can see/summarize the
+# shared group conversation. Mirrors `routes.ask._GROUP_HISTORY_TURNS` (the
+# cap the group surface itself uses on its own history) so a private user's
+# view of the group thread matches what the group agent works from.
+_GROUP_WINDOW_TURNS = 30
+
 _TYPE_LABELS = {
     "prd": "PRDs",
     "prototype": "Prototypes",
@@ -178,6 +185,76 @@ def assemble_project_fact_core(
     return roster, ledger, manifest
 
 
+def _recent_group_chat_window(project_id: int, user_id: str) -> str:
+    """A bounded, author-attributed transcript of the project's most-recent
+    GROUP-chat turns, for folding into the PRIVATE surface's context block so a
+    private ask ("summarize the group chat so far") can actually see the group
+    conversation — which the private thread's own owner-gated history never
+    carries.
+
+    ONE-DIRECTIONAL by construction: this reads the SHARED `kind='group'`
+    conversation (visible to every project member) and returns it to a member's
+    private chat. It NEVER reads any per-user private/individual chat, so no
+    private content can leak the other way (group→private only).
+
+    MEMBERSHIP-GATED (IDOR boundary): re-checks `is_project_member` — the SAME
+    gate the private assembler already ran upstream (`context_assembler_project`
+    403s a non-member before this is reached), mirrored here defensively and to
+    match `routes.ask._load_group_history`'s posture, so a non-member reads
+    nothing even if a future caller skips the outer gate.
+
+    Author-attributed using the SAME shape `_load_group_history` builds
+    ("Name (role): message" for human turns; the agent's own turns are labelled
+    as Sprntly), reusing the group turn store (`list_group_turns`) rather than
+    reinventing it. Bounded to the most-recent `_GROUP_WINDOW_TURNS`, each turn
+    per-turn clamped (`clamp_turn_text`) so one megabyte-scale turn can't blow
+    the private prompt. Best-effort (AD-P7): no group chat yet, no turns, or any
+    read error → "" (never blocks / breaks the private reply)."""
+    try:
+        from app.db.conversations import list_group_turns
+        from app.db.projects import get_group_chat_id, is_project_member
+        from app.prompt_history import clamp_turn_text
+
+        # IDOR boundary — a non-member reads nothing.
+        if not is_project_member(project_id, user_id):
+            return ""
+
+        conversation_id = get_group_chat_id(project_id)
+        if conversation_id is None:
+            return ""
+
+        turns = list_group_turns(conversation_id)  # author-enriched DTOs
+        if not turns:
+            return ""
+
+        lines: list[str] = []
+        for t in turns[-_GROUP_WINDOW_TURNS:]:
+            content = (t.get("content") or "").strip()
+            if not content:
+                continue
+            content = clamp_turn_text(content)
+            role = t.get("role") or "user"
+            if role == "user":
+                # Fold the author into the line so the model reads a multi-party
+                # transcript ("Name (role): message"), matching the shape
+                # `routes.ask._load_group_history` builds for the group surface.
+                author = t.get("author_name") or "Someone"
+                job_role = t.get("author_job_role")
+                prefix = f"{author} ({job_role})" if job_role else author
+                lines.append(f"{prefix}: {content}")
+            else:
+                # Agent turns are Sprntly's own voice in the shared room.
+                lines.append(f"Sprntly: {content}")
+
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001 — best-effort, must never break the reply
+        logger.warning(
+            "private group-chat window load failed project_id=%s", project_id,
+            exc_info=True,
+        )
+        return ""
+
+
 def assemble_private_project_context(
     project_id: int, user_id: str, dataset: str, company_id: str
 ) -> str:
@@ -219,6 +296,20 @@ def assemble_private_project_context(
         f"Task ledger (open delegations first):\n{ledger}\n\n"
         f"Artifacts: {manifest}"
     )
+
+    # Recent GROUP-chat window (breadth) — so this private chat can see and
+    # summarize the shared project group conversation. One-directional: private
+    # SEES group (the shared project space, visible to every member); the group
+    # surface never gains visibility into any per-user private chat. Bounded,
+    # author-attributed, membership-gated, best-effort (omitted on failure).
+    group_window = _recent_group_chat_window(project_id, user_id)
+    if group_window:
+        parts.append(
+            "RECENT GROUP CHAT (shared project group conversation — visible to "
+            "every member; summarize/answer from it when asked about the group "
+            "chat):\n" + group_window
+        )
+
     return "\n\n".join(p for p in parts if p)
 
 

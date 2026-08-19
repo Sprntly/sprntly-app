@@ -64,6 +64,15 @@ class ChatIntentIn(BaseModel):
     # The active tab's open PRD, when there is one. Ownership-gated below.
     prd_id: int | None = Field(default=None, ge=1)
     has_attachments: bool = False
+    # Optional pluggable context source: `{"kind": str, "params": dict}`,
+    # accepted so a surface that brings its own context can carry it symmetric
+    # with `/v1/ask`. `/intent` runs BEFORE dispatch and is not on the answer
+    # path, but a `{"kind": "project", ...}` source DOES scope the classify
+    # envelope's render-data legs (artifact list / counts / open lookup) to the
+    # project via `enrich_chat_envelope(project_id=...)`, so the cards a project
+    # chat renders match its project-scoped prose. No source (every main-chat
+    # client) ⇒ workspace-wide listing, unchanged.
+    context_source: dict | None = None
 
 
 @router.post("/intent")
@@ -127,7 +136,24 @@ def chat_intent(
     # run, so a card main chat can render always has the same data there.
     # No dataset is passed: it resolves per leg inside the enrichment,
     # exactly where this route resolved it before the extraction.
-    enrich_chat_envelope(envelope, company)
+    #
+    # When a project context-source rides this classify call
+    # (`{"kind": "project", "params": {"project_id": N}}`), forward its
+    # `project_id` so the listing / open legs resolve against THAT project's
+    # own artifacts — making the intent envelope's cards and counts agree with
+    # the project-scoped prose the answer path produces, instead of showing the
+    # whole workspace's. Naturally gated: no project context-source ⇒ no
+    # `project_id` ⇒ the workspace-wide listing is byte-identical to today.
+    project_id = None
+    if (
+        isinstance(body.context_source, dict)
+        and body.context_source.get("kind") == "project"
+    ):
+        params = body.context_source.get("params") or {}
+        raw = params.get("project_id")
+        if raw is not None:
+            project_id = int(raw)
+    enrich_chat_envelope(envelope, company, project_id=project_id)
     return envelope
 
 

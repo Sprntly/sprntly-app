@@ -62,6 +62,7 @@ from app.db.custom_artifacts import (
     list_artifacts_for_conversation,
     update_artifact,
 )
+from app.project_from_prd import maybe_pin_custom_artifact_to_project
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +362,21 @@ async def generate(
         conversation_id=body.conversation_id,
         created_by=company.user_id,
     )
+
+    # Pin the document to its project the instant the row exists — SERVER-SIDE,
+    # so it lands whether or not the client is still connected, and BEFORE the
+    # multi-minute generation runs (the `generating` row surfaces in the rail
+    # immediately, same as a building prototype). Only pins when the
+    # conversation is already bound to a project; a doc drafted in a bare chat
+    # stays project-less. Total/best-effort — a missed pin never fails the
+    # request or the generation; the project's own refetch reconciles it.
+    if body.conversation_id is not None:
+        await asyncio.to_thread(
+            maybe_pin_custom_artifact_to_project,
+            company_id=company.company_id,
+            conversation_id=body.conversation_id,
+            artifact_id=row["id"],
+        )
 
     # OFF THE REQUEST THREADPOOL, deliberately — this is the shape every other
     # long generation in this codebase uses (ask, evidence, brief, design).

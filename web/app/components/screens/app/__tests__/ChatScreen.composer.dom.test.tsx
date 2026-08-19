@@ -911,35 +911,48 @@ describe("ChatScreen focuses the composer whenever it is on screen", () => {
 // `ChatScreen` — attach, send, skills, dictation-absence, focus, disable
 // states — and stays green unchanged, which IS the behavioural proof
 // (test_chatscreen_composer_behavior_unchanged). This block adds the
-// structural half: the extraction actually happened, and ChatScreen.tsx's
-// diff is limited to the swap (no other logic touched).
+// structural half: the extraction actually happened.
+//
+// The active-conversation render (incl. `renderComposer` + the one
+// `<ChatComposer>` mount) was subsequently LIFTED verbatim out of `ChatScreen`
+// into the shared single-conversation presentation `ConversationView.tsx`. The
+// guard is unchanged in intent — one shared composer, one render helper, no
+// inline re-declaration — and now tracks that render at its new home while
+// keeping the host-side constant/type imports pinned in `ChatScreen`.
 describe("Composer extraction — structural regression", () => {
-  it("ChatScreen imports ChatComposer from shared/ and defines no in-file composer of its own", async () => {
+  it("the shared ChatComposer is imported by ConversationView, and neither screen re-declares a composer of its own", async () => {
     const { readFileSync } = await import("node:fs")
     const { join } = await import("node:path")
-    const src = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
+    const chatSrc = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
+    const viewSrc = readFileSync(join(__dirname, "../ConversationView.tsx"), "utf8")
 
-    expect(src).toContain('import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"')
+    // The composer render lives in ConversationView now — that is where the
+    // shared ChatComposer is imported.
+    expect(viewSrc).toContain('import { ChatComposer, type PinnedSkill } from "../../shared/ChatComposer"')
+    // ChatScreen still owns the composer's draft-length constants + pinned-skill
+    // type (host-side draft state), imported from shared — never re-declared.
+    expect(chatSrc).toContain('import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"')
     // No in-file re-declaration under any name a "composer" component would
-    // plausibly use.
-    expect(src).not.toMatch(/function\s+ChatComposer\s*\(/)
-    expect(src).not.toMatch(/const\s+ChatComposer\s*=/)
-    // The constants/type the composer owns now live in shared/ChatComposer —
-    // ChatScreen imports them rather than re-declaring them (would silently
+    // plausibly use, in EITHER file — the constants/type live in
+    // shared/ChatComposer and are imported, never re-declared (would silently
     // diverge otherwise).
-    expect(src).not.toMatch(/const\s+DRAFT_MAX_CHARS\s*=/)
-    expect(src).not.toMatch(/const\s+DRAFT_MIN_CHARS\s*=/)
-    expect(src).not.toMatch(/const\s+COMPOSER_PLACEHOLDER\s*=/)
-    expect(src).not.toMatch(/type\s+PinnedSkill\s*=/)
+    for (const src of [chatSrc, viewSrc]) {
+      expect(src).not.toMatch(/function\s+ChatComposer\s*\(/)
+      expect(src).not.toMatch(/const\s+ChatComposer\s*=/)
+      expect(src).not.toMatch(/const\s+DRAFT_MAX_CHARS\s*=/)
+      expect(src).not.toMatch(/const\s+DRAFT_MIN_CHARS\s*=/)
+      expect(src).not.toMatch(/const\s+COMPOSER_PLACEHOLDER\s*=/)
+      expect(src).not.toMatch(/type\s+PinnedSkill\s*=/)
+    }
   })
 
-  it("the render call site is unchanged — still one <ChatComposer> shared by the landing and dock mounts", async () => {
+  it("the render call site is one <ChatComposer> shared by the landing and dock mounts, lifted into ConversationView", async () => {
     const { readFileSync } = await import("node:fs")
     const { join } = await import("node:path")
-    const src = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
-    expect(src).toContain("<ChatComposer")
-    // The one render helper both mount points call — unchanged from before
-    // the extraction.
-    expect(src).toContain("const renderComposer = (home: boolean) =>")
+    const viewSrc = readFileSync(join(__dirname, "../ConversationView.tsx"), "utf8")
+    expect(viewSrc).toContain("<ChatComposer")
+    // The one render helper both mount points call — lifted verbatim from
+    // ChatScreen into ConversationView.
+    expect(viewSrc).toContain("const renderComposer = (home: boolean) =>")
   })
 })

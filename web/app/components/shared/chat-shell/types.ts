@@ -415,6 +415,12 @@ export interface MapMainTurnsDeps {
   name: string
   userInitials: string
   skillForQuery: (query: string) => SkillInfo | null
+  /** Optional per-surface user-body override (the project GROUP chat supplies a
+   *  mention-chip renderer). When set AND the turn has query text, the mapper
+   *  routes the body through it (ChatBubble's `user.bodyNode`); unset → main's
+   *  plain-query rendering, byte-identical. Structural turn type keeps this
+   *  module decoupled from the main screen's ThreadTurn. */
+  renderUserBody?: (turn: { query: string }) => ReactNode
 
   // footer / afterNode inputs
   ticketSetActionState: "running" | "ready" | "failed" | null

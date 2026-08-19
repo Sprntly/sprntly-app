@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -8,29 +8,17 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
+// `crucibleOn` gates Goal Analysis. `dispatchChatIntent` / `useChatIntentExecutors`
+// that main re-adds here are already owned by the shared engine (useConversation),
+// so they are NOT reintroduced into this wrapper.
 import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
-import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
-import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
 import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
-import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
-import {
-  providerNoticeFromEnvelope,
-  providerNoticeTitle,
-  type ProviderNotice,
-} from "../../../lib/providerLimitNotice"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
-import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
+import { buildHomeChips, DEFAULT_HOME_CHIPS } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
-import { EmptyPane } from "../../shared/EmptyPane"
-import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
-import {
-  AssistantWaitState,
-  WAIT_FAILED_TITLE,
-  isLongRunningSkill,
-} from "../../shared/AssistantWaitState"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import {
   clarifyAnswersText,
@@ -39,51 +27,60 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import { QuestionPopup, type PopupAnswer } from "../../shared/QuestionPopup"
+import { type PopupAnswer } from "../../shared/QuestionPopup"
+import {
+  useSlackShareCardHandlers,
+  type PendingShareState,
+} from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
+import { useAssignCompletion } from "../../shared/chat-shell/conversation/useAssignCompletion"
+import { askAgain } from "../../shared/chat-shell/conversation/askAgain"
+import { runClarifiedGeneration as runSharedClarifiedGeneration } from "../../shared/chat-shell/conversation/clarifiedGeneration"
 import {
   SlackShareMessage,
   type SlackShareResolution,
 } from "../../shared/SlackSharePreviewCard"
-import { ChatSuggestionIcon, IconDocument, IconSparkle } from "../../shared/app-icons"
+import { IconDocument, IconSparkle } from "../../shared/app-icons"
+import { AttachmentViewer } from "../../shared/AttachmentViewer"
 import { IconFolder } from "@tabler/icons-react"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { NextPromptSuggestions } from "../../shared/NextPromptSuggestions"
-// The composer — extracted 2026-08-10 so the individual chat and the project
-// group chat share ONE implementation instead of two.
-import { ChatComposer, DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
-import { SlashSkillMenu } from "../../shared/SlashSkillMenu"
-import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
-// Highlight-to-reply: one definition of how a quoted passage rides a message.
-import { QUOTE_VIEWER_NAME, buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
+import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
+// Highlight-to-reply / edit-a-past-prompt: one definition of how a quoted
+// passage rides a message, shared with the mapper and the persistence rewind.
+import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
-  customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
-import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
-import { useSpeechInput } from "../../../lib/useSpeechInput"
+import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../lib/runAskGeneration"
+import { resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../lib/runAskGeneration"
 // The ONE owner of a standalone ticket-set run and of `content.ticketSet`.
 // Nothing in this file may call `storiesApi.generateFromInsight` directly —
 // see the module header for why a second caller is a second LLM bill.
-import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
+import { loadTicketSet } from "../../../lib/runTicketSetGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
-import type { DetailState, PrdState, PrdContent, TicketSetFailureKind } from "../../../types/content"
+import type { DetailState, PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { prototypePath } from "../../../lib/routes"
 import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
-import { mapMainTurns } from "./mapMainTurns"
-import { ChatShell } from "../../shared/chat-shell/ChatShell"
+import { ConversationView } from "./ConversationView"
+import { useConversation } from "./useConversation"
+import { useThreadScroll } from "./useThreadScroll"
+import { useComposer } from "./useComposer"
+import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
+import { resolveShareRef } from "../../shared/chat-shell/conversation/resolveShareRef"
+import { useDocumentReopenProbe } from "../../shared/chat-shell/conversation/useDocumentReopenProbe"
+import { matchReportByTitle } from "../../shared/chat-shell/conversation/matchReportByTitle"
+import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -105,6 +102,44 @@ export type ThreadTurn = {
    *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
    *  the real document (PDF/image inline) and offer a download after a reload. */
   attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
+  /** The `conversation_turns.id` this turn was persisted as, when known.
+   *
+   *  Only needed to REWIND the conversation to this turn (editing or retrying a
+   *  past prompt): the server needs the row id, and the client turn id is its
+   *  own invention. Stamped on restore (`buildRestored`, straight off the DB
+   *  row) — turns sent in THIS session are resolved from `chatPersistence`'s own
+   *  map instead, since their id only arrives after the write settles. Absent on
+   *  every other path, which makes the rewind a no-op rather than a guess. */
+  dbTurnId?: number
+  /** Multi-party attribution (project GROUP surface only). Present ONLY on a
+   *  turn authored by SOMEONE OTHER than the current viewer — a peer's message
+   *  in the shared group thread. The single-author surfaces (main, private) and
+   *  the viewer's OWN group turns leave this UNSET, so `mapMainTurns` renders
+   *  them through the identical default (right-aligned, the viewer's own head)
+   *  path — the author render arm is data-driven and inert without this field.
+   *  `initials`/`avatarStyle` are PRECOMPUTED by the group adapter (via
+   *  `avatarColor.personAvatarStyle`) so the shared mapper never imports a
+   *  project-side helper. The agent's own turns carry NO author (they render as
+   *  Sprntly through the existing agent path). */
+  author?: {
+    name: string
+    role?: string | null
+    userId?: string | null
+    initials?: string | null
+    avatarStyle?: CSSProperties | null
+  }
+  /** Project GROUP surface: a user message that was POSTED to the shared thread
+   *  with the agent intentionally NOT addressed — a multi-member group turn that
+   *  does not `@Sprntly`-mention it (the 2-mode response gate's post-only branch),
+   *  or its hydrated/replayed form. The agent was never going to reply, so this
+   *  turn renders with NO agent block at all — no thinking state, and crucially
+   *  no "No response was generated" placeholder (which reads like a failure). It
+   *  is a peer-style silent post; the viewer's own head/alignment are unchanged.
+   *  This is distinct from a genuinely dropped reply (e.g. a clarify state lost on
+   *  reload), which SHOULD still surface as a real no-response. Unset on main,
+   *  private, solo groups, and `@Sprntly`-tagged group turns → default agent
+   *  rendering, byte-identical to before. */
+  postedOnly?: boolean
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders
@@ -122,15 +157,6 @@ export type ThreadTurn = {
    *  remove the whole turn, and the persist effect never saves a still-pending
    *  one (a reload cannot restore a skeleton nothing will ever fill). */
   summaryPending?: boolean
-  /** The `conversation_turns.id` this turn was persisted as, when known.
-   *
-   *  Only needed to REWIND the conversation to this turn (editing or retrying a
-   *  past prompt): the server needs the row id, and the client turn id is its
-   *  own invention. Stamped on restore (`buildRestored`, straight off the DB
-   *  row) — turns sent in THIS session are resolved from `chatPersistence`'s own
-   *  map instead, since their id only arrives after the write settles. Absent on
-   *  every other path, which makes the rewind a no-op rather than a guess. */
-  dbTurnId?: number
   /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
    *  (options as buttons, one submit for the batch) instead of the flattened
    *  numbered list that `reply.answer` carries. Both live on the same turn: the
@@ -198,18 +224,9 @@ export type ThreadTurn = {
   timedOut?: boolean
 }
 
-/** Artifact kinds a user can NAME in an open request that this panel does not
- *  render. Each one opens somewhere — just not here — so the reply names the
- *  thing they asked for rather than quietly handing back a PRD of that name. */
-const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
-  prototype: "A prototype",
-  report: "A report",
-  tickets: "Tickets",
-}
-
 type BriefMeta = { briefId: number; insightIndex: number }
 
-type ChatTab = {
+export type ChatTab = {
   id: string
   title: string
   thread: ThreadTurn[]
@@ -635,142 +652,11 @@ function openFailureReply(detail: string): AskResponse {
   } as AskResponse
 }
 
-/** Full-screen overlay that renders an attachment. When the ORIGINAL file was
- *  stored (`key`), it fetches a fresh signed URL and renders the real document —
- *  PDF/image inline, everything else offered as a download — falling back to the
- *  extracted text. Opened by clicking a file card on a user turn. */
-function AttachmentViewer({
-  attachment,
-  onClose,
-}: {
-  attachment: {
-    name: string
-    content: string
-    key?: string | null
-    mime?: string | null
-    /** Render `content` VERBATIM instead of through markdown. Set by the
-     *  quoted-passage viewer, whose text was already lifted out of a rendered
-     *  answer — re-parsing it collapses every single newline into a space (a
-     *  quoted list came back as one run-on paragraph) and re-interprets any
-     *  stray `*`/`#`/`_` the passage happened to contain. A real file with
-     *  markdown in it still wants the renderer, so this is opt-in. */
-    plain?: boolean
-  }
-  onClose: () => void
-}) {
-  const [urls, setUrls] = useState<{ view_url: string; download_url: string; mime: string } | null>(null)
-  const [status, setStatus] = useState<"idle" | "loading" | "error">(attachment.key ? "loading" : "idle")
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose()
-    }
-    document.addEventListener("keydown", onKey)
-    return () => document.removeEventListener("keydown", onKey)
-  }, [onClose])
-
-  // Sign-on-open: the stored URL expires, so mint a fresh one each time the
-  // viewer opens. Best-effort — a failure falls back to the extracted text.
-  useEffect(() => {
-    if (!attachment.key) return
-    let cancelled = false
-    setStatus("loading")
-    attachmentsApi.sign(attachment.key, attachment.name)
-      .then((u) => { if (!cancelled) { setUrls(u); setStatus("idle") } })
-      .catch(() => { if (!cancelled) setStatus("error") })
-    return () => { cancelled = true }
-  }, [attachment.key, attachment.name])
-
-  const mime = urls?.mime || attachment.mime || ""
-  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(attachment.name)
-  const isImage = /^image\//i.test(mime) || /\.(png|jpe?g|gif|webp)$/i.test(attachment.name)
-  const hasText = !!attachment.content.trim()
-
-  return (
-    <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
-      <div className="bc-file-viewer" onClick={(e) => e.stopPropagation()}>
-        <div className="bc-file-viewer-head">
-          <span className="bc-file-viewer-title" title={attachment.name}>
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-            </svg>
-            {attachment.name}
-          </span>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-            {urls?.download_url ? (
-              <a
-                className="bc-file-viewer-download"
-                href={urls.download_url}
-                download={attachment.name}
-                target="_blank"
-                rel="noopener noreferrer"
-                title={`Download ${attachment.name}`}
-                aria-label={`Download ${attachment.name}`}
-                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 6, color: "inherit", opacity: 0.75 }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-              </a>
-            ) : null}
-            <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-                <path d="M18 6 6 18M6 6l12 12" />
-              </svg>
-            </button>
-          </span>
-        </div>
-        <div className="bc-file-viewer-body">
-          {attachment.key && status === "loading" ? (
-            <p className="bc-file-viewer-empty">Loading document…</p>
-          ) : urls && isPdf ? (
-            <iframe
-              src={urls.view_url}
-              title={attachment.name}
-              data-testid="attachment-pdf-frame"
-              style={{ width: "100%", height: "100%", minHeight: "70vh", border: "none" }}
-            />
-          ) : urls && isImage ? (
-            <img
-              src={urls.view_url}
-              alt={attachment.name}
-              data-testid="attachment-image"
-              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block", margin: "0 auto" }}
-            />
-          ) : hasText ? (
-            <>
-              {attachment.plain ? (
-                <p className="bc-file-viewer-plain" data-testid="viewer-plain-text">
-                  {attachment.content}
-                </p>
-              ) : (
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
-              )}
-              {urls && !isPdf && !isImage ? (
-                <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
-              ) : null}
-            </>
-          ) : urls ? (
-            <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
-          ) : (
-            <p className="bc-file-viewer-empty">No preview available for this file.</p>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
 /** Pressing Enter while an ask is in flight used to be a silent no-op — the
  *  keystroke simply vanished, with the draft still sitting there. The guard is
  *  correct (one ask per tab); the silence was the bug. */
 export const BUSY_ENTER_HINT_LEAD = "Sprntly is still answering. Your message is saved — send it when the answer lands, or "
 export const BUSY_ENTER_HINT_TAIL = " to interrupt."
-/** How long the busy-Enter hint stays before clearing itself. */
-const BUSY_HINT_MS = 6000
 /** How long a copied-prompt tick stays on the button. Long enough to be seen
  *  after the click that caused it, short enough not to read as state. */
 const COPIED_HINT_MS = 1600
@@ -781,35 +667,6 @@ const COPIED_HINT_MS = 1600
 const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
   fetchSuggestions: (conversationId, opts) =>
     chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
-}
-
-const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
-  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
-  { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
-  { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
-  { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
-]
-
-
-/** The acknowledgment a ticket command writes on the SAME commit as the send.
- *  The pointer sentence is load-bearing twice over: it tells the reader how to
- *  get back to a panel they may close, and it is what TICKET_SET_ANSWER_RE
- *  matches to keep this turn out of a later PRD's grounding. Note what it does
- *  NOT contain — any ticket text. The whole point of the set is that the bodies
- *  live in the panel instead of being printed into the bubble. */
-const TICKET_SET_ACK =
-  "Writing tickets for that — they'll open in the panel on the right when ready. " +
-  "Use the View Tickets button in this chat to reopen them anytime."
-
-/** Toast copy per failure KIND. The kind is all the runner returns — no backend
- *  message ever reaches this layer — so the words live here, beside the panel's
- *  own SET_ERROR_COPY rather than sharing it: a toast has one line, the panel
- *  has a whole empty state. */
-const TICKET_SET_FAILURE_TOAST: Record<TicketSetFailureKind, string> = {
-  timeout: "That run is taking longer than expected. It may still finish — reopen this chat in a few minutes.",
-  network: "The connection dropped while the tickets were being written. Try again.",
-  notfound: "Those tickets are no longer available.",
-  failed: "The tickets couldn't be written from this conversation. Try again with more specifics.",
 }
 
 export function ChatScreen() {
@@ -1126,33 +983,46 @@ export function ChatScreen() {
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prd } : t))
     setContent({ prd })
   }, [activeTabId, setContent])
-  const [draft, setDraft] = useState("")
+  // Per-conversation composer (draft, attachments, slash palette + pinned skill,
+  // `+` menu, busy hint, dictation, optimistic pending-send) — extracted verbatim
+  // into the shared unit. The skill/slash-filter wiring, the submit/input/keydown
+  // handlers, and the composer effects at other positions stay in the host below
+  // and read this hook's state through the destructure.
+  // The whole composer is captured as one object so it can be handed to the
+  // engine (which drives the send handlers off it); the tab orchestrator still
+  // reads its state through this destructure.
+  const composer = useComposer({ showToast })
+  const {
+    draft, setDraft,
+    pendingSend, setPendingSend,
+    showSlash, setShowSlash,
+    slashFilter, setSlashFilter,
+    slashActive, setSlashActive,
+    slashFromMenu, setSlashFromMenu,
+    pinnedSkill, setPinnedSkill,
+    plusMenuOpen, setPlusMenuOpen,
+    plusMenuActive, setPlusMenuActive,
+    composerHint, setComposerHint, showComposerHint,
+    attachments, setAttachments,
+    composerRef,
+    focusComposerNextFrame,
+    fileInputRef,
+    voiceBaseRef,
+    voice, handleToggleVoice,
+    handleFileSelect,
+    openSkillPalette,
+    handleComposerInput,
+    handleSlashSelect,
+    handlePlusMenuSelect,
+    skills, setSkills,
+    filteredSkills, slashOpen,
+    skillForQuery,
+  } = composer
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
-  // The message the user just sent, rendered the INSTANT they hit send.
-  //
-  // Every send now opens with an awaited backend decision (POST /v1/chat/intent —
-  // a full LLM round-trip) before ANY branch knows whether this message becomes a
-  // chat turn or a command that seeds its own turn. That await used to sit in
-  // front of every render, so the composer cleared into an empty screen for
-  // multiple seconds and the send read as dropped. This is the bridge: the user's
-  // words + a thinking skeleton, on screen on the send's own commit.
-  //
-  // Deliberately NOT a ThreadTurn and never persisted — the command flows
-  // (openPrdInTab's seedTurn, seedCommandTurn) own the real turn they seed, and a
-  // pre-rendered turn here would duplicate both the bubble and the Supabase row.
-  // Whichever branch wins renders its real turn and clears this in the SAME
-  // commit, so the handoff is invisible. `tabId` is the tab the send was aimed at
-  // (null on the landing surface) so it only shows where it was typed.
-  // `startedAt` is the wall clock of the send itself. It is handed to the real
-  // turn when the dispatch settles, so the wait's elapsed-time ladder measures
-  // ONE wait across the two mounts rather than restarting at the handoff.
-  const [pendingSend, setPendingSend] = useState<
-    { tabId: string | null; query: string; attachments: { name: string }[]; startedAt: number } | null
-  >(null)
   // Insight keys ("briefId:insightIndex") known to already have a saved evidence
   // brief — flips the chat's first action to "View Evidence" (else it offers the
   // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
@@ -1161,16 +1031,6 @@ export function ChatScreen() {
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
-  const [showSlash, setShowSlash] = useState(false)
-  // The palette's entries — the company's own uploaded skills (PRD 1854).
-  //
-  // This used to be TWO lists merged at render time: the vendored built-in
-  // catalog from `askApi.skills()` and the company's uploads from
-  // `skillsApi.list()`. Chat no longer selects a built-in method for a turn, so
-  // the built-in half would have offered ~78 triggers that resolve to nothing;
-  // `askApi.skills()` now serves the company's own library and there is one
-  // list again.
-  const [skills, setSkills] = useState<SkillInfo[]>([])
   // Next-prompt suggestions, per tab. Fetched AFTER an answer settles, off the
   // answer path entirely: a slow, failed or never-returned request costs the
   // user nothing because the absence of suggestions is a normal, invisible
@@ -1181,57 +1041,22 @@ export function ChatScreen() {
   // Next-prompt suggestions are owned by the shared host hook (state + retire +
   // fetch-after-settle); ChatScreen keys by tab id and injects the main fetch.
   const nextPrompts = useNextPrompts(MAIN_NEXT_PROMPTS_ADAPTER)
-  const [slashFilter, setSlashFilter] = useState("")
-  // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
-  const [slashActive, setSlashActive] = useState(0)
-  // The palette was opened from the `+` menu or ⌘/ rather than by typing "/".
-  // Typing then must not slam it shut on the first keystroke, the way the
-  // "draft no longer starts with /" rule does for a typed open.
-  const [slashFromMenu, setSlashFromMenu] = useState(false)
-  // A skill pinned onto the NEXT message. Selecting from the palette used to
-  // paste "/competitive-intel " into the draft as raw text the user had to keep
-  // intact; it is a removable chip now, and the trigger is re-attached to the
-  // query at send time so the backend's deterministic slash fast-path is
-  // unchanged.
-  const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
   // Goal Analysis mode. A MODE rather than a skill: the next message starts a
   // run instead of posting a turn, so it cannot ride on `pinnedSkill` (which
   // splices a slash trigger into the query and sends it to the ask path).
+  //
+  // The slash-palette / pinned-skill / plus-menu / busy-hint composer state main
+  // declared alongside this in its bespoke engine is owned in this branch by the
+  // shared composer + engine (see the `useComposer` and `useConversation`
+  // destructures above); `quote` / `editingTurnId` / `copiedTurnId` are already
+  // declared by this host below. Only Goal Analysis is a main-wrapper concern, so
+  // only its two fields are re-homed here.
   const [goalMode, setGoalMode] = useState(false)
   // The run currently on screen, readable without making it an effect
   // dependency — the restore below has to know whether the user started one
   // while its request was in flight, and depending on `content` would re-fire
   // the restore on every unrelated content change.
   const goalRunRef = useRef<number | null>(null)
-  // A passage of an answer the reader highlighted and pressed Reply on, parked
-  // above the input until they send or dismiss it. Host state (not the shell's)
-  // because main renders its own composer; the shell reports the selection
-  // through `onQuoteSelection` and owns nothing else about it.
-  const [quote, setQuote] = useState<string | null>(null)
-  // The turn whose question is currently being rewritten in place. Exactly one
-  // at a time, and only ever a turn that never got an answer — see
-  // `canEditTurn`. Cleared on save, on cancel, and whenever the active tab
-  // changes (an editor left open on a tab you navigated away from would come
-  // back seated over a different thread's turn).
-  const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
-  // The turn whose copy button is showing its transient "Copied" tick.
-  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  // The composer's `+` menu (Attach a file / Browse skills).
-  const [plusMenuOpen, setPlusMenuOpen] = useState(false)
-  const [plusMenuActive, setPlusMenuActive] = useState(0)
-  // Transient composer hint line (role="status"), currently only the busy-Enter
-  // answer. Auto-clears so it never becomes permanent chrome.
-  const [composerHint, setComposerHint] = useState<"busy" | null>(null)
-  const composerHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const showComposerHint = useCallback((kind: "busy") => {
-    setComposerHint(kind)
-    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
-    composerHintTimerRef.current = setTimeout(() => setComposerHint(null), BUSY_HINT_MS)
-  }, [])
-  useEffect(() => () => {
-    if (composerHintTimerRef.current) clearTimeout(composerHintTimerRef.current)
-  }, [])
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -1243,14 +1068,24 @@ export function ChatScreen() {
   // Bumped whenever a resume re-attaches, purely to re-render the thread so the
   // wait picks the resumed copy up (the ref above carries no reactivity).
   const [, setResumeTick] = useState(0)
-  // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
-  // inlined as text client-side. The File feeds the PRD-import command
-  // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
-  // server-side text extraction at send time (POST /v1/ask/extract-file).
-  const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
   const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null; plain?: boolean } | null>(null)
+  // A passage of an answer the reader highlighted and pressed Reply on, parked
+  // above the input until they send or dismiss it. Host state (not the shell's)
+  // because main renders its own composer; the shell reports the selection
+  // through `onQuoteSelection` and owns nothing else about it. Appended to the
+  // sent message as a trailing blockquote at send time (see useConversation's
+  // handleComposerSubmit — the quote is passed into the engine as `quote`).
+  const [quote, setQuote] = useState<string | null>(null)
+  // The turn whose question is currently being rewritten in place. Exactly one
+  // at a time. Cleared on save, on cancel, and whenever the active tab changes
+  // (an editor left open on a tab you navigated away from would come back
+  // seated over a different thread's turn).
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
+  // The turn whose copy button is showing its transient "Copied" tick.
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -1258,172 +1093,15 @@ export function ChatScreen() {
   // in-flight ask. The ask poller reads this (isStopped) to bail; it's cleared
   // when a fresh ask starts on that tab so a stop never leaks into the next ask.
   const stoppedTabsRef = useRef<Set<string>>(new Set())
-  const composerRef = useRef<HTMLTextAreaElement>(null)
-  // Landing on a chat tab means you can just start typing. Selecting a tab — or
-  // opening one with "+" — used to leave focus on the document body, so every
-  // switch cost an extra click in the composer before the first keystroke.
-  //
-  // Deferred a frame ON PURPOSE. There is one <textarea> with two mount points
-  // (the landing composer and the thread dock), and a tab switch can move it
-  // between them or, coming from the pinned brief tab, mount it for the first
-  // time — so the node `composerRef` holds when the click fires is often not the
-  // one that ends up on screen. React flushes a click's state updates before the
-  // next frame, so by the time this runs the ref points at the live composer.
-  const focusComposerNextFrame = useCallback(() => {
-    requestAnimationFrame(() => composerRef.current?.focus())
-  }, [])
-  const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // ── Dictation ────────────────────────────────────────────────────────────
-  // Whatever was already typed when the mic was switched on. Speech APPENDS to
-  // a draft rather than replacing it, so half a typed question plus a spoken
-  // finish is one question — and the hook hands back a cumulative transcript,
-  // so this base is what makes assigning (rather than appending) safe as the
-  // interim phrase rewrites itself word by word.
-  const voiceBaseRef = useRef("")
-  const handleVoiceTranscript = useCallback((text: string) => {
-    if (!text) return
-    setDraft((voiceBaseRef.current + text).slice(0, DRAFT_MAX_CHARS))
-    // The textarea's auto-grow lives in the `change` handler, which speech never
-    // fires — without this the box stays one line tall while the words pile up
-    // out of sight.
-    const ta = composerRef.current
-    if (ta) {
-      ta.style.height = "auto"
-      ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-    }
-  }, [])
-  const voice = useSpeechInput(handleVoiceTranscript)
-  const handleToggleVoice = useCallback(() => {
-    if (voice.listening) {
-      voice.stop()
-      composerRef.current?.focus()
-      return
-    }
-    // Start speaking mid-sentence and the words join the sentence, with one
-    // space between what was typed and what was said.
-    const typed = draft.trimEnd()
-    voiceBaseRef.current = typed ? `${typed} ` : ""
-    voice.start()
-  }, [voice, draft])
-
-  // The scrolling thread viewport, so a new question (and the assistant's
-  // thinking/answer under it) is scrolled into view instead of staying hidden
-  // below the fold in a long conversation.
-  const threadScrollRef = useRef<HTMLDivElement>(null)
-  // Whether the user is pinned near the bottom. We only auto-follow streaming
-  // replies while pinned, so scrolling up to read history isn't yanked back.
-  const threadPinnedRef = useRef(true)
-  const prevThreadLenRef = useRef(0)
-
-  const scrollThreadToBottom = useCallback((behavior: ScrollBehavior) => {
-    const el = threadScrollRef.current
-    if (!el) return
-    const jump = () => {
-      const node = threadScrollRef.current
-      if (!node) return
-      try {
-        node.scrollTo({ top: node.scrollHeight, behavior })
-      } catch {
-        // jsdom / older engines without Element.scrollTo — set position directly.
-        node.scrollTop = node.scrollHeight
-      }
-    }
-    // An instant jump lands on THIS frame: a send has to be on screen on its own
-    // commit, not a frame later. The rAF pass then repeats it once the just-added
-    // turn (and its thinking skeleton) is laid out, catching the height the first
-    // call couldn't measure yet.
-    if (behavior !== "smooth") jump()
-    requestAnimationFrame(jump)
-  }, [])
-
-  // Track whether the user is pinned near the bottom of the thread. Auto-follow
-  // only applies while pinned, so scrolling up to read earlier turns during a
-  // long answer isn't fought by the follow effect.
-  const handleThreadScroll = useCallback(() => {
-    const el = threadScrollRef.current
-    if (!el) return
-    threadPinnedRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 120
-  }, [])
-
-  // Callback ref on the thread's content column. A ResizeObserver here keeps the
-  // viewport pinned to the bottom as content GROWS — the thinking skeleton
-  // appearing, then the answer typing in — not just on the initial render. That
-  // covers the async growth a one-shot scroll misses. Re-attaches whenever the
-  // content element mounts (tab switch, landing → thread), so it never observes
-  // a stale node.
-  const threadResizeObsRef = useRef<ResizeObserver | null>(null)
-  const setThreadContentEl = useCallback((el: HTMLDivElement | null) => {
-    threadResizeObsRef.current?.disconnect()
-    threadResizeObsRef.current = null
-    if (!el || typeof ResizeObserver === "undefined") return
-    const ro = new ResizeObserver(() => {
-      const scroller = threadScrollRef.current
-      if (scroller && threadPinnedRef.current) scroller.scrollTop = scroller.scrollHeight
-    })
-    ro.observe(el)
-    threadResizeObsRef.current = ro
-  }, [])
-  useEffect(() => () => threadResizeObsRef.current?.disconnect(), [])
-
-  // The send itself is what has to move the viewport. `pendingSend` renders the
-  // user's message on the send's own commit — seconds before the real turn lands
-  // (the intent decision is a round-trip away), so a scroll keyed on thread
-  // growth left the message parked below the fold that whole time. Re-pin and
-  // JUMP: from far up a long thread a smooth animation both takes too long and
-  // un-pins the follow behavior on its own way down (the scroll handler samples
-  // it mid-animation, well short of the bottom), which is exactly how the answer
-  // then streamed in off-screen.
-  useEffect(() => {
-    if (!pendingSend || pendingSend.tabId !== activeTabId) return
-    threadPinnedRef.current = true
-    scrollThreadToBottom("auto")
-  }, [pendingSend, activeTabId, scrollThreadToBottom])
-
-  // A new turn (the user just asked, or a command seeded its own turn) → re-pin
-  // and jump so the question + the assistant's thinking sit in view; the
-  // ResizeObserver then follows the answer as it grows. Guard on a real length
-  // increase so a reply landing on an existing turn doesn't double-trigger (the
-  // observer already handles growth).
-  useEffect(() => {
-    if (thread.length > prevThreadLenRef.current) {
-      threadPinnedRef.current = true
-      scrollThreadToBottom("auto")
-    }
-    prevThreadLenRef.current = thread.length
-  }, [thread.length, scrollThreadToBottom])
-
-  // On tab switch/open, land at the bottom (newest turn) without animation and
-  // reset the pinned state for the newly shown thread.
-  useEffect(() => {
-    prevThreadLenRef.current = thread.length
-    threadPinnedRef.current = true
-    scrollThreadToBottom("auto")
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId, scrollThreadToBottom])
-
-  // Attach: documents keep the real File (for the PRD-import command); plain-text
-  // formats are read as text and inlined into the next ask as context.
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files) return
-    Array.from(files).forEach((file) => {
-      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
-        setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
-        return
-      }
-      const reader = new FileReader()
-      reader.onload = () => {
-        const content = reader.result as string
-        // Keep the raw File on text attachments too — the original bytes are
-        // uploaded on send so the chip can render/download the real file later.
-        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000), file }])
-      }
-      reader.readAsText(file)
-    })
-    e.target.value = "" // reset so same file can be re-selected
-  }, [showToast])
+  // Per-conversation thread-viewport scroll (pinned-follow, send/new-turn/tab
+  // auto-jump, ResizeObserver) — extracted verbatim into the shared unit; the
+  // effects live in the hook so identical scroll behaviour drives every surface.
+  const { threadScrollRef, handleThreadScroll, setThreadContentEl } = useThreadScroll({
+    thread,
+    activeTabId,
+    pendingSend,
+  })
 
   // Load the palette on mount.
   //
@@ -2508,33 +2186,13 @@ export function ChatScreen() {
     [content.threadReports, content.threadReportsConversationId, activeConvId],
   )
 
-  // Open the report a CHAT TURN is about, from its title.
-  //
-  // Title is the join key because the reply the thread holds carries no report
-  // id: capture runs after the ask completes, deliberately (it must never delay
-  // the answer), so the id doesn't exist yet when the reply is stored. Both sides
-  // derive the title from the document's own <h1> — the client via
-  // reportTitleFromHtml, the server via report_capture.report_title — so they
-  // agree by construction.
-  //
-  // Matched exactly first, then leniently (case/whitespace, then either side
-  // being a prefix of the other) — a title that drifts by a dash or a truncation
-  // should still open the right document rather than dumping the reader on a
-  // list, which is the failure this whole path exists to avoid.
-  //
-  // No match at all means capture hasn't landed yet (or the row is gone): open
-  // the tab and let it show what it has, rather than pointing at a report that
-  // isn't there.
+  // Open the report a CHAT TURN is about, from its title — the shared
+  // `matchReportByTitle` (exact → lenient → prefix) over this surface's thread
+  // report list, with main's own panel wiring around it. No match means capture
+  // hasn't landed yet (or the row is gone): open the tab and let it show what it
+  // has, rather than pointing at a report that isn't there.
   const openReportByTitle = useCallback((title: string) => {
-    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
-    const want = norm(title)
-    const match =
-      threadReports.find((r) => r.title === title) ??
-      threadReports.find((r) => norm(r.title) === want) ??
-      threadReports.find((r) => {
-        const have = norm(r.title)
-        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
-      })
+    const match = matchReportByTitle(threadReports, title)
     if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
     openContentPanel("reports")
   }, [threadReports, setContent, openContentPanel])
@@ -2635,7 +2293,7 @@ export function ChatScreen() {
     if (content.documentId != null && from !== content.documentId) return
     setQuote(normalizeQuote(excerpt))
     composerRef.current?.focus()
-  }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId])
+  }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId, composerRef])
 
   // (The layout effect that used to re-measure the composer after a quote was
   // pasted into the draft is gone with the pasting: a parked chip changes the
@@ -2907,12 +2565,7 @@ export function ChatScreen() {
       turnAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
     ) => {
       const prev = conversationsRef.current
-      // Titled on the WORDS, never the quoted excerpt. A short question with a
-      // long highlight behind it would otherwise be filed in the history rail
-      // under "> findings unsupported by adequate documentation…" — the passage
-      // it was about rather than the thing that was asked.
-      const titleSource = splitQuotedSuffix(query).body || query
-      const title = titleSource.length > 52 ? `${titleSource.slice(0, 49)}…` : titleSource
+      const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
       // The DB conversation this tab is bound to, if any. A tab resumed from
       // Chat history already carries a `dbConvId` but has NO in-memory rail
@@ -3097,79 +2750,79 @@ export function ChatScreen() {
     sourceDocs: { name: string; content: string }[] | undefined,
     userMessage: string,
   ) => {
-    // The combined task (original command + the user's clarify answers, which
-    // echo each question's prompt for legibility) can outgrow the backend's
-    // 4000-char `task` cap — a 422 AFTER the "Generating a PRD…" ack is on
-    // screen. Trim the tail to fit: losing the last answer's tail beats losing
-    // the whole generation.
-    const TASK_MAX = 4000
-    const task = rawTask.length > TASK_MAX ? `${rawTask.slice(0, TASK_MAX - 1)}…` : rawTask
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const ack: AskResponse = {
-      answer:
-        // This ack lands on a LATER turn of an existing command tab, so the PRD
-        // card sits further up the thread (it anchors to thread[0]) — neither
-        // "above" nor "below" is reliably true here, so point at the chat.
-        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    setTabs((prev) => prev.map((t) => t.id === targetTabId
-      ? {
-          ...t,
-          pendingClarify: undefined,
-          prdGenerating: true,
-          thread: [...t.thread, { id, query: userMessage, reply: ack }],
-        }
-      : t))
-    if (targetTabId === activeTabIdRef.current) {
-      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+    // Shared clarified-generation flow (trim + ack + synchronous seed + async
+    // generate→bind→resume→dispatch). This surface injects its tab-scoped seams;
+    // the sequence itself lives in `clarifiedGeneration` so it can't drift from
+    // the project surface. The comments on each seam mark what USED to be inline.
+    runSharedClarifiedGeneration(rawTask, sourceDocs, userMessage, {
+      newId: () =>
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`,
+      // Seed the ack turn onto THIS command tab, clear the parked clarify, flip
+      // prdGenerating — one setTabs so the card→record flip and the ack land
+      // together. The ack lands on a LATER turn of an existing command tab, so
+      // the PRD card sits further up the thread (it anchors to thread[0]) —
+      // neither "above" nor "below" is reliably true here, so it points at the chat.
+      seedAckTurn: (id, message, ack) =>
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? {
+              ...t,
+              pendingClarify: undefined,
+              prdGenerating: true,
+              thread: [...t.thread, { id, query: message, reply: ack }],
+            }
+          : t)),
       // The rail was deliberately NOT opened while the questions were pending
       // (see `clarifyFirst` in openPrdInTab), so answering them is what opens
-      // it — otherwise the generation would run with no panel to land in.
-      setPrdPanelPending("prd")
-    }
-    pushPendingConversation(id, userMessage, targetTabId)
-    finalizeConversationTurn(id, { reply: ack }, targetTabId)
-    void (async () => {
-      const onPartial = (html: string) => {
+      // it — otherwise the generation would run with no panel to land in. Only
+      // when this is the active tab (background tabs don't touch the panel).
+      openPanel: () => {
+        if (targetTabId === activeTabIdRef.current) {
+          setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+          setPrdPanelPending("prd")
+        }
+      },
+      pushPendingConversation: (id, message) => pushPendingConversation(id, message, targetTabId),
+      finalizeAck: (id, ack) => finalizeConversationTurn(id, { reply: ack }, targetTabId),
+      onPartial: (html) => {
         if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
-      }
-      try {
-        // Same durable binding as the command flows, and free here: the tab has
-        // been chatting (the clarifying questions landed in it), so its
-        // conversation already exists and the id is a synchronous read — no
-        // round-trip in front of the user's generation.
-        const knownConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
-        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+      },
+      // Same durable binding as the command flows, and free here: the tab has
+      // been chatting (the clarifying questions landed in it), so its
+      // conversation already exists and the id is a synchronous read — no
+      // round-trip in front of the user's generation.
+      resolveKnownConvId: () => tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null,
+      generateFromTask: (task, docs, knownConvId) =>
+        prdApi.generateFromTask(task, false, docs, knownConvId),
+      onStarted: (start, knownConvId) => {
         if (knownConvId == null) void bindConvToPrd(targetTabId, start.prd_id)
         setTabs((prev) => prev.map((t) => t.id === targetTabId
           ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
           : t))
-        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
-        if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === targetTabId
-            ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
-            : t))
-          if (activeTabIdRef.current === targetTabId) {
-            setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
-          }
-          // Always a fresh generation here (the clarify gate only parks NEW
-          // tasks) — post the chat summary of what got built.
-          postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
-          // Same main-chat PRD fork continuity as the typed/Generate-button paths.
-          bindActiveProject(start.project_id ?? null)
-        } else {
-          setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
-          if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-          showToast("PRD unavailable", result.message.slice(0, 200))
+      },
+      onSuccess: (start, result) => {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
+          : t))
+        if (activeTabIdRef.current === targetTabId) {
+          setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
         }
-      } catch (e) {
+        // Always a fresh generation here (the clarify gate only parks NEW
+        // tasks) — post the chat summary of what got built.
+        postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
+        // Same main-chat PRD fork continuity as the typed/Generate-button paths.
+        bindActiveProject(start.project_id ?? null)
+      },
+      onFailure: (message) => {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+        if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD unavailable", message.slice(0, 200))
+      },
+      onError: (e) => {
         setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
         if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-      }
-    })()
+      },
+    })
   }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd, bindActiveProject])
 
   /** Freeze the questions turn into its settled, read-only form. Both answering
@@ -3350,213 +3003,19 @@ export function ChatScreen() {
   // skeleton optimistically, then confirms which sections changed and refreshes
   // the panel with the server's updated document — the same refresh contract
   // the input-question answer flow uses.
-  const prdChatEditFlow = useCallback(async (instruction: string, targetTabId: string, prdId: number) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query: instruction }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, instruction, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      const res = await prdApi.chatEdit(prdId, instruction)
-      if (res.sections_changed.length) {
-        // The scoped edit produced a fresh document — drop stale local drafts so
-        // the panel shows the server copy, then push it into the tab + panel.
-        clearPrdDrafts(prdId)
-        const prd = prdStateFromRecord(res.prd)
-        setTabs((prev) => prev.map((t) => (t.id === targetTabId ? { ...t, prd } : t)))
-        if (targetTabId === activeTabIdRef.current) setContent({ prd })
-      }
-      const answer = res.sections_changed.length
-        ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
-        : res.summary ||
-          "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it."
-      finalize({ answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize({
-        answer: `I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent])
-
-  // "Change the template to Acme" on a PRD tab: dispatch the in-place format
-  // switch (POST /v1/prd/{id}/change-template) and acknowledge in the thread —
-  // the ack posts on dispatch, like the ticket-set ack, because the re-write
-  // renders live in the panel and the thread's job is to say what started and
-  // where to look. The regeneration's OUTCOME lands as a toast (the same pair
-  // the panel's own Format control shows), read from the row's stamp: a failed
-  // regeneration is restored to `ready` with its content intact and its OLD
-  // stamp — unchanged stamp, unchanged document.
-  const prdChangeTemplateFlow = useCallback(async (
-    query: string, targetTabId: string, prdId: number,
-    templateId: string, templateName: string | null,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const label = templateName ? `“${templateName}”` : "that format"
-    let res: { status: "ready" | "generating"; unchanged?: boolean; artifact_template_id: string | null }
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      res = await prdApi.changeTemplate(prdId, templateId)
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize({
-        answer: `I couldn't switch the format — ${msg}. The PRD is unchanged, and its version history is intact.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-      return
-    }
-    if (res.unchanged) {
-      finalize({
-        answer: `This PRD is already written in ${label} — nothing to change.`,
-        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse)
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-      return
-    }
-    finalize({
-      answer: `Switching this PRD to ${label} — re-writing it into that structure now. It'll re-render in the panel on the right, and the previous version is saved in Version history.`,
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    // The turn is answered; the thread stays usable while the re-write runs.
-    setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-
-    // Drive the panel exactly like a first generation: stale drafts cleared (a
-    // local draft must not overwrite the re-laid-out document), the tab and
-    // panel flip to generating, and the poll + SSE stream render it live.
-    clearPrdDrafts(prdId)
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, prd: null, prdGenerating: true } : t))
-    if (targetTabId === activeTabIdRef.current) {
-      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
-      openContentPanel("prd")
-    }
-    try {
-      const { resumePrdGeneration, loadPrdById } = await import("../../../lib/runPrdGeneration")
-      const result = await resumePrdGeneration(prdId, undefined, (html) => {
-        if (targetTabId === activeTabIdRef.current) setContent({ prdPartialHtml: html })
-      })
-      const prd = result.ok
-        ? result.prd
-        // Timeout/hiccup: the backend preserved the document — reload it so the
-        // panel shows the honest state, never a blank pane.
-        : await loadPrdById(prdId).then((r) => (r.ok ? r.prd : null)).catch(() => null)
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId ? { ...t, prd, prdGenerating: false } : t))
-      if (targetTabId === activeTabIdRef.current) {
-        setContent({ prd, prdGenerating: false, prdPartialHtml: null })
-      }
-      if (result.ok && (result.prd.artifactTemplateId ?? null) === templateId) {
-        showToast("Format switched", `This PRD is now written in ${templateName || "the new format"}.`)
-      } else {
-        showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
-      }
-    } catch {
-      showToast("Couldn't switch the format", "The PRD is unchanged — its content and version history are intact. Try again in a moment.")
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel, showToast])
-
-  // ── Change the TICKETS' format from chat ────────────────────────────────────
-  // "Change the ticket template to Acme". The tickets counterpart of
-  // prdChangeTemplateFlow: the backend re-LAYS the existing tickets (identity,
-  // edits and tracker links preserved — never a regeneration) in the
-  // BACKGROUND, so the POST returns as soon as the switch is scheduled and the
-  // reply says it is under way rather than done. `target` is the thread's
-  // standalone set when it has one, else the tab PRD's persisted tickets —
-  // resolved by the caller, because the backend cannot see a set from a
-  // prd_id-shaped envelope.
-  const ticketsChangeTemplateFlow = useCallback(async (
-    query: string, targetTabId: string,
-    target: { ticketSetId: number } | { prdId: number },
-    templateId: string, templateName: string | null,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    const label = templateName ? `“${templateName}”` : "that format"
-    try {
-      const { storiesApi } = await import("../../../lib/api")
-      const res = await storiesApi.changeTemplate(target, templateId)
-      if (res.unchanged) {
-        finalize(asReply(`These tickets are already written in ${label} — nothing to change.`))
-        return
-      }
-      finalize(asReply(
-        `Re-laying the tickets into ${label} now — every ticket keeps its content, edits and tracker links; only the description layout changes. It carries on in the background, so you can keep working; they'll update in the panel on the right when it lands.`,
-      ))
-      // Follow the switch so the panel lands on the new format by itself. A
-      // standalone set is followed through its one owner, which marks the
-      // slice `relaying` in place — never `loadTicketSet`, which would blank
-      // tickets that are still perfectly readable. A PRD's tickets need no
-      // call at all: the Tickets tab's own poll is watching the row and owns
-      // both the re-read and the completion toast.
-      if (targetTabId === activeTabIdRef.current) {
-        if ("ticketSetId" in target) {
-          const slice = content.ticketSet
-          if (slice && slice.id === target.ticketSetId) {
-            void followTicketSetSwitch(
-              target.ticketSetId, setContent, slice, templateName,
-            ).then((landed) => {
-              if (landed) {
-                showToast("Format switched",
-                  `These tickets now use ${templateName || "the new format"}.`)
-              }
-            })
-          } else {
-            void loadTicketSet(target.ticketSetId, setContent)
-          }
-        }
-        openContentPanel("tickets")
-      }
-      showToast(
-        "Switching format",
-        `Re-laying these tickets into ${templateName || "the new format"}.`,
-      )
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize(asReply(`I couldn't switch the ticket format — ${msg}. The tickets are unchanged.`))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, openContentPanel,
-      showToast, content.ticketSet])
+  // Main's `ActionConfig.onArtifactUpdated` — apply a freshly-edited PRD to the
+  // captured tab + (if it's active) the ContentPanel. The panel-apply that used
+  // to live inline in `prdChatEditFlow`.
+  const applyPrdArtifactInTab = useCallback(
+    (tabId: string, update: { kind: "prd"; prdId: number; record: PrdRecord }) => {
+      // Drop stale local drafts so the panel shows the server copy.
+      clearPrdDrafts(update.prdId)
+      const prd = prdStateFromRecord(update.record)
+      setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, prd } : t)))
+      if (tabId === activeTabIdRef.current) setContent({ prd })
+    },
+    [setContent],
+  )
 
   // ── Assign tickets from chat ────────────────────────────────────────────────
   // "Assign the auth ticket to Dave" / "give these tickets to Priya and Sam".
@@ -3568,72 +3027,10 @@ export function ChatScreen() {
   // picks stay local until the last question settles, then `completeAssign`
   // writes them all and posts the summary (owner directive: finish all the
   // questions before anything is sent).
-  const assignTicketsFlow = useCallback(async (
-    query: string, targetTabId: string, prdId: number, instruction: string,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const finalize = (reply: AskResponse) => {
-      setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    try {
-      const plan = await ticketDataApi.assignPlan(prdId, instruction)
-      // Sequential on purpose: a handful of writes at most, and a per-ticket
-      // failure must be attributable to its ticket rather than lost in a race.
-      const applied: string[] = []
-      const failed: string[] = []
-      for (const a of plan.assignments) {
-        try {
-          await ticketDataApi.saveFields(a.ticket_key, { assignee: a.assignee })
-          applied.push(`“${a.ticket_title}” → ${a.assignee.display_name || a.assignee.email || "them"}`)
-        } catch {
-          failed.push(a.ticket_title)
-        }
-      }
-      const noteLine = [
-        plan.note,
-        failed.length
-          ? `I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`
-          : "",
-      ].filter(Boolean).join(" ")
-      if (plan.questions.length) {
-        setTabs((prev) => prev.map((t) => t.id === targetTabId
-          ? { ...t, pendingAssign: { questions: plan.questions, applied, turnId: id } }
-          : t))
-        const lead = applied.length
-          ? `Done so far:\n${applied.map((l) => `- ${l}`).join("\n")}\n\n`
-          : ""
-        const qWord = plan.questions.length === 1 ? "one more answer" : `${plan.questions.length} quick answers`
-        finalize(asReply(
-          `${noteLine ? `${noteLine}\n\n` : ""}${lead}I need ${qWord} to finish — pick below; I'll apply everything once you've been through them.`,
-        ))
-      } else if (applied.length || noteLine) {
-        finalize(asReply(
-          `${applied.length ? `Assigned:\n${applied.map((l) => `- ${l}`).join("\n")}` : ""}${applied.length && noteLine ? "\n\n" : ""}${noteLine}`,
-        ))
-      } else {
-        finalize(asReply(
-          "I couldn't work out that assignment — try naming the ticket and the person, e.g. “assign the login ticket to Dave”.",
-        ))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      finalize(asReply(`I couldn't plan that assignment — ${msg}. No tickets were changed.`))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation])
+  // (The ticket-assignment flow moved into the shared action layer —
+  // `runAssignTicketsAction`, config'd by `onAssignTickets` with main's captured
+  // tab + the dock assign question. `completeAssign`/`cancelAssign` below still
+  // apply the popup's answers, unchanged, until main adopts the engine.)
 
   // ── share_to_slack ────────────────────────────────────────────────────────
   //
@@ -3677,312 +3074,87 @@ export function ChatScreen() {
      *  passed in rather than read here so this stays a pure mapping of
      *  context → reference, testable without the content store. */
     reportId: number | null,
-  ): SlackShareTargetRef => {
-    const prdId = envelope.prd_id ?? tab?.prdId ?? null
-    // A KIND the user named wins over the tab's default document: "share the
-    // tickets" in a thread that has both a PRD and a set means the set, and
-    // falling through to prd_id there would share the wrong artifact under a
-    // name the user did give us.
-    const named = (envelope.artifact_type || "").toLowerCase()
-    if (named === "tickets" && tab?.ticketSetId) {
-      return { ticket_set_id: tab.ticketSetId }
-    }
-    if (named === "report" && reportId) {
-      return { report_id: reportId }
-    }
-    if (named === "prd" && prdId) {
-      return { prd_id: prdId }
-    }
-    // No subject named ("share this on slack") → whatever is in front of them,
-    // in the order the panel stacks it.
-    if (!envelope.artifact_query) {
-      if (prdId) return { prd_id: prdId }
-      if (tab?.ticketSetId) return { ticket_set_id: tab.ticketSetId }
-      if (reportId) return { report_id: reportId }
-    }
-    // A named subject with no matching tab context — "share the checkout PRD"
-    // — resolves by title against the caller's own library, server-side.
-    return {
-      artifact_type: envelope.artifact_type ?? null,
-      artifact_query: envelope.artifact_query ?? null,
-    }
-  }, [])
+  ): SlackShareTargetRef => resolveShareRef(envelope, {
+    prdId: tab?.prdId ?? null,
+    ticketSetId: tab?.ticketSetId ?? null,
+    reportId,
+  }), [])
 
-  const shareToSlackFlow = useCallback(async (
-    query: string, targetTabId: string, envelope: ChatIntentEnvelope,
-  ) => {
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    setTabs((prev) => prev.map((t) =>
-      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query }] } : t))
-    setBusyTabs((prev) => addToSet(prev, targetTabId))
-    pushPendingConversation(id, query, targetTabId)
-    const asReply = (answer: string) => ({
-      answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse)
-    const finalize = (reply: AskResponse, share?: ThreadTurn["slackShare"]) => {
+  // (The share-to-Slack PREVIEW flow moved into the shared action layer —
+  // `runShareToSlackAction`, config'd by `onShareToSlack` with main's tab/report
+  // share-ref + the dock channel picker. The interactive card handlers below —
+  // send / re-preview / question — come from the shared
+  // `useSlackShareCardHandlers`; main injects seams bound to the ACTIVE tab, the
+  // only tab a share card is ever visible on: `patchTurn`/`getShare` reach the
+  // active tab's turn, `getPendingShare`/`setPendingShare` its dock question.)
+  const slackPatchTurn = useCallback(
+    (turnId: string, patch: Partial<NonNullable<ThreadTurn["slackShare"]>>) =>
+      patchSlackShare(activeTabIdRef.current ?? "", turnId, patch),
+    [patchSlackShare],
+  )
+  const slackGetShare = useCallback(
+    (turnId: string) =>
+      tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+        ?.thread.find((tn) => tn.id === turnId)?.slackShare,
+    [],
+  )
+  const slackGetPendingShare = useCallback(
+    () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.pendingShare,
+    [],
+  )
+  const slackSetPendingShare = useCallback(
+    (ps: PendingShareState | undefined) =>
       setTabs((prev) => prev.map((t) =>
-        t.id === targetTabId
-          ? {
-              ...t,
-              thread: t.thread.map((tn) => tn.id === id
-                ? { ...tn, reply, ...(share ? { slackShare: share } : {}) }
-                : tn),
-            }
-          : t))
-      finalizeConversationTurn(id, { reply }, targetTabId)
-    }
-
-    const tab = tabsRef.current.find((t) => t.id === targetTabId)
-    const ref = shareRefFor(envelope, tab, content.reportFocusId ?? null)
-    try {
-      const preview = await slackShareApi.preview(ref, {
-        channel: envelope.share_channel ?? null,
-        note: envelope.share_note ?? null,
-      })
-      // The prose is deliberately short and NEVER claims a post happened — the
-      // card below it is the whole interaction, and a reply that got ahead of
-      // it is exactly the failure this two-step flow exists to prevent.
-      const lead =
-        preview.status === "ready"
-          ? "Here's what I'll post — have a look before I send it."
-          : preview.status === "needs_channel"
-            ? "Almost — I just need to know where this should go."
-            : preview.status === "blocked"
-              ? "I can't post there yet."
-              : preview.status === "unsupported_type"
-                ? "That one can't be shared to Slack."
-                : "Which document did you mean?"
-      finalize(asReply(lead), { ref, preview })
-      const question = slackShareQuestionFor(preview)
-      if (question) {
-        setTabs((prev) => prev.map((t) => t.id === targetTabId
-          ? { ...t, pendingShare: { turnId: id, ...question } }
-          : t))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      // Says plainly that nothing went out. An error here is most often "Slack
-      // is not connected", and the user must not be left wondering whether a
-      // half-failed share reached the channel anyway.
-      finalize(asReply(
-        `I couldn't set that share up — ${msg}. Nothing was posted to Slack.`,
-      ))
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-    }
-  }, [finalizeConversationTurn, pushPendingConversation, shareRefFor, content.reportFocusId])
-
-  const sendSlackShare = useCallback(async (
-    tabId: string, turnId: string, channelId: string, note: string,
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved || share.busy) return
-    const channelName =
-      share.preview.channel?.name
-      ?? (share.preview.channels ?? []).find((c) => c.id === channelId)?.name
-      ?? "the channel"
-    patchSlackShare(tabId, turnId, { busy: true })
-    try {
-      await slackShareApi.send(share.ref, channelId, note)
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "sent", channelName },
-      })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Slack rejected the message"
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare])
-
-  /** The user picked which document from an ambiguous match — re-preview on
-   *  that one, keeping the channel and note they already had. */
-  const repreviewSlackShare = useCallback(async (
-    tabId: string, turnId: string, target: SlackShareTarget,
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved) return
-    const ref: SlackShareTargetRef =
-      target.type === "prd" ? { prd_id: target.id }
-      : target.type === "report" ? { report_id: target.id }
-      : target.type === "ticket_set" ? { ticket_set_id: target.id }
-      : { custom_artifact_id: target.id }
-    patchSlackShare(tabId, turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(ref, {
-        channel: share.preview.channel?.name ?? share.preview.channel_query ?? null,
-      })
-      patchSlackShare(tabId, turnId, { busy: false, ref, preview })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare])
-
-  /** The share question settled — re-preview on the answer.
-   *
-   *  A re-preview rather than a local patch, and for both kinds: the server is
-   *  what knows whether the chosen channel is one Sprntly can post to, and
-   *  patching `status: "ready"` client-side would offer a Send for a private
-   *  channel the bot cannot join. One round trip buys the same guarantees the
-   *  first preview gave. */
-  const completeShareQuestion = useCallback(async (
-    tabId: string, answers: PopupAnswer[],
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const ps = tab?.pendingShare
-    if (!ps) return
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
-    const share = tabsRef.current
-      .find((t) => t.id === tabId)?.thread.find((tn) => tn.id === ps.turnId)?.slackShare
-    if (!share || share.resolved) return
-
-    const picked = answers.find((a) => !a.skipped)
-    if (!picked) {
-      // Skipped or dismissed — nothing was posted, and the card says exactly
-      // that rather than leaving an unanswered question in the thread.
-      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-      return
-    }
-    // A typed answer has no `value`; take the text (minus any leading '#') as
-    // the channel name, which the server matches exactly like a picked one.
-    const answer = (picked.value ?? picked.answer ?? "").trim()
-    if (!answer) {
-      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-      return
-    }
-
-    if (ps.kind === "target") {
-      const target = (share.preview.candidates ?? [])
-        .find((c) => `${c.type}-${c.id}` === answer)
-      if (!target) return
-      await repreviewSlackShare(tabId, ps.turnId, target)
-      return
-    }
-
-    patchSlackShare(tabId, ps.turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(share.ref, {
-        channel: answer.replace(/^#/, ""),
-      })
-      patchSlackShare(tabId, ps.turnId, { busy: false, preview })
-      // A typed channel that still doesn't resolve asks again rather than
-      // silently dropping the share.
-      const next = slackShareQuestionFor(preview)
-      if (next) {
-        setTabs((prev) => prev.map((t) => t.id === tabId
-          ? { ...t, pendingShare: { turnId: ps.turnId, ...next } }
-          : t))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(tabId, ps.turnId, {
-        busy: false, resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare, repreviewSlackShare])
-
-  /** Dismissing the question settles the share as NOT SENT. Deliberate: an
-   *  abandoned question would otherwise leave a thread whose last word is
-   *  "here's what I'll post" about a message that never went anywhere. */
-  const cancelShareQuestion = useCallback((tabId: string) => {
-    const ps = tabsRef.current.find((t) => t.id === tabId)?.pendingShare
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
-    if (ps) patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-  }, [patchSlackShare])
+        t.id === activeTabIdRef.current ? { ...t, pendingShare: ps } : t)),
+    [],
+  )
+  const { sendSlackShare, repreviewSlackShare, completeShareQuestion, cancelShareQuestion } =
+    useSlackShareCardHandlers({
+      patchTurn: slackPatchTurn,
+      getShare: slackGetShare,
+      getPendingShare: slackGetPendingShare,
+      setPendingShare: slackSetPendingShare,
+    })
 
   /** The one place anything is actually posted to Slack. */
-  /** The assign batch's ONE landing: the popup collected every pick (owner
-   *  directive — finish all the questions before anything is sent), and only
-   *  now do the writes happen, each through the ordinary fields endpoint. The
-   *  summary posts as its own agent turn on the flow's conversation entry. */
-  const completeAssign = useCallback(async (
-    tabId: string, answers: PopupAnswer[],
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const pa = tab?.pendingAssign
-    if (!pa) return
-    // Close the batch first — the popup is spent; the writes ride the tab's
-    // busy state, not a half-open stepper.
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
-    setBusyTabs((prev) => addToSet(prev, tabId))
-    const applied = [...pa.applied]
-    const failed: string[] = []
-    let skipped = 0
-    try {
-      for (let i = 0; i < pa.questions.length; i++) {
-        const q = pa.questions[i]
-        const a = answers[i]
-        // A multi-pick answer carries EVERY tick on `picks` — one option (and
-        // one write) per pick. A single-pick answer resolves to exactly one
-        // option, same lookup as always: by stable value first, label second.
-        const chosen: TicketAssignQuestion["options"] = []
-        if (a && !a.skipped && a.answer) {
-          if (q.multi && a.picks?.length) {
-            for (const p of a.picks) {
-              const opt =
-                (p.value != null ? q.options.find((o) => o.value === p.value) : undefined) ??
-                q.options.find((o) => o.label === p.label)
-              if (opt) chosen.push(opt)
-            }
-          } else {
-            const opt =
-              (a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
-              q.options.find((o) => o.label === a.answer)
-            if (opt) chosen.push(opt)
-          }
-        }
-        if (!chosen.length) { skipped += 1; continue }
-        for (const opt of chosen) {
-          const pair = q.fixed.kind === "ticket"
-            ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
-            : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
-          if (!pair.assignee) { skipped += 1; continue }
-          try {
-            await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
-            applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
-          } catch {
-            failed.push(pair.title)
-          }
-        }
-      }
-      const lines: string[] = []
-      if (applied.length) lines.push(`All set — assigned:\n${applied.map((l) => `- ${l}`).join("\n")}`)
-      if (skipped) lines.push(`${skipped === 1 ? "One ticket was" : `${skipped} tickets were`} left as they are.`)
-      if (failed.length) lines.push(`I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`)
-      // Nothing landed and nothing broke → everything was skipped; say that
-      // plainly instead of a bare skip count with no verdict.
-      const summary = !applied.length && !failed.length
-        ? "No assignments made — everything was skipped, so the tickets keep their current owners."
-        : lines.join("\n\n")
-      const reply = {
-        answer: summary, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse
-      const noteId =
-        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      setTabs((prev) => prev.map((t) => t.id === tabId
-        ? { ...t, thread: [...t.thread, { id: noteId, query: "", reply }] }
-        : t))
-      finalizeConversationTurn(pa.turnId, { reply }, tabId)
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, tabId))
-    }
-  }, [finalizeConversationTurn])
-
-  /** The assign popup's × — close the stepper. Nothing has been written from
-   *  it (the batch only submits on completion), so there is nothing to report:
-   *  the explicit pairs the plan applied are already in the flow's reply. */
-  const cancelAssign = useCallback((tabId: string) => {
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
+  // The assign batch's ONE landing (the popup collected every pick, then these
+  // writes happen through the ordinary fields endpoint, summary as its own agent
+  // turn) comes from the shared `useAssignCompletion` — the project host calls
+  // the SAME unit. Main injects seams bound to the ACTIVE tab, the only tab an
+  // assign popup is ever open on: read/clear its `pendingAssign`, toggle its
+  // busy set, append the summary turn (main's crypto-id), finalize it.
+  const assignGetPending = useCallback(
+    () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.pendingAssign,
+    [],
+  )
+  const assignClearPending = useCallback(
+    () => setTabs((prev) => prev.map((t) =>
+      t.id === activeTabIdRef.current ? { ...t, pendingAssign: undefined } : t)),
+    [],
+  )
+  const assignSetBusy = useCallback((busy: boolean) => {
+    const tabId = activeTabIdRef.current ?? ""
+    setBusyTabs((prev) => busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))
   }, [])
+  const assignAppendReplyTurn = useCallback((reply: AskResponse) => {
+    const noteId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) => t.id === activeTabIdRef.current
+      ? { ...t, thread: [...t.thread, { id: noteId, query: "", reply }] }
+      : t))
+  }, [])
+  const assignFinalizeTurn = useCallback(
+    (turnId: string, reply: AskResponse) =>
+      finalizeConversationTurn(turnId, { reply }, activeTabIdRef.current ?? ""),
+    [finalizeConversationTurn],
+  )
+  const { completeAssign, cancelAssign } = useAssignCompletion({
+    getPendingAssign: assignGetPending,
+    clearPendingAssign: assignClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
 
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
@@ -4001,6 +3173,46 @@ export function ChatScreen() {
       t.briefMeta == null && !t.hydrating
       ? t : undefined
   }, [])
+
+  // ── The generation-turn SEED seam (tab-orchestrator, main-provided) ─────────
+  // The shared entry every command-generation flow uses to land its settled
+  // acknowledgement turn: reuse the active tab if it's a plain chat (never a
+  // PRD/insight-bound one, which `reusableActiveTab` declines so a generation
+  // can't hijack a bound tab), else spawn a fresh chat tab; rename a placeholder,
+  // append the turn, clear the composer, and persist rail+Supabase. Returns the
+  // resolved conversation key + its bound DB conversation id (null on a fresh
+  // tab). This is the EXACT block the flows used to inline — kept verbatim so
+  // main is byte-identical; it is injected into the generation flows as a seam so
+  // a project slot provides its own single-conversation version at wiring time.
+  const seedGenerationTurn = useCallback((seedTurn: ThreadTurn): { tabId: string; dbConvId: number | null } => {
+    const inTab = reusableActiveTab()
+    const seedQuery = seedTurn.query
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
+    let tabId: string
+    let dbConvId: number | null = null
+    if (inTab) {
+      tabId = inTab.id
+      dbConvId = inTab.dbConvId ?? null
+      setTabs((prev) => prev.map((t) => t.id === inTab.id
+        ? {
+            // First message in a placeholder "New chat" tab → take the real
+            // title from the command, exactly as submitAsk's own rename does.
+            ...t,
+            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
+            thread: [...t.thread, seedTurn],
+          }
+        : t))
+      setDraft("")
+    } else {
+      // No reusable tab (the landing, the brief tab, or a PRD/insight tab whose
+      // binding must not be disturbed) → the command opens its own chat tab.
+      tabId = openTab(handle, [seedTurn])
+    }
+    // Rail + Supabase, so the exchange survives a reload like any other turn.
+    pushPendingConversation(seedTurn.id, seedQuery, tabId)
+    void finalizeConversationTurn(seedTurn.id, seedTurn.reply ? { reply: seedTurn.reply } : {}, tabId)
+    return { tabId, dbConvId }
+  }, [reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn])
 
   // ── Standalone ticket sets: the chat entry point ───────────────────────────
   // "Break this into tickets" in a chat with NO PRD. Before this the request
@@ -4027,68 +3239,6 @@ export function ChatScreen() {
    *  because that is the window the double-generation guard has to cover: two
    *  sends a second apart both read `ticketSetRunning` before either had come
    *  back from the network. */
-  const startTicketSetRun = useCallback((
-    tabId: string,
-    task: string,
-    seed: { turnId: string; title: string; query: string } | null,
-    /** The uploaded TICKET format the user named, off the intent envelope.
-     *  Undefined — the normal case, and every RE-RUN — means the company's
-     *  active ticket format. A re-run deliberately does not carry it: the
-     *  original envelope is long gone by then, and inventing one would be a
-     *  guess about what was asked for rather than a record of it. */
-    artifactTemplateId?: string | null,
-  ) => {
-    setTabs((prev) => prev.map((t) => t.id === tabId
-      ? { ...t, ticketSetRunning: true, ticketSetStatus: "generating", ticketSetTask: task }
-      : t))
-    // This IS the tab's ticket-set open, so the thread-resume probe must not
-    // also fire and put a second reader on the same row.
-    ticketSetAutoOpenedRef.current.add(tabId)
-    void (async () => {
-      // The set is stamped with its thread AT CREATION — a `ticket_sets` row has
-      // no back-patch route, unlike a PRD (conversationsApi.update) — so the
-      // conversation has to exist before the create call goes out, or the set is
-      // orphaned from the chat that asked for it and neither the resume nor the
-      // Artifacts row can name it. `ensureConversation` shares the very same
-      // in-flight create the turn persistence just fired (create-once per tab),
-      // so awaiting it costs at most the remainder of one already-issued request
-      // and never mints a second conversation. Null on failure → an unlinked
-      // set, which still generates and still reads in the panel.
-      const convId =
-        tabsRef.current.find((t) => t.id === tabId)?.dbConvId ??
-        (seed ? await persistence.ensureConversation(tabId, seed) : null)
-      // Opened HERE rather than before the await so the panel and the runner's
-      // first frame land on the same commit — otherwise the Tickets tab slides
-      // out over the "generate a PRD first" empty state for the length of one
-      // conversation create. Never yank the panel out from under another tab.
-      if (activeTabIdRef.current === tabId) openContentPanel("tickets")
-      const result = await runTicketSetGeneration(
-        task, convId ?? null, setContent, artifactTemplateId,
-      )
-      if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === tabId
-          ? { ...t, ticketSetRunning: false, ticketSetId: result.set.id, ticketSetStatus: "ready" }
-          : t))
-        // The thread's record of what got built — the same agent-only summary
-        // turn every other artifact posts. The backend accepts `ticket_set`
-        // (routes/artifacts.py::ChatSummaryIn) and renders the ROSTER as the
-        // content, so the summary describes the work, not the JSON.
-        postSummaryRef.current?.(tabId, "ticket_set", result.set.id)
-        return
-      }
-      setTabs((prev) => prev.map((t) => t.id === tabId
-        ? { ...t, ticketSetRunning: false, ticketSetStatus: "failed" }
-        : t))
-      // A KIND, never a message: nothing off the wire reaches the screen.
-      showToast("Tickets unavailable", TICKET_SET_FAILURE_TOAST[result.kind])
-    })()
-  }, [setContent, showToast, openContentPanel, persistence])
-
-  /** The chat's "generate tickets" command on a tab with no PRD.
-   *
-   *  Optimistic-first, the same rule the PRD command flows follow: the ack turn
-   *  renders on THIS commit and every network call happens after it, so the
-   *  composer never clears into a void. */
   /** A compact transcript of a tab's thread, for grounding a generated
    *  document. Newest turns last and the whole thing bounded, because this is
    *  prompt input: an unbounded thread would push the actual request out of
@@ -4107,199 +3257,6 @@ export function ChatScreen() {
     const MAX = 12_000
     return joined.length <= MAX ? joined : `…\n\n${joined.slice(-MAX)}`
   }, [])
-
-  const ticketSetCommandFlow = useCallback((
-    seedQuery: string,
-    task: string,
-    /** The uploaded TICKET format the user named, off the intent envelope. */
-    artifactTemplateId?: string | null,
-  ) => {
-    const inTab = reusableActiveTab()
-    const turnId =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const ack: AskResponse = {
-      answer: TICKET_SET_ACK,
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
-    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
-    let tabId: string
-    if (inTab) {
-      tabId = inTab.id
-      setTabs((prev) => prev.map((t) => t.id === inTab.id
-        ? {
-            ...t,
-            // First message in a placeholder "New chat" tab → take the real
-            // title from the command, exactly as submitAsk's own rename does.
-            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
-            thread: [...t.thread, seedTurn],
-          }
-        : t))
-      setDraft("")
-    } else {
-      // No reusable tab (the landing, the brief tab, or a PRD/insight tab whose
-      // binding must not be disturbed) → the command opens its own chat tab.
-      tabId = openTab(handle, [seedTurn])
-    }
-    // Rail + Supabase, so the exchange survives a reload like any other turn.
-    pushPendingConversation(turnId, seedQuery, tabId)
-    void finalizeConversationTurn(turnId, { reply: ack }, tabId)
-    startTicketSetRun(tabId, task, {
-      turnId,
-      title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
-      query: seedQuery,
-    }, artifactTemplateId)
-  }, [
-    reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
-    startTicketSetRun,
-  ])
-
-  /** Write a team document from this chat and open it in the right panel.
-   *
-   *  Mirrors `ticketSetCommandFlow`: seed a turn with an acknowledgement, put
-   *  it on the rail and in Supabase, THEN start the work — so the exchange
-   *  survives a reload and reads like every other command. */
-  const documentCommandFlow = useCallback((
-    seedQuery: string,
-    envelope: ChatIntentEnvelope,
-  ) => {
-    const inTab = reusableActiveTab()
-    const turnId =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const kind = envelope.artifact_kind?.trim() || "document"
-    const ack: AskResponse = {
-      answer: `Writing your ${kind} — it will open in the panel on the right.`,
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    const seedTurn: ThreadTurn = { id: turnId, query: seedQuery, reply: ack }
-    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
-    let tabId: string
-    let convId: number | null = null
-    if (inTab) {
-      tabId = inTab.id
-      convId = inTab.dbConvId ?? null
-      setTabs((prev) => prev.map((t) => t.id === inTab.id
-        ? {
-            ...t,
-            title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
-            thread: [...t.thread, seedTurn],
-          }
-        : t))
-      setDraft("")
-    } else {
-      // Sent from the landing or a PRD/insight tab whose binding must not be
-      // disturbed → the command opens its own chat tab, rather than writing a
-      // document that belongs to no thread at all.
-      tabId = openTab(handle, [seedTurn])
-    }
-    pushPendingConversation(turnId, seedQuery, tabId)
-    void finalizeConversationTurn(turnId, { reply: ack }, tabId)
-
-    void (async () => {
-      try {
-        // THE CONVERSATION HAS TO EXIST BEFORE THE DOCUMENT DOES.
-        //
-        // `convId` above is read synchronously off the tab, and on a tab's
-        // FIRST message that is null: `pushPendingConversation` fires the
-        // create and deliberately does not await it. So the most common path
-        // there is — ask a brand-new chat for a leadership update — stored the
-        // document with `conversation_id` NULL, orphaning it from the thread
-        // that asked for it. `useThreadDocumentSync` then could not re-attach
-        // it on reload or on coming back to the thread, and the panel had
-        // nothing to show.
-        //
-        // Exactly the defect #969 fixed for reports and the ticket-set flow
-        // fixed for its own rows, with the same instrument: `ensureConversation`
-        // shares the very same in-flight create the turn persistence just fired
-        // (create-once per tab), so awaiting it costs at most the remainder of
-        // one already-issued request and never mints a second conversation. It
-        // resolves null on failure, which leaves an unlinked document — still
-        // generated, still readable in the library — rather than no document.
-        const attachTo = convId ?? await persistence.ensureConversation(tabId, {
-          turnId,
-          // THE SAME TITLE `pushPendingConversation` WOULD HAVE USED, not the
-          // tab's `handle`. Whichever of the two calls wins the create race
-          // names the stored row, and this one now usually wins — so a
-          // different truncation here (37 chars vs 49) would silently rename
-          // the conversation in Chat history for this flow alone, leaving the
-          // in-session rail and the reloaded list disagreeing about the same
-          // thread.
-          title: seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery,
-          query: seedQuery,
-        })
-        const created = await customArtifactsApi.generate({
-          kind,
-          task: envelope.task?.trim() || seedQuery,
-          // THE GROUNDING. Without this the generator takes its
-          // "CONTEXT: none was supplied" branch and writes a structural
-          // skeleton that lists what it does not know — for a request whose
-          // whole subject was discussed in the thread above it. The planner's
-          // `task` is a brief, not the evidence behind it.
-          context: threadContextFor(tabId),
-          conversation_id: attachTo,
-        })
-        // NEVER OPEN THIS TAB'S DOCUMENT OVER SOMEONE ELSE'S THREAD. The
-        // create + generate round trips mean the user can have moved on by
-        // now, and this pair is unconditional: it would put chat A's document
-        // in front of whoever is reading chat B.
-        //
-        // The clear-on-switch used to paper over that — B gaining its own
-        // conversation id wiped the stray id — but a conversation coming into
-        // existence is no longer treated as a switch (that is the fix above),
-        // so the guard has to be stated where the assumption actually lives.
-        // The same rule `startTicketSetRun` already follows.
-        //
-        // Nothing is lost by skipping it: the document is now attached to its
-        // conversation, so returning to this thread re-opens it through
-        // `useThreadDocumentSync`.
-        if (activeTabIdRef.current !== tabId) return
-        setContent({ documentId: created.id, documentGenerating: true })
-        openContentPanel("document")
-      } catch {
-        showToast(
-          "Couldn't start that document",
-          "Please try again, or create one from Artifacts.",
-        )
-      }
-    })()
-  }, [
-    reusableActiveTab, openTab, pushPendingConversation, finalizeConversationTurn,
-    setContent, openContentPanel, showToast, threadContextFor, persistence,
-  ])
-
-  /** The reply-footer button: reopen a finished set, or re-run a failed one. */
-  const handleTicketSetAction = useCallback(async (tabId: string) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    if (!tab) return
-    if (tab.ticketSetStatus === "failed") {
-      // Re-run from the ORIGINAL request. In-session that is on the tab; after
-      // a reload it is read back off the row (`source_text`), because the
-      // transient copy is deliberately not persisted.
-      let task = tab.ticketSetTask?.trim() || content.ticketSet?.sourceText?.trim() || ""
-      if (!task && tab.ticketSetId != null) {
-        const { ticketSetsApi } = await import("../../../lib/api")
-        task = await ticketSetsApi.get(tab.ticketSetId)
-          .then((r) => r.source_text?.trim() ?? "")
-          .catch(() => "")
-      }
-      if (!task) {
-        showToast(
-          "Ask again in the chat",
-          "The original request isn't available any more — say what to break into tickets and I'll re-run it.",
-        )
-        return
-      }
-      startTicketSetRun(tabId, task, null)
-      return
-    }
-    if (tab.ticketSetId == null) return
-    // Always re-read the set rather than trusting whatever is in shared content:
-    // the panel is global, and opening a PRD in the meantime clears the slice.
-    setContent({ ticketSetStandalone: false })
-    openContentPanel("tickets")
-    void loadTicketSet(tab.ticketSetId, setContent)
-  }, [content.ticketSet, setContent, openContentPanel, showToast, startTicketSetRun])
-
   const prdCommandFlow = useCallback((
     seedQuery?: string,
     taskOverride?: string | null,
@@ -4568,54 +3525,6 @@ export function ChatScreen() {
     [openTab, pushPendingConversation, finalizeConversationTurn],
   )
 
-  /** The whole open_artifact dispatch: 1 match opens, 2+ ask, 0 says so — and a
-   *  kind this panel can't show says where it DOES live. */
-  const openArtifactFlow = useCallback(
-    (seedQuery: string, open: OpenArtifactResult) => {
-      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
-      if (open.status === "unsupported_type") {
-        // They named a real thing we simply don't render here. Substituting the
-        // PRD of the same name would hand over the wrong document with nothing
-        // to signal the swap, so name what they asked for and point at where it
-        // opens.
-        postOpenArtifactReply(
-          seedQuery,
-          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
-          [],
-        )
-        return
-      }
-      if (open.status === "resolved" && open.artifact) {
-        if (openArtifactInPanel(open.artifact, seedQuery)) return
-        // A match we cannot actually open (no usable id) is a NOT-FOUND from
-        // the user's side; saying so beats opening an empty panel.
-        postOpenArtifactReply(
-          seedQuery,
-          `I found "${open.artifact.title}" but couldn't open it — try it from the Artifacts tab.`,
-          [],
-        )
-        return
-      }
-      if (open.status === "ambiguous") {
-        postOpenArtifactReply(
-          seedQuery,
-          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
-          open.candidates,
-        )
-        return
-      }
-      // not_found. Deliberately does NOT offer to generate one: the user asked
-      // to open something, and turning that into a generation is the exact
-      // failure this action exists to prevent.
-      postOpenArtifactReply(
-        seedQuery,
-        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
-        [],
-      )
-    },
-    [openArtifactInPanel, postOpenArtifactReply],
-  )
-
   // ── One artifact-list card → its own thread ────────────────────────────────
   // The chat-side twin of ArtifactsScreen.openArtifact, per kind: an artifact
   // whose chat survives opens THAT thread (history restored, its panel over
@@ -4706,58 +3615,18 @@ export function ChatScreen() {
   /** "What are my PRDs?" → a reply naming the count plus the clickable cards.
    *  Mirrors postOpenArtifactReply's seeding (rail + Supabase persistence, the
    *  prose only — the cards are a live affordance riding the turn). */
-  const listArtifactsFlow = useCallback((seedQuery: string, envelope: ChatIntentEnvelope) => {
-    const items = envelope.artifact_list ?? []
-    const kind = envelope.list_kind && envelope.list_kind !== "all" ? envelope.list_kind : null
-    const kindNoun: Record<string, [string, string]> = {
-      prd: ["PRD", "PRDs"],
-      evidence: ["evidence document", "evidence documents"],
-      prototype: ["prototype", "prototypes"],
-      report: ["report", "reports"],
-      ticket_set: ["ticket set", "ticket sets"],
-      custom_artifact: ["document", "documents"],
-    }
-    const [one, many] = kind ? kindNoun[kind] ?? ["artifact", "artifacts"] : ["artifact", "artifacts"]
-    // A HOW-MANY ask leads with the NUMBERS — computed server-side over the
-    // whole library, never counted off the capped card list (the reported
-    // "12 cards for a today-vs-yesterday question" bug). The cards still
-    // render under it as the click-to-open affordance.
-    const counts = envelope.list_mode === "count" ? envelope.artifact_counts : null
-    // "your N newest", never "the N you've created": the rows are capped
-    // (backend cap, or the count the user asked for), so claiming they are
-    // everything would be wrong the moment the library outgrows the cap —
-    // the reported bug's phrasing half. The asked-for count ALSO names the
-    // request back ("your last 5 PRDs"), so an honoured ask is visible.
-    const answer = counts
-      ? [
-          `You've created ${counts.today} ${counts.today === 1 ? one : many} today and ${counts.yesterday} yesterday`,
-          counts.total > counts.today + counts.yesterday
-            ? ` — ${counts.total} in total.`
-            : ".",
-          items.length ? ` The newest are below — click one to open it with its chat.` : "",
-        ].join("")
-      : items.length === 0
-        ? `You haven't created any ${many} yet — generate one from a chat or the Top Insights brief and it'll show up here.`
-        : items.length === 1
-          ? `Here's your most recent ${one} — click it to open it with its chat.`
-          : `Here are your ${items.length} newest ${many} — click one to open it with its chat.`
+  // Main's `ActionConfig.emitTurn` — the ONE surface-specific primitive the
+  // shared action layer needs from main: place a fully-formed, settled command
+  // turn into the active tab (append / rename) or a fresh tab, then persist it
+  // client+server. A project surface supplies its own `emitTurn` (engine turns +
+  // server-only persist); the action bodies never learn which.
+  const emitCommandTurn = useCallback((turn: ThreadTurn) => {
+    const seedQuery = turn.query
+    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
     const activeId = activeTabIdRef.current
     const inTab = activeId && activeId !== BRIEF_TAB_ID
       ? tabsRef.current.find((t) => t.id === activeId)
       : undefined
-    const turnId =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const reply: AskResponse = {
-      answer, sources: [], follow_ups: [], key_points: [], citations: [],
-      confidence: 1, unanswered: "",
-    } as AskResponse
-    const seedTurn: ThreadTurn = {
-      id: turnId,
-      query: seedQuery,
-      reply,
-      ...(items.length ? { artifactList: items } : {}),
-    }
-    const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
     let tabId: string
     if (inTab) {
       tabId = inTab.id
@@ -4765,442 +3634,46 @@ export function ChatScreen() {
         ? {
             ...t,
             title: t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? handle : t.title,
-            thread: [...t.thread, seedTurn],
+            thread: [...t.thread, turn],
           }
         : t))
       setDraft("")
     } else {
-      tabId = openTab(handle, [seedTurn])
+      tabId = openTab(handle, [turn])
     }
-    pushPendingConversation(turnId, seedQuery, tabId)
-    void finalizeConversationTurn(turnId, { reply }, tabId)
+    pushPendingConversation(turn.id, seedQuery, tabId)
+    if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
-  const submitAsk = useCallback(
-    async (rawQuery: string) => {
-      const trimmed = rawQuery.trim()
-      // A doc-only send (empty ask + attachment) is allowed; a truly empty send is
-      // a no-op. Hoisted above the pending-send render below (it used to sit just
-      // before the optimistic turn) so an empty send can never strand a
-      // placeholder on screen.
-      if (trimmed.length < 1 && attachments.length === 0) return
-      // Retire the previous turn's next-prompt suggestions RIGHT HERE — the one
-      // and only place, so every entry point clears identically.
-      //
-      // This used to sit ~290 lines further down, after the intent-envelope
-      // round trip and after eighteen early returns. A typed send that resolved
-      // to `answer` reached it and looked correct; a send that took ANY command
-      // branch (edit_prd / tickets / generate_prd) returned before it and left
-      // the strip standing for the whole generation. Chip clicks hit that far
-      // more often than typing does, because a suggestion is frequently phrased
-      // as exactly the kind of request the envelope routes to a command — which
-      // is why this read as "chip clicks don't clear" (staging, 2026-08-05).
-      //
-      // Keyed on activeTabId, not the not-yet-resolved targetTabId: that is what
-      // the strip renders from, and a send that spawns a NEW tab gives that tab
-      // no suggestions to clear. Synchronous and unconditional — the instant
-      // anything is sent, suggestions about the previous turn are stale, and
-      // there is no branch where keeping them is right.
-      if (activeTabId) nextPrompts.retire(activeTabId)
-      // Show the user's message NOW — before the dispatch decision, which is a
-      // network round-trip away. `settlePendingSend()` retires it at every exit
-      // below; the branch that wins renders its own real turn in the same commit.
-      // See the `pendingSend` declaration for why this isn't a ThreadTurn.
-      const askStartedAt = Date.now()
-      setPendingSend({
-        tabId: activeTabId,
-        query: trimmed,
-        attachments: attachments.map((a) => ({ name: a.name })),
-        startedAt: askStartedAt,
-      })
-      const settlePendingSend = () => setPendingSend(null)
-      // Command phrasings are COMMANDS, not questions for the ask agent —
-      // intercept before any tab/ask work. Tickets is checked FIRST: "create
-      // tickets from this PRD" matches the PRD rule too, but the user asked for
-      // tickets. With a document attached, either phrasing imports the doc as a
-      // PRD; "…tickets" additionally lands on the Tickets tab when it's ready.
-      const docFile = attachments.find((a) => a.file)?.file ?? null
-      // Deictic-edit guard: with NO attached document, an edit-phrased message
-      // that points at the OPEN artifact ("make this PRD shorter", "shorten
-      // that ticket") beside a PRD tab is a QUESTION about that artifact, not a
-      // command to spawn a new one — let it fall through to the ask agent,
-      // which is grounded on the tab's PRD (+ evidence/tickets) since #786.
-      // With an attachment, "this PRD"/"this document" names the FILE, so the
-      // import flows below still run unchanged.
-      const activeTab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
-      // The clarify gate is mid-decision on this tab (a PRD command's reply is
-      // deferred — see deferredAckRef). A send landing INSIDE that window broke
-      // two invariants at once: its user turn queued ahead of the deferred
-      // assistant write (inverting the persisted user→assistant pairing the
-      // history restore depends on), and a second PRD command would overwrite
-      // the tab's deferred-ack entry, persisting one command's reply against
-      // the other's turn. The window is a single clarify round-trip (~seconds,
-      // under a visible thinking indicator), so hold the message and hand it
-      // back rather than letting it corrupt the record.
-      if (activeTab?.prdCommandThinking) {
-        settlePendingSend()
-        setDraft(rawQuery)
-        showToast("One moment", "Still working out that PRD request — I'll take your next message in a second.")
-        return
-      }
-      // A ticket run already going on THIS tab. Not a nicety: the insight path
-      // deliberately does not dedupe (routes/stories.py), and the insight is an
-      // LLM-composed string, so "break this into tickets" and "make tickets for
-      // that" are two rows and two multi-minute bills for one request. Only the
-      // duplicate ASK is refused — the tab stays fully usable for questions
-      // while the run goes — and the message is handed back to the composer
-      // rather than dropped, exactly as the PRD guard above does. Returns true
-      // when it swallowed the send.
-      const ticketSetInFlightGuard = (): boolean => {
-        if (!activeTab?.ticketSetRunning) return false
-        settlePendingSend()
-        setDraft(rawQuery)
-        // Bring the run they already have forward instead of just refusing.
-        openContentPanel("tickets")
-        showToast(
-          "Already writing those tickets",
-          "That run is still going — it'll land in the panel on the right.",
-        )
-        return true
-      }
-      // `isPrdTab` survives the ladder's removal because the ask path below
-      // still reads it. The two deictic regexes that sat here did not: they
-      // existed only to stop the ladder's own patterns from hijacking a PRD
-      // tab, and there are no patterns left to hijack anything.
-      const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
-      // Clarify-first answers: this tab's PRD task is parked behind the
-      // sufficiency gate's questions — the message IS the answers (or a
-      // "generate now" skip), never a fresh command/ask. Checked before every
-      // other branch so an answer like "make it for enterprise admins" can't
-      // be misread as an edit or command phrasing.
-      if (activeTab?.pendingClarify && !docFile) {
-        const { task, sourceDocs, turnId } = activeTab.pendingClarify
-        const skipped = CLARIFY_SKIP_RE.test(trimmed)
-        const combined = skipped
-          ? task
-          : `${task}\n\nAdditional details from the user:\n${trimmed}`
-        // The prose path settles the batch too, so answering in the composer
-        // keeps the same formatted record the card leaves behind. There's no
-        // per-question mapping in free text, so it resolves as "chat" (or
-        // "skip" for a bare "generate now") rather than inventing one.
-        markClarifyResolved(activeTab.id, turnId, { answers: [], mode: skipped ? "skip" : "chat" })
-        const { prdApi } = await import("../../../lib/api")
-        runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
-        settlePendingSend()
-        return
-      }
-      // ── The planner decides. Nothing in this file guesses. ───────────────
-      // EVERY message goes to the backend first (POST /v1/chat/intent, now
-      // backed by the Ask Planner) and the verdict decides which flow runs.
-      // This browser used to decide for itself, with a ladder of regexes over
-      // the newest message — `isPrdCommand`, `isTicketsCommand`,
-      // `isPrdEditCommand`, `mentionsPrd` plus a haiku classifier behind it.
-      // That ladder is gone, and its removal is the point: a regex deciding to
-      // GENERATE A PRD means an oddly-phrased question spends minutes and real
-      // money building a document nobody asked for, and no amount of tuning the
-      // pattern fixes the class of bug. The planner reads the whole message and
-      // the whole thread, so it does not have that failure mode.
-      //
-      // FAILURE MODE ON PURPOSE: if the call fails, this falls through to the
-      // grounded ask path — the question gets ANSWERED. It does not fall back
-      // to guessing. The worst case is that a genuine "write me a PRD" is
-      // answered as a question and the user asks again; the alternative is
-      // exactly the accidental generation this removal exists to stop.
-      //
-      // A "/skill …" message is EXPLICIT intent with its own backend fast-path
-      // (qa_agent's slash route) — the user named the skill, so there is
-      // nothing to infer and no call to spend.
-      // Attachment text, read ONCE and read EARLY — before the planner is asked
-      // to decide, because the decision depends on it.
-      //
-      // This used to run after the intent call, and the planner therefore judged
-      // "generate a PRD" with a deck attached as a request with no subject: it
-      // returned generate_prd at 0.5 confidence, the action floor (0.6) downgraded
-      // it to `answer`, and the user got prose instead of a document. The ask
-      // worker then planned the SAME turn again a few seconds later, this time
-      // with the extracted text in the question, and scored it 0.97 — the right
-      // answer, arriving after the client had already committed to the wrong one.
-      //
-      // Extracting first costs no extra wall-clock: this work was always on the
-      // critical path, just later in it. Best-effort by design — a failure here
-      // yields null and the message goes to the planner bare, exactly as before;
-      // the real extraction below keeps its own rollback/toast handling and is
-      // still the thing that decides whether the send can proceed.
-      let earlyExtracted: (string | null)[] | null = null
-      if (attachments.length > 0) {
-        earlyExtracted = await Promise.all(
-          attachments.map((a) =>
-            a.content
-              ? Promise.resolve<string | null>(a.content)
-              : a.file
-              ? askApi
-                  .extractFile(a.file)
-                  .then((r) => r.markdown.slice(0, 50000))
-                  .catch(() => null)
-              : Promise.resolve<string | null>(a.content ?? null),
-          ),
-        )
-      }
-
-      if (!trimmed.startsWith("/")) {
-        const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
-        // The planner sees what the answer path will see. Same `[Attached files]`
-        // framing and the same 100k clamp the send below uses, so the question
-        // the plan was made for and the question that gets executed match — which
-        // is also what lets the worker reuse this plan instead of buying another.
-        const attachedForIntent = earlyExtracted?.some((t) => t)
-          ? attachments
-              .map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`)
-              .join("\n\n")
-              .slice(0, 100000)
-          : null
-        const intentMessage = attachedForIntent
-          ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}`
-          : trimmed
-        const envelope = await import("../../../lib/api")
-          .then(({ chatIntentApi }) =>
-            chatIntentApi.resolve(intentMessage, {
-              conversationId: activeTab?.dbConvId ?? null,
-              prdId: tabPrdId,
-              hasAttachments: attachments.length > 0,
-            }),
-          )
-          .catch(() => null)
-        if (envelope) {
-          // THE QUIET FAILURE, and the more dangerous of the two. The endpoint
-          // fails open to `answer` when the model is unreachable — correct, a
-          // dead planner must never break a send — but with it down NO action
-          // can be recognised, so every command in the product silently turns
-          // into a chat reply. The message still gets answered, so nothing
-          // looks broken; asking for things simply stops working, and the only
-          // evidence is a line in a container log. Say it out loud instead.
-          const intentNotice = providerNoticeFromEnvelope(envelope)
-          if (intentNotice) {
-            showToast(
-              providerNoticeTitle(intentNotice),
-              `${intentNotice.message} Until then, commands like "write a PRD" or "share this on Slack" will be answered as ordinary questions.`,
-              undefined,
-              { persist: true },
-            )
-          }
-          // The intent→executor SWITCH itself is lifted into the shared
-          // `dispatchChatIntent` primitive — the private project chat reuses
-          // the SAME switch. ChatScreen supplies today's inline flows as
-          // executors, byte-identical to the ladder they replace; the doc/tab
-          // guards that decide WHICH flow to run stay HERE (ChatScreen-local
-          // UI state dispatchChatIntent knows nothing about), not inside the
-          // shared primitive.
-          const targetPrdId =
-            !docFile && activeTab ? (envelope.prd_id ?? tabPrdId) : null
-          // change_tickets_template's own target: the thread's standalone set
-          // outranks the tab PRD's tickets, because a thread that generated a
-          // set has that set on screen — its tickets are what "the tickets"
-          // means here. Resolved HERE (ChatScreen-local tab state), passed
-          // through the primitive's ctx.
-          const ticketsTarget =
-            !docFile && activeTab
-              ? activeTab.ticketSetId != null
-                ? { ticketSetId: activeTab.ticketSetId } as const
-                : targetPrdId != null ? { prdId: targetPrdId } as const : null
-              : null
-          const result = dispatchChatIntent(
-            envelope,
-            {
-              hasEditTarget: targetPrdId != null,
-              editTargetPrdId: targetPrdId,
-              ticketsTarget,
-            },
-            // The intent→executor WIRING is the shared
-            // `useChatIntentExecutors` half; ChatScreen injects today's exact
-            // flow bodies + tab guards as the adapter, so dispatch behaviour is
-            // byte-identical to the inline object it replaces.
-            useChatIntentExecutors({
-              onGenerateTickets: (env) => {
-                if (docFile) {
-                  setAttachments([])
-                  importPrdCommandFlow(docFile, {
-                    openTickets: true, seedQuery: trimmed,
-                    artifactTemplateId: env.artifact_template_id,
-                  })
-                  settlePendingSend()
-                  return
-                }
-                if (activeTab?.prd) {
-                  setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                  openContentPanel("tickets")
-                  settlePendingSend()
-                  return
-                }
-                // No PRD on this tab → a STANDALONE ticket set. The runner owns
-                // the scope patch, the generating flag and the panel open; this
-                // branch only decides that a set is what the user asked for.
-                if (ticketSetInFlightGuard()) return
-                ticketSetCommandFlow(
-                  trimmed, env.task?.trim() || trimmed, env.artifact_template_id,
-                )
-                settlePendingSend()
-              },
-              onEditPrd: (instruction, prdId) => {
-                void prdChatEditFlow(instruction, activeTab!.id, prdId!)
-                settlePendingSend()
-              },
-              onOpenArtifact: (open) => {
-                // OPEN, never generate. The two verbs are told apart in exactly
-                // one place (backend app/chat_intent.py's OPEN-vs-GENERATE
-                // rule) and this is the whole of the client's half: it can open
-                // a document, ask which one, or say there isn't one — it has no
-                // path into any generation flow, so a misfire here can never
-                // cost the user an unwanted PRD.
-                openArtifactFlow(trimmed, open)
-                settlePendingSend()
-              },
-              onGeneratePrd: (env) => {
-                if (docFile) {
-                  setAttachments([])
-                  importPrdCommandFlow(docFile, {
-                    openTickets: false, seedQuery: trimmed,
-                    artifactTemplateId: env.artifact_template_id,
-                  })
-                  settlePendingSend()
-                  return
-                }
-                prdCommandFlow(trimmed, env.task, env.artifact_template_id)
-                settlePendingSend()
-              },
-              onChangeTemplate: (env, prdId) => {
-                // The in-place format switch. dispatchChatIntent's own guard
-                // (ctx.hasEditTarget && env.artifact_template_id) already
-                // ensures prdId is non-null and a format id is present before
-                // this executor ever runs.
-                void prdChangeTemplateFlow(
-                  trimmed, activeTab!.id, prdId!,
-                  env.artifact_template_id!, env.artifact_template_name,
-                )
-                settlePendingSend()
-              },
-              onChangeTicketsTemplate: (env, target) => {
-                // The tickets' in-place format switch. The primitive's guard
-                // (ctx.ticketsTarget && env.artifact_template_id) already
-                // ensures both are present before this executor runs; the
-                // set-over-PRD preference was resolved into `ticketsTarget`
-                // above.
-                void ticketsChangeTemplateFlow(
-                  trimmed, activeTab!.id, target,
-                  env.artifact_template_id!, env.artifact_template_name,
-                )
-                settlePendingSend()
-              },
-              onListArtifacts: (env) => {
-                // "What are my PRDs?" — the rows rode the envelope; render
-                // them as clickable cards (empty included: "none yet" is the
-                // listing's own honest answer, not a fall-through).
-                listArtifactsFlow(trimmed, env)
-                settlePendingSend()
-              },
-              onCreateArtifact: (env) => {
-                // "Draft a leadership update on the Q3 reliability work" —
-                // write a team document and open it in THIS chat's right panel.
-                //
-                // SEEDS A REAL TURN, like every other command flow here. The
-                // first cut just fired the request and returned: the composer
-                // cleared, the optimistic bubble vanished, and the thread
-                // showed nothing — no question, no acknowledgement, nothing
-                // persisted. From the user's side that is indistinguishable
-                // from the message being swallowed, which is the very
-                // complaint this flow exists to fix.
-                documentCommandFlow(trimmed, env)
-                settlePendingSend()
-              },
-              onShareToSlack: (env) => {
-                // "Share this PRD on my slack channel and ask the team for
-                // feedback." PREVIEWS ONLY — the flow resolves the document
-                // and the channel and puts the message on screen; the post
-                // waits for the user's confirmation in the card.
-                void shareToSlackFlow(trimmed, activeTab!.id, env)
-                settlePendingSend()
-              },
-              onAssignTickets: (instruction, prdId) => {
-                // Change who OWNS tickets. dispatchChatIntent's own guard
-                // (ctx.hasEditTarget && envelope.instruction) already ensures
-                // prdId is non-null and an instruction is present before this
-                // executor ever runs.
-                void assignTicketsFlow(trimmed, activeTab!.id, prdId!, instruction)
-                settlePendingSend()
-              },
-              // No resolvable edit/format/assign target/instruction, no open
-              // lookup, or answer/low-confidence/unknown/generate_prototype →
-              // nothing to do here; ChatScreen's own grounded-ask code below
-              // already runs unconditionally whenever `result.handled` is
-              // false.
-              onAnswer: () => {},
-            }),
-          )
-          if (result.handled) return
-        }
-      }
-      // Attached file content is folded into the ask as context. Text
-      // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
-      // are parsed to markdown server-side (POST /v1/ask/extract-file) so a deck
-      // attached to a plain question reaches the agent too — they used to be
-      // silently dropped here, which read as "no document was attached" replies.
-      // `displayQuery` is what the thread shows (the user's ask, plus a chip per
-      // attachment — never the raw document dump). `sendQuery` is what the ask
-      // agent receives: the same text with the parsed attachment content folded
-      // in. Keeping them separate means the backend is unaffected while the UI
-      // stays clean, the way Claude's chat renders it.
-      const displayQuery = trimmed
-      // (The empty-send no-op is checked at the top of this function, before the
-      // pending-send placeholder is rendered.)
-      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
-      // before doing any work. (Authoritative per-tab guard happens once
-      // targetTabId is resolved below — needed for the no-active-tab case where
-      // openTab creates the target.)
-      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
-        settlePendingSend()
-        return
-      }
-      const id =
-        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      // Capture the target tab ID up-front so async callbacks always write to
-      // the right tab, even if the user switches tabs while the request is in-flight.
-      let targetTabId: string
-      const hasAttachments = attachments.length > 0
-      // OPTIMISTIC RENDER FIRST (the reported latency bug): the thread turn — the
-      // user's message + a chip per attachment — must appear on THIS commit,
-      // BEFORE the extractFile network call, so the composer never clears into a
-      // void. The chips render from NAMES here; each attachment's extracted
-      // content is folded onto the turn AFTER extraction resolves (below). The
-      // folded-in document text still rides `sendQuery` to the backend, never the
-      // thread bubble.
-      const newTurn: ThreadTurn = {
-        id,
-        query: displayQuery,
-        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
-      }
-      // The tab title/handle falls back to the first attachment's name when the
-      // ask itself is empty, so a doc-only send still reads sensibly in the tab.
-      // Built on the WORDS, never the quoted excerpt: the tab bar is the most
-      // visible label this message ever gets, and titling it with the passage
-      // someone highlighted names the wrong thing entirely.
-      const handle =
-        splitQuotedSuffix(displayQuery).body || displayQuery || attachments[0]?.name || "New chat"
-      // Remember where we started so an extraction failure can roll the optimistic
-      // turn back cleanly: remove a freshly-spawned tab (restoring the prior
-      // surface) or drop just this turn + undo a New-chat rename on an existing one.
+  // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
+  // Tab spawn/route is a WRAPPER concern: no active tab (or the synthetic brief
+  // tab) spawns a FRESH chat tab seeded with the turn; otherwise the turn appends
+  // to — and, on a placeholder "New chat", renames — the active tab. Returns the
+  // resolved target plus the rollback anchors an extraction failure needs. The
+  // single-conversation run in the engine is surface-agnostic and never spawns
+  // tabs; it calls this seam.
+  const resolveSendTarget = useCallback(
+    (
+      newTurn: ThreadTurn,
+      handle: string,
+    ): {
+      targetTabId: string
+      spawnedNewTab: boolean
+      prevActiveTabId: string | null
+      prevTitle: string | null
+    } => {
       const prevActiveTabId = activeTabId
       const spawnedNewTab = !activeTabId || activeTabId === BRIEF_TAB_ID
       const prevTitle = spawnedNewTab
         ? null
         : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
-      // No active tab, OR the active "tab" is the synthetic, thread-less brief
-      // tab → spawn a FRESH chat tab seeded with the query. A chat started from
-      // the Top Insights brief must never thread inline into it (the brief tab carries
-      // no `tabs` entry, so appending would silently no-op anyway).
+      let targetTabId: string
       if (spawnedNewTab) {
         const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         targetTabId = openTab(title, [newTurn])
       } else {
-        targetTabId = activeTabId
+        // spawnedNewTab === false guarantees a non-empty activeTabId.
+        targetTabId = activeTabId!
         const newTitle = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         setTabs((prev) => prev.map((t) => {
           if (t.id !== targetTabId) return t
@@ -5210,365 +3683,114 @@ export function ChatScreen() {
           return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
-      // The real turn is now on the tab, so the placeholder has been handed off.
-      // Same tick as the openTab/setTabs above → React batches both into ONE
-      // commit, so the swap from placeholder to turn never flickers.
-      settlePendingSend()
-      // Hand the placeholder's clock over with it, so the wait ladder measures
-      // one continuous wait rather than resetting to rung 0 at the handoff.
-      askStartRef.current.set(id, askStartedAt)
-      // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
-      // the new one is never treated as pre-stopped.
-      stoppedTabsRef.current.delete(targetTabId)
-
-      // Now — AFTER the turn is on screen — parse the attachments. Mark the tab
-      // busy FIRST so the just-rendered turn shows the thinking skeleton (not the
-      // terminal "no response" fallback, which needs live busy state) while the
-      // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
-      // eventual clear on the ask's completion.
-      let sendQuery = displayQuery
-      // Extracted attachment texts + the ORIGINAL file's storage key, persisted
-      // with the turn (survives reload; text read back by conversationPrdDocs for
-      // a later "generate a PRD"; key lets the chip render/download the real file).
-      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
-      if (hasAttachments) {
-        setBusyTabs((prev) => addToSet(prev, targetTabId))
-        const pending = attachments
-        let ctx: string
-        try {
-          // Per attachment, in parallel: (1) extract its text ONCE — plain-text
-          // inlines its content, documents (.pdf/.pptx/.docx/.doc) are parsed to
-          // markdown server-side; (2) upload the ORIGINAL file to storage so the
-          // chip can render/download the real document after a reload. The upload
-          // is best-effort (a failure leaves the text-only chip, never blocks the
-          // send). Order is preserved via the resolved array.
-          // The per-attachment extract (client-text | early-extracted | server
-          // markdown) + best-effort upload → `AttachmentRef[]` is defined ONCE in
-          // `resolveAttachmentRefs` (shared with the project composers via
-          // `buildSendCommand`). `earlyExtracted` (done above so the planner could
-          // see the text) is passed through so a document is never parsed twice.
-          const extracted = await resolveAttachmentRefs(pending, { preExtracted: earlyExtracted })
-          // Clamp the TOTAL context so question + attachments stay under the
-          // ask endpoint's 120k question cap even with several attachments.
-          ctx = extracted
-            .map((e) => `--- ${e.name} ---\n${e.content}`)
-            .join("\n\n")
-            .slice(0, 100000)
-          // Backfill the extracted content + stored file key onto the optimistic
-          // turn so its card opens a viewer / downloads the original.
-          const withContent = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
-          persistedAttachments = withContent
-          setTabs((prev) => prev.map((t) => t.id === targetTabId
-            ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
-            : t))
-          sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
-          setAttachments([]) // clear after successful extraction only
-        } catch (e) {
-          // Extraction failed: roll the optimistic turn back so no ghost
-          // "thinking" bubble is stranded, but KEEP the attachments so the user
-          // can retry or remove the bad one — a silent drop is exactly the failure
-          // mode this path exists to fix.
-          setBusyTabs((prev) => removeFromSet(prev, targetTabId))
-          if (spawnedNewTab) {
-            // This tab existed only for the failed send — remove it and restore
-            // the prior surface rather than leaving an empty stray tab behind.
-            setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
-            setActiveTabId(prevActiveTabId)
-          } else {
-            // Appended to an existing tab — drop just this turn and undo any
-            // New-chat rename so the tab looks exactly as it did before the send.
-            setTabs((prev) => prev.map((t) => t.id === targetTabId
-              ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
-              : t))
-          }
-          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-          return
-        }
-      }
-      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
-      setActiveConv(0)
-      // (Suggestions were cleared at the top of this function, before any await
-      // or early return — deliberately NOT here. See the note there.)
-      // The conversation id resolved inside `ask` below, captured so the
-      // post-answer suggestion fetch can reuse it without a second lookup.
-      let askConvId: number | null = null
-      // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
-      // It returns false (running nothing) if this tab already has an ask in
-      // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
-      // and routes the reply/error to the captured targetTabId. The guard, busy
-      // toggling, and cleanup (even if the tab is closed mid-flight) all live in
-      // the helper so the concurrency contract is unit-tested in one place.
-      await runTabAsk({
-        targetTabId,
-        asking: askingTabsRef.current,
-        setBusy: setBusyTabs,
-        // Fire-and-forget + poll: POST returns an ask_id, the answer keeps
-        // generating server-side, and the active ask_id is persisted per tab
-        // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
-        // resume effect instead of re-asking.
-        ask: async () => {
-          // The conversation id this ask belongs to. On a FOLLOW-UP the tab
-          // already carries it and this resolves without a round trip; on the
-          // tab's FIRST message the row is still being created —
-          // pushPendingConversation fires the create and deliberately does not
-          // await it — so reading `dbConvId` synchronously here would yield
-          // null. That is how a first-message HTML report got captured with
-          // conversation_id NULL and the Reports panel then said "No reports in
-          // this chat" (staging P1, 2026-07-30): the id is fixed at REQUEST
-          // time and nothing backfills it afterwards.
-          //
-          // `ensureConversation` shares the very same in-flight create the turn
-          // persistence uses (create-once per tab), so awaiting it costs at most
-          // the remainder of one already-issued request and never mints a second
-          // conversation. It resolves null on failure, so a create that fails
-          // still lets the ask through — exactly the previous behaviour.
-          const convId =
-            tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ??
-            (await persistence.ensureConversation(targetTabId, {
-              turnId: id,
-              // Titled on the words, not the quoted excerpt — same rule as
-              // `pushPendingConversation`.
-              ...(() => {
-                const t = splitQuotedSuffix(displayQuery).body || displayQuery
-                return { title: t.length > 52 ? `${t.slice(0, 49)}…` : t }
-              })(),
-              query: displayQuery,
-            }))
-          askConvId = convId ?? null
-          // Resolved AFTER the await — tabsRef, not the closure — so a
-          // conversation created (or a PRD that finished generating) AFTER the
-          // tab opened is still picked up. `sendQuery` carries any attached-
-          // document content; `isStopped` lets the user stop the ask.
-          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
-          return runAskGeneration(sendQuery, activeCompany, targetTabId, {
-            isCancelled: () => !mountedRef.current,
-            isStopped: () => stoppedTabsRef.current.has(targetTabId),
-            // Live token stream: the accumulating answer markdown renders in
-            // place of the thinking skeleton as the model writes it. Display
-            // only — onResult's authoritative reply replaces it.
-            onPartial: (text) => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped
-                      // A delta arriving after a drop means the preview came
-                      // back — clear the note rather than leave it contradicting
-                      // text that is visibly moving again.
-                      ? { ...turn, partial: text, streamDropped: false }
-                      : turn),
-                }
-              ))
-            },
-            // The live preview died mid-answer while the poll carries on. Purely
-            // a display downgrade ("Finishing the answer" + a note) — the poll
-            // is still authoritative and a stream failure is never an error.
-            onStreamDrop: () => {
-              setTabs((prev) => prev.map((t) =>
-                t.id !== targetTabId ? t : {
-                  ...t, thread: t.thread.map((turn) =>
-                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn),
-                }
-              ))
-            },
-            // Replay this tab's conversation so the model sees the prior turns
-            // (history) on EVERY follow-up, not just PRD-tab chats — the backend
-            // loads history by conversation_id, so without this each ask is
-            // context-free and a follow-up like "get all in to-do status" loses
-            // the thread it was answering. It is ALSO what attaches a captured
-            // HTML report to this chat room (app/report_capture.py).
-            ...(convId != null ? { conversation_id: convId } : {}),
-            // PRD-tab chat: also send the PRD id so the answer is grounded on the
-            // open PRD + its insight/evidence/tickets/prototype.
-            ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
-            // Standalone-artifact grounding: ONE primary artifact per tab,
-            // PRD first (its context already carries evidence + tickets),
-            // then an open evidence report, then a standalone ticket set.
-            ...(targetTab?.prdId == null && targetTab?.evidenceId != null
-              ? { evidence_id: targetTab.evidenceId }
-              : {}),
-            ...(targetTab?.prdId == null && targetTab?.evidenceId == null
-              && targetTab?.ticketSetId != null
-              ? { ticket_set_id: targetTab.ticketSetId }
-              : {}),
-          })
-        },
-        onResult: (tabId, res) => {
-          // If the answer already streamed in live, replaying the simulated
-          // typewriter over the (identical) final text would type the whole
-          // reply out twice — mark it as already animated.
-          const streamedTurn = tabsRef.current
-            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
-          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
-          askStartRef.current.delete(id)
-          resumedTurnsRef.current.delete(id)
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
-                : turn)
-            }
-          ))
-          const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
-          // Suggestions are fetched HERE — after the answer is on screen — and
-          // deliberately not awaited by the turn: it is already complete, so a
-          // slow or failed request degrades to the ordinary empty state. Only
-          // the error path is handled, because there is nothing to report; a
-          // rejection and an empty list mean the same thing to the user.
-          //
-          // It DOES wait on `persisted`, though. The backend reads the thread
-          // from the database, so firing before this turn's assistant row lands
-          // would ask "what comes next?" about a conversation missing the very
-          // exchange it should continue — and on a first message the thread
-          // would look empty and abstain every time.
-          //
-          // The whole block is wrapped: `onResult` runs inside runTabAsk, which
-          // turns anything thrown here into the TURN's error path — so a
-          // synchronous fault in this optional extra would surface as "Ask
-          // failed" over an answer that actually succeeded. Nothing about a
-          // suggestion strip is worth that, and it costs one try/catch to make
-          // it structurally impossible.
-          if (askConvId != null) {
-            const convId = askConvId
-            const prdId = tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null
-            // Fetch-after-settle via the shared hook: waits on `persisted`,
-            // fetches through the main adapter, and publishes only if the
-            // late-arrival guard still holds (screen mounted, tab still open,
-            // no newer send in flight — else these chips belong to a superseded
-            // turn). Every fault degrades to the empty state.
-            nextPrompts.onSettled(tabId, convId, {
-              prdId,
-              ready: persisted,
-              shouldApply: () =>
-                mountedRef.current &&
-                tabsRef.current.some((t) => t.id === tabId) &&
-                !askingTabsRef.current.has(tabId),
-            })
-          }
-        },
-        onError: (tabId, e) => {
-          // Poll cancelled because the user left the chat screen mid-flight: the
-          // ask_id is still persisted, so the mount-time resume effect will
-          // re-attach and populate on return. Not a failure — no error UI/toast.
-          if (e instanceof AskCancelledError) return
-          // User hit Stop: the stopped turn is already rendered by handleStopAsk.
-          // Not a failure — no error bubble/toast.
-          if (e instanceof AskStoppedError) return
-          askStartRef.current.delete(id)
-          resumedTurnsRef.current.delete(id)
-          // The 12-minute client budget expired while the job was still
-          // generating. The ask_id is deliberately still persisted, so this is
-          // NOT a failure: the turn says the answer is still running and a
-          // reload will pick it up, which the resume effect then does.
-          if (e instanceof AskTimeoutError) {
-            setTabs((prev) => prev.map((t) =>
-              t.id !== tabId ? t : {
-                ...t, thread: t.thread.map((turn) => turn.id === id
-                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
-                  : turn),
-              }
-            ))
-            return
-          }
-          // THE AI PROVIDER REFUSED THE REQUEST — say so, loudly. The error
-          // bubble carries the sentence too, but a bubble in one tab's thread
-          // is easy to scroll past, and this is a whole-account condition:
-          // every other tab and every other surface is failing the same way
-          // for the same reason. Observed 2026-08-16 with an exhausted
-          // Anthropic balance — the product degraded correctly everywhere and
-          // announced it nowhere.
-          //
-          // `persist` so it does NOT auto-dismiss: an out-of-credits account
-          // needs an admin to act, and a toast that vanishes in four seconds
-          // is indistinguishable from never having been shown.
-          const providerNotice =
-            e && typeof e === "object" && "providerNotice" in e
-              ? (e as { providerNotice?: ProviderNotice }).providerNotice
-              : undefined
-          if (providerNotice) {
-            showToast(
-              providerNoticeTitle(providerNotice),
-              providerNotice.message,
-              undefined,
-              { persist: true },
-            )
-          }
-          const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
-            ? (e.body as { detail: unknown }).detail
-            : null
-          const detailStr =
-            typeof detail === "string"
-              ? detail
-              : Array.isArray(detail)
-                ? detail
-                  .map((x) => (typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x)))
-                  .join(" · ")
-                : null
-          const msg =
-            e instanceof ApiError
-              ? detailStr || e.message
-              : e instanceof Error
-                ? e.message
-                : "Something went wrong"
-          setTabs((prev) => prev.map((t) =>
-            t.id !== tabId ? t : {
-              // Drop any streamed partial too: a half-answer above an error
-              // bubble would read as the reply having (partly) succeeded.
-              ...t, thread: t.thread.map((turn) => turn.id === id
-                ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
-                : turn)
-            }
-          ))
-          // `msg` is kept on the turn and in the persisted conversation row as
-          // the RECORD of what failed. It is not what the user reads: the failed
-          // turn renders fixed copy, and so does this toast. A backend detail
-          // string means nothing to the person who asked the question, and the
-          // 404 the tenant gate raises must not tell a foreign tenant that the
-          // row it asked for exists somewhere.
-          finalizeConversationTurn(id, { error: msg }, tabId)
-          showToast("Ask failed", WAIT_FAILED_TITLE)
-        },
-      })
+      return { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle }
     },
-    [activeCompany, activeTabId, attachments, assignTicketsFlow, nextPrompts.retire, nextPrompts.onSettled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openArtifactFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast, ticketsChangeTemplateFlow, listArtifactsFlow],
+    [activeTabId, openTab],
   )
 
-  // ── Stop an in-flight ask ─────────────────────────────────────────────────
-  // The composer's Send button becomes a Stop button while the active tab's ask
-  // is generating. Stopping is deliberate (unlike a background unmount): it
-  // reclaims the composer AT ONCE, marks the in-flight turn `stopped`, and asks
-  // the backend to cancel so the worker aborts before its next LLM step and any
-  // late answer is discarded server-side.
-  const handleStopAsk = useCallback(() => {
-    const tabId = activeTabId
-    if (!tabId) return
-    // 1) Signal the running poller to bail — it clears the persisted ask_id (so a
-    //    remount won't resume) and rejects with AskStoppedError, which onError
-    //    swallows. Checked on the poll's next tick.
-    stoppedTabsRef.current.add(tabId)
-    // 2) Best-effort backend cancel: the worker polls the job status between LLM
-    //    steps and aborts before the expensive answer call when it lands early.
-    const pending = getPendingAsk(activeCompany, tabId)
-    if (pending) {
-      const askId = Number(pending.id)
-      if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
-    }
-    // 3) Reclaim the composer immediately rather than waiting for the poll's next
-    //    tick (runTabAsk's finally also clears these — the double-clear is safe).
-    askingTabsRef.current.delete(tabId)
-    setBusyTabs((prev) => removeFromSet(prev, tabId))
-    // 4) Replace the in-flight turn's thinking skeleton with a muted stopped note.
-    //    The in-flight turn is the last one still awaiting a reply.
-    setTabs((prev) => prev.map((t) => {
-      if (t.id !== tabId) return t
-      let idx = -1
-      for (let i = t.thread.length - 1; i >= 0; i--) {
-        const turn = t.thread[i]
-        if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
+  // ── The prd-thinking guard + clarify-first intercept (wrapper seam) ────────
+  // A send landing INSIDE a deferred PRD-ack window (a PRD command's reply is
+  // deferred — see deferredAckRef) or a parked sufficiency gate is intercepted
+  // before intent classification: the first would invert the persisted
+  // user→assistant pairing the history restore depends on; the second must be
+  // read as the gate's ANSWERS, never a fresh command. Injected into the engine's
+  // submit; folds into the engine when the clarify machinery does. Returns true
+  // when it handled (and settled) the send.
+  const interceptBeforeIntent = useCallback(
+    async ({ rawQuery, trimmed, docFile, activeTab, settlePendingSend }: {
+      rawQuery: string
+      trimmed: string
+      docFile: File | null
+      activeTab: ChatTab | undefined
+      settlePendingSend: () => void
+    }): Promise<boolean> => {
+      if (activeTab?.prdCommandThinking) {
+        settlePendingSend()
+        setDraft(rawQuery)
+        showToast("One moment", "Still working out that PRD request — I'll take your next message in a second.")
+        return true
       }
-      if (idx === -1) return t
-      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined } : turn) }
-    }))
-  }, [activeTabId, activeCompany, setBusyTabs])
+      // Clarify-first answers: the tab's PRD task is parked behind the sufficiency
+      // gate — the message IS the answers (or a "generate now" skip). Resolves as
+      // "chat" (or "skip" for a bare "generate now") since free text has no
+      // per-question mapping, and settles the batch so the record matches the card.
+      if (activeTab?.pendingClarify && !docFile) {
+        const { task, sourceDocs, turnId } = activeTab.pendingClarify
+        const skipped = CLARIFY_SKIP_RE.test(trimmed)
+        const combined = skipped
+          ? task
+          : `${task}\n\nAdditional details from the user:\n${trimmed}`
+        markClarifyResolved(activeTab.id, turnId, { answers: [], mode: skipped ? "skip" : "chat" })
+        const { prdApi } = await import("../../../lib/api")
+        runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
+        settlePendingSend()
+        return true
+      }
+      return false
+    },
+    [setDraft, showToast, markClarifyResolved, runClarifiedGeneration],
+  )
+
+  // ── The per-conversation store seam ───────────────────────────────────────
+  // The single-conversation engine, extracted into the shared `useConversation`.
+  // Main injects its exact tab machinery + the grounding seam + the generation +
+  // submit leaf seams, so the run, the artifact-generation flows, and the send
+  // pipeline stay byte-unchanged; the engine builds `makeHandle` /
+  // `resolveAskParams` / `getPrdId` internally, owns the ask-core +
+  // `useConversationGeneration` + `submitAsk`, and returns the run/stop/
+  // action-turn functions, the generation flows, and `submitAsk`. composer /
+  // clarify fold in next.
+  const {
+    runConversationAsk, handleStopAsk, runActionTurnInTab, submitAsk,
+    handleComposerSubmit, handleComposerKeyDown,
+    listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
+    openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
+  } = useConversation({
+      tabsRef,
+      activeTabId,
+      activeTabIdRef,
+      setTabs,
+      setBusyTabs,
+      askingTabsRef,
+      stoppedTabsRef,
+      activeCompany,
+      persistence,
+      mountedRef,
+      animatedTurnIds,
+      askStartRef,
+      resumedTurnsRef,
+      pushPendingConversation,
+      setActiveConv,
+      finalizeConversationTurn,
+      emitCommandTurn,
+      seedGenerationTurn,
+      threadContextFor,
+      openArtifactInPanel,
+      postOpenArtifactReply,
+      markTicketSetAutoOpened: (key) => { ticketSetAutoOpenedRef.current.add(key) },
+      postSummary: (key, kind, artifactId) => { postSummaryRef.current?.(key, kind, artifactId) },
+      setContent,
+      openContentPanel,
+      content,
+      composer,
+      busy,
+      viewerAttachmentOpen: Boolean(viewerAttachment),
+      setActiveTabId,
+      resolveSendTarget,
+      interceptBeforeIntent,
+      importPrdCommandFlow,
+      prdCommandFlow,
+      applyPrdArtifactInTab,
+      shareRefFor,
+      nextPrompts,
+      showToast,
+      // Highlight-to-reply: the parked quote rides the next composer send as a
+      // trailing blockquote. Host state (main renders its own composer); the
+      // engine's submit appends it and calls onQuoteConsumed to clear it.
+      quote,
+      onQuoteConsumed: () => setQuote(null),
+    })
+
 
   // "Ask again" on a stopped / timed-out / failed turn — the surface used to be
   // a dead end at all three.
@@ -5579,32 +3801,19 @@ export function ChatScreen() {
   // its text back to the composer instead, which is also what the failure copy
   // ("try it with fewer files attached") tells the reader to do.
   const handleAskAgain = useCallback((turn: ThreadTurn) => {
-    const q = turn.query.trim()
-    if (!q) return
-    if (turn.attachments?.length) {
-      // Hand the WORDS back to the composer and the excerpt back to the quote
-      // chip, as two things — not the raw "> …" wire form. The composer is an
-      // editor; putting blockquote markers in it makes the user responsible for
-      // preserving syntax they never typed (the same mistake the pinned-skill
-      // chip fixed for slash triggers).
-      const { body, quote: repliedTo } = splitQuotedSuffix(turn.query)
-      setDraft(body)
-      setQuote(repliedTo)
-      composerRef.current?.focus()
-      return
-    }
-    void submitAsk(q)
+    askAgain(turn, { submit: submitAsk, setDraft, composerRef })
   }, [submitAsk])
 
   // ── Highlight-to-reply ────────────────────────────────────────────────────
   // A passage the reader selected in an answer, handed up by the shell's
-  // selection toolbar. It parks above the input and rides the next message as
-  // a trailing blockquote (`buildQuotedMessage`) — quoting is a way to point at
-  // a sentence, not a second send button, so nothing is dispatched here.
+  // selection toolbar. It parks above the input and rides the next message as a
+  // trailing blockquote (appended in the engine's handleComposerSubmit via the
+  // `quote` seam) — quoting is a way to point at a sentence, not a second send
+  // button, so nothing is dispatched here.
   const handleQuoteSelection = useCallback((text: string) => {
     setQuote(text)
     composerRef.current?.focus()
-  }, [])
+  }, [composerRef])
 
   // ── Copy a past prompt ────────────────────────────────────────────────────
   // The WORDS, not the wire form: a message that quoted a passage stores it as
@@ -5656,7 +3865,7 @@ export function ChatScreen() {
     }))
     void persistence.rewindToUserTurn(tabId, turn.id, turn.dbTurnId)
     void submitAsk(nextQuery)
-  }, [activeTabId, persistence, submitAsk])
+  }, [activeTabId, persistence, submitAsk, setTabs])
 
   const handleRetryTurn = useCallback((turn: ThreadTurn) => {
     // Verbatim — including the quoted passage, which is part of the question
@@ -6032,65 +4241,39 @@ export function ChatScreen() {
 
   // ── A thread that produced a DOCUMENT opens on it ──────────────────────────
   // The same requirement as the ticket-set probe directly above, for the one
-  // artifact that never had it. A chat-written document was reachable ONLY
-  // while the panel stayed open: `useThreadDocumentSync` (AppShell) re-attaches
-  // the pointer after a reload, but nothing opens the panel, and a document
-  // turn has no reply-footer button the way a ticket set does. So the ack said
-  // "it will open in the panel on the right", you reloaded, and the only route
-  // back to your leadership update was the Artifacts library.
-  //
-  // Deliberately the same shape as its sibling, including what it refuses to
-  // do: claim the tab BEFORE the fetch (this effect re-runs on unchanged-but-
-  // new deps, and an unclaimed probe would re-issue the request forever), never
-  // open over a tab the user has moved to, never fight a panel that is already
-  // open, and never auto-open a FAILED document — reopening a chat should not
-  // greet you with an error state you already dismissed. A failed document
-  // still shows in the library, which is where #1184 made it visible.
-  //
-  // `generating` DOES open, because that is the live state the panel exists to
-  // show: the tab polls the row to a terminal state on its own.
-  useEffect(() => {
-    if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return
-    if (documentAutoOpenedRef.current.has(activeTabId)) return
-    const tabId = activeTabId
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    if (!tab || tab.dbConvId == null) return
-    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
-    const convId = tab.dbConvId
-    documentAutoOpenedRef.current.add(tabId)
-    void (async () => {
-      try {
-        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
-        if (!docs.length) return
-        const newest = docs[0]
-        if (activeTabIdRef.current !== tabId) return
-        if (newest.status === "failed") return
-        if (contentPanelTabRef.current) return
-        // A GENERATION STARTED WHILE THIS WAS IN FLIGHT MUST WIN. This is a
-        // list read of the thread; `documentCommandFlow` writes the id of the
-        // document the user just asked for. Overwriting that with an older
-        // row is the same stale-read `useThreadDocumentSync` guards against,
-        // and it would put the previous document in front of someone watching
-        // a new one being written.
-        if (contentDocumentIdRef.current != null) return
-        // TICKETS WIN THE PANEL. Both probes run on thread open, both await,
-        // and both saw an empty panel before their fetch — so without this the
-        // slower network response decides which artifact you land on, and a
-        // document could open over tickets `loadTicketSet` is still filling.
-        // The ticket-set probe is older and its ack promises a Tickets panel,
-        // so it keeps precedence; the document is one click away in the strip.
-        if (tabsRef.current.find((t) => t.id === tabId)?.ticketSetId != null) return
-        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
-        openContentPanel("document")
-      } catch {
-        // A resume PROBE must never throw — it runs on every chat open and its
-        // only job is to surface an artifact that may not exist.
-      }
-    })()
-  }, [
-    activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
-    tabs, setContent, openContentPanel,
-  ])
+  // artifact that never had it — now the SHARED `useDocumentReopenProbe`, which
+  // both this surface and the project surface run. Main's context flows in via
+  // the probe: its per-tab guards + once-per-tab marker (`begin`), its
+  // `activeTabIdRef`/`contentPanelTabRef`/`contentDocumentIdRef` post-fetch
+  // reads, and its "TICKETS WIN THE PANEL" late-precedence arm (`ticketsWin`) —
+  // both probes await on an empty panel, so a ticket set `loadTicketSet` is
+  // still filling keeps the panel and the document is one click away in the
+  // strip. Deps are main's own, unchanged. A failed document still shows in the
+  // library (#1184); `generating` DOES open, the live state the panel shows.
+  useDocumentReopenProbe(
+    {
+      begin: () => {
+        if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return null
+        if (documentAutoOpenedRef.current.has(activeTabId)) return null
+        const tabId = activeTabId
+        const tab = tabsRef.current.find((t) => t.id === tabId)
+        if (!tab || tab.dbConvId == null) return null
+        if (tab.prd || tab.prdGenerating || tab.prdId != null) return null
+        documentAutoOpenedRef.current.add(tabId)
+        return tab.dbConvId
+      },
+      stillActive: () => activeTabIdRef.current === activeTabId,
+      panelOpen: () => Boolean(contentPanelTabRef.current),
+      documentClaimed: () => contentDocumentIdRef.current != null,
+      ticketsWin: () => tabsRef.current.find((t) => t.id === activeTabId)?.ticketSetId != null,
+      setContent,
+      openContentPanel,
+    },
+    [
+      activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
+      tabs, setContent, openContentPanel,
+    ],
+  )
 
   // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
   // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
@@ -6298,187 +4481,19 @@ export function ChatScreen() {
     }
   }, [activeCompany, finalizeConversationTurn])
 
-  const handleComposerSubmit = () => {
-    const q = draft.trim()
-    // Backend rejects questions under 3 chars — match BriefChat's guard (the
-    // send buttons are also disabled below 3, this covers Enter-to-send).
-    if (q.length < DRAFT_MIN_CHARS) {
-      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
-      return
-    }
-    // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
-    //
-    // This used to be a bare `return` — the single worst micro-interaction on
-    // the surface. Enter while an ask was in flight did nothing at all: no
-    // send, no message, the draft just sat there and the keystroke vanished.
-    // The guard stays (one ask per tab); the silence does not.
-    if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
-      showComposerHint("busy")
-      return
-    }
-    // A send is already mid-dispatch (its intent decision is still in flight).
-    // The busy/asking markers aren't set until the ask itself starts, so without
-    // this a second Enter during that window would double-send.
-    if (pendingSend) return
-    // A pinned skill is re-attached to the query as its slash trigger, so the
-    // backend's deterministic fast-path sees exactly what typing it by hand
-    // would have produced — the chip is a composer affordance, not a new
-    // protocol. The trigger stays visible on the sent turn, which is what makes
-    // the wait's skill chip verifiable from the thread itself.
-    // The pinned skill is spliced FIRST, then the quote appended, so the slash
-    // trigger stays the query's first token — the backend's deterministic
-    // fast-path and `skillForQuery` both read it there. (This ordering is the
-    // whole reason a quote rides at the END of the message; see `chatQuote.ts`.)
-    // Goal Analysis takes the message instead of the ask path. Deliberately
-    // BEFORE the skill splice and the quote build: a run takes the goal in the
-    // user's own words, and a slash trigger spliced into the front of it would
-    // become part of what Stage 0 tries to match a metric against.
-    if (goalMode) {
-      setDraft("")
-      setGoalMode(false)
-      setPlusMenuOpen(false)
-      if (voice.listening) voice.cancel()
-      void startGoalAnalysis(q)
-      const ta0 = composerRef.current
-      if (ta0) ta0.style.height = ""
-      return
-    }
-    const sent = buildQuotedMessage(spliceSkill(pinnedSkill, q), quote)
-    // Sending ends the dictation that produced the question — and CANCELS it
-    // rather than stopping it. A graceful stop still delivers the phrase the
-    // engine was finalising, and the hook's transcript is cumulative, so that
-    // trailing result would write the whole sent question back into the draft
-    // this send is about to clear.
-    if (voice.listening) voice.cancel()
-    voiceBaseRef.current = ""
-    setDraft("")
-    setPinnedSkill(null)
-    setQuote(null)
-    setPlusMenuOpen(false)
-    void submitAsk(sent)
-    const ta = composerRef.current
-    if (ta) {
-      // Clear the inline height so the textarea snaps back to its CSS resting
-      // size (min-height + padding). A hardcoded value here is shorter than the
-      // vertical padding and clips the placeholder after sending.
-      ta.style.height = ""
-    }
-  }
+  // ── Goal Analysis: restore-after-reload + start (main-wrapper concerns) ─────
+  // main declared its bespoke submit / slash-palette / plus-menu / skill
+  // handlers here; in this branch those are owned by the shared engine
+  // (`useConversation`) and composer (`useComposer`). Only Goal Analysis is
+  // main-specific, so only it is re-homed into this wrapper, alongside three thin
+  // host wrappers that let goal mode intercept the shared submit / Enter / `+`
+  // menu without teaching the surface-agnostic engine about it.
 
-  const filteredSkills = useMemo(() => {
-    // One list now (the company's own uploads) — the built-in catalog it used
-    // to be merged ahead of is gone. Server order is newest-first.
-    return skills.filter(
-      (s) =>
-        slashFilter === "" ||
-        s.trigger.toLowerCase().includes("/" + slashFilter) ||
-        s.label.toLowerCase().includes(slashFilter) ||
-        s.description.toLowerCase().includes(slashFilter),
-    )
-  }, [skills, slashFilter])
-  const slashOpen = showSlash && filteredSkills.length > 0
-  // Keep the highlight in range as the filtered list shrinks/grows.
-  useEffect(() => {
-    setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
-  }, [filteredSkills.length])
-
-  // ⌘/ (Ctrl+/ on Windows) opens the skills palette from the keyboard.
-  //
-  // Both composers have advertised this shortcut in their footer for a while and
-  // NOTHING was listening for it — there is no metaKey handler for "/" anywhere
-  // in the app. The `+` menu now points at it too ("Browse skills ⌘/"), so the
-  // hint had to become true rather than be repeated twice.
-  const openSkillPalette = useCallback(() => {
-    setSlashFromMenu(true)
-    setSlashFilter("")
-    setSlashActive(0)
-    setShowSlash(true)
-    setPlusMenuOpen(false)
-    composerRef.current?.focus()
-  }, [])
-
-  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "/") {
-      e.preventDefault()
-      openSkillPalette()
-      return
-    }
-    // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
-    // dismisses it — the composer's own Enter-to-send yields to the picker.
-    if (slashOpen) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault()
-        setSlashActive((i) => (i + 1) % filteredSkills.length)
-        return
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault()
-        setSlashActive((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
-        return
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault()
-        handleSlashSelect(filteredSkills[slashActive] ?? filteredSkills[0])
-        return
-      }
-      if (e.key === "Escape") {
-        e.preventDefault()
-        setShowSlash(false)
-        setSlashFromMenu(false)
-        return
-      }
-    }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      handleComposerSubmit()
-    }
-  }
-
-  const handleComposerInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const val = e.target.value
-    setDraft(val)
-    e.target.style.height = "auto"
-    e.target.style.height = Math.min(e.target.scrollHeight, 240) + "px"
-    // Slash command detection: show dropdown when text starts with /
-    if (val.startsWith("/")) {
-      setShowSlash(true)
-      setSlashFromMenu(false)
-      setSlashFilter(val.slice(1).toLowerCase())
-      setSlashActive(0)
-    } else if (!slashFromMenu) {
-      // A palette opened by TYPING closes as soon as the draft stops being a
-      // slash command. One opened from the `+` menu or ⌘/ stays put — a person
-      // browsing skills over a half-written question would otherwise lose the
-      // list on their next keystroke.
-      setShowSlash(false)
-    }
-  }
-
-  const handleSlashSelect = (skill: SkillInfo) => {
-    setShowSlash(false)
-    setSlashFromMenu(false)
-    setSlashFilter("")
-    // Pin the skill as a removable CHIP instead of pasting "/competitive-intel "
-    // into the draft as raw text. The old behaviour handed the user a string
-    // they had to preserve character-for-character or silently lose the skill,
-    // sitting in the middle of a sentence they were about to write.
-    setPinnedSkill({ id: skill.id, label: skill.label, trigger: skill.trigger })
-    // Only a draft the palette itself put there is cleared — a question already
-    // typed survives having a skill pinned onto it.
-    setDraft((d) => (d.startsWith("/") ? "" : d))
-    composerRef.current?.focus()
-  }
-
-  // The `+` menu: Attach a file / Browse skills. The slash palette used to be
-  // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
-  // invisible to anyone who never read the footer hint.
   // Restore this thread's analysis after a reload.
   //
   // `goalRunId` lives in the shared content slot, which is memory only, so
   // without this a refresh made the run UNREACHABLE — it kept going on the
-  // server, finished, and had no way back onto the screen. That is #1187
-  // repeated, and it is the failure that makes a long-running feature feel
-  // broken rather than slow.
+  // server, finished, and had no way back onto the screen.
   //
   // Gated on the flag, so an unenrolled company never pays a request (or
   // collects a 403) on every thread switch.
@@ -6498,9 +4513,7 @@ export function ChatScreen() {
         // still worth showing. A `failed` or `cancelled` run must NOT reopen
         // the panel: it would pin an undismissable red tab to that thread for
         // as long as the run row exists, with nothing the reader can do about
-        // it. There is no run-history surface yet, so a reload-then-fail user
-        // is not shown the failure at all — a real gap, and the lesser of the
-        // two until that surface exists.
+        // it.
         const mine = runs.find(
           (r) => r.conversation_id === activeConvId
             && r.status !== "failed" && r.status !== "cancelled",
@@ -6517,20 +4530,16 @@ export function ChatScreen() {
       }
     })()
     return () => { live = false }
-    // `activeTabId` is a REAL dependency, for the same reason the content
-    // reset above lists it: two tabs can share one conversation id, so without
-    // it this effect does not re-run on the switch — the reset clears the
-    // panel, the restore never fires again, and switching back does not
-    // recover it.
+    // `activeTabId` is a REAL dependency: two tabs can share one conversation
+    // id, so without it this effect does not re-run on the switch — the reset
+    // clears the panel, the restore never fires again, and switching back does
+    // not recover it.
   }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
 
   // Start a Goal Analysis run and put its panel on screen.
   //
   // The panel opens on the run id RATHER THAN on a result, because the first
-  // thing a run does is stop and ask what the goal means. If the panel waited
-  // for something to render, the question — which is the product's central
-  // claim, not an interruption on the way to one — would arrive as a surprise
-  // after a silence.
+  // thing a run does is stop and ask what the goal means.
   const startGoalAnalysis = useCallback(async (goalText: string) => {
     try {
       const run = await goalAnalysisApi.start(goalText, {
@@ -6553,54 +4562,67 @@ export function ChatScreen() {
     }
   }, [activeConvId, setContent, openContentPanel, showToast])
 
-  const handlePlusMenuSelect = useCallback((index: number) => {
-    setPlusMenuOpen(false)
-    if (index === 0) {
-      fileInputRef.current?.click()
+  // Goal mode intercepts the composer submit BEFORE the ask path: a run takes
+  // the goal in the user's own words, so a slash trigger spliced into the front
+  // of it (which the engine's submit would do) must never happen. Wrapped at the
+  // host so the shared engine's `handleComposerSubmit` stays surface-agnostic;
+  // a normal send falls straight through to it.
+  const handleGoalOrComposerSubmit = useCallback(() => {
+    if (!goalMode) {
+      handleComposerSubmit()
       return
     }
-    // Index 2 exists only while the company is enrolled — ChatComposer appends
-    // it last precisely so 0 and 1 keep meaning what they always meant.
+    const q = draft.trim()
+    // Match the engine's own guards so goal mode behaves identically under a
+    // too-short draft, an in-flight ask, or a send already mid-dispatch.
+    if (q.length < DRAFT_MIN_CHARS) {
+      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
+      return
+    }
+    if (busy) {
+      showComposerHint("busy")
+      return
+    }
+    if (pendingSend) return
+    setDraft("")
+    setGoalMode(false)
+    setPlusMenuOpen(false)
+    if (voice.listening) voice.cancel()
+    void startGoalAnalysis(q)
+    const ta = composerRef.current
+    if (ta) ta.style.height = ""
+  }, [
+    goalMode, handleComposerSubmit, draft, busy, pendingSend, voice,
+    setDraft, setPlusMenuOpen, startGoalAnalysis, composerRef, showComposerHint,
+  ])
+
+  // Enter-to-send must respect goal mode too. Only the plain Enter is overridden
+  // (no palette open, no modifier); ⌘/, the slash-palette navigation, and Esc
+  // all stay with the engine's keydown.
+  const handleGoalOrComposerKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (goalMode && e.key === "Enter" && !e.shiftKey && !slashOpen && !(e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        handleGoalOrComposerSubmit()
+        return
+      }
+      handleComposerKeyDown(e)
+    },
+    [goalMode, slashOpen, handleGoalOrComposerSubmit, handleComposerKeyDown],
+  )
+
+  // The `+` menu's third item (present only while enrolled — ChatComposer
+  // appends it last so indices 0/1 keep meaning what they always meant) turns on
+  // goal mode; everything else falls through to the composer's own handler.
+  const handleGoalOrPlusMenuSelect = useCallback((index: number) => {
     if (index === 2) {
+      setPlusMenuOpen(false)
       setGoalMode(true)
       composerRef.current?.focus()
       return
     }
-    openSkillPalette()
-  }, [openSkillPalette, composerRef])
-
-  // Esc stops the answer. The Stop button already sits in the composer and now
-  // beside the wait itself, but the fastest way out of a run you regret is the
-  // key everybody already presses to cancel things.
-  //
-  // It yields to anything that owns Esc more locally: the attachment viewer, the
-  // slash palette and the `+` menu each close on Esc first.
-  useEffect(() => {
-    if (!busy) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return
-      if (viewerAttachment || slashOpen || plusMenuOpen) return
-      handleStopAsk()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [busy, viewerAttachment, slashOpen, plusMenuOpen, handleStopAsk])
-
-  /** The skill a question DETERMINISTICALLY selected, or null.
-   *
-   *  Only a leading slash trigger counts: qa_agent's fast path treats it as an
-   *  explicit selection, so naming it is a fact. What the ROUTER picked for a
-   *  plain question is not knowable here — `_skill` is written into
-   *  `ask_jobs.response` by `complete_ask_job`, so the payload is `{}` for the
-   *  whole time the wait is on screen. Rather than guess, no chip is shown.
-   *  (Surfacing the routed skill mid-run needs a `routed_skill` column; that is
-   *  a separate backend change.) */
-  const skillForQuery = useCallback((query: string): SkillInfo | null => {
-    const first = query.trim().split(/\s+/)[0]
-    if (!first || !first.startsWith("/")) return null
-    const wanted = first.toLowerCase()
-    return skills.find((s) => s.trigger.toLowerCase() === wanted) ?? null
-  }, [skills])
+    handlePlusMenuSelect(index)
+  }, [handlePlusMenuSelect, setPlusMenuOpen, composerRef])
 
   /** The composer's one status line. A dictation problem outranks the busy hint:
    *  the busy hint answers a key you just pressed and expires on its own, while
@@ -6612,52 +4634,10 @@ export function ChatScreen() {
       ? <>{BUSY_ENTER_HINT_LEAD}<b>Stop</b>{BUSY_ENTER_HINT_TAIL}</>
       : null
 
-  /** ONE composer, rendered on the landing and in the thread dock. `home` is the
-   *  only difference between the two calls — everything else is shared state, so
-   *  the pair cannot drift again the way `.chat-home-composer` and
-   *  `.bc-composer` did. */
-  const renderComposer = (home: boolean) => (
-    <ChatComposer
-      home={home}
-      busy={busy}
-      draft={draft}
-      pinnedSkill={pinnedSkill}
-      attachments={attachments}
-      hint={composerHintNode}
-      menuOpen={plusMenuOpen}
-      menuActiveIndex={plusMenuActive}
-      slashMenu={slashOpen ? (
-        <SlashSkillMenu
-          skills={filteredSkills}
-          activeIndex={slashActive}
-          onSelect={handleSlashSelect}
-          onHover={setSlashActive}
-        />
-      ) : null}
-      composerRef={composerRef}
-      fileInputRef={fileInputRef}
-      onInput={handleComposerInput}
-      onKeyDown={handleComposerKeyDown}
-      onSend={handleComposerSubmit}
-      onStop={handleStopAsk}
-      onToggleMenu={() => { setPlusMenuActive(0); setPlusMenuOpen((o) => !o) }}
-      onMenuActive={setPlusMenuActive}
-      onMenuSelect={handlePlusMenuSelect}
-      onCloseMenu={() => setPlusMenuOpen(false)}
-      onRemoveAttachment={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))}
-      onRemoveSkill={() => setPinnedSkill(null)}
-      onFileSelect={handleFileSelect}
-      voiceSupported={voice.supported}
-      voiceListening={voice.listening}
-      onToggleVoice={handleToggleVoice}
-      quote={quote}
-      onRemoveQuote={() => setQuote(null)}
-      goalMode={goalMode}
-      onExitGoalMode={() => setGoalMode(false)}
-      goalModeAvailable={goalAnalysisOn}
-    />
-  )
-
+  // main's inline `renderComposer` is dropped: in this branch the composer is
+  // rendered by the shared `ConversationView` (landing + dock), which is handed
+  // the goal-mode props below. Keeping a second ChatComposer here would let the
+  // two drift.
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
   }
@@ -7544,7 +5524,12 @@ export function ChatScreen() {
             <BriefChat />
           ) : (
           (() => {
-            const mainTurns = mapMainTurns(thread, {
+            // The main turn-mapping dependency bag — annotated so the
+            // share_to_slack wrapper params below get their contextual types
+            // (else they'd be implicit-any). Handed straight to ConversationView,
+            // which calls mapMainTurns(thread, mapDeps) and reads a handful of
+            // these fields for its own render.
+            const mapDeps: MapMainTurnsDeps = {
               animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
               busy, activeTab, name, userInitials, skillForQuery,
               ticketSetActionState, showInsightMsg, chatEvidenceExists,
@@ -7566,271 +5551,77 @@ export function ChatScreen() {
               // the only one of these that reaches Slack, and only after the
               // user presses the button in the card.
               onSendSlackShare: (turnId, channelId, note) =>
-                void sendSlackShare(activeTab!.id, turnId, channelId, note),
+                void sendSlackShare(turnId, channelId, note),
               onCancelSlackShare: (turnId) =>
                 patchSlackShare(activeTab!.id, turnId, {
                   resolved: { outcome: "cancelled" },
                 }),
               onPickSlackShareTarget: (turnId, target) =>
-                void repreviewSlackShare(activeTab!.id, turnId, target),
-            })
-            // The main-chat shell region, rendered through the shared <ChatShell>
-            // in controlled mode: turns are pre-mapped here, refs and scroll
-            // behaviour stay host-side, and the composer, pending-send bubble, and
-            // dock extras are host-rendered and passed as slots. A surface:"main"
-            // descriptor is a structural no-op — no project seam is reachable.
-            const landingNode = (
-                <div className="home-landing-eyeline">
-                  <div className="od-center-inner od-center-inner--home">
-                    <div className="chat-greeting">
-                      <h1 className="chat-greeting-title">
-                        Welcome back, <em>{name}</em>.
-                      </h1>
-                      <p className="chat-greeting-sub">
-                        Welcome to Sprntly — what would you like to work on?
-                      </p>
-                    </div>
-
-                    <div className="home-landing-composer">
-                      {renderComposer(true)}
-                      {showChipRow ? (
-                        <div className="home-chip-row home-chip-row--under-chat" role="list">
-                          {displayChips.map(({ kind, card }) => (
-                            <button
-                              key={`${kind}-${card.id}`}
-                              type="button"
-                              className={`home-chip${kind === "starter" ? " home-chip--muted" : ""}`}
-                              role="listitem"
-                              onClick={() =>
-                                kind === "home"
-                                  ? handleHomeCard(card)
-                                  : handleStarterChip(card.prompt ?? card.title)
-                              }
-                            >
-                              <span className="home-chip-icon" aria-hidden>
-                                <ChatSuggestionIcon id={card.icon} size={16} />
-                              </span>
-                              <span className="home-chip-label">{card.title}</span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-
-                    {showEmptyStarters ? (
-                      <EmptyPane
-                        title="No starter prompts yet"
-                        hint="Populate `homeStarterCards` and `ondemandStarters` from your API or org defaults."
-                        placeholders={4}
-                      />
-                    ) : null}
-                  </div>
-                </div>
-            )
-            const leadingNode = (
-                            <>
-                              {/* Insight message — for a HEADER open, the chat opens with its
-                                  insight as the agent's first message (a pinned heading at the
-                                  top). For an IN-CHAT COMMAND open (`inlinePrdCards`) the card
-                                  + questions instead render inline after the command turn
-                                  (`afterNode` above). Hosts the Generate/View PRD +
-                                  Generate/View Prototype actions. */}
-                              {!inlinePrdCards ? insightCardNode : null}
-                              {!inlinePrdCards ? prdQuestionsNode : null}
-                              {/* Resumed-conversation loading state: the tab opened
-                                  instantly on row click; its history is still in flight. */}
-                              {activeTab?.hydrating && thread.length === 0 ? (
-                                <ChatBubble
-                                  turnId="chat-hydrating"
-                                  ariaBusy
-                                  agentName={AGENT_NAME}
-                                  agentBadge={null}
-                                  agentBodyNode={
-                                    // Nothing is generating here — history is loading —
-                                    // so this keeps its own copy ("loading conversation…",
-                                    // which used to sit in the head above) rather than
-                                    // inheriting the ask's "Working on your question".
-                                    <AssistantThinkingSkeleton compact phase="loading conversation…" />
-                                  }
-                                />
-                              ) : null}
-                            </>
-            )
-            // The optimistic bubble renders the message that was JUST sent, so
-            // it needs the same quote split a real turn gets — a raw
-            // "> excerpt" flashing here for the second before the real turn
-            // replaces it is the identical leak, only briefer.
-            const pendingSplit = pendingSend
-              ? splitQuotedSuffix(pendingSend.query)
-              : { body: "", quote: null }
-            const pendingSendNode = pendingSendHere && pendingSend ? (
-                      <ChatBubble
-                        turnId="pending-send"
-                        dataTestId="pending-send"
-                        ariaBusy
-                        user={{
-                          query: pendingSplit.body,
-                          quote: pendingSplit.quote,
-                          onOpenQuote: pendingSplit.quote
-                            ? () => setViewerAttachment({
-                                name: QUOTE_VIEWER_NAME,
-                                content: pendingSplit.quote!,
-                                plain: true,
-                              })
-                            : undefined,
-                          name,
-                          initials: userInitials,
-                          // Name-only and inert here, exactly as the optimistic
-                          // turn renders them before extraction — no `content`/
-                          // `downloadable` means ChatBubble's own card renders
-                          // non-viewable, same as this block always did.
-                          attachments: pendingSend.attachments.map((a) => ({ name: a.name })),
-                        }}
-                        agentName={AGENT_NAME}
-                        agentBadge="Product Coworker"
-                        agentBodyNode={
-                          // The same ladder the real turn will pick up — and
-                          // the same clock, handed over with the turn — so a
-                          // send opens on rung 0 (nothing) rather than a
-                          // spinner that flickers for 300ms on a cache hit.
-                          <AssistantWaitState
-                            compact
-                            startedAt={pendingSend.startedAt}
-                            skillLabel={skillForQuery(pendingSend.query)?.label ?? null}
-                            longSkill={isLongRunningSkill(skillForQuery(pendingSend.query)?.id)}
-                          />
-                        }
-                      />
-                    ) : null
-            const dockExtras = (
-              <>
-                {clarifyPopupOpen && pendingClarifyTurn?.clarify ? (
-                  <QuestionPopup
-                    questions={pendingClarifyTurn.clarify.map((cq) => ({
-                      header: cq.header ?? null,
-                      prompt: cq.prompt,
-                      options: cq.options.map((o) => ({ label: o })),
-                      skipDefault: cq.skip_default,
-                    }))}
-                    fallbackHeader="PRD details"
-                    busy={busy || !!activeTab?.prdGenerating}
-                    onDismiss={() =>
-                      setClarifyPopupDismissed((p) => ({ ...p, [pendingClarifyTurn.id]: true }))
-                    }
-                    onComplete={(answers) => {
-                      const given = answers
-                        .filter((a) => !a.skipped && a.answer)
-                        .map((a) => ({ prompt: a.prompt, answer: a.answer }))
-                      // Everything skipped is a skip in everything but name —
-                      // submitClarifyAnswers([]) resolves it as one, same as the
-                      // card's empty submit.
-                      void submitClarifyAnswers(given)
-                    }}
-                  />
-                ) : null}
-                {/* The assign batch. Picks are LOCAL until the last question
-                    settles — then completeAssign writes every pair through
-                    PUT /fields and posts the summary. Closing early therefore
-                    writes nothing. */}
-                {assignPopupOpen && pendingAssignState && activeTabId ? (
-                  <QuestionPopup
-                    questions={pendingAssignState.questions.map((q) => ({
-                      header: q.header,
-                      prompt: q.prompt,
-                      options: q.options.map((o) => ({
-                        label: o.label,
-                        description: o.description ?? null,
-                        value: o.value,
-                      })),
-                      // Free text can't be validated against the roster — the
-                      // options ARE the answer space here.
-                      allowOther: false,
-                      // "Assign 2 tickets to X" → the backend marks the
-                      // person-fixed question multi, and the card renders as
-                      // tick-several-confirm-once instead of a single pick
-                      // that could only honour one of the asked-for tickets.
-                      multiSelect: !!q.multi,
-                    }))}
-                    fallbackHeader="Assign"
-                    onComplete={(answers) => void completeAssign(activeTabId, answers)}
-                    onDismiss={() => cancelAssign(activeTabId)}
-                  />
-                ) : null}
-                {/* The share question — which channel, or which document.
-                    Every choice this product asks for comes through here
-                    (owner's directive, 2026-08-16); the preview card renders
-                    the MESSAGE, never the picker. Answering re-previews
-                    server-side, so a private channel Sprntly can't join is
-                    still caught after the pick. Dismissing settles the share
-                    as not-sent rather than leaving it hanging. */}
-                {sharePopupOpen && pendingShareState && activeTabId ? (
-                  <QuestionPopup
-                    questions={[{
-                      header: pendingShareState.header,
-                      prompt: pendingShareState.prompt,
-                      options: pendingShareState.options,
-                      // Channels: free text is a real answer — a workspace can
-                      // have more channels than anyone wants to scroll, and the
-                      // typed name is matched server-side exactly like a picked
-                      // one. Documents: the candidates ARE the answer space.
-                      allowOther: pendingShareState.kind === "channel",
-                    }]}
-                    fallbackHeader="Share"
-                    onComplete={(answers) =>
-                      void completeShareQuestion(activeTabId, answers)}
-                    onDismiss={() => cancelShareQuestion(activeTabId)}
-                  />
-                ) : null}
-                {/* Portal slot for lower-priority question batches (PRD input
-                    questions, assignment questions). Empty div when nothing
-                    portals in — costs no height. */}
-                <div className="bc-question-dock" ref={setQuestionDockEl} />
-                {/* Renders NOTHING when there are no suggestions — no empty
-                    container, no reserved height — so a thread Sprntly has
-                    nothing to add to looks exactly as it did before this
-                    feature, and a late response never shifts the composer
-                    under the user's cursor. Active tab only: the shared hook
-                    keys suggestions by tab so a background answer's chips stay
-                    with their own thread. */}
-                <NextPromptSuggestions
-                  suggestions={nextPrompts.suggestionsFor(activeTabId)}
-                  disabled={busy}
-                  onPick={(prompt) => { void submitAsk(prompt) }}
-                />
-              </>
-            )
+                void repreviewSlackShare(turnId, target),
+            }
+            // The main-chat active-conversation render, lifted verbatim into the
+            // shared ConversationView (still driven by this screen's inline
+            // engine via props). A surface:"main" descriptor is a structural
+            // no-op — no project seam is reachable.
             return (
-              <ChatShell
-                descriptor={{
-                  surface: "main",
-                  frame: {
-                    mode: showThreadView ? "thread" : "landing",
-                    landing: landingNode,
-                    viewportClassName: "od-center-scroll",
-                  },
-                  refs: {
-                    viewportRef: threadScrollRef,
-                    onViewportScroll: handleThreadScroll,
-                    contentColumnRef: setThreadContentEl,
-                  },
-                  transcript: {
-                    agentName: AGENT_NAME,
-                    agentBadge: "Product Coworker",
-                    timestamps: "none",
-                    leading: leadingNode,
-                  },
-                  composer: {
-                    busyMode: "block-while-asking",
-                    stop: { enabled: true, onStop: handleStopAsk },
-                    attachments: true,
-                  },
-                  reply: { mode: "streamed" },
-                  send: { onSubmit: handleComposerSubmit, pendingSendBubble: true },
-                  dock: { aboveComposer: dockExtras },
-                }}
-                turns={mainTurns}
-                pendingSend={pendingSendNode}
-                composerNode={renderComposer(false)}
+              <ConversationView
+                thread={thread}
+                mapDeps={mapDeps}
+                draft={draft}
+                pinnedSkill={pinnedSkill}
+                attachments={attachments}
+                composerHintNode={composerHintNode}
+                plusMenuOpen={plusMenuOpen}
+                plusMenuActive={plusMenuActive}
+                slashOpen={slashOpen}
+                filteredSkills={filteredSkills}
+                slashActive={slashActive}
+                composerRef={composerRef}
+                fileInputRef={fileInputRef}
+                voice={voice}
+                handleSlashSelect={handleSlashSelect}
+                setSlashActive={setSlashActive}
+                handleComposerInput={handleComposerInput}
+                handleComposerKeyDown={handleGoalOrComposerKeyDown}
+                handleComposerSubmit={handleGoalOrComposerSubmit}
+                setPlusMenuActive={setPlusMenuActive}
+                setPlusMenuOpen={setPlusMenuOpen}
+                handlePlusMenuSelect={handleGoalOrPlusMenuSelect}
+                goalMode={goalMode}
+                onExitGoalMode={() => setGoalMode(false)}
+                goalModeAvailable={goalAnalysisOn}
+                setAttachments={setAttachments}
+                setPinnedSkill={setPinnedSkill}
+                handleFileSelect={handleFileSelect}
+                handleToggleVoice={handleToggleVoice}
+                showChipRow={showChipRow}
+                displayChips={displayChips}
+                handleHomeCard={handleHomeCard}
+                handleStarterChip={handleStarterChip}
+                showEmptyStarters={showEmptyStarters}
+                activeTab={activeTab}
+                pendingSendHere={pendingSendHere}
+                pendingSend={pendingSend}
+                pendingClarifyTurn={pendingClarifyTurn}
+                setClarifyPopupDismissed={setClarifyPopupDismissed}
+                assignPopupOpen={assignPopupOpen}
+                pendingAssignState={pendingAssignState}
+                activeTabId={activeTabId}
+                completeAssign={completeAssign}
+                cancelAssign={cancelAssign}
+                sharePopupOpen={sharePopupOpen}
+                pendingShareState={pendingShareState}
+                completeShareQuestion={completeShareQuestion}
+                cancelShareQuestion={cancelShareQuestion}
+                setQuestionDockEl={setQuestionDockEl}
+                nextPrompts={nextPrompts}
+                submitAsk={submitAsk}
+                showThreadView={showThreadView}
+                threadScrollRef={threadScrollRef}
+                handleThreadScroll={handleThreadScroll}
+                setThreadContentEl={setThreadContentEl}
+                quote={quote}
+                onRemoveQuote={() => setQuote(null)}
                 onQuoteSelection={handleQuoteSelection}
               />
             )

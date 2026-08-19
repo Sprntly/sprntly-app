@@ -35,7 +35,6 @@ from app.deps.ownership import (
 )
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
-from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE
 # The SAME structured-attachment model the persisted `conversation_turns`
 # read/write path uses (routes/conversations.py) — reused here so the /v1/ask
 # project branch persists attachments in the exact shape `_load_history` folds.
@@ -139,6 +138,12 @@ class AskIn(BaseModel):
     # project 404s, a same-tenant non-member 403s. Omitted: `/v1/ask`
     # behaves exactly as it does today (no project block).
     project_id: int | None = Field(default=None, ge=1)
+    # Optional pluggable context source: `{"kind": str, "params": dict}`. When
+    # set, the ask job resolves it through `app.context_assembler.
+    # resolve_context_scope` to a `ContextScope` that a surface's own assembler
+    # builds (and auth-gates). Omitted / no registered assembler for the kind:
+    # resolves to None, so `/v1/ask` runs the exact current unscoped main path.
+    context_source: dict | None = None
     # Standalone-artifact grounding, same idea for the tabs that hold an
     # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
     # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
@@ -253,6 +258,91 @@ def _load_history(
         return []
 
 
+# How many of the most-recent group turns to fold into the agent's history — a
+# sane recent-turns cap so a long-running group thread can't grow the prompt
+# unboundedly (the per-turn clamp is applied downstream in
+# `qa_agent._render_history`, unchanged, exactly as for `_load_history`).
+_GROUP_HISTORY_TURNS = 30
+
+
+def _load_group_history(
+    conversation_id: int | None,
+    project_id: int | None,
+    user_id: str,
+    exclude_client_message_id: str | None,
+) -> list[dict]:
+    """Prior GROUP thread turns [{role, content}] for the @Sprntly reply, oldest
+    first, so the group agent sees what teammates said — NOT the owner-gated
+    `_load_history` (a group conversation's `user_id` is only its creator, so a
+    non-creator member's reply would get empty history and the creator's would
+    be author-stripped). Read from the group turn store (`list_group_turns`,
+    author-enriched), with the author folded into each user turn's content so
+    the model knows who said what without changing the `[{role, content}]` shape
+    the downstream render expects.
+
+    MEMBERSHIP-GATED (IDOR boundary): this runs in the ROUTE, BEFORE the
+    assembler's 403, and `list_group_turns` itself only guards `kind='group'`,
+    NOT membership — so a non-member of the project gets `[]`, never another
+    team's thread. Same check the assembler uses (`is_project_member`).
+
+    Excludes the CURRENT turn: Feature #1 posts the user's turn to the group
+    store BEFORE this ask fires, so `list_group_turns` already contains it. The
+    ask carries that turn's `client_message_id`; drop the matching turn (it is
+    passed as the question, so injecting it as history too would duplicate it).
+    Falls back to dropping the trailing user turn if no key is available.
+
+    Bounded to the most recent `_GROUP_HISTORY_TURNS`. Best-effort: no id/
+    project, non-member, or any read error → `[]` (history must never break the
+    reply)."""
+    if not conversation_id or project_id is None:
+        return []
+    try:
+        from app.db.conversations import list_group_turns
+        from app.db.projects import is_project_member
+
+        # IDOR boundary — a non-member reads nothing.
+        if not is_project_member(project_id, user_id):
+            return []
+
+        turns = list_group_turns(conversation_id)  # author-enriched DTOs
+        excluded_by_key = False
+        out: list[dict] = []
+        for t in turns:
+            if (
+                exclude_client_message_id
+                and t.get("client_message_id") == exclude_client_message_id
+            ):
+                excluded_by_key = True
+                continue  # the current turn — passed as the question, not history
+            content = (t.get("content") or "").strip()
+            if not content:
+                continue
+            role = t.get("role") or "user"
+            if role == "user":
+                # Fold the author into the content so the model reads a
+                # multi-party transcript ("Name (role): message") without
+                # changing the {role, content} shape. Agent turns stay plain
+                # (they are Sprntly's own voice).
+                author = t.get("author_name") or "Someone"
+                job_role = t.get("author_job_role")
+                prefix = f"{author} ({job_role})" if job_role else author
+                content = f"{prefix}: {content}"
+            out.append({"role": role, "content": content})
+
+        # Fallback current-turn exclusion: if the ask carried no key to match on,
+        # the current message is still the most-recent turn — drop a trailing
+        # user turn so the question isn't duplicated into history.
+        if not excluded_by_key and not exclude_client_message_id and out and out[-1]["role"] == "user":
+            out.pop()
+
+        return out[-_GROUP_HISTORY_TURNS:]
+    except Exception:  # noqa: BLE001 — history must never break the reply
+        logger.warning(
+            "group history load failed conversation_id=%s", conversation_id
+        )
+        return []
+
+
 def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
     """Resolve the pre-warm cache for this question, applying the same waiting +
     synthetic-delay behavior the old synchronous endpoint did. Returns the
@@ -328,23 +418,6 @@ async def ask(
         if get_set(company.company_id, body.ticket_set_id) is None:
             raise HTTPException(404, "Ticket set not found")
 
-    # Individual project chat (AD-P2/AD-P8/AD-P11): the project must belong
-    # to the caller's company/workspace (404 on a foreign-tenant id, same
-    # non-disclosure posture as the dataset/prd gates above), AND the caller
-    # must be a MEMBER of it (403 — a same-tenant non-member must not have
-    # the project's memory folded into an answer just by knowing its id;
-    # this is the same IDOR class the other project membership gates close).
-    # Both checks run BEFORE any project memory is read.
-    if body.project_id is not None:
-        from app.db.projects import is_project_member, project_belongs_to_company
-
-        if not project_belongs_to_company(
-            body.project_id, company.company_id, company.workspace_id
-        ):
-            raise HTTPException(404, "Project not found")
-        if not is_project_member(body.project_id, company.user_id):
-            raise HTTPException(403, "Not a member of this project")
-
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already
     # holds an assistant turn must not be served a cache hit that never read
@@ -353,57 +426,23 @@ async def ask(
     from app.timing import timed
 
     with timed("route:ask.history"):
-        history = _load_history(body.conversation_id, enterprise_id, company.user_id)
-
-    # Project context fold-in (AD-P8 — the bounded-assembly pattern, not the
-    # KG tables): the project's memory summary + top-N entries + the
-    # caller's job_role, prepended onto `history` as one extra "context" row
-    # ahead of the real turns — the SAME mechanism `_load_history` already
-    # uses to fold attachment text in, so every existing prompt-assembly
-    # site (`qa_agent._render_history` / `ask_runner.compose_ask_answer`)
-    # picks it up unmodified. Best-effort (AD-P7): a failure here (missing
-    # summary row, a DB hiccup) degrades to no project block — it must never
-    # block the answer. An empty/new project also yields no block.
-    if body.project_id is not None:
-        try:
-            from app.project_group_context import assemble_private_project_context
-
-            # Same breadth the @Sprntly group agent gets — memory summary +
-            # roster + task-ledger digest + artifact manifest, plus the
-            # caller's own memory entries/job_role. Breadth only: single-shot,
-            # no read tools / no tool loop / no write path.
-            project_block = assemble_private_project_context(
-                body.project_id, company.user_id, body.dataset, enterprise_id
+        # GROUP surface: load PRIOR thread history from the group turn store
+        # (membership-gated, author-attributed) instead of the owner-gated
+        # `_load_history` — so the @Sprntly reply sees what teammates said. Only
+        # the `surface == "group"` branch changes; main/private keep
+        # `_load_history` exactly, byte-identical.
+        _hist_ctx = body.context_source if isinstance(body.context_source, dict) else None
+        _hist_params = (_hist_ctx or {}).get("params") or {}
+        if _hist_ctx and _hist_ctx.get("kind") == "project" and _hist_params.get("surface") == "group":
+            _hist_proj = _hist_params.get("project_id")
+            history = _load_group_history(
+                body.conversation_id,
+                int(_hist_proj) if _hist_proj is not None else None,
+                company.user_id,
+                body.client_message_id,
             )
-        except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
-            logger.warning(
-                "assemble_private_project_context failed project_id=%s",
-                body.project_id, exc_info=True,
-            )
-            project_block = ""
-        if project_block:
-            # AUTHORITATIVE framing (not a passive "Context:" turn): ASK_SYSTEM
-            # tells the model to answer from connected sources and to deflect
-            # ("connect a connector") when a workspace-meta question — who is on
-            # the project, its tasks/delegations, its PRDs/artifacts — isn't in
-            # those sources. This block IS the source of truth for those, so the
-            # header explicitly tells the model to answer them from it and NOT
-            # to deflect. Breadth only; stays a single injected row (no tools).
-            history = [
-                {
-                    "role": "context",
-                    "content": f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{project_block}",
-                }
-            ] + history
-        # Best-effort bind (first-write-wins, mirrors bind_conversation_to_prd):
-        # navigating away mid-generation must not orphan the conversation ↔
-        # project link. Never blocks the answer on failure.
-        if body.conversation_id is not None:
-            from app.db.conversations import bind_conversation_to_project
-
-            bind_conversation_to_project(
-                body.conversation_id, body.project_id, enterprise_id, company.user_id
-            )
+        else:
+            history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
@@ -422,13 +461,27 @@ async def ask(
     # asking, so `conversation_id` is non-null on turn one too, and a first-turn
     # ask has no thread yet to be blind to (that's what the starter chips send).
     mid_thread = any(turn.get("role") == "assistant" for turn in history)
+    # A project chat carries its project on `context_source`
+    # (`{"kind": "project", ...}`), NOT on `body.project_id` — the project chats
+    # never send the top-level field. The authoritative project memory/breadth
+    # block is resolved by the assembler and folded into the answer inside the
+    # worker, so a cache hit here — keyed on (dataset, question) only — would
+    # serve a context-FREE answer that never read it. Treat a project-kind
+    # `context_source` exactly like `body.project_id` for cache eligibility.
+    project_scoped = bool(
+        isinstance(body.context_source, dict)
+        and body.context_source.get("kind") == "project"
+    )
     cached_payload = (
         await _timed_cache_resolve(body.dataset, body.question)
         if (
             body.prd_id is None
             # SKIPPED for project-scoped asks too: a cache hit never read the
-            # project's memory block just folded into `history` above.
+            # project's memory block just folded into `history` above. Project
+            # chats express this via `context_source` (see `project_scoped`);
+            # `body.project_id` covers any caller that sends it the old way.
             and body.project_id is None
+            and not project_scoped
             # An artifact-tab ask is context-bound for the same reason a
             # PRD-tab one is: the cache never read the open document.
             and body.evidence_id is None
@@ -452,26 +505,7 @@ async def ask(
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
     # `history` was already loaded above (before cache resolution).
-    #
-    # Individual-project-chat persistence identity (AC1/AC4): resolved ONLY
-    # for the project branch — main/PRD/artifact asks stay byte-unchanged
-    # (AC7), never minting or threading a client_message_id at all.
-    resolved_client_message_id = (
-        (body.client_message_id or str(uuid.uuid4())) if body.project_id is not None else None
-    )
-    # Structured attachments (project branch only): fold THIS turn's
-    # attachment text into the question the ANSWER sees, reusing the EXACT
-    # `[Attached: {name}]\n{body}` format `_load_history` folds a prior turn's
-    # attachments with, so behaviour matches today. The CLEAN `body.question`
-    # (no fold) is what gets persisted onto the user turn — so `_load_history`
-    # folds the attachments exactly ONCE on a follow-up (no double-count).
-    # On every non-project branch `answer_question is body.question` (no
-    # attachments read), keeping those sends byte-identical.
     answer_question = body.question
-    if body.project_id is not None and body.attachments:
-        for a in body.attachments:
-            if a.content:
-                answer_question += f"\n\n[Attached: {a.name}]\n{a.content}"
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
@@ -479,43 +513,7 @@ async def ask(
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
         prd_id=body.prd_id,
-        client_message_id=resolved_client_message_id,
     )
-    if body.project_id is not None:
-        # Persist the USER'S OWN turn at dispatch (AC1) — owned/idempotent,
-        # server-side conversation resolution (AC6), keyed on the SAME
-        # client_message_id just threaded onto the job row above so the
-        # answer (persisted after `complete_ask_job`, ask_job_id-linked) and
-        # the question land as one dialogue pair. Best-effort: a persist
-        # failure must never block the answer that's already generating.
-        from app.db.conversations import post_owned_individual_user_turn
-
-        try:
-            post_owned_individual_user_turn(
-                project_id=body.project_id,
-                user_id=company.user_id,
-                content=body.question,
-                client_message_id=resolved_client_message_id,
-                # Persist the CLEAN question + the STRUCTURED attachments (not the
-                # folded answer text) so a reloaded thread shows the chip and
-                # `_load_history` folds the text exactly once on a follow-up.
-                attachments=(
-                    [a.model_dump(exclude_none=True) for a in body.attachments]
-                    if body.attachments
-                    else None
-                ),
-            )
-        except Exception:  # noqa: BLE001 — best-effort, AD-P7
-            logger.warning(
-                "failed to persist individual-chat user turn ask_id=%s project_id=%s",
-                ask_id, body.project_id, exc_info=True,
-            )
-        # Identifiers only — never the memory/PRD body the answer was
-        # grounded on (see `assemble_project_context`'s docstring).
-        logger.info(
-            "ask.project_context ask_id=%s project_id=%s conversation_id=%s",
-            ask_id, body.project_id, body.conversation_id,
-        )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
         # requests, so a fire-and-forget create_task would never run and the
@@ -549,6 +547,9 @@ async def ask(
             # build spec §5.3) — None on every non-project ask, so the hook
             # never fires for them.
             project_id=body.project_id,
+            # Optional pluggable context source; None (and thus a no-op) for
+            # every ask until a surface's assembler is registered.
+            context_source=body.context_source,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -573,6 +574,9 @@ async def ask(
             workspace_id=company.workspace_id,
             # Gates the individual-chat memory-promotion hook — see above.
             project_id=body.project_id,
+            # Optional pluggable context source; None (and thus a no-op) for
+            # every ask until a surface's assembler is registered.
+            context_source=body.context_source,
         )
     )
     _inflight_tasks.add(task)
