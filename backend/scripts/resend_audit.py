@@ -5,7 +5,7 @@ so "did our testing reach a real customer's staff" is answered from the
 provider's own record rather than from our tables — connector-health alerts and
 Supabase auth mail never touch a Sprntly table, so they are invisible locally.
 
-    python scripts/resend_audit.py --domain chaostrack.com
+    python scripts/resend_audit.py --domain acme-logistics.example
 """
 from __future__ import annotations
 
