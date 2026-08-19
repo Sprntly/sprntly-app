@@ -28,6 +28,7 @@
  * dependency direction (screens/app → chat-shell) is preserved.
  */
 
+import type { RefObject } from "react"
 import type { AskResponse } from "../../../../lib/api"
 import type { AttachmentRef } from "../types"
 import type { ChatPersistence } from "../../../../lib/chatPersistence"
@@ -112,6 +113,54 @@ export interface ConversationResume {
   /** Turn ids restored from history/an in-flight run — excluded from the
    *  first-render typing animation so a reload doesn't replay it. */
   resumedTurnIds: ReadonlySet<string>
+}
+
+/**
+ * DELTA (project reality wins — see the frozen-contract note at the head of the
+ * file). The three render-mutated refs that ride the boundary between the async
+ * run and the render pass:
+ *   - `animatedTurnIds` — the typing-animation dedup Set; `mapMainTurns` MUTATES
+ *     it during the render pass (a fresh reply animates exactly once).
+ *   - `askStartRef`     — per-turn ask clocks feeding the wait ladder.
+ *   - `resumedTurnsRef`  — turn ids restored/re-attached, read at render.
+ *
+ * These are HOST-OWNED `RefObject`s, NOT engine `useState`: `useConversation`
+ * mutates them inside its async run (exactly as `useMainConversation` already
+ * receives them), and the SAME ref objects are threaded into the render-time
+ * `mapMainTurns` call. Folding them into engine state would make the render-pass
+ * `.add()` an illegal setState-in-render and desync the streamed-vs-replay dedup.
+ * The frozen `ConversationResume.resumedTurnIds` (an immutable snapshot) is the
+ * READ-model of `resumedTurnsRef`; the live ref is the write-model.
+ *
+ * A single-conversation surface (project) may let the engine mint these
+ * internally; main INJECTS its wrapper-owned refs so the tab wrapper can also
+ * thread them into `mapMainTurns` and its multi-tab resume effect. Hence the
+ * adapter carries them as an optional injected seam (absent → engine-created).
+ */
+export interface ConversationRenderRefs {
+  animatedTurnIds: RefObject<Set<string>>
+  askStartRef: RefObject<Map<string, number>>
+  resumedTurnsRef: RefObject<Set<string>>
+}
+
+/**
+ * DELTA (project reality wins). The frozen `SurfaceAdapter` assumed a FIXED
+ * `conversationKey` per mount. Main's reality violates that: a send can SPAWN a
+ * new conversation (a fresh tab), so the target a send lands on is resolved
+ * per-send. This seam models that resolution — main spawns/reuses a tab and
+ * returns the rollback anchors an extraction failure needs; a single-conversation
+ * surface returns its one fixed key with no spawn. `useConversation.submit`
+ * calls it after the optimistic pending-send and before the real-turn commit.
+ */
+export interface ConversationSendTarget {
+  /** The conversation key this send writes to (main: the resolved tab id). */
+  targetKey: string
+  /** True when a fresh conversation/tab was spawned to hold this send. */
+  spawned: boolean
+  /** Rollback anchors (main: the previously-active tab + its title) so an
+   *  extract failure can restore the prior surface state. */
+  prevActiveKey: string | null
+  prevTitle: string | null
 }
 
 // ── The engine output (useConversation → ConversationEngine) ─────────────────
@@ -206,6 +255,19 @@ export interface SurfaceAdapter {
   /** The surface's chat-intent flow bodies (endpoints per surface). Every slot
    *  optional — a surface provides only the intents it implements. */
   intentAdapter?: ChatIntentExecutorAdapter
+  /** DELTA (project reality wins). Host-owned render refs threaded into BOTH the
+   *  async run AND the render-time `mapMainTurns`. Main injects its wrapper's
+   *  refs (so the tab wrapper shares them with `mapMainTurns` + the multi-tab
+   *  resume effect); absent → the engine mints its own (single-conversation). */
+  renderRefs?: ConversationRenderRefs
+  /** DELTA (project reality wins). Per-send target resolution — main spawns/reuses
+   *  a tab; a single-conversation surface returns its one fixed key. Absent → the
+   *  send always targets `identity.conversationKey`. NOTE: the turn STORE itself
+   *  is likewise an injected seam for main (the tab list, keyed by target),
+   *  because main's background asks write to INACTIVE conversations; the engine
+   *  therefore does not own an internal single-conversation `useState` store when
+   *  driving main. A single-conversation surface owns its store internally. */
+  resolveSendTarget?(newTurnId: string): ConversationSendTarget
 }
 
 // Re-export the reply shape so a run-status consumer can spell it from here.
