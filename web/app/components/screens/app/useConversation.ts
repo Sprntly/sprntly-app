@@ -502,7 +502,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               },
               onEditPrd: (instruction, prdId) => {
                 const tabId = activeTab!.id
-                void runEditPrdAction(instruction, {
+                void runEditPrdAction(trimmed, instruction, {
                   emitTurn: emitCommandTurn,
                   runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
                   contextIds: { prdId },

@@ -927,7 +927,7 @@ export function useProjectConversation(
               settlePendingSend()
             },
             onEditPrd: (instruction, prdId) => {
-              void runEditPrdAction(instruction, {
+              void runEditPrdAction(trimmed, instruction, {
                 emitTurn,
                 runActionTurn: (q, w) => engine.runActionTurnInTab(convKey, q, w),
                 contextIds: { prdId },

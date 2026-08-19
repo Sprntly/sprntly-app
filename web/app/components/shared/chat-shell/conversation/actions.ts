@@ -114,12 +114,19 @@ function asReply(answer: string): AskResponse {
  * surface-specific bits — the async-turn lifecycle, which PRD is open, and where
  * the updated document renders — are all `config`.
  */
-export async function runEditPrdAction(instruction: string, config: ActionConfig): Promise<void> {
+export async function runEditPrdAction(
+  rawQuery: string,
+  instruction: string,
+  config: ActionConfig,
+): Promise<void> {
   const prdId = config.contextIds?.prdId ?? null
   // The dispatch guard only routes here with an edit target; a null is a safe
   // no-op rather than an unscoped edit.
   if (prdId == null || !config.runActionTurn) return
-  await config.runActionTurn(instruction, async () => {
+  // The displayed user turn is the user's RAW typed message (`rawQuery`), exactly
+  // like assign/share/generate — the planner's rephrased `instruction` drives the
+  // edit itself but must never replace what the user is shown as having said.
+  await config.runActionTurn(rawQuery, async () => {
     try {
       const { prdApi } = await import("../../../../lib/api")
       const res = await prdApi.chatEdit(prdId, instruction)
