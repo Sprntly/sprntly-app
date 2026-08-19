@@ -589,6 +589,92 @@ export type AskStatusResponse = AskResponse & {
   [extra: string]: unknown
 }
 
+// ── Goal Analysis (engine name Crucible; users never see that word) ────────
+//
+// Every route here is gated server-side by `require_crucible_module`, which
+// 403s for a company without the flag. The UI gate is a courtesy — this client
+// will happily be called by a company that is not enrolled, and should be, so
+// the failure is one honest 403 rather than a control that half-works.
+
+/** Where a run is. `awaiting_confirmation` is the I9 gate: the analysis has not
+ *  started and will not, until a person confirms what the goal MEANS. */
+export type GoalRunStatus =
+  | "draft" | "resolving_goal" | "awaiting_confirmation" | "planning"
+  | "awaiting_approval" | "running" | "ready" | "failed" | "cancelled"
+
+export type GoalRun = {
+  id: number
+  status: GoalRunStatus
+  goal_text: string
+  /** Closed-set machine code. The raw error text is deliberately NOT sent by
+   *  the backend — it carries URLs and provider messages. */
+  error_code: string | null
+  coverage_notes: { reason: string; actual: string }[]
+  claim_count: number
+  conversation_id: number | null
+  created_at: string | null
+  finished_at: string | null
+}
+
+export type GoalFinding = {
+  id: number
+  statement: string
+  claim_ids: string[]
+  adjudication: string | null
+  /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
+   *  decisions, so the panel must render them differently (I3). */
+  impact_value: number | null
+  currency: string | null
+  confidence_band: string | null
+  assumed_params: { name: string; basis: string }[]
+  impact: { value: number | null; affected_population: number | null }
+  confidence: {
+    band: string
+    weakest_leg: string | null
+    weakest_leg_reason: string | null
+    cap_reason: string | null
+  }
+}
+
+/** A candidate that did not survive, and why. Rendering this is not optional:
+ *  the considered list is what makes the ranking credible. */
+export type GoalRejection = {
+  id: number
+  label: string
+  reason: string
+  stopped_at_stage: string | null
+  claim_ids: string[]
+}
+
+export type GoalRunDetail = GoalRun & {
+  findings: GoalFinding[]
+  considered: GoalRejection[]
+  /** Stage 0's question and its prefilled proposal, when the run is waiting. */
+  prioritisation?: {
+    ask?: string
+    resolution?: string
+    proposed_definition?: string
+    proposed_source?: string | null
+    conflicts?: unknown[]
+  }
+}
+
+export const goalAnalysisApi = {
+  /** Start a run. Returns immediately — the row is durable before any work,
+   *  so this id is safe to poll even if the worker dies. */
+  start: (goal_text: string, opts?: { conversation_id?: number }) =>
+    api.post<GoalRun>("/v1/crucible", {
+      goal_text,
+      ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
+    }),
+  list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
+  get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),
+  /** The I9 gate. Sends the definition the user confirmed — their words, which
+   *  may be an edit of what we proposed. */
+  confirm: (runId: number, definition_text: string) =>
+    api.post<GoalRun>(`/v1/crucible/${runId}/confirm`, { definition_text }),
+}
+
 export const askApi = {
   /** Kick off an Ask in the background. Returns immediately with an ask_id;
    *  poll askApi.get(ask_id) until status !== 'generating'. */

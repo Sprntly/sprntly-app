@@ -8,7 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
-import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
@@ -60,7 +60,7 @@ import { QUOTE_VIEWER_NAME, buildQuotedMessage, normalizeQuote, splitQuotedSuffi
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -842,6 +842,10 @@ export function ChatScreen() {
   const searchParams = useSearchParams()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
+  // DEFAULT OFF, allowlist-only. This hides the entry point; the backend route
+  // refuses the request on its own, because the client decides what to render
+  // and the server decides what runs.
+  const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
   const { content, setContent } = useContent()
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
@@ -1190,6 +1194,15 @@ export function ChatScreen() {
   // query at send time so the backend's deterministic slash fast-path is
   // unchanged.
   const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
+  // Goal Analysis mode. A MODE rather than a skill: the next message starts a
+  // run instead of posting a turn, so it cannot ride on `pinnedSkill` (which
+  // splices a slash trigger into the query and sends it to the ask path).
+  const [goalMode, setGoalMode] = useState(false)
+  // The run currently on screen, readable without making it an effect
+  // dependency — the restore below has to know whether the user started one
+  // while its request was in flight, and depending on `content` would re-fire
+  // the restore on every unrelated content change.
+  const goalRunRef = useRef<number | null>(null)
   // A passage of an answer the reader highlighted and pressed Reply on, parked
   // above the input until they send or dismiss it. Host state (not the shell's)
   // because main renders its own composer; the shell reports the selection
@@ -2444,6 +2457,11 @@ export function ChatScreen() {
           // rendering the PREVIOUS thread's document.
           documentId: null,
           documentGenerating: false,
+          // Same rule, same reason. A run belongs to the thread that started
+          // it, and leaving it set showed thread A's analysis — with a LIVE
+          // Confirm button — on thread B, where confirming would lock a goal
+          // definition against a conversation the reader was not looking at.
+          goalRunId: null,
         }
       : { conversationId: activeConvId })
     // `activeTabId` is a REAL dependency, not a lint appeasement: without it
@@ -6311,6 +6329,20 @@ export function ChatScreen() {
     // trigger stays the query's first token — the backend's deterministic
     // fast-path and `skillForQuery` both read it there. (This ordering is the
     // whole reason a quote rides at the END of the message; see `chatQuote.ts`.)
+    // Goal Analysis takes the message instead of the ask path. Deliberately
+    // BEFORE the skill splice and the quote build: a run takes the goal in the
+    // user's own words, and a slash trigger spliced into the front of it would
+    // become part of what Stage 0 tries to match a metric against.
+    if (goalMode) {
+      setDraft("")
+      setGoalMode(false)
+      setPlusMenuOpen(false)
+      if (voice.listening) voice.cancel()
+      void startGoalAnalysis(q)
+      const ta0 = composerRef.current
+      if (ta0) ta0.style.height = ""
+      return
+    }
     const sent = buildQuotedMessage(spliceSkill(pinnedSkill, q), quote)
     // Sending ends the dictation that produced the question — and CANCELS it
     // rather than stopping it. A graceful stop still delivers the phrase the
@@ -6440,14 +6472,102 @@ export function ChatScreen() {
   // The `+` menu: Attach a file / Browse skills. The slash palette used to be
   // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
   // invisible to anyone who never read the footer hint.
+  // Restore this thread's analysis after a reload.
+  //
+  // `goalRunId` lives in the shared content slot, which is memory only, so
+  // without this a refresh made the run UNREACHABLE — it kept going on the
+  // server, finished, and had no way back onto the screen. That is #1187
+  // repeated, and it is the failure that makes a long-running feature feel
+  // broken rather than slow.
+  //
+  // Gated on the flag, so an unenrolled company never pays a request (or
+  // collects a 403) on every thread switch.
+  useEffect(() => {
+    // Mirrors the content reset above: the thread changed, so whatever run was
+    // on screen belongs to the previous one. Clearing the ref too is what lets
+    // the restore below run for the NEW thread instead of seeing a stale id
+    // and declining.
+    goalRunRef.current = null
+    if (!goalAnalysisOn || activeConvId == null) return
+    let live = true
+    void (async () => {
+      try {
+        const { runs } = await goalAnalysisApi.list()
+        if (!live) return
+        // Newest first from the server; take this thread's most recent that is
+        // still worth showing. A `failed` or `cancelled` run must NOT reopen
+        // the panel: it would pin an undismissable red tab to that thread for
+        // as long as the run row exists, with nothing the reader can do about
+        // it. There is no run-history surface yet, so a reload-then-fail user
+        // is not shown the failure at all — a real gap, and the lesser of the
+        // two until that surface exists.
+        const mine = runs.find(
+          (r) => r.conversation_id === activeConvId
+            && r.status !== "failed" && r.status !== "cancelled",
+        )
+        if (!live || !mine) return
+        // Never clobber a run the user started while this request was in
+        // flight — the restore would yank the panel back to an older one.
+        if (goalRunRef.current != null) return
+        goalRunRef.current = mine.id
+        setContent({ goalRunId: mine.id })
+      } catch {
+        // A failed restore is a missing panel, not a broken chat. The run row
+        // survives and the listing will be tried again on the next switch.
+      }
+    })()
+    return () => { live = false }
+    // `activeTabId` is a REAL dependency, for the same reason the content
+    // reset above lists it: two tabs can share one conversation id, so without
+    // it this effect does not re-run on the switch — the reset clears the
+    // panel, the restore never fires again, and switching back does not
+    // recover it.
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+
+  // Start a Goal Analysis run and put its panel on screen.
+  //
+  // The panel opens on the run id RATHER THAN on a result, because the first
+  // thing a run does is stop and ask what the goal means. If the panel waited
+  // for something to render, the question — which is the product's central
+  // claim, not an interruption on the way to one — would arrive as a surprise
+  // after a silence.
+  const startGoalAnalysis = useCallback(async (goalText: string) => {
+    try {
+      const run = await goalAnalysisApi.start(goalText, {
+        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+      })
+      goalRunRef.current = run.id
+      setContent({ goalRunId: run.id })
+      openContentPanel("goal")
+    } catch (e) {
+      // A 403 here is the entitlement gate, and it is the one failure worth
+      // naming precisely: the control was visible, so "something went wrong"
+      // would read as a bug rather than as "your company is not on this yet".
+      const denied = e instanceof ApiError && e.status === 403
+      showToast(
+        denied ? "Goal Analysis is not enabled" : "Could not start the analysis",
+        denied
+          ? "This is an experimental feature and your company is not enrolled yet."
+          : (e instanceof Error ? e.message : String(e)).slice(0, 200),
+      )
+    }
+  }, [activeConvId, setContent, openContentPanel, showToast])
+
   const handlePlusMenuSelect = useCallback((index: number) => {
     setPlusMenuOpen(false)
     if (index === 0) {
       fileInputRef.current?.click()
       return
     }
+    // Index 2 exists only while the company is enrolled — ChatComposer appends
+    // it last precisely so 0 and 1 keep meaning what they always meant.
+    if (index === 2) {
+      setGoalMode(true)
+      composerRef.current?.focus()
+      return
+    }
     openSkillPalette()
-  }, [openSkillPalette])
+  }, [openSkillPalette, composerRef])
 
   // Esc stops the answer. The Stop button already sits in the composer and now
   // beside the wait itself, but the fastest way out of a run you regret is the
@@ -6532,6 +6652,9 @@ export function ChatScreen() {
       onToggleVoice={handleToggleVoice}
       quote={quote}
       onRemoveQuote={() => setQuote(null)}
+      goalMode={goalMode}
+      onExitGoalMode={() => setGoalMode(false)}
+      goalModeAvailable={goalAnalysisOn}
     />
   )
 

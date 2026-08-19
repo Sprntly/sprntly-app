@@ -64,6 +64,7 @@ const EMPTY: AppContentState = {
   // document exists, exactly as Reports is.
   documentId: null,
   documentGenerating: false,
+  goalRunId: null,
   threadReports: [],
   threadReportsStatus: "idle",
   threadReportsConversationId: null,

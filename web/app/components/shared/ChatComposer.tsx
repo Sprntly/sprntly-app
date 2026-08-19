@@ -97,6 +97,9 @@ export function ChatComposer({
   placeholder,
   quote,
   onRemoveQuote,
+  goalMode,
+  onExitGoalMode,
+  goalModeAvailable,
 }: {
   home?: boolean
   busy: boolean
@@ -148,6 +151,20 @@ export function ChatComposer({
    *  byte-identical. */
   quote?: string | null
   onRemoveQuote?: () => void
+  /** Goal Analysis mode. The composer only DISPLAYS the chip — the caller owns
+   *  the state and decides what "send" means in this mode, because on the main
+   *  chat it starts a run rather than posting a turn.
+   *
+   *  Undefined for every existing caller, so their `.cx-head` renders exactly
+   *  as before. Undefined ALSO hides the `+` menu entry: the entry is offered
+   *  only where the company is enrolled, and enrolment is the host's question
+   *  to answer, not this component's. */
+  goalMode?: boolean
+  onExitGoalMode?: () => void
+  /** Whether to offer Goal Analysis in the `+` menu at all. Separate from
+   *  `goalMode` so a surface can show the chip for a run already in flight
+   *  without offering to start another. */
+  goalModeAvailable?: boolean
 }) {
   const menuRef = useRef<HTMLDivElement>(null)
   // Opening the menu moves focus into it, so it is operable from the keyboard at
@@ -178,7 +195,22 @@ export function ChatComposer({
 
   const canSend = draft.trim().length >= DRAFT_MIN_CHARS
   const showCount = draft.length >= DRAFT_COUNTER_FROM
-  const hasHead = !!pinnedSkill || attachments.length > 0
+  const hasHead = !!pinnedSkill || attachments.length > 0 || !!goalMode
+
+  // The `+` menu as DATA. It was two hardcoded buttons with the arrow-key wrap
+  // written as `% 2`, so a third entry was unreachable from the keyboard and
+  // the ArrowUp branch incremented like ArrowDown — a copy-paste slip that was
+  // invisible while there were only two items to cycle between. The indices are
+  // the host's contract (`onMenuSelect(index)`), so they stay positional and
+  // Goal Analysis is appended LAST, leaving 0 and 1 exactly where every caller
+  // already expects them.
+  const menuItems: { label: React.ReactNode; testId: string }[] = [
+    { label: "Attach a file", testId: "menu-attach" },
+    { label: <>Browse skills <small>⌘/</small></>, testId: "menu-skills" },
+  ]
+  if (goalModeAvailable) {
+    menuItems.push({ label: "Analyse a goal", testId: "menu-goal-analysis" })
+  }
 
   // ── Dictation (default-on, see the prop doc above) ───────────────────────
   // Whatever was already typed when the mic switched on — speech APPENDS to a
@@ -255,6 +287,26 @@ export function ChatComposer({
                 className="cx-chip-x"
                 aria-label={`Remove the ${pinnedSkill.label} skill`}
                 onClick={onRemoveSkill}
+              >
+                ×
+              </button>
+            </span>
+          ) : null}
+          {/* Goal Analysis reads as a MODE rather than an attachment, so it
+              sits first in the head row: it changes what the next message
+              does, and a chip you have to hunt for behind two files is a mode
+              you will forget you are in. */}
+          {goalMode ? (
+            <span
+              className="cx-chip cx-chip--skill"
+              data-testid="goal-analysis-chip"
+            >
+              <b>Goal Analysis</b>
+              <button
+                type="button"
+                className="cx-chip-x"
+                aria-label="Leave Goal Analysis"
+                onClick={onExitGoalMode}
               >
                 ×
               </button>
@@ -359,28 +411,27 @@ export function ChatComposer({
           role="menu"
           aria-label="Add to this message"
           onKeyDown={(e) => {
-            if (e.key === "ArrowDown") { e.preventDefault(); onMenuActive((menuActiveIndex + 1) % 2); return }
-            if (e.key === "ArrowUp") { e.preventDefault(); onMenuActive((menuActiveIndex + 1) % 2); return }
+            const n = menuItems.length
+            if (e.key === "ArrowDown") { e.preventDefault(); onMenuActive((menuActiveIndex + 1) % n); return }
+            // Was a copy of the ArrowDown branch, so Up and Down both went down.
+            // `+ n - 1` rather than `- 1` because JS `%` keeps the sign, and
+            // -1 % 3 is -1, which indexes nothing.
+            if (e.key === "ArrowUp") { e.preventDefault(); onMenuActive((menuActiveIndex + n - 1) % n); return }
             if (e.key === "Escape") { e.preventDefault(); onCloseMenu(); composerRef.current?.focus() }
           }}
         >
-          <button
-            type="button"
-            role="menuitem"
-            className={`cx-menu-item${menuActiveIndex === 0 ? " is-active" : ""}`}
-            onClick={() => onMenuSelect(0)}
-          >
-            Attach a file
-          </button>
-          <button
-            type="button"
-            role="menuitem"
-            className={`cx-menu-item${menuActiveIndex === 1 ? " is-active" : ""}`}
-            onClick={() => onMenuSelect(1)}
-          >
-            Browse skills
-            <small>⌘/</small>
-          </button>
+          {menuItems.map((item, i) => (
+            <button
+              key={item.testId}
+              type="button"
+              role="menuitem"
+              data-testid={item.testId}
+              className={`cx-menu-item${menuActiveIndex === i ? " is-active" : ""}`}
+              onClick={() => onMenuSelect(i)}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
       ) : null}
 

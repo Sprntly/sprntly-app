@@ -95,6 +95,10 @@ export type ContentPanelTab =
    *  Reports it hangs off the CHAT THREAD rather than off the PRD, so it sits
    *  after the pipeline and stays hidden until the thread actually has one. */
   | "document"
+  /** A Goal Analysis run. Like `document` it hangs off the CHAT THREAD rather
+   *  than off the PRD, so it sits outside the pipeline and stays hidden until
+   *  the thread actually has a run. */
+  | "goal"
 
 /** A request to open a captured report in the thread it was generated in.
  *
