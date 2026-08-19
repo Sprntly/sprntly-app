@@ -63,6 +63,7 @@ import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
 import { loadPrdById } from "../../../../lib/runPrdGeneration"
+import { loadTicketSet } from "../../../../lib/runTicketSetGeneration"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -986,9 +987,10 @@ export function ProjectDetailScreen({
   }, [state.status, openPrdInPanelById])
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
-  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD
-  // and evidence both open like main; the STANDALONE-browse open (ArtifactsModal,
-  // by-id) stays deferred.
+  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
+  // evidence, report and ticket_set all open like main's STANDALONE branch (no
+  // chat-resume: the drawer is a library view, not a thread turn); prototype and
+  // custom_artifact are routed by the drawer itself (own full-page surfaces).
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
     if (artifact.type === "prd") {
@@ -1007,6 +1009,24 @@ export function ProjectDetailScreen({
         prdPartialHtml: null,
       })
       openContentPanel("evidence")
+    } else if (artifact.type === "report") {
+      // Main's `openChatArtifactItem` report STANDALONE branch (the no-surviving-
+      // chat fallback), verbatim: focus the Reports tab on this report id, no
+      // conversation scope. The tab self-loads the report body by id.
+      setContent({
+        conversationId: null,
+        reportFocusId: artifact.open.report_id,
+        reportFocusStandalone: true,
+      })
+      openContentPanel("reports")
+    } else if (artifact.type === "ticket_set") {
+      // Main's `openChatArtifactItem` ticket_set STANDALONE branch, verbatim:
+      // mark the set standalone, open the Tickets tab, and load the set by id
+      // through the SHARED `loadTicketSet` (which clears sibling PRD/evidence
+      // slots so the tab shows only this set).
+      setContent({ ticketSetStandalone: true })
+      openContentPanel("tickets")
+      void loadTicketSet(artifact.open.ticket_set_id, setContent)
     }
   }, [setContent, openContentPanel, openPrdInPanelById])
 
