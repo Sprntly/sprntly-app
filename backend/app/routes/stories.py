@@ -295,6 +295,22 @@ async def generate(
             conversation_id=body.conversation_id,
             source_text=body.insight,
         )
+        # When the commanding chat belongs to a project (its individual/group
+        # project chat, or a chat auto-forked into one), pin this ticket set to
+        # that project — the derived rail + context manifest read straight off
+        # project_artifacts, so this single upsert makes the set visible in both.
+        # Server-side (runs regardless of the client), best-effort (a failed pin
+        # never blocks generation). Non-project chats read None and are
+        # unaffected. Only the insight path mints a ticket_set row here; the
+        # prd_id path has none to pin.
+        if ticket_set_id is not None and body.conversation_id is not None:
+            from app.project_from_prd import (
+                maybe_pin_conversation_artifact_to_project,
+            )
+
+            maybe_pin_conversation_artifact_to_project(
+                body.conversation_id, company.company_id, "ticket_set", ticket_set_id
+            )
 
     job_id = next(_job_ids)
     _jobs[job_id] = {

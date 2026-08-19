@@ -208,3 +208,57 @@ def maybe_auto_create_project_for_prd(
             exc_info=True,
         )
         return None
+
+
+def maybe_pin_conversation_artifact_to_project(
+    conversation_id: int | None,
+    company_id: str | None,
+    artifact_type: str,
+    artifact_id: int,
+) -> int | None:
+    """Pin `artifact_id` to whatever project `conversation_id` is bound to.
+
+    The generalised, artifact-type-agnostic sibling of the PRD-specific
+    `maybe_auto_create_project_for_prd`'s already-bound branch (line ~168):
+    given a conversation that already belongs to a project (a project's own
+    individual/group chat, or a chat auto-forked into a project), UPSERT the
+    generated artifact into that project's `project_artifacts` so it shows up
+    on the project's artifact rail AND in the project context manifest the
+    context-assembler injects (both are derived at read time from
+    `project_artifacts`, so this single write is all that's needed).
+
+    Called from the generation loci that mint a NON-PRD artifact server-side
+    (evidence / ticket-set), which had no project-pin of their own — so a doc
+    generated inside a project chat used to orphan from the project. PRDs are
+    already pinned by `maybe_auto_create_project_for_prd` at their generation
+    routes and do not go through here.
+
+    Robust to client-close by construction: it runs server-side wherever the
+    generation job does, not on the client. Idempotent (add_artifact upserts
+    on the PK), so a force-regen that mints a NEW artifact id simply pins the
+    new id — resolve-forward on the rail covers the superseded old pin.
+
+    `artifact_type` must be a pinnable type (prd/evidence/prototype/report/
+    ticket_set); a `custom_artifact` team document is excluded by the
+    `project_artifacts` CHECK constraint and must never be passed here.
+
+    Best-effort — never raises (mirrors `bind_conversation_to_prd` /
+    `add_artifact`): a failed pin must never break the generation it
+    accompanies. Non-project (main-chat) generation is unaffected: an unbound
+    conversation (or none at all) reads None and nothing is written. Returns
+    the project id it pinned to, or None."""
+    if conversation_id is None or not company_id:
+        return None
+    try:
+        project_id = _conversation_project_id(conversation_id, company_id)
+        if project_id is None:
+            return None
+        add_artifact(project_id, artifact_type, artifact_id)
+        return project_id
+    except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
+        logger.warning(
+            "Failed to pin %s %s to conversation %s's project",
+            artifact_type, artifact_id, conversation_id,
+            exc_info=True,
+        )
+        return None
