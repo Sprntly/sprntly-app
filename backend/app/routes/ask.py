@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import random
+import re
 import sys
 import time
 import uuid
@@ -27,6 +28,7 @@ from app.db import (
     find_cached_ask,
     get_ask_job,
     start_ask_job,
+    suppress_ask_job,
 )
 from app.deps.ownership import (
     require_owned_dataset,
@@ -43,6 +45,11 @@ from app.routes.conversations import TurnAttachment
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
+
+# The @Sprntly agent token — word-boundary so "@Sprntly" / "@sprntly" match but
+# "@sprntlybot" does not. Mirrors routes/projects.py `_MENTION_RE`; the group
+# 2-mode gate uses it to decide whether a multi-human turn addressed the agent.
+_MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
 
 
 # Strong refs to in-flight background Ask tasks. asyncio holds only a weak
@@ -403,6 +410,82 @@ def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
     return None
 
 
+# ── One authorization posture for the project-chat ask lifecycle ─────────────
+# The gates below (project membership + the group 2-mode gate) share ONE
+# posture: a project-chat ask is authorized SYNCHRONOUSLY at the /v1/ask route,
+# BEFORE any job is spawned or tokens spent, and every check FAILS CLOSED (a
+# check that can't be established denies rather than admits). This is
+# deliberately the SAME gate the async project assembler already runs, hoisted
+# earlier so a denial costs no LLM round-trip and never leaks a raw backend
+# error to the client.
+#
+# NOTE: a third change — recording an owner `user_id` on the ask row and
+# gating GET/cancel/stream to that owner — is DEFERRED pending an ownership
+# decision (it reshapes the shared `ask_jobs` store that main chat depends on).
+# It would slot in here (an `_owner_ok(row, company)` helper) and be applied in
+# get_ask / cancel_ask / stream_ask_generation alongside the existing
+# company-id check. See the report for the full scope.
+
+
+def _project_source(body: "AskIn") -> tuple[int, dict] | None:
+    """The `(project_id, params)` a project-scoped ask targets, or None for a
+    non-project ask. Project chats carry their project on `context_source`
+    (`{"kind": "project", "params": {"project_id", "surface"}}`), never on the
+    top-level `body.project_id`."""
+    src = body.context_source if isinstance(body.context_source, dict) else None
+    if not src or src.get("kind") != "project":
+        return None
+    params = src.get("params") or {}
+    proj_raw = params.get("project_id")
+    if proj_raw is None:
+        return None
+    return int(proj_raw), params
+
+
+def _gate_project_membership(
+    project_id: int, company: "WorkspaceContext"
+) -> None:
+    """Part 3 — SYNCHRONOUS project-membership gate at the route, for BOTH
+    surfaces. 404 when the project isn't in the caller's `(company, workspace)`
+    (same non-disclosure posture as the dataset/prd gates), 403 (typed,
+    friendly) when the caller is a same-tenant NON-member. Runs BEFORE the job
+    is spawned, so a non-member never triggers an ask-planner round-trip and
+    never sees a raw `403` string from a failed background job. The async
+    assembler still runs the identical gate as defense-in-depth."""
+    from app.db.projects import is_project_member, project_belongs_to_company
+
+    if not project_belongs_to_company(
+        project_id, company.company_id, company.workspace_id
+    ):
+        raise HTTPException(404, "Project not found")
+    if not is_project_member(project_id, company.user_id):
+        raise HTTPException(403, "You are not a member of this project.")
+
+
+def _group_is_multi_human(project_id: int) -> bool:
+    """Whether the project has ≥2 human members — the group 2-mode gate's
+    multi-human test. FAILS CLOSED: any read error is treated as multi-human
+    (→ suppress), after ONE retry. A count hiccup must never drop the gate into
+    solo-mode and let Sprntly interject into a shared thread."""
+    from app.db.projects import count_project_members
+
+    for attempt in range(2):
+        try:
+            return count_project_members(project_id) >= 2
+        except Exception:  # noqa: BLE001 — fail CLOSED toward multi-human
+            logger.warning(
+                "count_project_members failed project_id=%s attempt=%s",
+                project_id, attempt, exc_info=True,
+            )
+    return True
+
+
+def _mentions_agent(question: str | None) -> bool:
+    """True when the turn `@Sprntly`-mentions the agent (word-boundary,
+    case-insensitive) — the same token the group send path recognises."""
+    return bool(_MENTION_RE.search(question or ""))
+
+
 @router.post("")
 async def ask(
     body: AskIn,
@@ -442,6 +525,43 @@ async def ask(
         # foreign, indistinguishable on purpose.
         if get_set(company.company_id, body.ticket_set_id) is None:
             raise HTTPException(404, "Ticket set not found")
+
+    # ── Project-scoped ask: synchronous authorization, BEFORE any generation ──
+    # A project chat carries its project on `context_source`. Two gates fire
+    # here, at the route, before the job is spawned:
+    #   Part 3 — membership: a non-member 403s NOW (no ask-planner token burn,
+    #            no raw 403 leaking from a background job). BOTH surfaces.
+    #   Part 1 — group 2-mode gate: in a MULTI-human group, Sprntly is fully
+    #            silent unless the turn @Sprntly-mentions it. Evaluated
+    #            pre-generation and FAIL-CLOSED, so an untagged multi-human ask
+    #            does NO LLM work, stores NO readable answer, and broadcasts
+    #            nothing — closing the old fail-OPEN, pay-then-suppress bug.
+    _proj = _project_source(body)
+    if _proj is not None:
+        _project_id, _proj_params = _proj
+        _gate_project_membership(_project_id, company)
+        if _proj_params.get("surface") == "group" and not _mentions_agent(body.question):
+            if _group_is_multi_human(_project_id):
+                # Suppress BEFORE generation: persist a job row for the question
+                # so the client's POST still gets a pollable ask_id, mark it
+                # terminally silenced (empty response), and return a no-answer
+                # terminal state the client renders as nothing. No LLM work runs,
+                # no group turn is persisted, nothing is broadcast — the sender
+                # reads NOTHING.
+                ask_id = start_ask_job(
+                    company_id=enterprise_id,
+                    dataset=body.dataset,
+                    question=body.question,
+                    conversation_id=body.conversation_id,
+                    pinned_skill=body.pinned_skill,
+                )
+                suppress_ask_job(ask_id)
+                logger.info(
+                    "group_reply_suppressed_pregen project_id=%s conversation_id=%s "
+                    "reason=multi_human_no_mention",
+                    _project_id, body.conversation_id,
+                )
+                return {"ask_id": ask_id, "status": "cancelled"}
 
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already

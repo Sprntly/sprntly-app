@@ -732,22 +732,25 @@ async def run_ask_job(
                 # a persist/broadcast failure can only fail to ADD the group
                 # turn — the answer is already durably stored above.
                 if (context_source.get("params") or {}).get("surface") == "group":
-                    # 2-mode response gate (server backstop): in a MULTI-human
+                    # 2-mode response gate (server BACKSTOP): in a MULTI-human
                     # project (≥2 human members), Sprntly replies ONLY to a turn
-                    # that @Sprntly-mentions it. If an ask fired anyway (a buggy or
-                    # bypassing client), suppress the reply persist+broadcast here
-                    # so no group reply can appear against the rule. Solo projects
-                    # and @Sprntly-mentioning turns are unaffected. Fail OPEN
-                    # toward replying (a count-read hiccup must never silently
-                    # swallow a legitimate reply) — the client gate is the primary,
-                    # this is defense-in-depth.
+                    # that @Sprntly-mentions it. The PRIMARY gate now runs at the
+                    # /v1/ask route BEFORE generation (routes/ask.py), so a
+                    # suppressed ask never reaches this post-terminal hook at all;
+                    # this stays as defense-in-depth for any future path that
+                    # spawns a group ask without the route gate. FAIL CLOSED — a
+                    # count-read hiccup treats the project as multi-human and
+                    # suppresses the persist+broadcast, matching the route gate's
+                    # posture (never let the agent interject into a shared thread
+                    # on a read failure). Solo projects and @Sprntly-mentioning
+                    # turns still reply.
                     import re as _re
 
                     try:
                         from app.db import projects as _projects_db
                         _multi_human = _projects_db.count_project_members(int(_promo_project_id)) >= 2
-                    except Exception:  # noqa: BLE001 — fail open toward replying
-                        _multi_human = False
+                    except Exception:  # noqa: BLE001 — fail CLOSED toward suppression
+                        _multi_human = True
                     _mentions_agent = bool(_re.search(r"@sprntly\b", question or "", _re.IGNORECASE))
                     if _multi_human and not _mentions_agent:
                         logger.info(
