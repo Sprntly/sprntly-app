@@ -41,6 +41,8 @@ import {
   type ChatArtifactItem, type SlackShareTargetRef, type GroupTurn,
 } from "../../../../lib/api"
 import { type PopupAnswer } from "../../../shared/QuestionPopup"
+import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
+import { buildQuotedMessage, splitQuotedSuffix } from "../../../../lib/chatQuote"
 import {
   useSlackShareCardHandlers,
   type PendingShareState,
@@ -111,6 +113,11 @@ function clarifyAnswersText(answers: ClarifyAnswer[]): string {
 }
 const CLARIFY_SKIP_RE = /^\s*(generate( now)?|go|proceed|do it|just do it|skip|that'?s? (all|it|enough))\b/i
 
+// How long a turn's transient "Copied" tick shows after a per-turn Copy. Same
+// value main's ChatScreen keeps for the identical affordance (kept a local
+// const here because main's is module-private).
+const COPIED_HINT_MS = 1600
+
 function surfaceKey(projectId: number | string, surface: ProjectChatSurface): string {
   return `project-${projectId}-${surface}`
 }
@@ -166,6 +173,12 @@ export function useProjectConversation(
   // sets it; the host (ProjectMainThread) renders the SHARED AttachmentViewer from
   // it, mirroring how ChatScreen mounts the same component at its own root.
   const [viewerAttachment, setViewerAttachment] = useState<ViewerAttachment | null>(null)
+  // Acting on a past prompt (main parity): the ONE turn currently open in the
+  // inline editor, and the ONE showing its transient "Copied" tick. Host-owned,
+  // exactly like main's ChatScreen keeps them.
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [clarifyPopupDismissed, setClarifyPopupDismissed] = useState<Record<string, boolean>>({})
   const [questionDockEl, setQuestionDockEl] = useState<HTMLDivElement | null>(null)
   const threadRef = useRef<ThreadTurn[]>(thread)
@@ -329,7 +342,16 @@ export function useProjectConversation(
             const reply = next?.role === "assistant"
               ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse
               : undefined
-            restored.push({ id: `resumed-${conv.id}-${i}`, query: t.content, reply })
+            restored.push({
+              id: `resumed-${conv.id}-${i}`,
+              // Carry the DB row id so a rehydrated turn can still be rewound to
+              // (edit/retry a past prompt): the server needs the real row id,
+              // and the persistence map only covers turns THIS session wrote.
+              // Mirrors main's `buildRestored` dbTurnId threading.
+              ...(typeof t.id === "number" ? { dbTurnId: t.id } : {}),
+              query: t.content,
+              reply,
+            })
             if (reply) i++
           } else if (t.role === "assistant" && t.content.trim()) {
             restored.push({ id: `resumed-${conv.id}-${i}`, query: "", reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse })
@@ -1179,6 +1201,80 @@ export function useProjectConversation(
     askAgain(turn, { submit: submitAsk, setDraft: composer.setDraft, composerRef: composer.composerRef })
   }, [composer, submitAsk])
 
+  // ── Acting on a past prompt: copy / edit / retry (main parity) ─────────────
+  // Copy is free — it changes nothing — so it works on any turn the viewer or a
+  // peer actually spoke. It drops the trailing quoted passage (pasting "> …"
+  // markup elsewhere is never what was meant); the excerpt has its own viewer.
+  const handleCopyTurn = useCallback((turn: { id: string; query: string }) => {
+    const body = splitQuotedSuffix(turn.query).body || turn.query
+    if (!body) return
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(body)
+        setCopiedTurnId(turn.id)
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+        copiedTimerRef.current = setTimeout(() => setCopiedTurnId(null), COPIED_HINT_MS)
+      } catch {
+        showToast("Couldn't copy", "Your browser blocked clipboard access — select the text and copy it manually.")
+      }
+    })()
+  }, [showToast])
+
+  // Edit and retry both RE-ASK. The two surfaces diverge on what that means
+  // because their persistence does:
+  //   * PRIVATE (single-author) mirrors main exactly — truncate the on-screen
+  //     thread at this turn AND rewind the persisted conversation to it (this
+  //     surface's OWN `persistence.rewindToUserTurn` → DELETE …/turns/{id},
+  //     NOT main's), so screen and DB agree, then re-ask. `dbTurnId` (threaded
+  //     through hydrate above and the fresh-send map inside chatPersistence) is
+  //     what lets a rehydrated turn be rewound at all.
+  //   * GROUP is a shared multi-author feed: deleting everything after a turn
+  //     would erase peers' messages, so a re-post is a NEW post, never a history
+  //     rewind. It runs through `submitAsk`, which already carries the 2-mode
+  //     response gate (untagged multi-human → silent post; @Sprntly / solo →
+  //     reply) and mints a fresh turn id + client_message_id — so the reply gate
+  //     is honoured and idempotency/echo-dedup stay intact (no double-render).
+  const reAskFromTurn = useCallback((turn: ThreadTurn, nextQuery: string) => {
+    const q = nextQuery.trim()
+    if (!q) return
+    if (isGroup) {
+      void submitAsk(q)
+      return
+    }
+    setThread((prev) => {
+      const idx = prev.findIndex((x) => x.id === turn.id)
+      // Not found means the thread moved under us (a background answer landed, a
+      // rehydrate) — drop the action rather than truncate at a guess.
+      return idx === -1 ? prev : prev.slice(0, idx)
+    })
+    void persistence.rewindToUserTurn(convKey, turn.id, turn.dbTurnId)
+    void submitAsk(q)
+  }, [isGroup, submitAsk, persistence, convKey])
+
+  const handleRetryTurn = useCallback((turn: ThreadTurn) => {
+    // Verbatim — including the quoted passage, which is part of the question.
+    reAskFromTurn(turn, turn.query.trim())
+  }, [reAskFromTurn])
+
+  const handleEditTurn = useCallback((turnId: string) => setEditingTurnId(turnId), [])
+  const handleCancelTurnEdit = useCallback(() => setEditingTurnId(null), [])
+  const handleSubmitTurnEdit = useCallback((turn: ThreadTurn, text: string) => {
+    setEditingTurnId(null)
+    const body = text.trim()
+    if (body.length < DRAFT_MIN_CHARS) return
+    // The passage the original message replied to is kept: the editor owns your
+    // words, not the excerpt. Re-composed the same way the composer would have.
+    const { quote: repliedTo } = splitQuotedSuffix(turn.query)
+    const next = buildQuotedMessage(body, repliedTo)
+    // Saving without changing anything just closes the editor (Retry is for
+    // re-running an identical question, deliberately).
+    if (next === turn.query) return
+    reAskFromTurn(turn, next)
+  }, [reAskFromTurn])
+
+  // A "Copied" timer left pending on unmount would setState on a dead surface.
+  useEffect(() => () => { if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current) }, [])
+
   // ── Reopen this conversation's PRD ─────────────────────────────────────────
   // The "View PRD" affordance (ChatArtifactActions, shown once a PRD exists on
   // the turn). Routes through the SAME artifact sink the edit flow + open-
@@ -1407,6 +1503,12 @@ export function useProjectConversation(
     inlinePrdCards: false, inlinePrdAnchorIdx: null, insightCardNode: null, prdQuestionsNode: null,
     clarifyPopupOpen, pendingClarifyTurn,
     handleAskAgain, handleStopAsk: engine.handleStopAsk,
+    // Acting on a past prompt (main parity). The mapper draws the Copy / Edit /
+    // Ask-again row once these are present; ownership (peer turns get Copy only)
+    // is enforced data-driven in the mapper via `turn.author`.
+    editingTurnId, copiedTurnId,
+    onCopyTurn: handleCopyTurn, onRetryTurn: handleRetryTurn, onEditTurn: handleEditTurn,
+    onSubmitTurnEdit: handleSubmitTurnEdit, onCancelTurnEdit: handleCancelTurnEdit,
     submitClarifyAnswers, setViewerAttachment,
     openReportByTitle, openArtifactInPanel: (c) => onOpenArtifact?.(c), openChatArtifactItem,
     handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd,
@@ -1423,7 +1525,7 @@ export function useProjectConversation(
       turn.reply?.answer?.includes(MORE_MARKER)
         ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
         : null,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames])
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
