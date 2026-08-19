@@ -98,6 +98,26 @@ BANNED_CAUSAL_INFLECTIONS: tuple[str, ...] = (
 # CAUSAL_HEAD_NOUN below, which requires the copula AND its complement rather
 # than banning a noun and then trying to exempt every innocent use of it.
 
+#: What makes a complement a DISCLAIMER rather than an assertion.
+#:
+#: STEMS, not whole phrases, and that distinction is the fix. The first version
+#: was a closed nine-phrase allowlist, so it hard-errored on "is not established
+#: by the available evidence" — the exact honest phrasing this lint exists to
+#: make easy — and on "is being tracked in ticket KAN-322", "is yet to be
+#: identified", "is one of three candidates", "is disputed between the two
+#: sources". Nine sentences that assert no cause at all, each a failed run.
+#:
+#: A negation or an uncertainty stem anywhere in the complement means the
+#: sentence is reporting that we do NOT know, which is never what I5 exists to
+#: catch. This costs some recall. A lint that 500s on honest reporting costs
+#: the whole invariant, because somebody switches it off.
+_NOT_A_DISCLAIMER = (
+    r"(?![^.;]{0,60}?\b(?:not|never|unknown|unclear|uncertain|undetermined|"
+    r"unresolved|pending|tbd|investigat\w*|identif\w*|determin\w*|establish\w*|"
+    r"disput\w*|document\w*|track\w*|candidate\w*|hypothes\w*|suspect\w*|"
+    r"what|which|whether|why|yet|open)\b)"
+)
+
 CAUSAL_EXEMPTIONS: tuple[str, ...] = (
     r"\b(?:hard|disk|shared|google|storage|ssd|usb|network)\s+drives\b",
     r"\bdrives\s+(?:failed|sync|are|were|mounted|attached)\b",
@@ -149,9 +169,37 @@ CAUSAL_HEAD_NOUN = (
     # span exemption, because an exemption shorter than the hit cannot contain
     # it and so would never fire.
     r"(?:cause|driver)s?\s+of\s+(?!concern\b|alarm\b|worry\b|complaint\b)"
-    r"[^.;]{0,80}?\bis\s+"
-    r"(?!(?:still\s+)?(?:unknown|unclear|under\s+investigation|not\s+yet\s+known|"
-    r"being\s+investigated|to\s+be\s+determined|tbd|open|undetermined)\b)"
+    r"[^.;]{0,80}?\bis\s+" + _NOT_A_DISCLAIMER
+)
+
+#: THE PASSIVE FORM — and the one the head-noun rule structurally CANNOT see,
+#: because that rule keys on `cause|driver` + `of` + copula and "X is driven by
+#: Y" has none of the three.
+#:
+#: `driven by` / `responsible for` / `attributable to` were dropped from the
+#: phrase list for good reasons ("a job driven by cron", "the engineer
+#: responsible for the connector is on call", "attributable to the July billing
+#: period") — but nothing replaced them, so four genuine assertions went legal
+#: while a comment claimed the head-noun rule covered them. It did not. "X is
+#: driven by Y" is the most common passive causal construction an LLM writes.
+CAUSAL_PASSIVE = (
+    r"\b(?:is|are|was|were)\s+"
+    r"(?:driven\s+by|caused\s+by|responsible\s+for)\s+"
+    + _NOT_A_DISCLAIMER
+)
+
+# `attributable to` was TRIED here and removed: it catches "Churn is
+# attributable to export latency" and also "The invoice is attributable to the
+# July billing period", which is accounting, not causation, and which no
+# disclaimer stem can distinguish. A hard error on an invoice sentence costs
+# more than the one assertion it buys. Documented rather than silently dropped
+# so the next person does not re-add it and rediscover the invoice.
+
+#: "The reason for X is Y", "the reason why X is Y", "the consequence of X is
+#: Y". Also dropped for precision and also not replaced.
+CAUSAL_REASON_NOUN = (
+    r"\b(?:the\s+reason\s+(?:for|why)|(?:the|a)\s+consequence\s+of)\b"
+    r"[^.;]{0,80}?\bis\s+" + _NOT_A_DISCLAIMER
 )
 
 
@@ -196,8 +244,20 @@ def _pattern(phrases: tuple[str, ...]) -> re.Pattern[str]:
 _SPEC_ONLY = _pattern(BANNED_CAUSAL_VERBS)
 _WITH_INFLECTIONS = _pattern(BANNED_CAUSAL_VERBS + BANNED_CAUSAL_INFLECTIONS)
 _EXEMPT = re.compile("|".join(CAUSAL_EXEMPTIONS), re.IGNORECASE)
+#: The four shape rules, checked together. Each requires a whole construction
+#: rather than a phrase, which is what lets the ban list stay small enough not
+#: to fire on ordinary prose.
 _HEAD_NOUN = re.compile(
-    f"(?:{CAUSAL_HEAD_NOUN})|(?:{CAUSAL_COPULA_FIRST})", re.IGNORECASE
+    "|".join(
+        f"(?:{rule})"
+        for rule in (
+            CAUSAL_HEAD_NOUN,      # "the cause of X is Y"
+            CAUSAL_COPULA_FIRST,   # "X is the cause of Y"
+            CAUSAL_PASSIVE,        # "X is driven by Y"
+            CAUSAL_REASON_NOUN,    # "the reason for X is Y"
+        )
+    ),
+    re.IGNORECASE,
 )
 
 

@@ -994,3 +994,53 @@ def test_i9_a_definition_with_unresolved_conflicts_cannot_lock():
                             confirmed_by_user_at=NOW, confirmed_by_user_id="u-1",
                             conflicts_found=conflicts)
     assert_goal_locked(resolved)
+
+
+def test_frozendict_refuses_the_in_place_merge_operator():
+    """`|=` is a mutator, and missing it TRADED AWAY a property the code this
+    replaced had: `MappingProxyType` refuses `|=` outright, while a dict
+    subclass inherits `dict.__ior__` and updates in place.
+
+    `impact.native_units |= {...}` is safe by accident — the frozen dataclass's
+    `__setattr__` catches the rebind — which is exactly what makes the aliased
+    form easy to miss:
+
+        d = impact.native_units
+        d |= {"normalized": v}      # wrote through into a frozen score
+
+    That is I10's harm arriving through the class built to prevent it.
+    """
+    impact = Impact(value=1.0, currency="accounts", affected_population=4,
+                    movable_gap=0.16, value_per_unit=None,
+                    native_units={"tickets": 2.0})
+    aliased = impact.native_units
+    with pytest.raises(TypeError):
+        aliased |= {"HACKED": 1.0}                    # type: ignore[misc]
+    assert dict(impact.native_units) == {"tickets": 2.0}
+
+    # `|` is deliberately still allowed: it returns a new plain dict and
+    # mutates nothing.
+    merged = impact.native_units | {"extra": 1.0}
+    assert merged == {"tickets": 2.0, "extra": 1.0}
+    assert dict(impact.native_units) == {"tickets": 2.0}
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda d: d.update({"x": 1.0}),
+    lambda d: d.setdefault("x", 1.0),
+    lambda d: d.pop("tickets"),
+    lambda d: d.popitem(),
+    lambda d: d.clear(),
+    lambda d: d.__setitem__("x", 1.0),
+    lambda d: d.__delitem__("tickets"),
+    lambda d: d.__ior__({"x": 1.0}),
+])
+def test_every_dict_mutator_is_refused(mutate):
+    """Enumerated rather than sampled — `__ior__` was missed exactly because
+    the first version checked the ones that came to mind."""
+    impact = Impact(value=1.0, currency="accounts", affected_population=4,
+                    movable_gap=0.16, value_per_unit=None,
+                    native_units={"tickets": 2.0})
+    with pytest.raises(TypeError):
+        mutate(impact.native_units)
+    assert dict(impact.native_units) == {"tickets": 2.0}

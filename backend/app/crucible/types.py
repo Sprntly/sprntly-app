@@ -67,6 +67,15 @@ class FrozenDict(dict):
 
     __setitem__ = __delitem__ = _immutable          # type: ignore[assignment]
     pop = popitem = clear = update = setdefault = _immutable  # type: ignore[assignment]
+    # `|=` IS A MUTATOR, and missing it traded away a property the proxy had:
+    # `MappingProxyType` refuses `|=` outright, while a dict subclass inherits
+    # `dict.__ior__` and updates in place. `impact.native_units |= {...}` is
+    # safe by accident (the frozen dataclass's `__setattr__` catches the
+    # rebind), but `d = impact.native_units; d |= {...}` writes straight
+    # through into the frozen score — I10's exact harm, from the class built to
+    # prevent it. `|` is fine and deliberately left alone: it returns a new
+    # plain dict and mutates nothing.
+    __ior__ = _immutable                            # type: ignore[assignment]
 
     def __hash__(self) -> int:                       # type: ignore[override]
         return hash(tuple(sorted(self.items())))
