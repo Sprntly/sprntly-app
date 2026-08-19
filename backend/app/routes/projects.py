@@ -61,6 +61,7 @@ from app.realtime import publish_broadcast
 from app.project_group_realtime import publish_group_turn_created
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
+from app.project_title import generate_project_title
 from app.delegation_status_ingest import maybe_ingest_status
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.chat_envelope import enrich_chat_envelope
@@ -240,6 +241,7 @@ def create_project(
     PRD" tab returns the EXISTING project instead of minting a duplicate.
     Every other origin (manual/artifact) is unaffected — no dedup key exists
     for them, and none is checked."""
+    name = payload.name
     if payload.origin == "prd_auto" and payload.prd_id is not None:
         existing_id = find_existing_prd_auto_project(payload.prd_id, ctx.company_id)
         if existing_id is not None and projects_db.project_belongs_to_company(
@@ -248,11 +250,16 @@ def create_project(
             existing = projects_db.get_project(existing_id)
             if existing is not None:
                 return existing
+        # The "Auto · from PRD" tab forwards the PRD's own title as `name`.
+        # Name the project for what the PRD is ABOUT instead — the same shared
+        # derivation the generation-time hook uses. Best-effort: falls back to
+        # the incoming `payload.name` (the PRD title) on any failure.
+        name = generate_project_title(prd_id=payload.prd_id, fallback_title=payload.name)
 
     project = projects_db.create_project(
         company_id=ctx.company_id,
         workspace_id=ctx.workspace_id,
-        name=payload.name,
+        name=name,
         created_by=ctx.user_id,
         origin=payload.origin,
     )

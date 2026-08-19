@@ -40,6 +40,7 @@ from app.db.client import require_client
 from app.db.conversations import bind_conversation_to_project
 from app.db.projects import add_artifact, create_project
 from app.project_origin_seed import seed_project_origin_memory
+from app.project_title import generate_project_title
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +177,14 @@ def maybe_auto_create_project_for_prd(
             if existing_project_id is not None:
                 return existing_project_id
 
+        # Name the project for what the PRD is ABOUT, not the PRD's title
+        # verbatim — the shared name-derivation point both fork paths route
+        # through. Best-effort: falls back to `prd_title` on any failure.
+        project_name = generate_project_title(prd_id=prd_id, fallback_title=prd_title)
         project = create_project(
             company_id=company_id,
             workspace_id=workspace_id,
-            name=prd_title,
+            name=project_name,
             created_by=user_id,
             origin="prd_auto",
         )
