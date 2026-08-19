@@ -479,7 +479,7 @@ describe("ProjectDetailView — state", () => {
 
   it("the chat note bar swaps group ⇆ individual copy", () => {
     const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
-    expect(screen.getByTestId("chat-note").textContent).toContain("smart interjection")
+    expect(screen.getByTestId("chat-note").textContent).toContain("replies to every message")
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
     expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
@@ -491,7 +491,7 @@ describe("ProjectDetailView — state", () => {
     expect(groupNote.querySelector('[data-surface="group"]')).toBeNull()
     expect(groupNote.querySelector('[data-surface="individual"]')).toBeNull()
     // The explanatory copy stays even though the badge is gone.
-    expect(groupNote.textContent).toContain("smart interjection")
+    expect(groupNote.textContent).toContain("replies to every message")
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
     const indivNote = screen.getByTestId("chat-note")
