@@ -873,61 +873,8 @@ export function ChatScreen() {
     }
   }, [activeCompany, tabsKey, activeTabKey])
 
-  // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
-  // strip large/transient fields (prd, evidence, *Generating)
-  useEffect(() => {
-    try {
-      // prdCommandThinking is stripped with the rest: the in-flight call it
-      // tracks does not survive a reload, so restoring it would leave a
-      // thinking indicator spinning forever with nothing behind it. Turn-level
-      // `partial` (live streamed answer text) is stripped for the same reason —
-      // the resume path re-attaches the stream and rebuilds it from replay.
-      // `evidenceDetail` is stripped as a large field like `prd`/`evidence`; the
-      // small `evidenceOnly` flag beside it is what survives, and it's enough for
-      // a reloaded tab to reopen on its Evidence panel (read-loaded by briefMeta).
-      // The four ticket-set fields go with them, and the LATCH is the one that
-      // matters: a persisted `ticketSetRunning` would come back as a disabled
-      // "Writing tickets…" button for a run this page can no longer observe —
-      // the stale in-flight state this feature must never show. The id/status
-      // are dropped alongside it because the thread-resume probe
-      // (GET /v1/ticket-sets/by-conversation) is the authority on both, and a
-      // restored pair could contradict it.
-      const slim = tabs.map(({ prd: _p, evidence: _e, evidenceDetail: _ed, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ticketSetRunning: _tsr, ticketSetId: _tsi, ticketSetStatus: _tss, ticketSetTask: _tst, ...rest }) => {
-        // A still-pending summary indicator is dropped from the SAVED copy:
-        // its in-flight call dies with the page, so restoring it would strand
-        // a "Summarizing…" skeleton nothing will ever fill. The summary itself
-        // persists (as the turn's reply, and as a conversation row) only once
-        // it actually lands.
-        const stripped = {
-          ...rest,
-          thread: rest.thread
-            .filter((tn) => !(tn.summaryPending && !tn.reply))
-            .map(({ partial: _partial, streamDropped: _sd, timedOut: _to, ...turn }) =>
-              // An in-flight Slack send dies with the page, so `busy` must not
-              // come back with it — a restored spinner would sit forever on a
-              // share whose outcome nothing can now report. The preview and
-              // the `resolved` record both persist (a settled share must still
-              // say what was posted after a reload); only the in-flight flag
-              // is dropped, exactly like `ticketSetRunning` above.
-              turn.slackShare?.busy
-                ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
-                : turn),
-        }
-        // A PRD command awaiting its deferred reply (the clarify gate is still
-        // deciding — see deferredAckRef) has a reply-less seed turn, and the
-        // in-flight promise that would fill it dies with the page. Persisted
-        // as-is, a reload restored it into "No response was generated for this
-        // message." — false and a dead end. Mark it in the SAVED copy only, so
-        // a restore can say what actually happened; a normal settle re-runs
-        // this effect with the ref cleared and the mark comes straight off.
-        if (!deferredAckRef.current.has(stripped.id)) return stripped
-        const last = stripped.thread[stripped.thread.length - 1]
-        if (!last || last.reply || last.error || last.stopped) return stripped
-        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
-      })
-      sessionStorage.setItem(tabsKey, JSON.stringify(slim))
-    } catch { /* ignore */ }
-  }, [tabs, tabsKey])
+  // Persist tabs to sessionStorage lives BELOW the composer destructure (it folds
+  // in the optimistic `pendingSend`); see the effect after `} = composer`.
   useEffect(() => {
     try { sessionStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
@@ -1018,6 +965,98 @@ export function ChatScreen() {
     filteredSkills, slashOpen,
     skillForQuery,
   } = composer
+
+  // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
+  // strip large/transient fields (prd, evidence, *Generating). Placed AFTER the
+  // `composer` destructure because it also folds in the optimistic `pendingSend`.
+  useEffect(() => {
+    try {
+      // prdCommandThinking is stripped with the rest: the in-flight call it
+      // tracks does not survive a reload, so restoring it would leave a
+      // thinking indicator spinning forever with nothing behind it. Turn-level
+      // `partial` (live streamed answer text) is stripped for the same reason —
+      // the resume path re-attaches the stream and rebuilds it from replay.
+      // `evidenceDetail` is stripped as a large field like `prd`/`evidence`; the
+      // small `evidenceOnly` flag beside it is what survives, and it's enough for
+      // a reloaded tab to reopen on its Evidence panel (read-loaded by briefMeta).
+      // The four ticket-set fields go with them, and the LATCH is the one that
+      // matters: a persisted `ticketSetRunning` would come back as a disabled
+      // "Writing tickets…" button for a run this page can no longer observe —
+      // the stale in-flight state this feature must never show. The id/status
+      // are dropped alongside it because the thread-resume probe
+      // (GET /v1/ticket-sets/by-conversation) is the authority on both, and a
+      // restored pair could contradict it.
+      const slim = tabs.map(({ prd: _p, evidence: _e, evidenceDetail: _ed, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ticketSetRunning: _tsr, ticketSetId: _tsi, ticketSetStatus: _tss, ticketSetTask: _tst, ...rest }) => {
+        // A still-pending summary indicator is dropped from the SAVED copy:
+        // its in-flight call dies with the page, so restoring it would strand
+        // a "Summarizing…" skeleton nothing will ever fill. The summary itself
+        // persists (as the turn's reply, and as a conversation row) only once
+        // it actually lands.
+        const stripped = {
+          ...rest,
+          thread: rest.thread
+            .filter((tn) => !(tn.summaryPending && !tn.reply))
+            .map(({ partial: _partial, streamDropped: _sd, timedOut: _to, ...turn }) =>
+              // An in-flight Slack send dies with the page, so `busy` must not
+              // come back with it — a restored spinner would sit forever on a
+              // share whose outcome nothing can now report. The preview and
+              // the `resolved` record both persist (a settled share must still
+              // say what was posted after a reload); only the in-flight flag
+              // is dropped, exactly like `ticketSetRunning` above.
+              turn.slackShare?.busy
+                ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
+                : turn),
+        }
+        // A PRD command awaiting its deferred reply (the clarify gate is still
+        // deciding — see deferredAckRef) has a reply-less seed turn, and the
+        // in-flight promise that would fill it dies with the page. Persisted
+        // as-is, a reload restored it into "No response was generated for this
+        // message." — false and a dead end. Mark it in the SAVED copy only, so
+        // a restore can say what actually happened; a normal settle re-runs
+        // this effect with the ref cleared and the mark comes straight off.
+        if (!deferredAckRef.current.has(stripped.id)) return stripped
+        const last = stripped.thread[stripped.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return stripped
+        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
+      })
+      // Fold the OPTIMISTIC in-flight send into the SAVED copy only. Between
+      // `setPendingSend()` and `resolveSendTarget()` (a slow intent-classify /
+      // clarify round-trip in between) the just-sent question lives ONLY in the
+      // transient `pendingSend` overlay — never in `tabs` — so a reload during
+      // that window landed on a blank "New chat" with the question gone. Writing
+      // it into the persisted snapshot here (NOT into React `tabs` — live DOM is
+      // untouched) makes the question survive the reload. It is marked
+      // `interrupted` because no server-side ask exists yet in this pre-dispatch
+      // window (the ask_id is minted later, inside runConversationAsk), so there
+      // is nothing to re-attach to — the restore shows the question with a
+      // one-click "send it again" rather than a stranded spinner. The moment
+      // `resolveSendTarget` seeds the REAL awaiting turn (and `pendingSend`
+      // clears in the same tick), the tab's last turn is awaiting and the guard
+      // below skips the fold — leaving the working resume-on-reload path (turn
+      // in `tabs` + persisted ask_id) exactly as it was.
+      const withPending = (() => {
+        if (!pendingSend || !pendingSend.query || pendingSend.tabId == null) return slim
+        return slim.map((t) => {
+          if (t.id !== pendingSend.tabId) return t
+          const last = t.thread[t.thread.length - 1]
+          // A real awaiting turn is already here (the seeded ask) — the resume
+          // path owns it; do not double it.
+          if (last && last.reply === undefined && last.error === undefined && !last.stopped) return t
+          const pendingTurn = {
+            id: `pending-${pendingSend.startedAt}`,
+            query: pendingSend.query,
+            ...(pendingSend.attachments && pendingSend.attachments.length
+              ? { attachments: pendingSend.attachments }
+              : {}),
+            interrupted: true,
+          }
+          const title = t.title && t.title !== "New chat" ? t.title : pendingSend.query.slice(0, 49)
+          return { ...t, title, thread: [...t.thread, pendingTurn] }
+        })
+      })()
+      sessionStorage.setItem(tabsKey, JSON.stringify(withPending))
+    } catch { /* ignore */ }
+  }, [tabs, tabsKey, pendingSend])
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
