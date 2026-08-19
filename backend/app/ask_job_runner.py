@@ -28,6 +28,7 @@ from app.db.asks import (
     set_ask_job_route,
     touch_ask_job,
 )
+from app.context_assembler import AssembleRequest, resolve_context_scope
 from app.db.conversations import post_individual_turn
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
@@ -308,6 +309,7 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
+    context_source: dict | None = None,
 ) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -404,9 +406,22 @@ def _run_sync(
     )
     history_token = ask_runner.set_active_history(history)
 
-    # The project-private surface scope was removed with the project chats;
-    # every ask now runs `qa_agent.answer()` on the main (unscoped) path.
-    scope = None
+    # Pluggable context seam: resolve any caller-supplied `context_source`
+    # (`{"kind": str, "params": dict}`) to a `ContextScope` through the
+    # assembler registry. The registry is EMPTY in this phase, so
+    # `resolve_context_scope` returns None for every ask — `qa_agent.answer()`
+    # runs the exact current (unscoped) main path, byte-identical to before.
+    scope = resolve_context_scope(
+        context_source,
+        AssembleRequest(
+            user_id=user_id,
+            company_id=enterprise_id,
+            dataset=dataset,
+            conversation_id=conversation_id,
+            question=question,
+            params=(context_source or {}).get("params") or {},
+        ),
+    )
 
     def _single_shot() -> dict:
         return qa_agent.answer(
@@ -511,6 +526,7 @@ async def run_ask_job(
     user_id: str | None = None,
     workspace_id: str | None = None,
     project_id: int | None = None,
+    context_source: dict | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -544,6 +560,7 @@ async def run_ask_job(
             project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            context_source=context_source,
         )
 
     def _on_committed(outcome: ExecutionOutcome) -> None:

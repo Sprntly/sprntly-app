@@ -138,6 +138,12 @@ class AskIn(BaseModel):
     # project 404s, a same-tenant non-member 403s. Omitted: `/v1/ask`
     # behaves exactly as it does today (no project block).
     project_id: int | None = Field(default=None, ge=1)
+    # Optional pluggable context source: `{"kind": str, "params": dict}`. When
+    # set, the ask job resolves it through `app.context_assembler.
+    # resolve_context_scope` to a `ContextScope` that a surface's own assembler
+    # builds (and auth-gates). Omitted / no registered assembler for the kind:
+    # resolves to None, so `/v1/ask` runs the exact current unscoped main path.
+    context_source: dict | None = None
     # Standalone-artifact grounding, same idea for the tabs that hold an
     # artifact WITHOUT a PRD: an evidence tab sends its evidence_id, a
     # ticket-set tab its ticket_set_id, so "this evidence" / "ticket 2" refer
@@ -426,6 +432,9 @@ async def ask(
             # build spec §5.3) — None on every non-project ask, so the hook
             # never fires for them.
             project_id=body.project_id,
+            # Optional pluggable context source; None (and thus a no-op) for
+            # every ask until a surface's assembler is registered.
+            context_source=body.context_source,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -450,6 +459,9 @@ async def ask(
             workspace_id=company.workspace_id,
             # Gates the individual-chat memory-promotion hook — see above.
             project_id=body.project_id,
+            # Optional pluggable context source; None (and thus a no-op) for
+            # every ask until a surface's assembler is registered.
+            context_source=body.context_source,
         )
     )
     _inflight_tasks.add(task)

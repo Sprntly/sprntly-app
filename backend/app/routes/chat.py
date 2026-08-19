@@ -64,6 +64,12 @@ class ChatIntentIn(BaseModel):
     # The active tab's open PRD, when there is one. Ownership-gated below.
     prd_id: int | None = Field(default=None, ge=1)
     has_attachments: bool = False
+    # Optional pluggable context source: `{"kind": str, "params": dict}`,
+    # accepted so a surface that brings its own context can carry it symmetric
+    # with `/v1/ask`. `/intent` runs BEFORE dispatch and is not on the answer
+    # path, so this field is accepted-and-ignored here; the answer-time seam
+    # lives on `/v1/ask`. Omitted by every current client.
+    context_source: dict | None = None
 
 
 @router.post("/intent")
