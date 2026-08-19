@@ -44,7 +44,7 @@ from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 # is `setdefault`, so the csrf negative tests that pass an explicit (foreign/empty/absent)
 # Origin still exercise the 403 path. The Origin is pulled from `settings.origins_list`
 # (derived from ALLOWED_ORIGINS — the SAME allow-list CORS uses; no second list).
-def _wrap_client_origin(cls) -> None:
+def _wrap_client_origin(cls, guard_app_layer: bool = False) -> None:
     _orig = cls.__init__
     if getattr(_orig, "_origin_wrapped", False):
         return
@@ -52,6 +52,8 @@ def _wrap_client_origin(cls) -> None:
     def __init__(self, *a, **kw):
         from app.config import settings  # read lazily so per-test config reloads apply
 
+        if guard_app_layer:
+            _assert_app_layer_expected()
         headers = dict(kw.pop("headers", None) or {})
         headers.setdefault("origin", settings.origins_list[0])
         kw["headers"] = headers
@@ -64,7 +66,11 @@ def _wrap_client_origin(cls) -> None:
 def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     import starlette.testclient as _tc
 
-    _wrap_client_origin(_tc.TestClient)
+    # Only TestClient carries the app-layer guard: that class exists solely to
+    # drive an ASGI app, so building one is proof the file touches the app.
+    # `httpx.AsyncClient` is also used for ordinary outbound HTTP, so guarding
+    # it would raise on tests that never go near the app.
+    _wrap_client_origin(_tc.TestClient, guard_app_layer=True)
     import httpx
 
     _wrap_client_origin(httpx.AsyncClient)
@@ -73,6 +79,21 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
 # Modules that import `settings` at top level and therefore need to be
 # reloaded after env vars change. Order matters: config first, then its
 # consumers, then anything that imports the consumers.
+# Split in two because the expensive half is not needed by most tests.
+#
+# MEASURED, not guessed: reloading the whole list costs 469 ms PER TEST, and
+# `app.main` alone is 275 ms of it — 63%. Across the 10,850 tests in the fast
+# lane that is ~85 minutes of CPU spent re-importing a FastAPI app that most
+# tests never touch. `app.main` imports every router, so reloading it re-runs
+# all of them a second time on top of the route entries below. Per-module:
+# app.main 275ms, routes.connectors 49ms, routes.internal_mcp 26ms,
+# routes.prd 21ms, routes.brief 18ms — the top 5 are 90% of the cost.
+#
+# For contrast, the schema reset (`reset_fake_db`, 76 tables) is 6.5 ms. The
+# fixture cost was never the database.
+#
+# The core half is genuinely per-test: these modules read settings at import
+# time and cache clients, so a test that changes env must see them fresh.
 _RELOAD_ORDER = [
     "app.config",
     "app.db.client",
@@ -99,27 +120,34 @@ _RELOAD_ORDER = [
     "app.prd_runner",
     "app.prd_questions",
     "app.brief_runner",
+    "app.connectors.tokens",
+    "app.connectors.google_oauth",
+    "app.connectors.figma_oauth",
+    "app.connectors.github_app",
+    "app.db.mcp_tokens",
+]
+
+# The HTTP layer. Reloaded ONLY by tests that actually build a TestClient —
+# `tests._company_helpers.company_client` already reloaded `app.main` itself,
+# so for route tests this list was being done twice and for everything else it
+# was pure waste.
+_APP_RELOAD_ORDER = [
     "app.routes.health",
     "app.routes.datasets",
     "app.routes.brief",
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
-    "app.connectors.tokens",
-    "app.connectors.google_oauth",
-    "app.connectors.figma_oauth",
-    "app.connectors.github_app",
     "app.routes.connectors",
     "app.routes.internal",
-    "app.db.mcp_tokens",
     "app.routes.mcp_tokens",
     "app.routes.internal_mcp",
     "app.main",
 ]
 
 
-def _reload_app_modules() -> None:
-    for name in _RELOAD_ORDER:
+def _reload_modules(names) -> None:
+    for name in names:
         mod = sys.modules.get(name)
         if mod is None:
             try:
@@ -131,6 +159,116 @@ def _reload_app_modules() -> None:
                 importlib.reload(mod)
             except Exception:
                 raise
+
+
+def _reload_app_modules() -> None:
+    """The per-test half: settings-reading modules and cached clients."""
+    _reload_modules(_RELOAD_ORDER)
+
+
+def reload_app_layer() -> None:
+    """Rebuild the HTTP layer immediately. For callers that need it NOW.
+
+    `company_client` uses this because it constructs a TestClient in the same
+    breath. Everyone else gets it from `isolated_settings`, but only when
+    `file_needs_app_layer` says the test file actually touches the app.
+    """
+    _reload_modules(_APP_RELOAD_ORDER)
+
+
+#: Source markers that mean a test file builds or touches the FastAPI app.
+#: Deliberately generous — a false positive costs one file its old speed, a
+#: false negative costs correctness.
+#:
+#: Direct construction is self-marking: a file that writes `TestClient(...)`
+#: contains the word. The entries that are NOT self-marking are the conftest
+#: fixtures that build a client on the test's behalf — `app_client`,
+#: `unauth_client`, `tenant_client`, `company_client`. Those must be listed by
+#: name, because the test file only ever mentions the fixture in its signature.
+#: If you add another app-building fixture, add its name here; the
+#: `_assert_app_layer_expected` guard below will fail loudly if you forget.
+#:
+#: `from tests.test_` is the third case: a handful of files import fixtures
+#: (`env`, `client`) straight out of a sibling test module, so neither a
+#: conftest fixture name nor `TestClient` appears in their own source. Rather
+#: than add generic names like `client` or `env` — which appear in most of the
+#: suite and would switch the optimisation off — we treat any cross-test-module
+#: import as "assume it drags the app in". That is 11 files today.
+_APP_MARKERS = ("app.main", "TestClient", "company_client", "app_client",
+                "unauth_client", "tenant_client", "main_mod",
+                "reload_app_layer", "from tests.test_")
+
+#: Per-file answer to "does this need the HTTP layer", computed once.
+_needs_app_layer: dict[str, bool] = {}
+
+
+def file_needs_app_layer(path: str) -> bool:
+    """Read the test file once and decide whether it touches the app.
+
+    Static, per FILE, and cached — not per test. Reloading the HTTP layer costs
+    ~450 ms of the 469 ms, and 59% of the 10,850 fast-lane tests never touch the
+    app, which is most of the suite's wall-clock. Deciding from the source keeps
+    the reload IDENTICAL where it is needed (same `importlib.reload`, same module
+    identity) rather than changing semantics for everyone to save time for some.
+
+    An earlier attempt evicted the modules from `sys.modules` instead of
+    reloading them. That was faster still and broke 36 tests in
+    test_routes_internal_mcp.py, because eviction gives you a NEW module object
+    and anything holding a reference to the old one (patches, captured
+    handlers, isinstance checks) silently talks to a different module. Reloading
+    mutates in place and keeps identity stable. Do not "optimise" this back.
+
+    Matching is a plain substring scan, so a marker inside a comment or a
+    docstring counts as a hit. That is intentional: it errs toward doing the
+    reload, which costs time, never correctness.
+    """
+    cached = _needs_app_layer.get(path)
+    if cached is not None:
+        return cached
+    try:
+        src = Path(path).read_text(errors="ignore")
+    except OSError:
+        # Cannot read it: assume it needs the app. Being wrong this way is
+        # merely slow; being wrong the other way is a mystery failure.
+        src = "app.main"
+    answer = any(marker in src for marker in _APP_MARKERS)
+    _needs_app_layer[path] = answer
+    return answer
+
+
+#: Path of the test file currently executing, for the guard below.
+_current_test_file: str | None = None
+
+
+def _assert_app_layer_expected() -> None:
+    """Fail loudly if a TestClient is built under a file we classified `no`.
+
+    The gate is a static source scan, so it can be wrong. A false positive is
+    harmless (one file keeps its old speed). A false NEGATIVE is the dangerous
+    one: the test would run against whatever `app.main` the previous test in
+    this worker happened to leave in `sys.modules`, and would fail — if at all —
+    as an ordering-dependent mystery somewhere else entirely.
+
+    Constructing a TestClient is the unambiguous "I am driving the app" signal,
+    so it is the right place to check. Directly-written clients can never trip
+    this (the file contains `TestClient`, so it is classified `yes`); only a
+    fixture building one for a file that forgot a marker will.
+    """
+    path = _current_test_file
+    if path is None or file_needs_app_layer(path):
+        return
+    raise RuntimeError(
+        f"TestClient was constructed during {path}, but that file matches none "
+        f"of the app markers, so isolated_settings skipped the HTTP-layer "
+        f"reload and the app may be stale from a previous test. Add the "
+        f"fixture/helper name to _APP_MARKERS in tests/conftest.py "
+        f"(current markers: {', '.join(_APP_MARKERS)})."
+    )
+
+
+def pytest_runtest_setup(item):
+    global _current_test_file
+    _current_test_file = str(item.fspath)
 
 
 # Schema for the fake Supabase. SQLite-compatible DDL that mirrors the
@@ -1785,7 +1923,7 @@ def tmp_data_dir(tmp_path: Path, repo_root: Path) -> Path:
 
 
 @pytest.fixture
-def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+def isolated_settings(request, tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_data_dir))
     monkeypatch.setenv("TEMPLATE_DIR", str(tmp_data_dir))
     monkeypatch.setenv("DEMO_PASSWORD", "test-pw")
@@ -1801,6 +1939,9 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key")
 
     _reload_app_modules()
+    # The HTTP layer only for the files that touch it — see `file_needs_app_layer`.
+    if file_needs_app_layer(str(request.fspath)):
+        reload_app_layer()
 
     # Wire the in-memory fake Supabase + reset the schema per-test.
     reset_fake_db(_FAKE_SCHEMA)
