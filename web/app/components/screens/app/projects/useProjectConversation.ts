@@ -19,9 +19,11 @@
  * thin single-conversation opener over `lib/runPrdGeneration` (the PRD tab-wiring
  * stays main-only by design).
  *
- * DEFERRED (flagged): the assign/share DOCK "complete" writes (parking + render +
- * cancel are wired; the apply/re-preview writes are a follow-up), skills catalog
- * (Tier 2), next-prompt suggestions + in-flight resume + toasts (Tier 3).
+ * The assign/share DOCK is fully wired: parking + render + cancel + the apply
+ * (completeAssign → PUT /fields) and channel re-preview / send (completeShare-
+ * Question + the Slack card's send/pick/cancel) all mirror main over this single
+ * conversation. Import-from-doc PRD tab wiring stays main-only by design; the
+ * AttachmentViewer + report-by-title opens have no project-surface sink yet.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
@@ -32,8 +34,12 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
+  slackShareApi, ticketDataApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
+  type ChatArtifactItem, type SlackShareTarget, type SlackShareTargetRef,
 } from "../../../../lib/api"
+import { slackShareQuestionFor } from "../../../../lib/chat/slackShareQuestion"
+import { type PopupAnswer } from "../../../shared/QuestionPopup"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
@@ -106,6 +112,12 @@ export function useProjectConversation(
   metaRef.current = meta
   const dbConvIdRef = useRef<number | null>(null)
   dbConvIdRef.current = dbConvId
+  // Fresh reads for the dock-question async handlers (main reads these off its
+  // tabsRef; the single-conversation store keeps them on refs the same way).
+  const pendingShareRef = useRef(pendingShare)
+  pendingShareRef.current = pendingShare
+  const pendingAssignRef = useRef(pendingAssign)
+  pendingAssignRef.current = pendingAssign
   const stoppedRef = useRef(false)
   const askingRef = useRef<Set<string>>(new Set())
   const busySetRef = useRef<Set<string>>(new Set())
@@ -651,6 +663,225 @@ export function useProjectConversation(
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleComposerSubmit() }
   }, [composer, handleComposerSubmit])
 
+  // ── Retry a failed/errored ask ─────────────────────────────────────────────
+  // The per-turn "Ask again" affordance (mapMainTurns' `onAskAgain`). Same
+  // orchestration main runs (`handleAskAgain`): a plain turn re-submits through
+  // the shared `submitAsk`; a turn that carried attachments can't be replayed
+  // (the files aren't re-uploadable), so it refills the composer for the user.
+  const handleAskAgain = useCallback((turn: ThreadTurn) => {
+    const q = turn.query.trim()
+    if (!q) return
+    if (turn.attachments?.length) {
+      composer.setDraft(turn.query)
+      composer.composerRef.current?.focus()
+      return
+    }
+    void submitAsk(q)
+  }, [composer, submitAsk])
+
+  // ── Reopen this conversation's PRD ─────────────────────────────────────────
+  // The "View PRD" affordance (ChatArtifactActions, shown once a PRD exists on
+  // the turn). Routes through the SAME artifact sink the edit flow + open-
+  // candidate cards use (`onOpenArtifact`) — the project surface's single
+  // channel into the shared ContentPanel — rather than main's tab-local panel.
+  const handleOpenPrd = useCallback(() => {
+    const prdId = metaRef.current.prdId
+    if (prdId == null) return
+    onOpenArtifact?.({ type: "prd", title: "", prd_id: prdId } as unknown as OpenArtifactCandidate)
+  }, [onOpenArtifact])
+
+  // ── Open an artifact card from a list-artifacts turn ───────────────────────
+  // The click target for `runListArtifactsAction`'s cards (`onOpenArtifactItem`).
+  // Mirrors main's `openChatArtifactItem` prd/evidence branch, routed to the
+  // project surface's `onOpenArtifact` (whose candidate kind is prd | evidence);
+  // main's report/ticket_set/prototype content-panel-resume branches have no
+  // project-surface equivalent, so those kinds are left unopened here.
+  const openChatArtifactItem = useCallback((a: ChatArtifactItem) => {
+    if (a.type !== "prd" && a.type !== "evidence") return
+    onOpenArtifact?.({
+      type: a.type,
+      id: a.id,
+      title: a.title,
+      status: a.status,
+      prd_id: a.open.prd_id ?? null,
+      brief_id: a.open.brief_id ?? null,
+      insight_index: a.open.insight_index ?? null,
+      brief_anchored: a.brief_anchored,
+      week_label: a.source.week_label ?? null,
+      conversation_id: a.source.conversation_id ?? null,
+      conversation_title: a.source.conversation_title || null,
+    })
+  }, [onOpenArtifact])
+
+  // ── Slack share: the interactive card + dock steps (main-parity) ───────────
+  // The PREVIEW is seeded by the shared `runShareToSlackAction` (onShareToSlack
+  // in submitAsk). These are the post-preview steps — send / re-preview / the
+  // channel question — mirrored from main's ChatScreen over this conversation's
+  // single thread (main keeps them inline too; no shared extraction exists yet).
+  const patchSlackShare = useCallback((
+    turnId: string,
+    patch: Partial<NonNullable<ThreadTurn["slackShare"]>>,
+  ) => {
+    setThread((prev) => prev.map((tn) => (tn.id === turnId && tn.slackShare
+      ? { ...tn, slackShare: { ...tn.slackShare, ...patch } }
+      : tn)))
+  }, [])
+
+  // The one place anything is actually posted to Slack (card's Send button).
+  const sendSlackShare = useCallback(async (turnId: string, channelId: string, note: string) => {
+    const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
+    if (!share || share.resolved || share.busy) return
+    const channelName =
+      share.preview.channel?.name
+      ?? (share.preview.channels ?? []).find((c) => c.id === channelId)?.name
+      ?? "the channel"
+    patchSlackShare(turnId, { busy: true })
+    try {
+      await slackShareApi.send(share.ref, channelId, note)
+      patchSlackShare(turnId, { busy: false, resolved: { outcome: "sent", channelName } })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Slack rejected the message"
+      patchSlackShare(turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
+    }
+  }, [patchSlackShare])
+
+  // The user picked which document from an ambiguous match — re-preview on that
+  // one, keeping the channel/note they already had.
+  const repreviewSlackShare = useCallback(async (turnId: string, target: SlackShareTarget) => {
+    const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
+    if (!share || share.resolved) return
+    const ref: SlackShareTargetRef =
+      target.type === "prd" ? { prd_id: target.id }
+      : target.type === "report" ? { report_id: target.id }
+      : target.type === "ticket_set" ? { ticket_set_id: target.id }
+      : { custom_artifact_id: target.id }
+    patchSlackShare(turnId, { busy: true })
+    try {
+      const preview = await slackShareApi.preview(ref, {
+        channel: share.preview.channel?.name ?? share.preview.channel_query ?? null,
+      })
+      patchSlackShare(turnId, { busy: false, ref, preview })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      patchSlackShare(turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
+    }
+  }, [patchSlackShare])
+
+  // Card's × / decline — nothing posted; record it so the thread doesn't leave
+  // "here's what I'll post" as the last word on a message that never went out.
+  const cancelSlackShareCard = useCallback((turnId: string) => {
+    const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
+    if (!share || share.resolved) return
+    patchSlackShare(turnId, { resolved: { outcome: "cancelled" } })
+  }, [patchSlackShare])
+
+  // The dock channel/target question settled — re-preview on the answer (a round
+  // trip, both kinds: only the server knows whether the chosen channel is one
+  // Sprntly can post to). Mirrors main's `completeShareQuestion`.
+  const completeShareQuestion = useCallback(async (_tabId: string, answers: PopupAnswer[]) => {
+    const ps = pendingShareRef.current
+    if (!ps) return
+    setPendingShare(undefined)
+    const share = threadRef.current.find((tn) => tn.id === ps.turnId)?.slackShare
+    if (!share || share.resolved) return
+    const picked = answers.find((a) => !a.skipped)
+    if (!picked) { patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } }); return }
+    const answer = (picked.value ?? picked.answer ?? "").trim()
+    if (!answer) { patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } }); return }
+    if (ps.kind === "target") {
+      const target = (share.preview.candidates ?? []).find((c) => `${c.type}-${c.id}` === answer)
+      if (!target) return
+      await repreviewSlackShare(ps.turnId, target)
+      return
+    }
+    patchSlackShare(ps.turnId, { busy: true })
+    try {
+      const preview = await slackShareApi.preview(share.ref, { channel: answer.replace(/^#/, "") })
+      patchSlackShare(ps.turnId, { busy: false, preview })
+      // A typed channel that still doesn't resolve asks again rather than
+      // silently dropping the share.
+      const next = slackShareQuestionFor(preview)
+      if (next) setPendingShare({ turnId: ps.turnId, ...next })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      patchSlackShare(ps.turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
+    }
+  }, [patchSlackShare, repreviewSlackShare])
+
+  // Dock question dismissed → settle the share as NOT sent (main parity).
+  const cancelShareQuestion = useCallback((_tabId: string) => {
+    const ps = pendingShareRef.current
+    setPendingShare(undefined)
+    if (ps) patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } })
+  }, [patchSlackShare])
+
+  // ── Assign: apply the dock popup's ambiguous picks (main-parity) ───────────
+  // The batch's ONE landing: the popup collected every pick (finish all
+  // questions before anything is sent), and only now do the writes happen, each
+  // through the ordinary fields endpoint. Mirrors main's `completeAssign` over
+  // the single-conversation thread (no shared extraction exists — main keeps it
+  // inline too, `runAssignTicketsAction` only covers the up-front unambiguous
+  // apply + raising this question).
+  const completeAssign = useCallback(async (_tabId: string, answers: PopupAnswer[]) => {
+    const pa = pendingAssignRef.current
+    if (!pa) return
+    setPendingAssign(undefined)
+    setBusy(true)
+    const applied = [...pa.applied]
+    const failed: string[] = []
+    let skipped = 0
+    try {
+      for (let i = 0; i < pa.questions.length; i++) {
+        const q = pa.questions[i]
+        const a = answers[i]
+        const chosen: TicketAssignQuestion["options"] = []
+        if (a && !a.skipped && a.answer) {
+          if (q.multi && a.picks?.length) {
+            for (const p of a.picks) {
+              const opt =
+                (p.value != null ? q.options.find((o) => o.value === p.value) : undefined) ??
+                q.options.find((o) => o.label === p.label)
+              if (opt) chosen.push(opt)
+            }
+          } else {
+            const opt =
+              (a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
+              q.options.find((o) => o.label === a.answer)
+            if (opt) chosen.push(opt)
+          }
+        }
+        if (!chosen.length) { skipped += 1; continue }
+        for (const opt of chosen) {
+          const pair = q.fixed.kind === "ticket"
+            ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
+            : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
+          if (!pair.assignee) { skipped += 1; continue }
+          try {
+            await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
+            applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
+          } catch {
+            failed.push(pair.title)
+          }
+        }
+      }
+      const lines: string[] = []
+      if (applied.length) lines.push(`All set — assigned:\n${applied.map((l) => `- ${l}`).join("\n")}`)
+      if (skipped) lines.push(`${skipped === 1 ? "One ticket was" : `${skipped} tickets were`} left as they are.`)
+      if (failed.length) lines.push(`I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`)
+      const summary = !applied.length && !failed.length
+        ? "No assignments made — everything was skipped, so the tickets keep their current owners."
+        : lines.join("\n\n")
+      const reply = {
+        answer: summary, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse
+      const noteId = newId()
+      setThread((prev) => [...prev, { id: noteId, query: "", reply }])
+      void finalizeConversationTurn(pa.turnId, { reply }, convKey)
+    } finally {
+      setBusy(false)
+    }
+  }, [convKey, finalizeConversationTurn])
+
   // ── Host-bag assembly ──────────────────────────────────────────────────────
   const activeTab = useMemo(() => ({
     id: convKey, hydrating: hydrating && thread.length === 0,
@@ -676,13 +907,13 @@ export function useProjectConversation(
     chatPrdExists: meta.prdId != null, chatPrdCtaWaiting: false, chatProtoPrdId: null, chatPrototypeReady: false,
     inlinePrdCards: false, inlinePrdAnchorIdx: null, insightCardNode: null, prdQuestionsNode: null,
     clarifyPopupOpen, pendingClarifyTurn,
-    handleAskAgain: () => {}, handleStopAsk: engine.handleStopAsk,
+    handleAskAgain, handleStopAsk: engine.handleStopAsk,
     submitClarifyAnswers, setViewerAttachment: () => {},
-    openReportByTitle: () => {}, openArtifactInPanel: (c) => onOpenArtifact?.(c), openChatArtifactItem: () => {},
-    handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd: () => {},
+    openReportByTitle: () => {}, openArtifactInPanel: (c) => onOpenArtifact?.(c), openChatArtifactItem,
+    handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd,
     handleViewPrototype: () => {}, handlePrototypeSettled: () => {},
-    onSendSlackShare: () => {}, onCancelSlackShare: () => {}, onPickSlackShareTarget: () => {},
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact])
+    onSendSlackShare: sendSlackShare, onCancelSlackShare: cancelSlackShareCard, onPickSlackShareTarget: repreviewSlackShare,
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, sendSlackShare, cancelSlackShareCard, repreviewSlackShare])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
@@ -706,17 +937,18 @@ export function useProjectConversation(
     pendingSend: composer.pendingSend,
     pendingClarifyTurn,
     setClarifyPopupDismissed,
-    // Assign/share dock popups — parked + rendered + cancellable. The apply/
-    // re-preview "complete" writes are a Tier-1 follow-up (flagged).
+    // Assign/share dock popups — parked, rendered, and now APPLIED: completeAssign
+    // writes every picked pair (PUT /fields), completeShareQuestion re-previews on
+    // the chosen channel/document, both mirroring main over this conversation.
     assignPopupOpen: !!pendingAssign,
     pendingAssignState: pendingAssign,
     activeTabId: convKey,
-    completeAssign: () => { setPendingAssign(undefined) },
+    completeAssign,
     cancelAssign: () => { setPendingAssign(undefined) },
     sharePopupOpen: !!pendingShare,
     pendingShareState: pendingShare,
-    completeShareQuestion: () => { setPendingShare(undefined) },
-    cancelShareQuestion: () => { setPendingShare(undefined) },
+    completeShareQuestion,
+    cancelShareQuestion,
     setQuestionDockEl,
     nextPrompts, submitAsk, showThreadView,
     threadScrollRef: scroll.threadScrollRef, handleThreadScroll: scroll.handleThreadScroll, setThreadContentEl: scroll.setThreadContentEl,
