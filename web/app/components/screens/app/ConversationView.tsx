@@ -97,6 +97,14 @@ export interface ConversationViewHostProps {
   setPinnedSkill: Dispatch<SetStateAction<PinnedSkill | null>>
   handleFileSelect: (e: ChangeEvent<HTMLInputElement>) => void
   handleToggleVoice: () => void
+  // ── Goal Analysis mode (MAIN; opt-in) ──────────────────────────────────────
+  /** The composer's Goal Analysis mode + its `+`-menu entry. All optional and
+   *  default-off, so a surface that never passes them (the project chats) gets a
+   *  byte-identical composer. Only main wires these — the mode intercepts the
+   *  host's submit before the ask path. */
+  goalMode?: boolean
+  onExitGoalMode?: () => void
+  goalModeAvailable?: boolean
 
   // ── Landing ────────────────────────────────────────────────────────────────
   /** Per-surface empty-state greeting. UNSET → the default main/private copy
@@ -203,6 +211,10 @@ export function ConversationView(props: ConversationViewProps) {
     setPinnedSkill,
     handleFileSelect,
     handleToggleVoice,
+    // goal analysis (opt-in; main only)
+    goalMode,
+    onExitGoalMode,
+    goalModeAvailable,
     // landing
     showChipRow,
     displayChips,
@@ -298,6 +310,9 @@ export function ConversationView(props: ConversationViewProps) {
       onToggleVoice={handleToggleVoice}
       quote={quote}
       onRemoveQuote={onRemoveQuote}
+      goalMode={goalMode}
+      onExitGoalMode={onExitGoalMode}
+      goalModeAvailable={goalModeAvailable}
     />
   )
 

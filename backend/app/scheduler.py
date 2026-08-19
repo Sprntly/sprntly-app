@@ -822,6 +822,18 @@ def _run_orphan_ask_job_sweep() -> None:
                 "generating", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan business-context refresh sweep failed")
+    try:
+        # Goal Analysis runs whose worker stopped reporting. A run is the most
+        # expensive thing on this list and the only one with a human gate in
+        # the middle, so an abandoned row is both the costliest to leave
+        # spinning and the easiest to mistake for "still thinking".
+        from app.db.crucible_runs import sweep_orphans
+
+        n = sweep_orphans()
+        if n:
+            logger.info("Failed %d abandoned Goal Analysis run(s)", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan Goal Analysis sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

@@ -8,7 +8,10 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
-import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+// `crucibleOn` gates Goal Analysis. `dispatchChatIntent` / `useChatIntentExecutors`
+// that main re-adds here are already owned by the shared engine (useConversation),
+// so they are NOT reintroduced into this wrapper.
+import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
 import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
@@ -48,7 +51,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -696,6 +699,10 @@ export function ChatScreen() {
   const searchParams = useSearchParams()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
+  // DEFAULT OFF, allowlist-only. This hides the entry point; the backend route
+  // refuses the request on its own, because the client decides what to render
+  // and the server decides what runs.
+  const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
   const { content, setContent } = useContent()
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
@@ -1034,6 +1041,22 @@ export function ChatScreen() {
   // Next-prompt suggestions are owned by the shared host hook (state + retire +
   // fetch-after-settle); ChatScreen keys by tab id and injects the main fetch.
   const nextPrompts = useNextPrompts(MAIN_NEXT_PROMPTS_ADAPTER)
+  // Goal Analysis mode. A MODE rather than a skill: the next message starts a
+  // run instead of posting a turn, so it cannot ride on `pinnedSkill` (which
+  // splices a slash trigger into the query and sends it to the ask path).
+  //
+  // The slash-palette / pinned-skill / plus-menu / busy-hint composer state main
+  // declared alongside this in its bespoke engine is owned in this branch by the
+  // shared composer + engine (see the `useComposer` and `useConversation`
+  // destructures above); `quote` / `editingTurnId` / `copiedTurnId` are already
+  // declared by this host below. Only Goal Analysis is a main-wrapper concern, so
+  // only its two fields are re-homed here.
+  const [goalMode, setGoalMode] = useState(false)
+  // The run currently on screen, readable without making it an effect
+  // dependency — the restore below has to know whether the user started one
+  // while its request was in flight, and depending on `content` would re-fire
+  // the restore on every unrelated content change.
+  const goalRunRef = useRef<number | null>(null)
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -2112,6 +2135,11 @@ export function ChatScreen() {
           // rendering the PREVIOUS thread's document.
           documentId: null,
           documentGenerating: false,
+          // Same rule, same reason. A run belongs to the thread that started
+          // it, and leaving it set showed thread A's analysis — with a LIVE
+          // Confirm button — on thread B, where confirming would lock a goal
+          // definition against a conversation the reader was not looking at.
+          goalRunId: null,
         }
       : { conversationId: activeConvId })
     // `activeTabId` is a REAL dependency, not a lint appeasement: without it
@@ -4453,6 +4481,148 @@ export function ChatScreen() {
     }
   }, [activeCompany, finalizeConversationTurn])
 
+  // ── Goal Analysis: restore-after-reload + start (main-wrapper concerns) ─────
+  // main declared its bespoke submit / slash-palette / plus-menu / skill
+  // handlers here; in this branch those are owned by the shared engine
+  // (`useConversation`) and composer (`useComposer`). Only Goal Analysis is
+  // main-specific, so only it is re-homed into this wrapper, alongside three thin
+  // host wrappers that let goal mode intercept the shared submit / Enter / `+`
+  // menu without teaching the surface-agnostic engine about it.
+
+  // Restore this thread's analysis after a reload.
+  //
+  // `goalRunId` lives in the shared content slot, which is memory only, so
+  // without this a refresh made the run UNREACHABLE — it kept going on the
+  // server, finished, and had no way back onto the screen.
+  //
+  // Gated on the flag, so an unenrolled company never pays a request (or
+  // collects a 403) on every thread switch.
+  useEffect(() => {
+    // Mirrors the content reset above: the thread changed, so whatever run was
+    // on screen belongs to the previous one. Clearing the ref too is what lets
+    // the restore below run for the NEW thread instead of seeing a stale id
+    // and declining.
+    goalRunRef.current = null
+    if (!goalAnalysisOn || activeConvId == null) return
+    let live = true
+    void (async () => {
+      try {
+        const { runs } = await goalAnalysisApi.list()
+        if (!live) return
+        // Newest first from the server; take this thread's most recent that is
+        // still worth showing. A `failed` or `cancelled` run must NOT reopen
+        // the panel: it would pin an undismissable red tab to that thread for
+        // as long as the run row exists, with nothing the reader can do about
+        // it.
+        const mine = runs.find(
+          (r) => r.conversation_id === activeConvId
+            && r.status !== "failed" && r.status !== "cancelled",
+        )
+        if (!live || !mine) return
+        // Never clobber a run the user started while this request was in
+        // flight — the restore would yank the panel back to an older one.
+        if (goalRunRef.current != null) return
+        goalRunRef.current = mine.id
+        setContent({ goalRunId: mine.id })
+      } catch {
+        // A failed restore is a missing panel, not a broken chat. The run row
+        // survives and the listing will be tried again on the next switch.
+      }
+    })()
+    return () => { live = false }
+    // `activeTabId` is a REAL dependency: two tabs can share one conversation
+    // id, so without it this effect does not re-run on the switch — the reset
+    // clears the panel, the restore never fires again, and switching back does
+    // not recover it.
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+
+  // Start a Goal Analysis run and put its panel on screen.
+  //
+  // The panel opens on the run id RATHER THAN on a result, because the first
+  // thing a run does is stop and ask what the goal means.
+  const startGoalAnalysis = useCallback(async (goalText: string) => {
+    try {
+      const run = await goalAnalysisApi.start(goalText, {
+        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+      })
+      goalRunRef.current = run.id
+      setContent({ goalRunId: run.id })
+      openContentPanel("goal")
+    } catch (e) {
+      // A 403 here is the entitlement gate, and it is the one failure worth
+      // naming precisely: the control was visible, so "something went wrong"
+      // would read as a bug rather than as "your company is not on this yet".
+      const denied = e instanceof ApiError && e.status === 403
+      showToast(
+        denied ? "Goal Analysis is not enabled" : "Could not start the analysis",
+        denied
+          ? "This is an experimental feature and your company is not enrolled yet."
+          : (e instanceof Error ? e.message : String(e)).slice(0, 200),
+      )
+    }
+  }, [activeConvId, setContent, openContentPanel, showToast])
+
+  // Goal mode intercepts the composer submit BEFORE the ask path: a run takes
+  // the goal in the user's own words, so a slash trigger spliced into the front
+  // of it (which the engine's submit would do) must never happen. Wrapped at the
+  // host so the shared engine's `handleComposerSubmit` stays surface-agnostic;
+  // a normal send falls straight through to it.
+  const handleGoalOrComposerSubmit = useCallback(() => {
+    if (!goalMode) {
+      handleComposerSubmit()
+      return
+    }
+    const q = draft.trim()
+    // Match the engine's own guards so goal mode behaves identically under a
+    // too-short draft, an in-flight ask, or a send already mid-dispatch.
+    if (q.length < DRAFT_MIN_CHARS) {
+      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
+      return
+    }
+    if (busy) {
+      showComposerHint("busy")
+      return
+    }
+    if (pendingSend) return
+    setDraft("")
+    setGoalMode(false)
+    setPlusMenuOpen(false)
+    if (voice.listening) voice.cancel()
+    void startGoalAnalysis(q)
+    const ta = composerRef.current
+    if (ta) ta.style.height = ""
+  }, [
+    goalMode, handleComposerSubmit, draft, busy, pendingSend, voice,
+    setDraft, setPlusMenuOpen, startGoalAnalysis, composerRef, showComposerHint,
+  ])
+
+  // Enter-to-send must respect goal mode too. Only the plain Enter is overridden
+  // (no palette open, no modifier); ⌘/, the slash-palette navigation, and Esc
+  // all stay with the engine's keydown.
+  const handleGoalOrComposerKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      if (goalMode && e.key === "Enter" && !e.shiftKey && !slashOpen && !(e.metaKey || e.ctrlKey)) {
+        e.preventDefault()
+        handleGoalOrComposerSubmit()
+        return
+      }
+      handleComposerKeyDown(e)
+    },
+    [goalMode, slashOpen, handleGoalOrComposerSubmit, handleComposerKeyDown],
+  )
+
+  // The `+` menu's third item (present only while enrolled — ChatComposer
+  // appends it last so indices 0/1 keep meaning what they always meant) turns on
+  // goal mode; everything else falls through to the composer's own handler.
+  const handleGoalOrPlusMenuSelect = useCallback((index: number) => {
+    if (index === 2) {
+      setPlusMenuOpen(false)
+      setGoalMode(true)
+      composerRef.current?.focus()
+      return
+    }
+    handlePlusMenuSelect(index)
+  }, [handlePlusMenuSelect, setPlusMenuOpen, composerRef])
 
   /** The composer's one status line. A dictation problem outranks the busy hint:
    *  the busy hint answers a key you just pressed and expires on its own, while
@@ -4464,6 +4634,10 @@ export function ChatScreen() {
       ? <>{BUSY_ENTER_HINT_LEAD}<b>Stop</b>{BUSY_ENTER_HINT_TAIL}</>
       : null
 
+  // main's inline `renderComposer` is dropped: in this branch the composer is
+  // rendered by the shared `ConversationView` (landing + dock), which is handed
+  // the goal-mode props below. Keeping a second ChatComposer here would let the
+  // two drift.
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
   }
@@ -5408,11 +5582,14 @@ export function ChatScreen() {
                 handleSlashSelect={handleSlashSelect}
                 setSlashActive={setSlashActive}
                 handleComposerInput={handleComposerInput}
-                handleComposerKeyDown={handleComposerKeyDown}
-                handleComposerSubmit={handleComposerSubmit}
+                handleComposerKeyDown={handleGoalOrComposerKeyDown}
+                handleComposerSubmit={handleGoalOrComposerSubmit}
                 setPlusMenuActive={setPlusMenuActive}
                 setPlusMenuOpen={setPlusMenuOpen}
-                handlePlusMenuSelect={handlePlusMenuSelect}
+                handlePlusMenuSelect={handleGoalOrPlusMenuSelect}
+                goalMode={goalMode}
+                onExitGoalMode={() => setGoalMode(false)}
+                goalModeAvailable={goalAnalysisOn}
                 setAttachments={setAttachments}
                 setPinnedSkill={setPinnedSkill}
                 handleFileSelect={handleFileSelect}

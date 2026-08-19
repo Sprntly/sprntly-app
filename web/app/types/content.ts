@@ -760,6 +760,9 @@ export interface AppContentState {
    *  it ready. Purely presentational: the row's own `status` is the truth, and
    *  this only avoids a flash of "empty document" before the first fetch. */
   documentGenerating: boolean
+  /** The Goal Analysis run open in the panel, or null when this thread has
+   *  none — the normal state, and what keeps the tab hidden. */
+  goalRunId: number | null
   /** The active thread's captured reports, newest first. Owned by
    *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
    *  and ChatScreen — see that hook for why there is exactly one fetcher. */
