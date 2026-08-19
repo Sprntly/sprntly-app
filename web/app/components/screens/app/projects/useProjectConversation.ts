@@ -34,7 +34,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  slackShareApi, ticketDataApi, customArtifactsApi,
+  slackShareApi, ticketDataApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
   type ChatArtifactItem, type SlackShareTarget, type SlackShareTargetRef,
 } from "../../../../lib/api"
@@ -47,6 +47,7 @@ import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../../shared/chat-shell/conversation/resolveShareRef"
+import { useDocumentReopenProbe } from "../../../shared/chat-shell/conversation/useDocumentReopenProbe"
 import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
 import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
@@ -230,34 +231,31 @@ export function useProjectConversation(
   // opens, an already-open panel is never fought, and a fresh in-flight generate —
   // `content.documentId` already set — is never overwritten by this older list read).
   const documentProbedRef = useRef<Set<number>>(new Set())
-  useEffect(() => {
-    if (hydrating || dbConvId == null) return
-    const convId = dbConvId
-    if (documentProbedRef.current.has(convId)) return
-    const m = metaRef.current
-    if (m.prd || m.prdGenerating || m.prdId != null) return
-    if (m.ticketSetId != null) return
-    documentProbedRef.current.add(convId)
-    void (async () => {
-      try {
-        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
-        if (!docs.length) return
-        const newest = docs[0]
-        // The user may have swapped surfaces during the round trip.
-        if (dbConvIdRef.current !== convId) return
-        if (newest.status === "failed") return
-        // Never fight a panel that is already open, and never overwrite the
-        // document a live generate just wrote (the stale-read guard).
-        if (contentPanelTab) return
-        if (content.documentId != null) return
-        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
-        openContentPanel("document")
-      } catch {
-        // A resume probe must never throw — its only job is to surface an
-        // artifact that may not exist.
-      }
-    })()
-  }, [hydrating, dbConvId, contentPanelTab, content.documentId, setContent, openContentPanel])
+  // This surface's context handed to the SHARED probe: its per-conversation
+  // guards + once-per-conversation marker (`begin`), its `dbConvIdRef`/
+  // `contentPanelTab`/`content.documentId` post-fetch reads, and NO late-
+  // precedence arm (main's "tickets win" has no project counterpart — a
+  // ticket-set that owns the panel already bails in `begin`). Deps unchanged.
+  useDocumentReopenProbe(
+    {
+      begin: () => {
+        if (hydrating || dbConvId == null) return null
+        const convId = dbConvId
+        if (documentProbedRef.current.has(convId)) return null
+        const m = metaRef.current
+        if (m.prd || m.prdGenerating || m.prdId != null) return null
+        if (m.ticketSetId != null) return null
+        documentProbedRef.current.add(convId)
+        return convId
+      },
+      stillActive: () => dbConvIdRef.current === dbConvId,
+      panelOpen: () => Boolean(contentPanelTab),
+      documentClaimed: () => content.documentId != null,
+      setContent,
+      openContentPanel,
+    },
+    [hydrating, dbConvId, contentPanelTab, content.documentId, setContent, openContentPanel],
+  )
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
   const persistence = useMemo(() => {

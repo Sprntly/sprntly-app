@@ -45,7 +45,6 @@ import { IconFolder } from "@tabler/icons-react"
 import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 import {
-  customArtifactsApi,
   type ChatIntentEnvelope,
   artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
@@ -77,6 +76,7 @@ import { useConversationGeneration } from "./useConversationGeneration"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../shared/chat-shell/conversation/resolveShareRef"
+import { useDocumentReopenProbe } from "../../shared/chat-shell/conversation/useDocumentReopenProbe"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -4789,65 +4789,39 @@ export function ChatScreen() {
 
   // ── A thread that produced a DOCUMENT opens on it ──────────────────────────
   // The same requirement as the ticket-set probe directly above, for the one
-  // artifact that never had it. A chat-written document was reachable ONLY
-  // while the panel stayed open: `useThreadDocumentSync` (AppShell) re-attaches
-  // the pointer after a reload, but nothing opens the panel, and a document
-  // turn has no reply-footer button the way a ticket set does. So the ack said
-  // "it will open in the panel on the right", you reloaded, and the only route
-  // back to your leadership update was the Artifacts library.
-  //
-  // Deliberately the same shape as its sibling, including what it refuses to
-  // do: claim the tab BEFORE the fetch (this effect re-runs on unchanged-but-
-  // new deps, and an unclaimed probe would re-issue the request forever), never
-  // open over a tab the user has moved to, never fight a panel that is already
-  // open, and never auto-open a FAILED document — reopening a chat should not
-  // greet you with an error state you already dismissed. A failed document
-  // still shows in the library, which is where #1184 made it visible.
-  //
-  // `generating` DOES open, because that is the live state the panel exists to
-  // show: the tab polls the row to a terminal state on its own.
-  useEffect(() => {
-    if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return
-    if (documentAutoOpenedRef.current.has(activeTabId)) return
-    const tabId = activeTabId
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    if (!tab || tab.dbConvId == null) return
-    if (tab.prd || tab.prdGenerating || tab.prdId != null) return
-    const convId = tab.dbConvId
-    documentAutoOpenedRef.current.add(tabId)
-    void (async () => {
-      try {
-        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
-        if (!docs.length) return
-        const newest = docs[0]
-        if (activeTabIdRef.current !== tabId) return
-        if (newest.status === "failed") return
-        if (contentPanelTabRef.current) return
-        // A GENERATION STARTED WHILE THIS WAS IN FLIGHT MUST WIN. This is a
-        // list read of the thread; `documentCommandFlow` writes the id of the
-        // document the user just asked for. Overwriting that with an older
-        // row is the same stale-read `useThreadDocumentSync` guards against,
-        // and it would put the previous document in front of someone watching
-        // a new one being written.
-        if (contentDocumentIdRef.current != null) return
-        // TICKETS WIN THE PANEL. Both probes run on thread open, both await,
-        // and both saw an empty panel before their fetch — so without this the
-        // slower network response decides which artifact you land on, and a
-        // document could open over tickets `loadTicketSet` is still filling.
-        // The ticket-set probe is older and its ack promises a Tickets panel,
-        // so it keeps precedence; the document is one click away in the strip.
-        if (tabsRef.current.find((t) => t.id === tabId)?.ticketSetId != null) return
-        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
-        openContentPanel("document")
-      } catch {
-        // A resume PROBE must never throw — it runs on every chat open and its
-        // only job is to surface an artifact that may not exist.
-      }
-    })()
-  }, [
-    activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
-    tabs, setContent, openContentPanel,
-  ])
+  // artifact that never had it — now the SHARED `useDocumentReopenProbe`, which
+  // both this surface and the project surface run. Main's context flows in via
+  // the probe: its per-tab guards + once-per-tab marker (`begin`), its
+  // `activeTabIdRef`/`contentPanelTabRef`/`contentDocumentIdRef` post-fetch
+  // reads, and its "TICKETS WIN THE PANEL" late-precedence arm (`ticketsWin`) —
+  // both probes await on an empty panel, so a ticket set `loadTicketSet` is
+  // still filling keeps the panel and the document is one click away in the
+  // strip. Deps are main's own, unchanged. A failed document still shows in the
+  // library (#1184); `generating` DOES open, the live state the panel shows.
+  useDocumentReopenProbe(
+    {
+      begin: () => {
+        if (!activeTabId || isBriefTab || pendingReportFocus || pendingTicketSetFocus) return null
+        if (documentAutoOpenedRef.current.has(activeTabId)) return null
+        const tabId = activeTabId
+        const tab = tabsRef.current.find((t) => t.id === tabId)
+        if (!tab || tab.dbConvId == null) return null
+        if (tab.prd || tab.prdGenerating || tab.prdId != null) return null
+        documentAutoOpenedRef.current.add(tabId)
+        return tab.dbConvId
+      },
+      stillActive: () => activeTabIdRef.current === activeTabId,
+      panelOpen: () => Boolean(contentPanelTabRef.current),
+      documentClaimed: () => contentDocumentIdRef.current != null,
+      ticketsWin: () => tabsRef.current.find((t) => t.id === activeTabId)?.ticketSetId != null,
+      setContent,
+      openContentPanel,
+    },
+    [
+      activeTabId, isBriefTab, pendingReportFocus, pendingTicketSetFocus,
+      tabs, setContent, openContentPanel,
+    ],
+  )
 
   // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
   // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
