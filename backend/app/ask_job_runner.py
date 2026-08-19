@@ -668,38 +668,34 @@ async def run_ask_job(
                 # a persist/broadcast failure can only fail to ADD the group
                 # turn — the answer is already durably stored above.
                 if (context_source.get("params") or {}).get("surface") == "group":
+                    # 2-mode response gate (server backstop): in a MULTI-human
+                    # project (≥2 human members), Sprntly replies ONLY to a turn
+                    # that @Sprntly-mentions it. If an ask fired anyway (a buggy or
+                    # bypassing client), suppress the reply persist+broadcast here
+                    # so no group reply can appear against the rule. Solo projects
+                    # and @Sprntly-mentioning turns are unaffected. Fail OPEN
+                    # toward replying (a count-read hiccup must never silently
+                    # swallow a legitimate reply) — the client gate is the primary,
+                    # this is defense-in-depth.
+                    import re as _re
+
                     try:
-                        from app.db import conversations as _conversations_db
-                        from app.db.asks import get_ask_job
-                        from app.project_group_realtime import (
-                            publish_group_turn_created,
+                        from app.db import projects as _projects_db
+                        _multi_human = _projects_db.count_project_members(int(_promo_project_id)) >= 2
+                    except Exception:  # noqa: BLE001 — fail open toward replying
+                        _multi_human = False
+                    _mentions_agent = bool(_re.search(r"@sprntly\b", question or "", _re.IGNORECASE))
+                    if _multi_human and not _mentions_agent:
+                        logger.info(
+                            "group_reply_gated project_id=%s conversation_id=%s "
+                            "reason=multi_human_no_mention",
+                            _promo_project_id, conversation_id,
+                        )
+                    else:
+                        _persist_group_reply(
+                            ask_id, int(_promo_project_id), conversation_id, payload
                         )
 
-                        # Stamp the reply with the SAME send-identity key its
-                        # originating ask carried (persisted on `ask_jobs` by
-                        # `/v1/ask`). The member who posted the message renders
-                        # this reply from its own ask poll, so it uses this key
-                        # to recognise the reply's realtime echo as its own and
-                        # NOT double-render it — id-precise, never a timing
-                        # guess. A peer (a different key) still gets it live.
-                        _grp_cmid = (get_ask_job(ask_id) or {}).get("client_message_id")
-                        _grp_turn = _conversations_db.post_group_turn(
-                            conversation_id,
-                            None,
-                            payload.get("answer", ""),
-                            role="assistant",
-                            reply=payload,
-                            client_message_id=_grp_cmid,
-                        )
-                        publish_group_turn_created(
-                            int(_promo_project_id), conversation_id, _grp_turn
-                        )
-                    except Exception:  # noqa: BLE001 — best-effort, never fail the answer
-                        logger.warning(
-                            "group assistant-turn persist/broadcast failed "
-                            "ask_id=%s project_id=%s",
-                            ask_id, _promo_project_id, exc_info=True,
-                        )
 
     outcome = await run_execution_job(
         job_id=ask_id,
@@ -722,3 +718,38 @@ async def run_ask_job(
         # Terminal SSE frame AFTER complete_ask_job (inside the primitive) so a
         # client woken by `done` reads a `ready` row on its next poll.
         token_stream.close(channel, kind="done")
+
+
+def _persist_group_reply(
+    ask_id: int, project_id: int, conversation_id: int, payload: dict
+) -> None:
+    """Persist + broadcast the group agent reply (Choice A). Extracted so the
+    2-mode gate above reads as a single decision. Best-effort throughout."""
+    try:
+        from app.db import conversations as _conversations_db
+        from app.db.asks import get_ask_job
+        from app.project_group_realtime import (
+            publish_group_turn_created,
+        )
+
+        # Stamp the reply with the SAME send-identity key its originating ask
+        # carried (persisted on `ask_jobs` by `/v1/ask`). The member who posted
+        # the message renders this reply from its own ask poll, so it uses this
+        # key to recognise the reply's realtime echo as its own and NOT
+        # double-render it — id-precise, never a timing guess. A peer (a
+        # different key) still gets it live.
+        _grp_cmid = (get_ask_job(ask_id) or {}).get("client_message_id")
+        _grp_turn = _conversations_db.post_group_turn(
+            conversation_id,
+            None,
+            payload.get("answer", ""),
+            role="assistant",
+            reply=payload,
+            client_message_id=_grp_cmid,
+        )
+        publish_group_turn_created(project_id, conversation_id, _grp_turn)
+    except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+        logger.warning(
+            "group assistant-turn persist/broadcast failed ask_id=%s project_id=%s",
+            ask_id, project_id, exc_info=True,
+        )
