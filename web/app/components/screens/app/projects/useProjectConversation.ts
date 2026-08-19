@@ -682,13 +682,25 @@ export function useProjectConversation(
       const envelope: ChatIntentEnvelope | null = await chatIntentApi
         .resolve(intentMessage, {
           conversationId: dbConvIdRef.current,
-          prdId: metaRef.current.prdId ?? openPanelPrdId,
+          // Open-panel PRD wins over the generation-time `metaRef` cache. On a
+          // long multi-PRD thread `metaRef.current.prdId` holds an EARLIER PRD,
+          // so "edit/open/share the PRD" must resolve to the one actually in
+          // front of the user (the shared panel's `content.prd`); `metaRef` is
+          // the fallback for the brief window right after a fresh generate,
+          // before the panel catches up. Mirrors main's `tabPrdId`
+          // (`prd?.prd_id ?? prdId`) and the Slack `resolveShareRef` precedence.
+          prdId: openPanelPrdId ?? metaRef.current.prdId ?? null,
           hasAttachments: composer.attachments.length > 0,
           contextSource: { kind: "project", params: { project_id: projectId, surface } },
         })
         .catch(() => null)
       if (envelope) {
-        const targetPrdId = !docFile ? (envelope.prd_id ?? metaRef.current.prdId ?? openPanelPrdId) : null
+        // The planner's explicit `prd_id` wins (it resolved a named subject),
+        // then the OPEN-PANEL PRD, then the stale `metaRef` cache as a last
+        // resort — same open-panel-first precedence as the intent resolve above,
+        // so edit / assign-tickets / change-template all target the PRD the user
+        // is looking at rather than an earlier one from this thread.
+        const targetPrdId = !docFile ? (envelope.prd_id ?? openPanelPrdId ?? metaRef.current.prdId ?? null) : null
         const ticketsTarget = !docFile
           ? (metaRef.current.ticketSetId != null ? { ticketSetId: metaRef.current.ticketSetId } as const
             : targetPrdId != null ? { prdId: targetPrdId } as const : null)
@@ -776,7 +788,12 @@ export function useProjectConversation(
                 // exactly like main (project-only artifacts stay unresolvable-by-
                 // name = the deferred project-context behaviour).
                 resolveShareRef: (e): SlackShareTargetRef => resolveShareRef(e, {
-                  prdId: metaRef.current.prdId ?? content.prd?.prd_id ?? null,
+                  // Open-panel PRD first, stale `metaRef` cache as fallback — the
+                  // share context is "the document in front of the user", so on a
+                  // multi-PRD thread this must be the panel's open PRD, not an
+                  // earlier one cached at generation time. Matches the edit target
+                  // above and the resolver's own documented precedence.
+                  prdId: content.prd?.prd_id ?? metaRef.current.prdId ?? null,
                   ticketSetId: metaRef.current.ticketSetId ?? null,
                   reportId: content.reportFocusId ?? null,
                 }),
