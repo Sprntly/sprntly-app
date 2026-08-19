@@ -68,7 +68,7 @@ vi.mock("../../prdAccessApi", () => ({
 }))
 
 import { postLoginPath } from "../client"
-import { ONBOARDING_STEP_SLUGS } from "../../onboarding/types"
+import { ONBOARDING_STEP_SLUGS, slugForStep } from "../../onboarding/types"
 import { ApiError } from "../../api"
 
 const FIRST_STEP = `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
@@ -181,6 +181,90 @@ describe("postLoginPath — pending-invite resolution for existing members", () 
       new ApiError(409, { detail: "already in another company" }),
     )
     expect(await postLoginPath()).toBe("/invite-conflict")
+  })
+})
+
+describe("postLoginPath — project invite lands on the project's private chat (AD-TNM3)", () => {
+  it("existing member accepting a project-carrying invite → /projects?id=…&chat=individual", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockResolvedValue({
+      company_id: "co-1",
+      role: "member",
+      project_id: 42,
+    })
+    expect(await postLoginPath()).toBe("/projects?id=42&chat=individual")
+  })
+
+  it("existing member accepting a PLAIN org invite (no project_id) → unchanged '/' landing", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockResolvedValue({
+      company_id: "co-1",
+      role: "member",
+      project_id: null,
+    })
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("existing member: a non-numeric project_id is ignored → unchanged '/' landing", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockResolvedValue({
+      company_id: "co-1",
+      role: "member",
+      project_id: "42" as unknown as number,
+    })
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("invite-conflict is still guarded even when acceptance would carry a project (409 → /invite-conflict)", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockRejectedValue(
+      new ApiError(409, { detail: "already in another company" }),
+    )
+    expect(await postLoginPath()).toBe("/invite-conflict")
+  })
+
+  it("brand-new invitee (no workspace yet) accepting a project invite → project's private chat", async () => {
+    // No workspace on the FIRST fetch; the accept materialises membership, so
+    // the SECOND fetch resolves to the (already-onboarded) inviter's company.
+    getUserMock.mockResolvedValue({
+      data: {
+        user: { id: "user-1", email_confirmed_at: "2026-01-01T00:00:00Z", user_metadata: {} },
+      },
+    })
+    fetchWorkspaceMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "ws-1",
+        onboarding_completed_at: "2026-01-02T00:00:00Z",
+        onboarding_step: 0,
+      })
+    acceptInviteMock.mockResolvedValue({
+      company_id: "co-1",
+      role: "member",
+      project_id: 7,
+    })
+    expect(await postLoginPath()).toBe("/projects?id=7&chat=individual")
+  })
+
+  it("brand-new invitee whose fresh company onboarding is UNFINISHED still goes to onboarding (project redirect deferred)", async () => {
+    getUserMock.mockResolvedValue({
+      data: {
+        user: { id: "user-1", email_confirmed_at: "2026-01-01T00:00:00Z", user_metadata: {} },
+      },
+    })
+    fetchWorkspaceMock
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: "ws-1",
+        onboarding_completed_at: null,
+        onboarding_step: 2,
+      })
+    acceptInviteMock.mockResolvedValue({
+      company_id: "co-1",
+      role: "member",
+      project_id: 7,
+    })
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(2)}`)
   })
 })
 

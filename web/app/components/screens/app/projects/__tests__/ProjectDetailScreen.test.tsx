@@ -320,6 +320,35 @@ describe("ProjectDetailView — top bar", () => {
     expect(screen.queryByText(/status/i)).toBeNull()
     expect(screen.queryByTestId("status-pill")).toBeNull()
   })
+
+  it("test_avatar_tooltip_name — a member avatar's hover tooltip (native title) shows the member's NAME when present", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    // David M. + Shristi are the two human members in PROJECT — the native
+    // `title` is the hover tooltip, addressable via getByTitle.
+    expect(screen.getByTitle("David M.")).toBeTruthy()
+    expect(screen.getByTitle("Shristi")).toBeTruthy()
+  })
+
+  it("test_avatar_tooltip_email_fallback — a member with NO name falls back to their EMAIL in the tooltip", () => {
+    const emailOnlyProject = {
+      ...PROJECT,
+      members: [
+        {
+          kind: "human" as const,
+          user_id: "u9",
+          name: null,
+          email: "newbie@example.com",
+          avatar_url: null,
+          job_role: null,
+          added_at: hoursAgo(1),
+        },
+      ],
+    }
+    render(React.createElement(ProjectDetailView, viewProps({ project: emailOnlyProject })))
+    expect(screen.getByTitle("newbie@example.com")).toBeTruthy()
+    // The generic "Member" fallback is NOT used when an email is available.
+    expect(screen.queryByTitle("Member")).toBeNull()
+  })
 })
 
 // The former "right rail structure" describe — the redesign removes the

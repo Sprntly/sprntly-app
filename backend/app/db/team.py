@@ -391,6 +391,27 @@ def _grant_invite_workspaces(
     return granted
 
 
+def _dataset_for_project_workspace(workspace_id: str | None, company_id: str) -> str:
+    """Best-effort dataset slug for a project's workspace, mirroring
+    `chat_envelope._dataset_for`'s resolution order (workspace-bound slug →
+    company-slug fallback → ""). Used to scope the join-greeting's artifact
+    manifest read at invite-ACCEPT time, where there is no request ctx to hand
+    us `_dataset_for(ctx)`. A wrong-or-empty slug only degrades the greeting's
+    artifact section (the manifest is already narrowed to the project's own
+    `project_artifacts` refs — never a cross-tenant read), never raises."""
+    try:
+        from app.db.companies import slug_for_company_id
+        from app.db.workspaces import dataset_slug_for_workspace
+
+        if workspace_id:
+            bound = dataset_slug_for_workspace(workspace_id)
+            if bound:
+                return bound
+        return slug_for_company_id(company_id) or ""
+    except Exception:  # noqa: BLE001 — best-effort, never blocks an accept
+        return ""
+
+
 def _add_invite_project_member(invite: dict, user_id: str) -> None:
     """Extension B (AD-TNM3): if the invite carries a `project_id`, land the
     accepter in that project's `project_members`. Fires on BOTH accept paths
@@ -403,7 +424,30 @@ def _add_invite_project_member(invite: dict, user_id: str) -> None:
         return
     from app.db import projects as projects_db
 
+    # Was this a NET-NEW membership? Captured BEFORE the (idempotent) upsert so
+    # the on-join greeting fires only for a first-time add — a member who was
+    # already on the project (added earlier via the POST /members or /tag
+    # routes, which greet on their own new-membership branch) must NOT be
+    # greeted again here. Mirrors those routes' new-membership-only contract.
+    already_member = projects_db.is_project_member(pid, user_id)
+
     projects_db.add_member(pid, user_id)
+
+    # Seed the on-join grounding greeting for a first-time member (AD-P7). The
+    # accept path grows project_members WITHOUT going through the POST /members
+    # or /tag routes that post the greeting, so a brand-new email invitee would
+    # otherwise land in a blank private project chat. Best-effort/never-raises,
+    # exactly like the route call sites; skipped for a re-accept (dedupe).
+    if not already_member:
+        try:
+            from app.project_join_greeting import post_join_greeting
+
+            project0 = projects_db.get_project(pid) or {}
+            company_id = invite.get("company_id") or project0.get("company_id") or ""
+            dataset = _dataset_for_project_workspace(project0.get("workspace_id"), company_id)
+            post_join_greeting(pid, user_id, dataset=dataset, company_id=company_id)
+        except Exception:  # noqa: BLE001 — best-effort, never blocks an accept
+            pass
 
     # Best-effort live landing (AD-TNM5): publish a `member.added` signal on the
     # accepter's OWN per-user channel so an accept lands them live in the
@@ -427,9 +471,11 @@ def accept_invite_for_user(
     """Materialise a pending invite into a company_members row for `user_id`
     plus workspace_members rows for the invite's target workspaces.
 
-    Returns {company_id, role, workspace_ids} on success, or None if no
-    matching invite. Raises ValueError("already_in_company") if the user
-    already belongs to a different company (one-user-one-company invariant).
+    Returns {company_id, role, workspace_ids, project_id} on success, or None
+    if no matching invite. `project_id` is the project the invite carried
+    (AD-TNM3) or None for a plain WJ/team invite. Raises
+    ValueError("already_in_company") if the user already belongs to a
+    different company (one-user-one-company invariant).
 
     The caller's email must already be verified (Supabase Auth handles
     this); this helper does not re-verify.
@@ -463,6 +509,10 @@ def accept_invite_for_user(
                 "company_id": company_id,
                 "role": existing[0].get("role"),
                 "workspace_ids": granted,
+                # The project this invite carried (AD-TNM3), so the client can
+                # land the accepter in that project's private chat instead of
+                # the dashboard. None for every plain WJ/team invite.
+                "project_id": invite.get("project_id"),
             }
         raise ValueError("already_in_company")
 
@@ -483,7 +533,14 @@ def accept_invite_for_user(
     )
     _add_invite_project_member(invite, user_id)
     delete_invite(invite["id"])
-    return {"company_id": company_id, "role": role, "workspace_ids": granted}
+    return {
+        "company_id": company_id,
+        "role": role,
+        "workspace_ids": granted,
+        # See the same-company branch above: carry the invite's project (if any)
+        # so the client can land the accepter directly in its private chat.
+        "project_id": invite.get("project_id"),
+    }
 
 
 def touch_invite(invite_id: str) -> dict | None:
