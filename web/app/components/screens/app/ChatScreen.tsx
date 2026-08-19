@@ -8,7 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
-import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
@@ -60,7 +60,7 @@ import { QUOTE_VIEWER_NAME, buildQuotedMessage, normalizeQuote, splitQuotedSuffi
 import {
   customArtifactsApi,
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SkillInfo, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -842,6 +842,10 @@ export function ChatScreen() {
   const searchParams = useSearchParams()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
+  // DEFAULT OFF, allowlist-only. This hides the entry point; the backend route
+  // refuses the request on its own, because the client decides what to render
+  // and the server decides what runs.
+  const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
   const { content, setContent } = useContent()
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
@@ -1190,6 +1194,10 @@ export function ChatScreen() {
   // query at send time so the backend's deterministic slash fast-path is
   // unchanged.
   const [pinnedSkill, setPinnedSkill] = useState<PinnedSkill | null>(null)
+  // Goal Analysis mode. A MODE rather than a skill: the next message starts a
+  // run instead of posting a turn, so it cannot ride on `pinnedSkill` (which
+  // splices a slash trigger into the query and sends it to the ask path).
+  const [goalMode, setGoalMode] = useState(false)
   // A passage of an answer the reader highlighted and pressed Reply on, parked
   // above the input until they send or dismiss it. Host state (not the shell's)
   // because main renders its own composer; the shell reports the selection
@@ -6311,6 +6319,20 @@ export function ChatScreen() {
     // trigger stays the query's first token — the backend's deterministic
     // fast-path and `skillForQuery` both read it there. (This ordering is the
     // whole reason a quote rides at the END of the message; see `chatQuote.ts`.)
+    // Goal Analysis takes the message instead of the ask path. Deliberately
+    // BEFORE the skill splice and the quote build: a run takes the goal in the
+    // user's own words, and a slash trigger spliced into the front of it would
+    // become part of what Stage 0 tries to match a metric against.
+    if (goalMode) {
+      setDraft("")
+      setGoalMode(false)
+      setPlusMenuOpen(false)
+      if (voice.listening) voice.cancel()
+      void startGoalAnalysis(q)
+      const ta0 = composerRef.current
+      if (ta0) ta0.style.height = ""
+      return
+    }
     const sent = buildQuotedMessage(spliceSkill(pinnedSkill, q), quote)
     // Sending ends the dictation that produced the question — and CANCELS it
     // rather than stopping it. A graceful stop still delivers the phrase the
@@ -6440,14 +6462,49 @@ export function ChatScreen() {
   // The `+` menu: Attach a file / Browse skills. The slash palette used to be
   // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
   // invisible to anyone who never read the footer hint.
+  // Start a Goal Analysis run and put its panel on screen.
+  //
+  // The panel opens on the run id RATHER THAN on a result, because the first
+  // thing a run does is stop and ask what the goal means. If the panel waited
+  // for something to render, the question — which is the product's central
+  // claim, not an interruption on the way to one — would arrive as a surprise
+  // after a silence.
+  const startGoalAnalysis = useCallback(async (goalText: string) => {
+    try {
+      const run = await goalAnalysisApi.start(goalText, {
+        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+      })
+      setContent({ goalRunId: run.id })
+      openContentPanel("goal")
+    } catch (e) {
+      // A 403 here is the entitlement gate, and it is the one failure worth
+      // naming precisely: the control was visible, so "something went wrong"
+      // would read as a bug rather than as "your company is not on this yet".
+      const denied = e instanceof ApiError && e.status === 403
+      showToast(
+        denied ? "Goal Analysis is not enabled" : "Could not start the analysis",
+        denied
+          ? "This is an experimental feature and your company is not enrolled yet."
+          : (e instanceof Error ? e.message : String(e)).slice(0, 200),
+      )
+    }
+  }, [activeConvId, setContent, openContentPanel, showToast])
+
   const handlePlusMenuSelect = useCallback((index: number) => {
     setPlusMenuOpen(false)
     if (index === 0) {
       fileInputRef.current?.click()
       return
     }
+    // Index 2 exists only while the company is enrolled — ChatComposer appends
+    // it last precisely so 0 and 1 keep meaning what they always meant.
+    if (index === 2) {
+      setGoalMode(true)
+      composerRef.current?.focus()
+      return
+    }
     openSkillPalette()
-  }, [openSkillPalette])
+  }, [openSkillPalette, composerRef])
 
   // Esc stops the answer. The Stop button already sits in the composer and now
   // beside the wait itself, but the fastest way out of a run you regret is the
@@ -6532,6 +6589,9 @@ export function ChatScreen() {
       onToggleVoice={handleToggleVoice}
       quote={quote}
       onRemoveQuote={() => setQuote(null)}
+      goalMode={goalMode}
+      onExitGoalMode={() => setGoalMode(false)}
+      goalModeAvailable={goalAnalysisOn}
     />
   )
 

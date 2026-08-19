@@ -22,6 +22,11 @@ import { EmptyPane } from "./EmptyPane"
 const DocumentTab = lazy(() =>
   import("./DocumentTab").then((m) => ({ default: m.DocumentTab })),
 )
+// Lazy for the same reason: Goal Analysis is off for almost every company, so
+// its panel has no business in the bundle every other company downloads.
+const GoalAnalysisTab = lazy(() =>
+  import("./GoalAnalysisTab").then((m) => ({ default: m.GoalAnalysisTab })),
+)
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
@@ -77,6 +82,9 @@ const TABS = [
   // posture as Reports and for the same reason — it hangs off the THREAD, not
   // off the PRD — so it sits last and is hidden until one exists.
   { icon: <IconFileText size={11.5}/> , id: "document", label: "Document" },
+  // Goal Analysis, same posture again: a run hangs off the THREAD, is off for
+  // almost every company, and is hidden until this thread actually has one.
+  { icon: <IconSparkle size={11.5}/> , id: "goal", label: "Goal Analysis" },
 ] as const
 
 // The key is versioned because the bounds below moved: widths stored under the
@@ -448,6 +456,7 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
     // Hidden until this thread has written one. A tab that is always present
     // but usually empty teaches people to ignore it.
     document: content.documentId == null,
+    goal: content.goalRunId == null,
   }
   // The tab currently being shown is never pulled out from under the reader —
   // whatever is in the body must stay reachable in the bar above it. Evidence is
@@ -737,6 +746,15 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
             <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
+          {activeTab === "goal" && content.goalRunId != null && (
+            <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading analysis…</div>}>
+              {/* Keyed on the run id for the same reason the document tab is:
+                  a second run in one thread swaps this prop, and the poll
+                  timer, the confirm state and the user's half-typed definition
+                  all belong to the run they were mounted for. */}
+              <GoalAnalysisTab key={content.goalRunId} runId={content.goalRunId} />
+            </Suspense>
           )}
           {activeTab === "document" && content.documentId != null && (
             <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading document…</div>}>

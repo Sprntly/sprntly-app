@@ -31,7 +31,7 @@ import {
   type StaffCompany,
   type StaffEntitlementsPatch,
 } from "../../../lib/api"
-import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
 
 // The module toggles stored in companies.feature_flags — mirrors the
 // FeatureFlags keys in lib/onboarding/types.ts. The Modules group shows
@@ -61,10 +61,12 @@ export const MODULES: { key: string; label: string }[] = [
  *  app/entitlements.py crucible_enabled. A missing key is OFF, unlike every
  *  other module on this screen: this gates an experimental capability nobody
  *  has rather than grandfathering one people already had, so enrolment is
- *  explicit. Display-level only — never written back. */
-export function crucibleEnabled(flags: Record<string, boolean>): boolean {
-  return !!flags.crucible
-}
+ *  explicit. Display-level only — never written back.
+ *
+ *  DELEGATES to the shared predicate rather than restating it. Two copies of
+ *  "what does a missing key mean" is exactly how the staff panel ends up
+ *  showing a company as enrolled while the app hides the control from them. */
+export const crucibleEnabled = crucibleOn
 
 /** Whether the Agents module is on, mirroring backend
  *  app/entitlements.py agents_enabled: an explicit `agents` key wins; rows

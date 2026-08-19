@@ -24906,3 +24906,50 @@
   .gwip-skel-line::after { animation: none; }
   .gwip-bar-pill { animation: none; left: 0; width: 100%; opacity: .55; }
 }
+
+/* ── Goal Analysis panel (engine name Crucible; never shown) ─────────────── */
+.ga { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
+.ga-goal { font-weight: 600; font-size: 14px; margin: 0; }
+.ga-ask { margin: 0; line-height: 1.5; }
+.ga-provenance { margin: 0; opacity: 0.65; font-size: 12px; }
+.ga-definition {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border, #e5e5e5);
+  border-radius: 8px; font: inherit; resize: vertical;
+}
+.ga-confirm {
+  align-self: flex-start; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid transparent; background: var(--accent, #111); color: #fff;
+  cursor: pointer;
+}
+.ga-confirm:disabled { opacity: 0.45; cursor: default; }
+.ga-loading, .ga-empty { opacity: 0.7; margin: 0; }
+.ga-error { color: var(--danger, #b42318); margin: 0; }
+
+/* Coverage sits ABOVE the findings: a note that a third of the evidence was
+   undated changes how every number below it reads. */
+.ga-coverage {
+  margin: 0; padding: 10px 12px; list-style: none; border-radius: 8px;
+  background: var(--surface-2, #f6f6f5); display: flex; flex-direction: column;
+  gap: 6px; font-size: 12px;
+}
+.ga-findings { margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 14px; }
+.ga-finding { border-top: 1px solid var(--border, #ececec); padding-top: 12px; }
+.ga-finding:first-child { border-top: none; padding-top: 0; }
+.ga-finding-statement { margin: 0 0 6px; line-height: 1.5; }
+.ga-finding-meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  font-size: 12px; }
+.ga-size { font-weight: 600; }
+/* "Could not be sized" must not read like a number, and must never look like
+   a zero — the two lead to opposite decisions (I3). */
+.ga-size--unknown { font-weight: 400; font-style: italic; opacity: 0.7; }
+.ga-band, .ga-conflict {
+  padding: 1px 7px; border-radius: 999px; background: var(--surface-2, #f0f0ef);
+}
+.ga-conflict { background: #fdf1e3; }
+.ga-weakest, .ga-cap { margin: 6px 0 0; font-size: 12px; opacity: 0.7; }
+.ga-assumed { margin: 6px 0 0; padding-left: 16px; font-size: 12px; opacity: 0.7; }
+.ga-considered { font-size: 12px; }
+.ga-considered summary { cursor: pointer; opacity: 0.75; }
+.ga-considered ul { margin: 8px 0 0; padding-left: 16px;
+  display: flex; flex-direction: column; gap: 6px; }
