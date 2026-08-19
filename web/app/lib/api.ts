@@ -612,6 +612,12 @@ export const askApi = {
        *  folded into the answer's question server-side. Ignored on every
        *  other branch. */
       attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+      /** Pluggable context source ({kind, params}) — the wire form of a
+       *  surface's own context assembler. The project surfaces send
+       *  `{ kind: "project", params: { project_id, surface } }`; the backend
+       *  routes it to `ProjectContextAssembler` (membership-gated server-side).
+       *  Omitted on every main-chat ask ⇒ the unscoped path is byte-identical. */
+      context_source?: { kind: string; params?: Record<string, unknown> }
     },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
@@ -634,6 +640,9 @@ export const askApi = {
       // Structured attachments (project branch): the server persists them onto
       // the user turn and folds their text into the answer's question.
       ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
+      // Pluggable context source: routed server-side to the matching context
+      // assembler (membership-gated). Absent on main ⇒ unscoped path unchanged.
+      ...(opts?.context_source != null ? { context_source: opts.context_source } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),

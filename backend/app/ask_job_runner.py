@@ -419,9 +419,38 @@ def _run_sync(
             dataset=dataset,
             conversation_id=conversation_id,
             question=question,
+            workspace_id=workspace_id,
             params=(context_source or {}).get("params") or {},
         ),
     )
+
+    # Conv-bind (ported from `b09801dd^:routes/ask.py`): when a project scope
+    # resolves, point this conversation at the project — first-write-wins and
+    # best-effort (mirrors `bind_conversation_to_prd`), so navigating away
+    # mid-generation can't orphan the conversation↔project link. The membership
+    # gate already ran inside the assembler (raising before we get here) on the
+    # SAME `(company, workspace, member)` facts, so a bind only ever fires for a
+    # caller the gate admitted. Never blocks the answer.
+    if (
+        scope is not None
+        and conversation_id is not None
+        and context_source
+        and context_source.get("kind") == "project"
+    ):
+        _bind_project_id = ((context_source.get("params") or {}).get("project_id"))
+        if _bind_project_id is not None:
+            try:
+                from app.db.conversations import bind_conversation_to_project
+
+                bind_conversation_to_project(
+                    conversation_id, int(_bind_project_id), enterprise_id, user_id
+                )
+            except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+                logger.warning(
+                    "bind_conversation_to_project failed conversation_id=%s "
+                    "project_id=%s",
+                    conversation_id, _bind_project_id, exc_info=True,
+                )
 
     def _single_shot() -> dict:
         return qa_agent.answer(

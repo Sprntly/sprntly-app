@@ -1,24 +1,33 @@
 """Pluggable context-assembler seam for the ask path.
 
-Phase 1 — SCAFFOLDING ONLY. This module defines the seam by which ANY surface
-can bring its own context assembler to `qa_agent.answer()`, but it registers
-NONE. With `ASSEMBLER_REGISTRY` empty, `resolve_context_scope()` returns `None`
-for every ask, so every ask runs the exact current (unscoped) main path
-unchanged. No behaviour changes this phase.
+This module defines the seam by which ANY surface can bring its own context
+assembler to `qa_agent.answer()`. An ask with NO `context_source` on the wire
+short-circuits to `None` in `resolve_context_scope()` BEFORE the registry is
+consulted, so every main-chat ask runs the exact current (unscoped) main path,
+byte-identical. Only an ask that carries a `context_source` whose `kind` has a
+registered assembler gets a scope.
 
-`ContextScope` generalizes the older `app.surface_scope.SurfaceScope`: instead
-of an enum of three fixed surfaces, any caller supplies an assembler keyed by a
-`context_source["kind"]` string, and each assembler produces a `ContextScope`.
-A `ContextScope` whose `is_noop` is True — like a `None` scope — is the no-op:
-`answer()` runs its current code path completely unchanged.
+`ASSEMBLER_REGISTRY` is populated at import time by
+`_register_builtin_assemblers()` (bottom of this module). The one built-in is
+`"project" → ProjectContextAssembler` (the private + @Sprntly-group project
+chats), which returns a `SurfaceScope` — the type `answer(scope=...)` already
+consumes — populated with the project's breadth block.
 
-Pure seam: no I/O, and no import of `qa_agent` or any surface module, so
-importing this file can never create an import cycle.
+`ContextScope` (below) is the seam's own descriptor, kept from the scaffolding
+pass; the first assembler returns a `SurfaceScope` directly to avoid churning
+`answer()`'s internals. FOLLOW-UP: unify the two into one descriptor.
+
+The seam itself does no I/O and imports no surface/`qa_agent` module at module
+top; `_register_builtin_assemblers()` uses a DEFERRED import, so the dependency
+stays one-directional and no import cycle can form.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Callable, Optional, Protocol, runtime_checkable
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, no runtime import (cycle-safe)
+    from app.surface_scope import SurfaceScope
 
 
 @dataclass(frozen=True)
@@ -58,6 +67,10 @@ class AssembleRequest:
     dataset: Optional[str]
     conversation_id: Optional[int]
     question: str
+    #: The caller's workspace, threaded so an assembler's membership/tenant gate
+    #: can scope to the full `(company_id, workspace_id)` pair (the project
+    #: membership gate 404s a foreign-workspace project id).
+    workspace_id: Optional[str] = None
     params: dict = field(default_factory=dict)
 
 
@@ -75,22 +88,31 @@ class ContextAssembler(Protocol):
         ...
 
 
-#: Empty in Phase 1 — no assembler is registered, so `resolve_context_scope`
-#: returns None for every ask and behaviour is byte-identical to today's main
-#: path. Phase 2 registers a surface's assembler under its `kind` key.
+#: Keyed by `context_source["kind"]`. The `"project"` assembler is registered
+#: at import time by `_register_builtin_assemblers()` at the bottom of this
+#: module. An ask with NO `context_source` never consults this registry
+#: (`resolve_context_scope` returns None first), so the main-chat path stays
+#: byte-identical.
 ASSEMBLER_REGISTRY: dict[str, ContextAssembler] = {}
 
 
 def resolve_context_scope(
     context_source: Optional[dict], req: AssembleRequest
-) -> Optional[ContextScope]:
+) -> "Optional[SurfaceScope]":
     """Route ``context_source["kind"]`` to its registered assembler and return
-    the `ContextScope` it builds.
+    the scope it builds.
 
     Returns ``None`` when there is no source, no ``kind``, or no registered
-    assembler for that kind — which is EVERY ask in Phase 1, because
-    `ASSEMBLER_REGISTRY` is empty. When a scope IS returned, its assembler has
-    already run its own auth gate (raising on failure); the seam only routes.
+    assembler for that kind — which is EVERY main-chat ask (no ``context_
+    source`` on the wire ⇒ ``None`` ⇒ the byte-identical unscoped path). When a
+    scope IS returned, its assembler has already run its own auth gate (raising
+    on failure); the seam only routes.
+
+    Return type widened from ``Optional[ContextScope]`` to
+    ``Optional[SurfaceScope]``: ``answer(scope=...)`` consumes ``SurfaceScope``,
+    and the first registered assembler (``ProjectContextAssembler``) returns one
+    directly to avoid churning ``answer()``'s internals this phase. FOLLOW-UP:
+    unify ``ContextScope`` and ``SurfaceScope`` into one descriptor.
     """
     if not context_source:
         return None
@@ -101,3 +123,22 @@ def resolve_context_scope(
     if assembler is None:
         return None
     return assembler.assemble(req)
+
+
+def _register_builtin_assemblers() -> None:
+    """Populate `ASSEMBLER_REGISTRY` with the in-repo assemblers, once, at
+    import time. The deferred import lives HERE (not at module top) so the
+    dependency is one-directional — `context_assembler_project` imports names
+    from THIS module, and this module never needs it at definition time — which
+    keeps the seam free of the import cycle its scaffolding docstring guards
+    against. Failure is swallowed: a broken optional assembler must never take
+    down the whole ask path (the affected `kind` simply routes to no assembler
+    and `resolve_context_scope` returns None, i.e. the main path)."""
+    try:
+        from app.context_assembler_project import ProjectContextAssembler
+    except Exception:  # noqa: BLE001 — never break import of the ask path
+        return
+    ASSEMBLER_REGISTRY.setdefault("project", ProjectContextAssembler())
+
+
+_register_builtin_assemblers()

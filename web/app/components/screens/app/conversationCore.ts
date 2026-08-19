@@ -105,6 +105,12 @@ export interface AskGrounding {
   project_id?: number
   evidence_id?: number
   ticket_set_id?: number
+  /** Pluggable context source ({kind, params}) — the wire form of a surface's
+   *  own context assembler. The project surfaces send
+   *  `{ kind: "project", params: { project_id, surface } }`; the backend
+   *  routes it to `ProjectContextAssembler` (membership-gated server-side).
+   *  Absent on main, so the unscoped path is byte-identical. */
+  context_source?: { kind: string; params?: Record<string, unknown> }
 }
 
 /**

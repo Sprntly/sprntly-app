@@ -346,8 +346,24 @@ export function useProjectConversation(
     _key: string, _m: { turnId: string; displayQuery: string },
   ): Promise<{ convId: number | null; grounding: AskGrounding }> => {
     const convId = dbConvIdRef.current ?? await ensureProjectConv()
-    return { convId: convId ?? null, grounding: convId != null ? { conversation_id: convId } : {} }
-  }, [ensureProjectConv])
+    // Pin this project's context source on every send: the backend routes it to
+    // `ProjectContextAssembler` (membership-gated server-side), which folds the
+    // project's roster/ledger/artifacts/memory into the answer. `surface`
+    // carries the mount identity this adapter already knows — "private" for the
+    // individual "My chat with Sprntly" mount, "group" for the @Sprntly group
+    // mount. conversation_id still rides for history replay + the conv↔project
+    // bind; `project_id` moves onto `context_source.params` (the seam's shape).
+    const context_source = {
+      kind: "project",
+      params: { project_id: projectId, surface },
+    }
+    return {
+      convId: convId ?? null,
+      grounding: convId != null
+        ? { conversation_id: convId, context_source }
+        : { context_source },
+    }
+  }, [ensureProjectConv, projectId, surface])
 
   const pushPendingConversation = useCallback((
     turnId: string, query: string, key: string,
