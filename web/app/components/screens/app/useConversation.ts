@@ -31,8 +31,11 @@ import type { Dispatch, RefObject, SetStateAction } from "react"
 import { addToSet, removeFromSet } from "../../../lib/chatAskState"
 import { getPendingAsk } from "../../../lib/runAskGeneration"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
-import type { AskResponse } from "../../../lib/api"
+import type { AskResponse, OpenArtifactCandidate } from "../../../lib/api"
+import type { AppContentState } from "../../../types/content"
+import type { ContentPanelTab } from "../../../context/NavigationContext"
 import { useMainConversation, type MainConversation } from "./useMainConversation"
+import { useConversationGeneration } from "./useConversationGeneration"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
 import type { ChatTab, ThreadTurn } from "./ChatScreen"
@@ -84,16 +87,35 @@ export interface MainConversationAdapter {
     key: string,
   ) => Promise<void>
 
+  // ── Generation-flow leaf seams (tab-flavored; injected by the wrapper) ──────
+  // The artifact-generation flows (`useConversationGeneration`) fold INTO the
+  // engine (matching the `useProjectConversation` oracle) so submit can dispatch
+  // them without the engine↔generation↔submit mount-order cycle. These are the
+  // per-surface leaf seams the shared flows still need; main injects its
+  // tab-orchestrator versions, a project slot its single-conversation ones.
+  emitCommandTurn: (turn: ThreadTurn) => void
+  seedGenerationTurn: (seedTurn: ThreadTurn) => { tabId: string; dbConvId: number | null }
+  threadContextFor: (key: string) => string
+  openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
+  postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
+  markTicketSetAutoOpened: (key: string) => void
+  postSummary: (key: string, kind: "prd" | "evidence" | "prototype" | "ticket_set", artifactId: number) => void
+  setContent: (patch: Partial<AppContentState>) => void
+  openContentPanel: (tab: ContentPanelTab) => void
+  content: AppContentState
+
   // ── Cross-cutting ──────────────────────────────────────────────────────────
   nextPrompts: Pick<ReturnType<typeof useNextPrompts>, "onSettled">
   showToast: (title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => void
 }
 
-export interface Conversation extends MainConversation {
-  /** The handle factory the generation flows + submit still consume from the
-   *  wrapper until they too fold into this engine. */
-  makeHandle: (tabId: string) => ConversationHandle
-}
+/** The engine output: the ask-core run/stop/action-turn + the artifact-generation
+ *  flows (now owned by the engine) + the handle factory (still consumed by the
+ *  wrapper for its multi-tab resume). */
+export type Conversation = MainConversation &
+  ReturnType<typeof useConversationGeneration> & {
+    makeHandle: (tabId: string) => ConversationHandle
+  }
 
 export function useConversation(adapter: MainConversationAdapter): Conversation {
   const {
@@ -113,6 +135,16 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     pushPendingConversation,
     setActiveConv,
     finalizeConversationTurn,
+    emitCommandTurn,
+    seedGenerationTurn,
+    threadContextFor,
+    openArtifactInPanel,
+    postOpenArtifactReply,
+    markTicketSetAutoOpened,
+    postSummary,
+    setContent,
+    openContentPanel,
+    content,
     nextPrompts,
     showToast,
   } = adapter
@@ -220,5 +252,28 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     showToast,
   })
 
-  return { ...engine, makeHandle }
+  // ── The per-conversation artifact-generation flows ─────────────────────────
+  // Folded into the engine (was a sibling call in the wrapper). Main injects its
+  // tab-orchestrator seams (emitCommandTurn / seedGenerationTurn / the real
+  // global content-panel) + the ticket-set/summary coordination; a project slot
+  // supplies single-conversation equivalents. Byte-unchanged from the wrapper.
+  const generation = useConversationGeneration({
+    emitTurn: emitCommandTurn,
+    makeHandle,
+    seedGenerationTurn,
+    threadContextFor,
+    persistence,
+    pushPendingConversation,
+    finalizeConversationTurn,
+    setContent,
+    openContentPanel,
+    content,
+    showToast,
+    openArtifactInPanel,
+    postOpenArtifactReply,
+    markTicketSetAutoOpened,
+    postSummary,
+  })
+
+  return { ...engine, ...generation, makeHandle }
 }

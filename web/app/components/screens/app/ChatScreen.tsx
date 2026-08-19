@@ -77,7 +77,6 @@ import { ConversationView } from "./ConversationView"
 import { useConversation } from "./useConversation"
 import { useThreadScroll } from "./useThreadScroll"
 import { useComposer } from "./useComposer"
-import { useConversationGeneration } from "./useConversationGeneration"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../shared/chat-shell/conversation/resolveShareRef"
@@ -3584,14 +3583,18 @@ export function ChatScreen() {
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
   // ── The per-conversation store seam ───────────────────────────────────────
-  // The single-conversation ask-core, extracted into the shared `useConversation`
-  // engine. Main injects its exact tab machinery + the grounding seam, so the run
-  // stays byte-unchanged; the engine builds `makeHandle` (the per-tab
-  // ConversationHandle factory) + `resolveAskParams` + `getPrdId` internally and
-  // returns the run/stop/action-turn functions. The generation flows below still
-  // consume `makeHandle` from here; submit / composer / clarify fold in next.
-  const { makeHandle, runConversationAsk, handleStopAsk, runActionTurnInTab } =
-    useConversation({
+  // The single-conversation engine, extracted into the shared `useConversation`.
+  // Main injects its exact tab machinery + the grounding seam + the generation
+  // leaf seams, so the run + the artifact-generation flows stay byte-unchanged;
+  // the engine builds `makeHandle` / `resolveAskParams` / `getPrdId` internally,
+  // owns the ask-core + `useConversationGeneration`, and returns the run/stop/
+  // action-turn functions plus the generation flows. submit / composer / clarify
+  // fold in next.
+  const {
+    runConversationAsk, handleStopAsk, runActionTurnInTab,
+    listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
+    openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
+  } = useConversation({
       tabsRef,
       activeTabId,
       activeTabIdRef,
@@ -3608,6 +3611,16 @@ export function ChatScreen() {
       pushPendingConversation,
       setActiveConv,
       finalizeConversationTurn,
+      emitCommandTurn,
+      seedGenerationTurn,
+      threadContextFor,
+      openArtifactInPanel,
+      postOpenArtifactReply,
+      markTicketSetAutoOpened: (key) => { ticketSetAutoOpenedRef.current.add(key) },
+      postSummary: (key, kind, artifactId) => { postSummaryRef.current?.(key, kind, artifactId) },
+      setContent,
+      openContentPanel,
+      content,
       nextPrompts,
       showToast,
     })
@@ -3654,32 +3667,6 @@ export function ChatScreen() {
     [activeTabId, openTab],
   )
 
-  // The per-conversation artifact-generation flows. Main injects its
-  // tab-orchestrator emitTurn (emitCommandTurn) + the real global content-panel
-  // seam (setContent/openContentPanel/content); more per-flow deps grow here as
-  // flows move in.
-  const {
-    listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
-    openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
-  } = useConversationGeneration({
-    emitTurn: emitCommandTurn,
-    makeHandle,
-    seedGenerationTurn,
-    threadContextFor,
-    persistence,
-    pushPendingConversation,
-    finalizeConversationTurn,
-    setContent,
-    openContentPanel,
-    content,
-    showToast,
-    openArtifactInPanel,
-    postOpenArtifactReply,
-    // Main-tab coordination seams: mark the auto-open so the resume probe doesn't
-    // double-read, and post the agent-only summary turn via main's poster.
-    markTicketSetAutoOpened: (key) => { ticketSetAutoOpenedRef.current.add(key) },
-    postSummary: (key, kind, artifactId) => { postSummaryRef.current?.(key, kind, artifactId) },
-  })
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
