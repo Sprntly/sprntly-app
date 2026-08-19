@@ -263,26 +263,23 @@ export function useProjectConversation(
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
   const persistence = useMemo(() => {
-    const base = createChatPersistence({
+    return createChatPersistence({
       getApi: () => import("../../../../lib/api").then((m) => m.conversationsApi),
       getTabConvId: () => dbConvIdRef.current,
       getTabPrdId: () => metaRef.current.prdId ?? null,
       setTabConvId: (_key, convId) => { setDbConvId(convId) },
       onConversationCreated: () => { /* no rail entry on a project surface */ },
-    })
-    // Route the create path to the DURABLE project conversation. The shared gen
-    // flows (create-artifact/import-PRD/ticket-set) call `ensureConversation`
-    // when a tab has no bound row; the generic path mints a THROWAWAY
-    // `conversationsApi.create` row, which the reload-time hydrate — reading the
-    // project row — can't see, so a chat-written document orphans from its
-    // thread (the same fork the top-of-file note calls out for sends). Delegate
-    // to `ensureProjectConv` (get-or-create per project+surface) so every such
-    // artifact attaches to the one row hydrate reads back.
-    return {
-      ...base,
-      ensureConversation: () =>
+      // Route the create path to the DURABLE project conversation. The shared gen
+      // flows (create-artifact/import-PRD/ticket-set) call `ensureConversation`
+      // when a tab has no bound row; the generic path mints a THROWAWAY
+      // `conversationsApi.create` row, which the reload-time hydrate — reading the
+      // project row — can't see, so a chat-written document orphans from its
+      // thread (the same fork the top-of-file note calls out for sends). Delegate
+      // to `ensureProjectConv` (get-or-create per project+surface) so every such
+      // artifact attaches to the one row hydrate reads back.
+      resolveConversationId: () =>
         (ensureProjectConvRef.current ? ensureProjectConvRef.current() : Promise.resolve(null)),
-    }
+    })
   }, [])
 
   // ── The single-conversation handle ────────────────────────────────────────

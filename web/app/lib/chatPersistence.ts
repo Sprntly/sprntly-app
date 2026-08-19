@@ -46,6 +46,21 @@ export type ChatPersistenceDeps = {
    * be tagged with the DB id (the `_dbId` tagging ChatScreen does today).
    */
   onConversationCreated?: (turnId: string, convId: number) => void
+  /**
+   * First-class get-or-create for a key's conversation id, used ONLY by
+   * `ensureConversation`. When omitted, `ensureConversation` falls back to the
+   * built-in per-tab resolver (`resolveConvId`) — which is how MAIN keeps its
+   * identical `inFlightCreates`/`knownConvIds`/append-queue semantics and, per
+   * ChatScreen's ask-grounding note, shares the very same in-flight create the
+   * turn persistence uses (create-once per tab). A surface that owns a DURABLE
+   * conversation row (e.g. a project chat) injects its own get-or-create here
+   * instead of post-hoc replacing `ensureConversation`, so the shared create
+   * path routes to that row rather than minting a throwaway one.
+   */
+  resolveConversationId?: (
+    key: string,
+    create: { turnId: string; title: string; query: string },
+  ) => Promise<number | null>
 }
 
 export function createChatPersistence(deps: ChatPersistenceDeps) {
@@ -221,6 +236,13 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     args: { turnId: string; title: string; query: string },
   ): Promise<number | null> {
     try {
+      // A surface with a durable row (project chat) injects its get-or-create
+      // via `resolveConversationId`; main omits it and uses the built-in
+      // `resolveConvId`, which shares the tab's single in-flight create with
+      // pushUserTurn/pushAssistantTurn.
+      if (deps.resolveConversationId) {
+        return deps.resolveConversationId(tabId, args).catch(() => null)
+      }
       return resolveConvId(tabId, args).catch(() => null)
     } catch {
       return Promise.resolve(null)
