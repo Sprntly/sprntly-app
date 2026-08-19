@@ -215,14 +215,26 @@ def _format_alert(rows: list[dict]) -> tuple[str, str, str]:
 
 
 def _send_alert(connection_rows: list[dict]) -> None:
-    """Email each disconnected connector's OWNER — the user who connected it.
+    """Email a disconnect alert — to US by default, to owners only if opted in.
 
-    Resolves ``connection.user_id`` → email via the ``profiles`` table and groups
-    connectors by owner, so each owner gets ONE email about their own
-    connector(s). Any connector whose owner email can't be resolved falls back to
-    the configured admin address (``connector_health_alert_email``, then
-    ``signin_monitor_alert_email``) so it's never silently dropped. With no
-    RESEND_API_KEY — or nothing left to route — logs a warning and no-ops."""
+    ``connector_health_alert_owners`` (default FALSE) decides. With it off,
+    every alert goes to the configured admin address
+    (``connector_health_alert_email``, then ``signin_monitor_alert_email``) and
+    no connector owner is contacted. With it on, alerts are grouped per owner
+    (``connection.user_id`` → email via ``profiles``) so each owner gets ONE
+    email about their own connector(s), with the admin address as the fallback
+    for unresolvable owners.
+
+    WHY IT DEFAULTS OFF. This is the only mail path that ignores
+    ``notification_settings.email_enabled``, on the grounds that an ops alert is
+    not product mail. True for our own connectors; wrong for a customer's. A
+    tenant whose corpus we are reading for testing would receive an unsolicited
+    "your connector is broken" email about a connection they may not know we are
+    exercising. Found 2026-08-18, when the connector behind a test tenant turned
+    out to be owned by a real employee at that customer.
+
+    With no RESEND_API_KEY — or nothing left to route — logs a warning and
+    no-ops."""
     api_key = settings.resend_api_key
     if not api_key:
         logger.warning(
@@ -235,15 +247,25 @@ def _send_alert(connection_rows: list[dict]) -> None:
     from app.db.profiles import emails_for_user_ids
     from app.synthesis.email_delivery import _send_via_resend
 
-    try:
-        owner_emails = emails_for_user_ids([r.get("user_id") for r in connection_rows])
-    except Exception:  # noqa: BLE001 — a profiles lookup failure falls back to admin
-        logger.exception("connector_health: owner-email lookup failed; using fallback")
-        owner_emails = {}
-
     fallback = (
         settings.connector_health_alert_email or settings.signin_monitor_alert_email
     )
+
+    if settings.connector_health_alert_owners:
+        try:
+            owner_emails = emails_for_user_ids(
+                [r.get("user_id") for r in connection_rows]
+            )
+        except Exception:  # noqa: BLE001 — a profiles lookup failure falls back to admin
+            logger.exception(
+                "connector_health: owner-email lookup failed; using fallback"
+            )
+            owner_emails = {}
+    else:
+        # Not consulted, and deliberately not even LOOKED UP: with owner alerts
+        # off there is no reason to read a customer's staff addresses out of
+        # `profiles` just to discard them.
+        owner_emails = {}
 
     # Route each connector to its owner's email; unresolvable owners → the admin
     # fallback. Group by recipient so each person gets a single email.
@@ -257,9 +279,18 @@ def _send_alert(connection_rows: list[dict]) -> None:
         by_recipient.setdefault(to, []).append(row)
 
     if unrouted:
-        logger.warning(
-            "connector_health: %d disconnected connector(s) had no resolvable "
-            "owner email and no fallback configured — logged only",
+        # ERROR, not warning. With owner alerts off (the default) the admin
+        # address is the ONLY recipient, so an empty one turns "the owner is
+        # emailed" into "nobody is emailed" — and a disconnected row is never
+        # re-alerted on later sweeps, because it is already `disconnected`. That
+        # makes this single line the entire lifetime signal for a tenant whose
+        # ingest has silently stopped. It says what to set, because the person
+        # reading the journal at 03:00 should not have to find that out.
+        logger.error(
+            "connector_health: %d disconnected connector(s) alerted NOBODY — "
+            "no recipient is configured. Set CONNECTOR_HEALTH_ALERT_EMAIL (or "
+            "SIGNIN_MONITOR_ALERT_EMAIL) on this deployment; until then a "
+            "broken connector degrades KG ingest with no notification at all.",
             unrouted,
         )
 
