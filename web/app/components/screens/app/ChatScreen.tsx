@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -106,6 +106,23 @@ export type ThreadTurn = {
    *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
    *  the real document (PDF/image inline) and offer a download after a reload. */
   attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
+  /** Multi-party attribution (project GROUP surface only). Present ONLY on a
+   *  turn authored by SOMEONE OTHER than the current viewer — a peer's message
+   *  in the shared group thread. The single-author surfaces (main, private) and
+   *  the viewer's OWN group turns leave this UNSET, so `mapMainTurns` renders
+   *  them through the identical default (right-aligned, the viewer's own head)
+   *  path — the author render arm is data-driven and inert without this field.
+   *  `initials`/`avatarStyle` are PRECOMPUTED by the group adapter (via
+   *  `avatarColor.personAvatarStyle`) so the shared mapper never imports a
+   *  project-side helper. The agent's own turns carry NO author (they render as
+   *  Sprntly through the existing agent path). */
+  author?: {
+    name: string
+    role?: string | null
+    userId?: string | null
+    initials?: string | null
+    avatarStyle?: CSSProperties | null
+  }
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders
