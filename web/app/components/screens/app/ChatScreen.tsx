@@ -74,8 +74,7 @@ import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import { ConversationView } from "./ConversationView"
-import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
-import { useMainConversation } from "./useMainConversation"
+import { useConversation } from "./useConversation"
 import { useThreadScroll } from "./useThreadScroll"
 import { useComposer } from "./useComposer"
 import { useConversationGeneration } from "./useConversationGeneration"
@@ -3585,49 +3584,33 @@ export function ChatScreen() {
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
   // ── The per-conversation store seam ───────────────────────────────────────
-  // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the
-  // existing tab-multiplexer accessors (turn patch, busy, stop/asking flags,
-  // pending-ask lookup) so the shared ask-core reads/writes a conversation
-  // WITHOUT hardcoding `setTabs(prev => prev.map(t => t.id === … ))`. Main's
-  // behaviour is byte-unchanged — every method is a thin 1:1 wrapper over what
-  // the run code already did; the seam only relocates WHERE the accessor is
-  // spelled. A project slot builds a single-conversation handle instead (later).
-  const makeTabHandle = useCallback(
-    (tabId: string): ConversationHandle => ({
-      key: tabId,
-      getTurns: () => tabsRef.current.find((t) => t.id === tabId)?.thread ?? [],
-      patchTurns: (update) =>
-        setTabs((prev) =>
-          prev.map((t) => {
-            if (t.id !== tabId) return t
-            // Preserve the run code's "return the SAME tab ref when the thread is
-            // untouched" semantics: only mint a new tab object when `update`
-            // actually returns a new thread array (a no-op stop returns the input
-            // array unchanged, which must not force a needless new reference).
-            const next = update(t.thread)
-            return next === t.thread ? t : { ...t, thread: next }
-          }),
-        ),
-      setBusy: (busy) =>
-        setBusyTabs((prev) => (busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))),
-      markStopped: () => {
-        stoppedTabsRef.current.add(tabId)
-      },
-      isStopped: () => stoppedTabsRef.current.has(tabId),
-      clearAsking: () => {
-        askingTabsRef.current.delete(tabId)
-      },
-      pendingAsk: () => getPendingAsk(activeCompany, tabId),
-      isAsking: () => askingTabsRef.current.has(tabId),
-      exists: () => tabsRef.current.some((t) => t.id === tabId),
-      patchMeta: (partial) =>
-        setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, ...partial } : t))),
-      isActive: () => activeTabIdRef.current === tabId,
-      dbConvId: () => tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null,
-      getMeta: () => tabsRef.current.find((t) => t.id === tabId) ?? null,
-    }),
-    [activeCompany],
-  )
+  // The single-conversation ask-core, extracted into the shared `useConversation`
+  // engine. Main injects its exact tab machinery + the grounding seam, so the run
+  // stays byte-unchanged; the engine builds `makeHandle` (the per-tab
+  // ConversationHandle factory) + `resolveAskParams` + `getPrdId` internally and
+  // returns the run/stop/action-turn functions. The generation flows below still
+  // consume `makeHandle` from here; submit / composer / clarify fold in next.
+  const { makeHandle, runConversationAsk, handleStopAsk, runActionTurnInTab } =
+    useConversation({
+      tabsRef,
+      activeTabId,
+      activeTabIdRef,
+      setTabs,
+      setBusyTabs,
+      askingTabsRef,
+      stoppedTabsRef,
+      activeCompany,
+      persistence,
+      mountedRef,
+      animatedTurnIds,
+      askStartRef,
+      resumedTurnsRef,
+      pushPendingConversation,
+      setActiveConv,
+      finalizeConversationTurn,
+      nextPrompts,
+      showToast,
+    })
 
   // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
   // Tab spawn/route is a WRAPPER concern: no active tab (or the synthetic brief
@@ -3671,86 +3654,6 @@ export function ChatScreen() {
     [activeTabId, openTab],
   )
 
-  // ── Ask grounding (the one surface-divergent seam) ────────────────────────
-  // Resolve THIS send's conversation id + grounding at request time: reuse the
-  // tab's dbConvId (or create the row once via the shared persistence), then
-  // layer main's PRD>evidence>ticket-set priority. Injected into the ask-core so
-  // the run body stays surface-agnostic; a project surface pins project_id.
-  const resolveAskParams = useCallback<ResolveAskParams>(
-    async (key, { turnId, displayQuery }) => {
-      // `ensureConversation` shares the very same in-flight create the turn
-      // persistence uses (create-once per tab), so awaiting it costs at most the
-      // remainder of one already-issued request and never mints a second
-      // conversation. It resolves null on failure, so a create that fails still
-      // lets the ask through — exactly the previous behaviour. (This was the fix
-      // for a first-message report captured with conversation_id NULL.)
-      const convId =
-        tabsRef.current.find((t) => t.id === key)?.dbConvId ??
-        (await persistence.ensureConversation(key, {
-          turnId,
-          title: displayQuery.length > 52 ? `${displayQuery.slice(0, 49)}…` : displayQuery,
-          query: displayQuery,
-        }))
-      // Re-read AFTER the await — tabsRef, not a closure — so a conversation
-      // created (or a PRD that finished generating) AFTER the tab opened is still
-      // picked up.
-      const targetTab = tabsRef.current.find((t) => t.id === key)
-      return {
-        convId: convId ?? null,
-        grounding: {
-          // history replay: the backend loads history by conversation_id, so a
-          // follow-up keeps the thread it is answering (and a captured HTML
-          // report attaches to this chat room).
-          ...(convId != null ? { conversation_id: convId } : {}),
-          // PRD-tab chat grounds on the open PRD + its insight/evidence/tickets.
-          ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
-          // Standalone-artifact grounding: ONE primary per tab — PRD first (its
-          // context already carries evidence + tickets), then an open evidence
-          // report, then a standalone ticket set.
-          ...(targetTab?.prdId == null && targetTab?.evidenceId != null
-            ? { evidence_id: targetTab.evidenceId }
-            : {}),
-          ...(targetTab?.prdId == null && targetTab?.evidenceId == null
-            && targetTab?.ticketSetId != null
-            ? { ticket_set_id: targetTab.ticketSetId }
-            : {}),
-        },
-      }
-    },
-    [persistence],
-  )
-  // The grounding PRD id for the post-answer suggestion fetch, read fresh at
-  // settle (a PRD that finished generating mid-ask is still picked up).
-  const getPrdId = useCallback(
-    (key: string) => tabsRef.current.find((t) => t.id === key)?.prdId ?? null,
-    [],
-  )
-
-  // ── The single-conversation ask-core (send-run + stop), extracted ──────────
-  // Both run functions operate through a ConversationHandle, so the identical
-  // code drives main (one handle per tab) and, later, a project slot. Main
-  // injects its exact tab machinery + the grounding seam, so behaviour is
-  // byte-unchanged; `runConversationAsk`/`handleStopAsk` are destructured back
-  // into the same names, leaving submitAsk / mapDeps / the Esc handler untouched.
-  const { runConversationAsk, handleStopAsk, runActionTurnInTab } = useMainConversation({
-    makeHandle: makeTabHandle,
-    activeKey: activeTabId,
-    activeCompany,
-    askingRef: askingTabsRef,
-    setBusy: setBusyTabs,
-    resolveAskParams,
-    getPrdId,
-    mountedRef,
-    animatedTurnIds,
-    askStartRef,
-    resumedTurnsRef,
-    pushPendingConversation,
-    setActiveConv,
-    finalizeConversationTurn,
-    nextPrompts,
-    showToast,
-  })
-
   // The per-conversation artifact-generation flows. Main injects its
   // tab-orchestrator emitTurn (emitCommandTurn) + the real global content-panel
   // seam (setContent/openContentPanel/content); more per-flow deps grow here as
@@ -3760,7 +3663,7 @@ export function ChatScreen() {
     openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
   } = useConversationGeneration({
     emitTurn: emitCommandTurn,
-    makeHandle: makeTabHandle,
+    makeHandle,
     seedGenerationTurn,
     threadContextFor,
     persistence,
