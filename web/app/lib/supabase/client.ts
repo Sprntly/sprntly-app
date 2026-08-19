@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { fetchWorkspaceForUser } from "../onboarding/store"
 import { slugForStep, ONBOARDING_STEP_SLUGS } from "../onboarding/types"
+import { projectPath } from "../routes"
 
 let browserClient: SupabaseClient | null = null
 
@@ -199,11 +200,20 @@ export async function postLoginPath(): Promise<string> {
   // any failure (404 = no invite, network glitch) falls through to
   // onboarding without surfacing an error here.
   if (!workspace) {
-    const accepted = (await tryAcceptInvite()) === "accepted"
-    if (accepted) {
+    const accept = await tryAcceptInvite()
+    if (accept.outcome === "accepted") {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
-        if (fresh.onboarding_completed_at) return "/"
+        if (fresh.onboarding_completed_at) {
+          // Project invite (AD-TNM3): the accept already landed them in the
+          // project's `project_members` — send them straight to its private
+          // chat rather than the dashboard. A plain workspace/org invite
+          // carries no project_id and keeps the existing "/" landing.
+          if (accept.projectId != null) {
+            return projectPath(accept.projectId, { chat: "individual" })
+          }
+          return "/"
+        }
         // slugForStep clamps the (possibly stale 7-step) index into range and
         // maps it to its semantic slug.
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
@@ -309,9 +319,18 @@ export async function postLoginPath(): Promise<string> {
   //    can never accept it, and silently ignoring the invite leaves both
   //    sides confused — route to the explanatory blocked-invite page instead.
   //  - no invite (404) / transient error → normal flow.
-  if ((await tryAcceptInvite()) === "conflict") return "/invite-conflict"
+  const accept = await tryAcceptInvite()
+  if (accept.outcome === "conflict") return "/invite-conflict"
 
-  if (workspace.onboarding_completed_at) return "/"
+  if (workspace.onboarding_completed_at) {
+    // Project invite (AD-TNM3): an existing-company member accepting a
+    // project-carrying invite lands directly in that project's private chat.
+    // Plain workspace/org invites (no project_id) keep the "/" landing.
+    if (accept.outcome === "accepted" && accept.projectId != null) {
+      return projectPath(accept.projectId, { chat: "individual" })
+    }
+    return "/"
+  }
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }
 
@@ -409,19 +428,31 @@ export async function notAuthorizedContinuePath(): Promise<string> {
  *  - error    — network/other failure; treated as best-effort no-op */
 type InviteAcceptOutcome = "accepted" | "none" | "conflict" | "error"
 
-async function tryAcceptInvite(): Promise<InviteAcceptOutcome> {
+/** The accept outcome plus, on "accepted", the project the invite carried
+ *  (AD-TNM3) — null for a plain workspace/org invite. postLoginPath uses a
+ *  non-null projectId to land the accepter in that project's private chat. */
+type InviteAcceptResult = {
+  outcome: InviteAcceptOutcome
+  projectId: number | null
+}
+
+async function tryAcceptInvite(): Promise<InviteAcceptResult> {
   try {
     // Lazy import keeps the api module out of the cold-start path of
     // postLoginPath (teamApi now lives in lib/teamApi, not TeamSettings).
     const { teamApi } = await import("../teamApi")
-    await teamApi.acceptInvite()
-    return "accepted"
+    const res = await teamApi.acceptInvite()
+    const pid = res?.project_id
+    return {
+      outcome: "accepted",
+      projectId: typeof pid === "number" && Number.isFinite(pid) ? pid : null,
+    }
   } catch (err) {
     const { ApiError } = await import("../api")
     if (err instanceof ApiError) {
-      if (err.status === 409) return "conflict"
-      if (err.status === 404) return "none"
+      if (err.status === 409) return { outcome: "conflict", projectId: null }
+      if (err.status === 404) return { outcome: "none", projectId: null }
     }
-    return "error"
+    return { outcome: "error", projectId: null }
   }
 }

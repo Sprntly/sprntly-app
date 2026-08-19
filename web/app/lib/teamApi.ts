@@ -82,5 +82,14 @@ export const teamApi = {
   removeMember: (userId: string) =>
     api.delete<void>(`/v1/team/members/${encodeURIComponent(userId)}`),
   acceptInvite: () =>
-    api.post<{ company_id: string; role: TeamRole }>("/v1/invites/accept"),
+    api.post<{
+      company_id: string
+      role: TeamRole
+      /** The workspaces granted by this accept. */
+      workspace_ids?: string[]
+      /** The project this invite carried (AD-TNM3), or null/absent for a
+       *  plain workspace/org invite. When present, the sign-in flow lands the
+       *  accepter directly in that project's private chat. */
+      project_id?: number | null
+    }>("/v1/invites/accept"),
 }

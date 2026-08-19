@@ -64,6 +64,7 @@ import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/Clarif
 import { useComposer } from "../useComposer"
 import { personAvatarStyle } from "./avatarColor"
 import { MentionBubble } from "./MentionBubble"
+import { GreetingTurnBody } from "./GreetingTurnBody"
 import { mentionsAgent, stripAgentMention } from "./mentions"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
@@ -75,6 +76,7 @@ import type { ConversationHandle, AskGrounding } from "../conversationCore"
 import type { ThreadTurn, ChatTab } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
 import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
+import { MORE_MARKER } from "../../../shared/chat-shell/types"
 
 export type ProjectChatSurface = "individual" | "group"
 
@@ -656,11 +658,32 @@ export function useProjectConversation(
     return joined.length <= 12_000 ? joined : `…\n\n${joined.slice(-12_000)}`
   }, [])
 
-  const openArtifactInPanel = useCallback((candidate: OpenArtifactCandidate): boolean => {
+  const openArtifactInPanel = useCallback((candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
     if (!onOpenArtifact) return false
+    // GROUP surface: opening an artifact must NOT swallow the human's message.
+    // On main/private, resolving `open_artifact` opens the panel WITHOUT a
+    // thread turn (acceptable — a solo surface), but in a GROUP the message
+    // ("@Sprntly open the <title> PRD") has to be posted as a real group turn
+    // so it's persisted (a `conversation_turns` row), attributed to the sender,
+    // and broadcast to peers — otherwise the send is silently dropped and the
+    // composer's optimistic "Working on your question" never resolves. Post it
+    // as a post-only group turn (same seam as the plain-ask group path: an
+    // optimistic bubble + `postGroupTurn` via `pushPendingConversation`), THEN
+    // open the artifact for the sender. The two are not mutually exclusive.
+    if (isGroup && seedQuery && seedQuery.trim()) {
+      const id = newId()
+      // Mint + register this send's identity key so the poster's own realtime
+      // echo of the turn is recognised (not double-rendered), mirroring the
+      // plain-ask and command group send paths.
+      const cmid = newId()
+      cmidByTurnIdRef.current.set(id, cmid)
+      mySentCmidsRef.current.add(cmid)
+      setThread((prev) => [...prev, { id, query: seedQuery, postedOnly: true }])
+      pushPendingConversation(id, seedQuery, convKey)
+    }
     onOpenArtifact(candidate)
     return true
-  }, [onOpenArtifact])
+  }, [onOpenArtifact, isGroup, convKey, pushPendingConversation])
 
   const postOpenArtifactReply = useCallback((seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => {
     emitTurn({
@@ -1494,6 +1517,14 @@ export function useProjectConversation(
     // Group: route the user body through the mention-chip renderer (@user chips
     // + @Sprntly agent chip). Individual/main leave it undefined → plain query.
     renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query, knownNames: mentionKnownNames }) : undefined,
+    // The on-join greeting's lead/Show-more split. Only a greeting turn carries
+    // the `MORE_MARKER`; every other turn returns null and stays on the default
+    // reply ladder. Both project surfaces get it (either can host a greeting);
+    // main never passes it, so main rendering is unchanged.
+    renderAgentBody: (turn: { reply?: { answer: string } | null }) =>
+      turn.reply?.answer?.includes(MORE_MARKER)
+        ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
+        : null,
   }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)

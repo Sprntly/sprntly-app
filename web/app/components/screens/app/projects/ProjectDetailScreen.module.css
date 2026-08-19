@@ -90,6 +90,8 @@
   box-shadow: 0 0 0 1.5px var(--surface-2);
   margin-left: -6px;
   flex-shrink: 0;
+  /* Initials are text; without this the avatar shows the text I-beam on hover. */
+  cursor: default;
 }
 
 .topAv:first-child {

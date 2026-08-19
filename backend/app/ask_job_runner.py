@@ -115,14 +115,33 @@ _GROUP_SCOPE_SYSTEM = (
     "You have a delegate_task tool: when someone asks you to hand a specific "
     "task to a teammate (by name, @handle, or role — resolve them against the "
     "roster below), call it. Do not call it for a plain question, an FYI, or "
-    "human-to-human chatter. Once you call delegate_task, the handoff has "
-    "happened — you are DONE. Do NOT then do the task yourself, write the "
-    "deliverable you just handed off, or answer the underlying question in the "
-    "teammate's place. Do NOT say the teammate has replied, finished, agreed, "
-    "or done anything at all — they have not. Confirm the handoff plainly in "
-    "your own voice (\"I've asked <name> to <task> — I'll bring their answer "
-    "back here once it's in.\") and stop there; never end a delegation reply on "
-    "a fabricated result.\n\n"
+    "human-to-human chatter. You must ACTUALLY CALL delegate_task to hand a "
+    "task off — NEVER reply that you are delegating, assigning, handing off, "
+    "or \"on it\" without calling the tool on THIS turn. A message like \"On "
+    "it — delegating that now\" or \"I'll assign this to <name>\" with no "
+    "delegate_task call is a failure: the handoff never happened, no brief was "
+    "sent, nothing was recorded. Either call delegate_task, or — if you are "
+    "not delegating — do not claim you are. Once you call delegate_task, the "
+    "handoff has happened — you are DONE. Do NOT then do the task yourself, "
+    "write the deliverable you just handed off, or answer the underlying "
+    "question in the teammate's place. Do NOT say the teammate has replied, "
+    "finished, agreed, or done anything at all — they have not. Confirm the "
+    "handoff plainly in your own voice (\"I've asked <name> to <task> — I'll "
+    "bring their answer back here once it's in.\") and stop there; never end a "
+    "delegation reply on a fabricated result.\n\n"
+    "You have a complete_task tool: when the person speaking says a task that "
+    "was delegated to THEM is finished or done (\"I'm done with the pricing "
+    "one-pager\", \"finished that\", \"sent it over\", \"the review's done\"), "
+    "call complete_task to record it on the ledger. You must ACTUALLY CALL the "
+    "tool for the completion to be recorded — never just say \"noted\" or "
+    "\"marked it done\" without calling complete_task on THIS turn; a bare "
+    "acknowledgment updates nothing. Only for the speaker's OWN task, and only "
+    "for a real completion — not a question about status, not a request to "
+    "start work. Relay whatever complete_task tells you (recorded, "
+    "already-done, or nothing-to-mark) — do not claim a completion the tool "
+    "did not confirm. When someone reports a task DONE, ONLY record the "
+    "completion — do NOT also call delegate_task to re-assign or hand off the "
+    "task they just finished.\n\n"
     "You can edit this project's PRD. When the latest turn asks for a PRD "
     "change, call the edit_prd tool with a plain-language instruction — you do "
     "NOT choose or pass a PRD id; the right PRD is resolved for you, and if the "
@@ -732,22 +751,25 @@ async def run_ask_job(
                 # a persist/broadcast failure can only fail to ADD the group
                 # turn — the answer is already durably stored above.
                 if (context_source.get("params") or {}).get("surface") == "group":
-                    # 2-mode response gate (server backstop): in a MULTI-human
+                    # 2-mode response gate (server BACKSTOP): in a MULTI-human
                     # project (≥2 human members), Sprntly replies ONLY to a turn
-                    # that @Sprntly-mentions it. If an ask fired anyway (a buggy or
-                    # bypassing client), suppress the reply persist+broadcast here
-                    # so no group reply can appear against the rule. Solo projects
-                    # and @Sprntly-mentioning turns are unaffected. Fail OPEN
-                    # toward replying (a count-read hiccup must never silently
-                    # swallow a legitimate reply) — the client gate is the primary,
-                    # this is defense-in-depth.
+                    # that @Sprntly-mentions it. The PRIMARY gate now runs at the
+                    # /v1/ask route BEFORE generation (routes/ask.py), so a
+                    # suppressed ask never reaches this post-terminal hook at all;
+                    # this stays as defense-in-depth for any future path that
+                    # spawns a group ask without the route gate. FAIL CLOSED — a
+                    # count-read hiccup treats the project as multi-human and
+                    # suppresses the persist+broadcast, matching the route gate's
+                    # posture (never let the agent interject into a shared thread
+                    # on a read failure). Solo projects and @Sprntly-mentioning
+                    # turns still reply.
                     import re as _re
 
                     try:
                         from app.db import projects as _projects_db
                         _multi_human = _projects_db.count_project_members(int(_promo_project_id)) >= 2
-                    except Exception:  # noqa: BLE001 — fail open toward replying
-                        _multi_human = False
+                    except Exception:  # noqa: BLE001 — fail CLOSED toward suppression
+                        _multi_human = True
                     _mentions_agent = bool(_re.search(r"@sprntly\b", question or "", _re.IGNORECASE))
                     if _multi_human and not _mentions_agent:
                         logger.info(
