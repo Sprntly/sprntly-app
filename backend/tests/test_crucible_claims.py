@@ -194,12 +194,29 @@ def test_a_signal_with_no_timestamp_is_dropped_and_counted():
 
 
 def test_retired_signals_are_skipped_and_counted():
+    """Retirement is `superseded_by`/`expired_at` — THE REPO'S definition, the
+    one `signal_is_retired` encodes and every other reader honours.
+
+    This test used to write `properties={"retired": True}`, a key no writer in
+    the codebase produces. It passed, and it proved nothing: in production the
+    guard matched no signal at all, so superseded metrics and expired roadmap
+    bets voted in every run while the coverage note reported zero retired.
+    """
     claims, stats = project_signals([
         sig(id="live"),
-        sig(id="dead", properties={"retired": True}),
+        sig(id="superseded", properties={"superseded_by": "sig-99"}),
+        sig(id="expired", properties={"expired_at": "2026-01-01T00:00:00Z"}),
     ])
     assert [c.id for c in claims] == ["live"]
-    assert stats["retired"] == 1
+    assert stats["retired"] == 2
+
+
+def test_an_invented_retirement_key_does_not_retire_anything():
+    """The inverse, so the fixture can never drift back: a key the codebase
+    does not write must not silently drop a live signal either."""
+    claims, stats = project_signals([sig(id="live", properties={"retired": True})])
+    assert [c.id for c in claims] == ["live"]
+    assert stats["retired"] == 0
 
 
 def test_the_drop_counts_are_what_a_coverage_note_is_built_from():

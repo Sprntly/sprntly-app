@@ -70,6 +70,11 @@ class PipelineResult:
     confidences: tuple[Confidence, ...]
     rejected: tuple[Rejection, ...]
     stats: dict
+    #: How many leading findings get the full treatment. The rest are RETURNED
+    #: — dropping them would be the silent truncation the ledger exists to
+    #: prevent — but a reader given 168 equally-weighted options has been handed
+    #: the corpus back, not a decision aid.
+    deep_count: int = 0
 
 
 def _cluster(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
@@ -115,7 +120,12 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     return tuple(seen)
 
 
-def _refute(claims: Sequence[Claim], accounts: Sequence[str]) -> Optional[str]:
+def _refute(
+    claims: Sequence[Claim],
+    accounts: Sequence[str],
+    *,
+    dates_are_ingest_clock: bool = False,
+) -> Optional[str]:
     """Try to kill the finding. Returns a reason if it dies.
 
     Modelled on what actually killed the spike's first framing: evidence that
@@ -136,7 +146,16 @@ def _refute(claims: Sequence[Claim], accounts: Sequence[str]) -> Optional[str]:
     """
     dates = sorted(c.observed_at for c in claims)
     span = dates[-1] - dates[0]
-    if span < ECHO_WINDOW:
+    # WHEN THE DATES ARE THE INGEST CLOCK, THIS TEST MEANS NOTHING. A backfill
+    # stamps thousands of signals within seconds of each other whatever the
+    # underlying events' real dates were, so every cluster looks like one
+    # conversation and the run returns nothing — with a reason that is stated
+    # confidently and is false, which is worse than returning nothing plainly.
+    # Measured on a real 2,777-signal tenant: 2,410 rows had valid_at equal to
+    # created_at, across 16 distinct days. The rule is skipped and the caller
+    # renders a coverage note saying so; disclosing the blind spot beats
+    # exercising a check that cannot see.
+    if span < ECHO_WINDOW and not dates_are_ingest_clock:
         return (
             f"all {len(claims)} supporting claims land within "
             f"{span.days} days — this is one conversation "
@@ -164,6 +183,7 @@ def build_findings(
     now: datetime,
     goal_accounts: Optional[frozenset[str]] = None,
     solution_evidence_absent: bool = True,
+    dates_are_ingest_clock: bool = False,
     deep_cap: int = DEFAULT_DEEP_CAP,
 ) -> PipelineResult:
     """The whole deterministic middle of the engine.
@@ -187,7 +207,8 @@ def build_findings(
 
         if len(group) < MIN_CLAIMS_PER_FINDING:
             rejected.append(Rejection(
-                key, f"only {len(group)} supporting claim — an anecdote, not a "
+                _label(group, key),
+                f"only {len(group)} supporting claim — an anecdote, not a "
                      f"finding", "clustering", ids))
             continue
 
@@ -199,19 +220,26 @@ def build_findings(
             accounts = tuple(a for a in raw_accounts if a in goal_accounts)
 
         # Refute on the RAW set — see `_refute`. Size on the scoped one.
-        refutation = _refute(group, raw_accounts)
+        refutation = _refute(group, raw_accounts,
+                             dates_are_ingest_clock=dates_are_ingest_clock)
         if refutation:
-            rejected.append(Rejection(key, refutation, "verification", ids))
+            rejected.append(Rejection(_label(group, key), refutation, "verification", ids))
             continue
 
-        statement = _statement(key, group, accounts)
+        # The KEY groups; the LABEL reads. They are different strings on
+        # purpose: grouping wants a stable opaque id (`c490`), and a reader
+        # wants the theme in the corpus's own words. Rendering the key is how
+        # the first version put "c490" in front of a user.
+        label = _label(group, key)
+        statement = _statement(label, group, accounts)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
             # I5 is a hard error at the boundary; here it is a drop, because a
             # statement we cannot phrase honestly is not one to ship with a
             # caveat.
             rejected.append(Rejection(
-                key, "could not be stated without asserting causation the "
+                _label(group, key),
+                "could not be stated without asserting causation the "
                      "evidence does not support", "rendering", ids))
             continue
 
@@ -225,7 +253,7 @@ def build_findings(
             ),)
 
         finding = Finding(
-            id=f"f-{key[:60]}",
+            id=f"f-{key}",
             statement=statement,
             claim_ids=ids,
             impact_inputs=ImpactInputs(
@@ -262,10 +290,12 @@ def build_findings(
     return PipelineResult(
         findings=tuple(findings), impacts=tuple(impacts),
         confidences=tuple(confidences), rejected=tuple(rejected),
+        deep_count=min(deep_cap, len(findings)),
         stats={
             "claims": len(claims), "clusters": len(clusters),
             "findings": len(findings), "rejected": len(rejected),
             "sizeable": sum(1 for i in impacts if i.value is not None),
+            "echo_check_skipped": bool(dates_are_ingest_clock),
         },
     )
 
@@ -296,20 +326,45 @@ def _rank(
     return sorted(range(len(findings)), key=key)
 
 
-def _statement(key: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+def _label(claims: Sequence[Claim], key: str) -> str:
+    """What a reader should see this group called.
+
+    The MOST COMMON subject in the group, not the first claim's: the cluster
+    leader is simply whichever claim happened to appear first in id order, and
+    naming a theme after an arbitrary member is how a group of nine about
+    billing ends up titled with the one sentence about a calendar invite. Ties
+    break toward the subject seen earliest, so the label is stable across runs.
+    """
+    counts: dict[str, int] = {}
+    order: dict[str, int] = {}
+    for i, c in enumerate(claims):
+        subject = (c.subject or "").strip()
+        if not subject:
+            continue
+        counts[subject] = counts.get(subject, 0) + 1
+        order.setdefault(subject, i)
+    if not counts:
+        return key
+    return max(counts, key=lambda k: (counts[k], -order[k]))
+
+
+def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
     """Prose that survives the causal lint by construction.
 
     Says what was OBSERVED and in what population, and stops. No "because", no
     "drives" — those need causal evidence, and a corpus of tickets and calls
     does not have any.
+
+    The topic is QUOTED. It comes from a signal's own words, so presenting it
+    unquoted would read as our description of the business; quoted, it is
+    plainly reported speech, which is what it is. `cluster.label_for` has
+    already cut it at the first causal connective, so a source's own "because"
+    cannot arrive here and be attributed to us.
     """
     n = len(claims)
     where = (
         f" across {len(accounts)} account{'s' if len(accounts) != 1 else ''}"
         if accounts else ""
     )
-    kinds = sorted({c.type for c in claims})
-    return (
-        f"{n} claims{where} concern {key}"
-        f" ({', '.join(kinds)})."
-    )
+    topic = (label or "").strip() or "an unlabelled group"
+    return f"{n} claims{where} concern \u201c{topic}\u201d."

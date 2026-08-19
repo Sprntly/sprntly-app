@@ -302,3 +302,111 @@ def test_a_metric_named_only_with_stopwords_cannot_match_everything():
         goal="improve net revenue retention",
     )
     assert out.status == "needs_input"
+
+
+# ─── The four the review caught. Each one adopted something nobody chose. ────
+
+def _tree(*metrics):
+    """A KPI tree with the given (name, definition) primary metrics."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        north_star=SimpleNamespace(metric=metrics[0][0], description=metrics[0][1]),
+        primary_metrics=[
+            SimpleNamespace(metric=m, description=d) for m, d in metrics[1:]
+        ],
+    )
+
+
+def _resolve(goal, tree):
+    return resolve(company_id="co", raw_goal_text=goal, currency="accounts",
+                   sources=[KpiTreeSource(tree)])
+
+
+def test_two_metrics_matching_one_goal_is_a_question_not_a_ranking():
+    """MAU and WAU both name "increase active users". Adopting whichever the
+    tree lists first is a coherent, confident answer to a question the user
+    did not ask — I9's exact failure mode, and invisible afterwards."""
+    tree = _tree(("Monthly Active Users", "distinct users in 30 days"),
+                 ("Weekly Active Users", "distinct users in 7 days"))
+    out = _resolve("increase active users", tree)
+    assert out.status == "needs_input"
+    assert "Monthly Active Users" in out.ask and "Weekly Active Users" in out.ask
+
+
+def test_the_tie_is_order_independent():
+    """The bug was positional, so the proof has to be too: swapping the tree
+    must not change the outcome."""
+    a = _resolve("increase active users",
+                 _tree(("Monthly Active Users", "30 days"),
+                       ("Weekly Active Users", "7 days")))
+    b = _resolve("increase active users",
+                 _tree(("Weekly Active Users", "7 days"),
+                       ("Monthly Active Users", "30 days")))
+    assert a.status == b.status == "needs_input"
+
+
+def test_a_goal_of_only_stopwords_adopts_nothing():
+    """`set() <= anything` is True, so a goal that normalised to zero tokens
+    matched EVERY metric and silently adopted the north star."""
+    tree = _tree(("Net Revenue Retention", "expansion minus churn"))
+    for goal in ("improve our total rate", "   ", "make it better"):
+        out = _resolve(goal, tree)
+        assert out.status != "candidate", f"{goal!r} adopted something"
+
+
+def test_a_real_metric_name_still_matches():
+    """The control. A guard that also blocked real matches would trade one
+    failure for another."""
+    tree = _tree(("Net Revenue Retention (NRR)", "expansion minus churn"))
+    out = _resolve("improve net revenue retention", tree)
+    assert out.status == "candidate"
+
+
+def test_reduce_is_recorded_as_a_decrease():
+    """The table never mutates a locked row, so "reduce churn" stored as
+    `increase` has every later run reading the goal backwards."""
+    tree = _tree(("Churn Rate", "accounts lost over accounts held"))
+    out = _resolve("reduce churn rate", tree)
+    assert out.status == "candidate"
+    assert out.definition.direction == "decrease"
+
+
+def test_confirm_refuses_an_empty_definition():
+    """`resolve` refuses to adopt a named-but-undefined metric. Clearing the
+    textarea reached the same state through the other door."""
+    from app.crucible.types import GoalDefinition
+
+    bare = GoalDefinition(id="", raw_goal_text="g", metric_name="", definition_text="",
+                          currency="accounts", direction="increase")
+    for blank in ("", "   ", "\t\n"):
+        with pytest.raises(ValueError, match="empty"):
+            confirm(bare, user_id="u1", at=NOW, definition_text=blank)
+
+
+def test_a_definition_with_no_known_source_is_elicited_not_adopted():
+    """`origin or "adopted"` defaulted unknown provenance to the STRONGER
+    claim — a row asserting the company's own system defined a metric that no
+    source ever named."""
+    from app.crucible.types import GoalDefinition
+
+    bare = GoalDefinition(id="", raw_goal_text="g", metric_name="", definition_text="",
+                          currency="accounts", direction="increase")
+    locked = confirm(bare, user_id="u1", at=NOW,
+                     definition_text="renewal-cohort revenue net of churn")
+    assert locked.origin == "elicited"
+    assert locked.status == "locked"
+
+
+def test_a_broken_source_does_not_end_stage_0():
+    """The docstring promises one broken rung cannot end Stage 0."""
+    class Exploding:
+        label = "exploding"
+
+        def candidates(self, company_id, goal_text):
+            raise RuntimeError("boom")
+
+    tree = _tree(("Net Revenue Retention", "expansion minus churn"))
+    out = resolve(company_id="co", raw_goal_text="improve net revenue retention",
+                  currency="accounts", sources=[Exploding(), KpiTreeSource(tree)])
+    assert out.status == "candidate"

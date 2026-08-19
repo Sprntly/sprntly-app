@@ -232,3 +232,57 @@ def test_unsizeable_findings_sort_last_but_are_never_dropped():
     assert len(out.findings) == 2
     assert out.impacts[0].value is not None
     assert out.impacts[-1].value is None
+
+
+# ─── What a dry run against 2,777 real signals exposed ───────────────────────
+
+def test_only_the_leading_findings_are_marked_deep():
+    """`deep_cap` was accepted, documented and never applied, so a run that
+    produced 168 findings presented all 168 as equally analysed. That is the
+    corpus handed back, not a decision aid."""
+    claims = []
+    for c_i in range(8):
+        claims += [claim(f"x{c_i}a", subject=f"theme {c_i}", days_ago=5,
+                         accounts=(f"A{c_i}",)),
+                   claim(f"x{c_i}b", subject=f"theme {c_i}", days_ago=60,
+                         accounts=(f"B{c_i}",))]
+    out = run(claims, deep_cap=3)
+    assert len(out.findings) == 8      # nothing dropped
+    assert out.deep_count == 3
+
+
+def test_the_echo_check_is_skipped_when_dates_are_the_ingest_clock():
+    """A backfill stamps thousands of signals within seconds whatever the real
+    events' dates were, so every cluster looks like one conversation and the
+    run returns nothing — with a reason stated confidently and false. Measured
+    on a real tenant: 2,410 of 2,777 rows had valid_at == created_at."""
+    claims = [claim(f"c{i}", days_ago=1, accounts=(f"A{i}",)) for i in range(4)]
+    assert run(claims).findings == ()                       # the honest default
+    out = run(claims, dates_are_ingest_clock=True)
+    assert len(out.findings) == 1
+    assert out.stats["echo_check_skipped"] is True
+
+
+def test_the_skip_is_a_skip_not_a_free_pass():
+    """The other two refutations still run — a single-account pattern is still
+    that account's situation however the corpus is dated."""
+    claims = [claim(f"c{i}", days_ago=1, accounts=("OnlyOne",)) for i in range(4)]
+    out = run(claims, dates_are_ingest_clock=True)
+    assert out.findings == ()
+    assert "single account" in out.rejected[0].reason
+
+
+def test_a_group_is_named_by_its_commonest_subject_not_its_first_claim():
+    """The cluster leader is whichever claim appeared first in id order.
+    Naming a theme after an arbitrary member is how nine claims about billing
+    end up titled with the one sentence about a calendar invite."""
+    claims = [
+        claim("c1", subject="calendar invite", days_ago=5, accounts=("A",)),
+        claim("c2", subject="billing retries", days_ago=40, accounts=("B",)),
+        claim("c3", subject="billing retries", days_ago=90, accounts=("C",)),
+    ]
+    for c in claims:
+        object.__setattr__(c, "subject_cluster_id", "c0")
+    out = run(claims)
+    assert "billing retries" in out.findings[0].statement
+    assert "c0" not in out.findings[0].statement

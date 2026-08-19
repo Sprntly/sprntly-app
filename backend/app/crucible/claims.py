@@ -32,6 +32,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
+from app.graph.types import signal_is_retired
 from app.crucible.types import (
     STRENGTH_SCORE,
     Claim,
@@ -271,7 +272,12 @@ def project_signals(
     stats = {"seen": len(rows), "projected": 0, "no_timestamp": 0, "retired": 0}
     for row in rows:
         props = row.get("properties")
-        if isinstance(props, dict) and props.get("retired"):
+        # THE REPO'S OWN DEFINITION, not a key invented here. Retirement is
+        # `superseded_by`/`expired_at`, which is what every other reader checks
+        # via `signal_is_retired`; `properties["retired"]` is written by
+        # nothing, so this guard let expired roadmap bets and superseded
+        # metrics vote while reporting a retired count of zero forever.
+        if signal_is_retired(props if isinstance(props, dict) else None):
             stats["retired"] += 1
             continue
         claim = project_signal(row, sides)

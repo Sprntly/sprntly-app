@@ -130,7 +130,11 @@ def _names_the_same_metric(
     of those is a guess about intent, and a wrong guess here produces a
     coherent answer to the wrong question.
     """
-    if not metric:
+    if not metric or not goal:
+        # BOTH sides, not just the metric. `set() <= anything` is True, so a
+        # goal that normalises to nothing ("improve our total rate" — every
+        # word a stopword) matched every metric in the tree and silently
+        # adopted the north star. An empty side names nothing.
         return False
     return set(metric) <= set(goal) or set(goal) <= set(metric)
 
@@ -244,7 +248,14 @@ def resolve(
                 getattr(source, "label", source),
             )
 
-    conflicts = _conflicts_between(seen)
+    try:
+        conflicts = _conflicts_between(seen)
+    except Exception:  # noqa: BLE001 — the comment above promises one broken
+        # rung cannot end Stage 0; a malformed candidate reaching THIS line
+        # would have ended it anyway, outside the per-source guard.
+        logger.exception("crucible goal: conflict detection failed; asking")
+        return GoalResolution(status="needs_input", candidates_seen=tuple(seen),
+                              ask=_no_definition_ask(raw_goal_text))
     if conflicts:
         # NEVER resolved here. Two authoritative systems disagreeing about what
         # a metric means is worth more than either answer — it says the model of
@@ -261,6 +272,20 @@ def resolve(
             status="needs_input",
             candidates_seen=(),
             ask=_no_definition_ask(raw_goal_text),
+        )
+
+    # AMBIGUITY IS NOT A RANKING. Two metrics both naming the goal ("increase
+    # active users" against MAU and WAU) used to adopt whichever the tree
+    # happened to list first — a coherent, confident answer to a question the
+    # user did not ask, which is precisely what I9 exists to prevent. Distinct
+    # metric NAMES are a different failure from `_conflicts_between`, which
+    # only pairs identical names, so it cannot see this one.
+    distinct = {c.metric_name.strip().lower() for c in seen if c.metric_name.strip()}
+    if len(distinct) > 1:
+        return GoalResolution(
+            status="needs_input",
+            candidates_seen=tuple(seen),
+            ask=_ambiguous_metric_ask(seen),
         )
 
     best = seen[0]
@@ -283,7 +308,7 @@ def resolve(
             definition_text=best.definition_text,
             definition_source_ref=best.source_ref,
             currency=currency,
-            direction="increase",
+            direction=_direction_of(raw_goal_text),
             status="candidate",
             origin="adopted",
             definition_hash=definition_hash(best.definition_text, best.source_ref),
@@ -311,6 +336,13 @@ def confirm(
         raise ValueError("I9: locking requires the id of the user who confirmed it")
 
     text = definition.definition_text if definition_text is None else definition_text
+    if not text.strip():
+        # `resolve()` refuses to adopt a named-but-undefined metric; confirm
+        # has to refuse the same thing, or clearing the textarea locks a blank
+        # definition and the run sizes everything against nothing.
+        raise ValueError(
+            "I9: a goal definition cannot be empty — say what the metric means"
+        )
     edited = text.strip() != definition.definition_text.strip()
 
     return GoalDefinition(
@@ -326,7 +358,11 @@ def confirm(
         horizon_weeks=definition.horizon_weeks,
         population=definition.population,
         status="locked",
-        origin="elicited" if edited else (definition.origin or "adopted"),
+        # UNKNOWN PROVENANCE IS `elicited`, NOT `adopted`. Defaulting the other
+        # way makes the row assert that the company's own system defined this
+        # metric, which is the stronger claim and the one nothing here can
+        # support — on a `needs_input` run there was never a source at all.
+        origin="elicited" if (edited or not definition.origin) else definition.origin,
         confirmed_by_user_at=at,
         confirmed_by_user_id=user_id,
         definition_hash=definition_hash(text, definition.definition_source_ref),
@@ -368,6 +404,57 @@ def _named_but_undefined_ask(c: MetricCandidate) -> str:
         f"I produce: two teams can both point at this metric and mean gross "
         f"versus net, or booked versus recognised. Tell me how it's calculated "
         f"and I'll use that."
+    )
+
+
+#: Words that make a goal a REDUCTION. Stored as a definition field because the
+#: table never mutates a locked row: "reduce churn" persisted as `increase`
+#: would have every later run reading the goal backwards, and nothing
+#: downstream could detect it.
+_DECREASE_WORDS = frozenset({
+    "reduce", "reducing", "decrease", "decreasing", "lower", "lowering",
+    "cut", "cutting", "shrink", "minimise", "minimize", "eliminate", "drop",
+    "fewer", "less", "down",
+})
+
+
+def _direction_of(goal_text: str) -> str:
+    """Increase or decrease, from the user's own verb.
+
+    Defaults to `increase`, which is the common case, but a goal that says
+    "reduce" must not be recorded as its opposite — and this is read from the
+    RAW goal text rather than from the metric, because "reduce churn" and
+    "improve retention" can name the same tree entry.
+    """
+    words = {w.strip(".,;:!?").lower() for w in (goal_text or "").split()}
+    return "decrease" if words & _DECREASE_WORDS else "increase"
+
+
+def _ambiguous_metric_ask(candidates: Sequence[MetricCandidate]) -> str:
+    """Two metrics both name this goal. Ask which — never rank them.
+
+    Quotes each with its definition, so choosing is a decision about meaning
+    rather than about which label looks more official.
+    """
+    seen: list[str] = []
+    lines: list[str] = []
+    for c in candidates:
+        key = c.metric_name.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.append(key)
+        definition = " ".join((c.definition_text or "").split())
+        lines.append(
+            f"\u2022 {c.metric_name}"
+            + (f" \u2014 {definition}" if definition else " (no definition recorded)")
+        )
+    joined = "\n".join(lines)
+    return (
+        "More than one metric in your KPI tree matches this goal, and they do "
+        "not mean the same thing:\n\n"
+        f"{joined}\n\n"
+        "Which one is this goal about? Paste the definition you mean, or edit "
+        "one of the above."
     )
 
 

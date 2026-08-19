@@ -30,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import WorkspaceContext
 from app.crucible.claims import project_signals
+from app.crucible.cluster import assign_clusters, parse_embedding
 from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
 from app.crucible.pipeline import build_findings
 from app.crucible.types import GoalDefinition
@@ -43,6 +44,12 @@ router = APIRouter(prefix="/v1/crucible", tags=["crucible"])
 #: Small and dedicated. Runs can only ever starve each other; the queue beyond
 #: it is the durable `resolving_goal` row, which is what that row is for.
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crucible")
+
+#: Rows per page of the signal read. Small BECAUSE of the embeddings: each row
+#: carries a 1536-float vector, and a 1000-row page of those is large enough to
+#: time out — the failure that made the original version exclude embeddings
+#: entirely. 250 x 1536 floats is roughly 1.5MB of JSON, which is fine.
+_PAGE = 250
 
 #: asyncio holds only a WEAK reference to a task, so a bare create_task can be
 #: garbage-collected mid-run.
@@ -268,9 +275,25 @@ def execute_run(
                        started_at=now.isoformat())
         runs_db.heartbeat(run_id, company_id)
 
-        # ── Stage 4. Project the corpus into claims. ────────────────────────
+        # ── Stage 4. Project the corpus into claims, then group them. ───────
         signals = _load_signals(company_id)
         claims, stats = project_signals(signals)
+
+        # Grouping is what turns 2,777 claims into findings rather than into a
+        # reading of our own taxonomy. See app/crucible/cluster.py.
+        embeddings = {
+            str(row.get("id")): vec
+            for row in signals
+            if (vec := parse_embedding(row.get("embedding"))) is not None
+        }
+        if embeddings:
+            claims = assign_clusters(claims, embeddings)
+        else:
+            logger.warning(
+                "crucible: no embeddings for %s — clustering will fall back to "
+                "claim kind, which produces taxonomy rather than findings",
+                company_id,
+            )
         runs_db.update(run_id, company_id, claim_count=len(claims))
 
         if not claims:
@@ -279,13 +302,15 @@ def execute_run(
             return
 
         # ── Stages 5–8. Findings, verified and scored. ──────────────────────
-        result = build_findings(claims, currency="accounts", now=now)
+        ingest_clock = _dates_are_ingest_clock(signals)
+        result = build_findings(claims, currency="accounts", now=now,
+                                dates_are_ingest_clock=ingest_clock)
         runs_db.heartbeat(run_id, company_id)
 
         rows = []
-        for finding, impact, confidence in zip(
+        for rank, (finding, impact, confidence) in enumerate(zip(
             result.findings, result.impacts, result.confidences
-        ):
+        )):
             rows.append({
                 "statement": finding.statement,
                 "claim_ids": list(finding.claim_ids),
@@ -307,7 +332,10 @@ def execute_run(
                     "weakest_leg_reason": confidence.weakest_leg_reason,
                     "cap_reason": confidence.cap_reason,
                 },
-                "tier": "deep",
+                # Everything is stored; only the leading few are presented as
+                # analysed in depth. `deep_cap` used to be accepted and then
+                # ignored, so every finding claimed the same standing.
+                "tier": "deep" if rank < result.deep_count else "shallow",
             })
 
         ledger = [{
@@ -356,6 +384,29 @@ def _bare_definition(company_id: str, goal_text: str) -> GoalDefinition:
     )
 
 
+#: Above this share of signals whose `valid_at` is just their `created_at`,
+#: the corpus is dated by the ingest clock rather than by when anything
+#: happened, and every date-based test is measuring our own backfill.
+_INGEST_CLOCK_SHARE = 0.6
+
+
+def _dates_are_ingest_clock(signals: list[dict]) -> bool:
+    """Is this corpus dated by when we READ it rather than when it happened?
+
+    `valid_at` defaults to now() at ingest and most pullers never set it, so a
+    backfill gives thousands of signals the same few timestamps. Detected
+    rather than assumed, because a tenant whose sources DO carry real dates
+    should still get the full checks.
+    """
+    if not signals:
+        return False
+    same = sum(
+        1 for r in signals
+        if r.get("valid_at") and str(r.get("valid_at"))[:19] == str(r.get("created_at"))[:19]
+    )
+    return (same / len(signals)) >= _INGEST_CLOCK_SHARE
+
+
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
     """Every degradation renders. A quietly thinner run is indistinguishable
     from a complete one, which is worse than the failure it replaced."""
@@ -366,11 +417,25 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
             "actual": f"{claim_stats['no_timestamp']} of {claim_stats['seen']} "
                       f"signals carried no usable date and were not read",
         })
-    if pipeline_stats.get("findings") and not pipeline_stats.get("sizeable"):
+    if pipeline_stats.get("echo_check_skipped"):
         notes.append({
-            "reason": "nothing could be sized",
-            "actual": "no finding named an account, so every result is "
-                      "unsized rather than small",
+            "reason": "evidence is dated by ingest, not by when it happened",
+            "actual": "most signals carry the timestamp we read them at, so "
+                      "the check for one conversation echoing through the "
+                      "corpus could not run and nothing here is weighted by "
+                      "recency",
+        })
+    total = pipeline_stats.get("findings") or 0
+    sizeable = pipeline_stats.get("sizeable") or 0
+    if total and sizeable < total:
+        # Fires on PARTIAL sizing too, not only on none of it. A run where
+        # three of 168 findings carry a number and the rest do not is exactly
+        # the run where a reader assumes the other 165 are small.
+        notes.append({
+            "reason": "most findings could not be sized",
+            "actual": f"{total - sizeable} of {total} findings name no account, "
+                      f"so they are unsized rather than small — a missing "
+                      f"number here is not a zero",
         })
     return notes
 
@@ -386,10 +451,12 @@ def _load_signals(company_id: str) -> list[dict]:
 
     client = require_client()
     rows: list[dict] = []
-    for page in range(40):
+    for page in range(160):
         chunk = (
             client.table("kg_signal")
-            .select("id,kind,source_type,content,properties,valid_at,source_id")
+            .select(
+                "id,kind,source_type,content,properties,valid_at,created_at,source_id,embedding"
+            )
             .eq("enterprise_id", company_id)
             # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
             # unordered query's rows in any order, so paging without one can
@@ -397,10 +464,10 @@ def _load_signals(company_id: str) -> list[dict]:
             # read a slightly different corpus each time and stop being
             # reproducible, which is the whole claim this engine makes.
             .order("id")
-            .range(page * 1000, page * 1000 + 999)
+            .range(page * _PAGE, page * _PAGE + _PAGE - 1)
             .execute()
         ).data or []
         rows.extend(chunk)
-        if len(chunk) < 1000:
+        if len(chunk) < _PAGE:
             break
     return rows
