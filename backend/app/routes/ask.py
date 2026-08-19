@@ -280,10 +280,15 @@ def _load_group_history(
     the model knows who said what without changing the `[{role, content}]` shape
     the downstream render expects.
 
-    MEMBERSHIP-GATED (IDOR boundary): this runs in the ROUTE, BEFORE the
-    assembler's 403, and `list_group_turns` itself only guards `kind='group'`,
-    NOT membership — so a non-member of the project gets `[]`, never another
-    team's thread. Same check the assembler uses (`is_project_member`).
+    MEMBERSHIP- AND BINDING-GATED (IDOR boundary): this runs in the ROUTE,
+    BEFORE the assembler's 403, and `list_group_turns` itself only guards
+    `kind='group'`, NOT membership OR project/company scope. So TWO checks run
+    here: (1) `is_project_member` for the client-supplied `project_id` — a
+    non-member gets `[]`; and (2) a bind of `conversation_id` to that
+    `project_id` via the server-derived canonical group id
+    (`get_group_chat_id`) — a member who passes a FOREIGN project's (or
+    tenant's) group `conversation_id` also gets `[]`, never that other team's
+    thread. Both denials share the leak-free `[]` shape.
 
     Excludes the CURRENT turn: Feature #1 posts the user's turn to the group
     store BEFORE this ask fires, so `list_group_turns` already contains it. The
@@ -298,13 +303,33 @@ def _load_group_history(
         return []
     try:
         from app.db.conversations import list_group_turns
-        from app.db.projects import is_project_member
+        from app.db.projects import get_group_chat_id, is_project_member
 
-        # IDOR boundary — a non-member reads nothing.
+        # IDOR boundary, part 1 — a non-member of the client-supplied project
+        # reads nothing.
         if not is_project_member(project_id, user_id):
             return []
 
-        turns = list_group_turns(conversation_id)  # author-enriched DTOs
+        # IDOR boundary, part 2 — bind conversation_id ↔ project_id. The client
+        # supplies BOTH the project_id (membership-checked above) AND the
+        # conversation_id, but the membership check alone never ties them
+        # together: a member of project A could pass project B's group
+        # conversation_id and fold a FOREIGN team's (cross-project, even
+        # cross-tenant) thread into the prompt. `list_group_turns` only guards
+        # `kind='group'`, not project/company scope, so it can't catch this on
+        # its own. Resolve the project's OWN canonical group conversation
+        # (server-derived, never client-trusted — the same posture
+        # `project_group_context._load_group_window` uses) and require the
+        # client's id to match it. No group chat for this project, or any
+        # mismatch → deny, leak-free, same `[]` shape as the non-member deny.
+        canonical_conversation_id = get_group_chat_id(project_id)
+        if canonical_conversation_id is None or canonical_conversation_id != conversation_id:
+            return []
+
+        # Belt-and-suspenders — also scope the turn read by the owning project,
+        # so a future caller that forgets the binding above still can't read
+        # another project's turns.
+        turns = list_group_turns(conversation_id, project_id=project_id)  # author-enriched DTOs
         excluded_by_key = False
         out: list[dict] = []
         for t in turns:
