@@ -43,6 +43,10 @@ import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import { resolveAttachmentRefs, spliceSkill } from "../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
+// Highlight-to-reply: the send appends the parked quote as a trailing
+// blockquote (AFTER the pinned-skill splice, so the slash trigger stays the
+// query's first token). One definition of that, shared with the mapper.
+import { buildQuotedMessage } from "../../../lib/chatQuote"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../shared/chat-shell/conversation/actions"
@@ -127,6 +131,16 @@ export interface MainConversationAdapter {
   busy: boolean
   /** The attachment viewer is open — Esc yields to it (closes it first). */
   viewerAttachmentOpen: boolean
+
+  // ── Highlight-to-reply (MAIN; opt-in) ──────────────────────────────────────
+  /** The passage parked above the composer, appended to the sent message as a
+   *  trailing blockquote at send time — placed AFTER the pinned-skill splice so
+   *  the query's first token (which drives skill routing) is never a ">". Host
+   *  state, since main renders its own composer. UNSET/undefined on a surface
+   *  that doesn't quote → the send is byte-identical to before. */
+  quote?: string | null
+  /** Clear the parked quote once a send has consumed it. */
+  onQuoteConsumed?: () => void
 
   // ── Submit leaf seams (tab-flavored; wrapper) ──────────────────────────────
   setActiveTabId: Dispatch<SetStateAction<string | null>>
@@ -216,6 +230,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     shareRefFor,
     nextPrompts,
     showToast,
+    quote,
+    onQuoteConsumed,
   } = adapter
   // The composer fields the send handlers + submit read. Kept as the same local
   // names so the extracted bodies stay verbatim.
@@ -699,8 +715,11 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     // markers aren't set yet, so without this a second Enter would double-send.
     if (pendingSend) return
     // A pinned skill is re-attached as its slash trigger so the backend fast-path
-    // sees exactly what typing it by hand would produce.
-    const sent = spliceSkill(pinnedSkill, q)
+    // sees exactly what typing it by hand would produce. The parked quote is then
+    // appended as a trailing blockquote — spliced AFTER the skill so the query's
+    // first token stays the slash trigger (a leading blockquote would put ">"
+    // there and silently break skill routing; see chatQuote.ts).
+    const sent = buildQuotedMessage(spliceSkill(pinnedSkill, q), quote ?? null)
     // Sending CANCELS the dictation that produced the question (a graceful stop
     // would write the trailing phrase back into the draft this send clears).
     if (voice.listening) voice.cancel()
@@ -708,6 +727,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     setDraft("")
     setPinnedSkill(null)
     setPlusMenuOpen(false)
+    onQuoteConsumed?.()
     void submitAsk(sent)
     const ta = composerRef.current
     if (ta) {
@@ -717,6 +737,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   }, [
     draft, activeTabId, askingTabsRef, showComposerHint, pendingSend, pinnedSkill,
     voice, voiceBaseRef, setDraft, setPinnedSkill, setPlusMenuOpen, submitAsk, composerRef, showToast,
+    quote, onQuoteConsumed,
   ])
 
   // Keep the palette highlight in range as the filtered list shrinks/grows.

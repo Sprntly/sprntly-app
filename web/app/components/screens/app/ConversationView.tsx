@@ -156,6 +156,18 @@ export interface ConversationViewHostProps {
   threadScrollRef: Ref<HTMLDivElement>
   handleThreadScroll: () => void
   setThreadContentEl: (el: HTMLDivElement | null) => void
+
+  // ── Highlight-to-reply (MAIN; opt-in) ──────────────────────────────────────
+  /** The passage parked above the composer as a dismissable quote chip, shown
+   *  in `renderComposer`. Rides the next send as a trailing blockquote (appended
+   *  by the engine). UNSET → no chip, byte-identical composer. */
+  quote?: string | null
+  /** Dismiss the parked quote chip. */
+  onRemoveQuote?: () => void
+  /** The reader highlighted a passage of an answer and pressed Reply — handed to
+   *  ChatShell's selection toolbar. UNSET → the shell mounts no toolbar and no
+   *  listeners, so main's DOM is byte-identical for a host that hasn't opted in. */
+  onQuoteSelection?: (text: string) => void
 }
 
 export type ConversationViewProps = ConversationViewHostProps
@@ -225,6 +237,10 @@ export function ConversationView(props: ConversationViewProps) {
     threadScrollRef,
     handleThreadScroll,
     setThreadContentEl,
+    // highlight-to-reply (opt-in)
+    quote,
+    onRemoveQuote,
+    onQuoteSelection,
   } = props
 
   // Fields the lifted render reads directly, re-supplied by the mapper's bag so
@@ -280,6 +296,8 @@ export function ConversationView(props: ConversationViewProps) {
       voiceSupported={voice.supported}
       voiceListening={voice.listening}
       onToggleVoice={handleToggleVoice}
+      quote={quote}
+      onRemoveQuote={onRemoveQuote}
     />
   )
 
@@ -530,6 +548,7 @@ export function ConversationView(props: ConversationViewProps) {
       turns={mainTurns}
       pendingSend={pendingSendNode}
       composerNode={renderComposer(false)}
+      onQuoteSelection={onQuoteSelection}
     />
   )
 }

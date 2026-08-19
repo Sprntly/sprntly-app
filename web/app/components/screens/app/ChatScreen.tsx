@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -42,7 +42,10 @@ import { IconFolder } from "@tabler/icons-react"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { DRAFT_MAX_CHARS } from "../../shared/ChatComposer"
+import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
+// Highlight-to-reply / edit-a-past-prompt: one definition of how a quoted
+// passage rides a message, shared with the mapper and the persistence rewind.
+import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
   artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
@@ -96,6 +99,15 @@ export type ThreadTurn = {
    *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
    *  the real document (PDF/image inline) and offer a download after a reload. */
   attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
+  /** The `conversation_turns.id` this turn was persisted as, when known.
+   *
+   *  Only needed to REWIND the conversation to this turn (editing or retrying a
+   *  past prompt): the server needs the row id, and the client turn id is its
+   *  own invention. Stamped on restore (`buildRestored`, straight off the DB
+   *  row) — turns sent in THIS session are resolved from `chatPersistence`'s own
+   *  map instead, since their id only arrives after the write settles. Absent on
+   *  every other path, which makes the rewind a no-op rather than a guess. */
+  dbTurnId?: number
   /** Multi-party attribution (project GROUP surface only). Present ONLY on a
    *  turn authored by SOMEONE OTHER than the current viewer — a peer's message
    *  in the shared group thread. The single-author surfaces (main, private) and
@@ -642,6 +654,9 @@ function openFailureReply(detail: string): AskResponse {
  *  correct (one ask per tab); the silence was the bug. */
 export const BUSY_ENTER_HINT_LEAD = "Sprntly is still answering. Your message is saved — send it when the answer lands, or "
 export const BUSY_ENTER_HINT_TAIL = " to interrupt."
+/** How long a copied-prompt tick stays on the button. Long enough to be seen
+ *  after the click that caused it, short enough not to read as state. */
+const COPIED_HINT_MS = 1600
 
 // Main's next-prompt fetch: the shared endpoint keyed by the settled
 // conversation id. A stable module const so the shared hook's fetch-after-settle
@@ -972,7 +987,6 @@ export function ChatScreen() {
   const composer = useComposer({ showToast })
   const {
     draft, setDraft,
-    quoteJustInsertedRef,
     pendingSend, setPendingSend,
     showSlash, setShowSlash,
     slashFilter, setSlashFilter,
@@ -1033,7 +1047,22 @@ export function ChatScreen() {
   const [, setResumeTick] = useState(0)
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
-  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null; plain?: boolean } | null>(null)
+  // A passage of an answer the reader highlighted and pressed Reply on, parked
+  // above the input until they send or dismiss it. Host state (not the shell's)
+  // because main renders its own composer; the shell reports the selection
+  // through `onQuoteSelection` and owns nothing else about it. Appended to the
+  // sent message as a trailing blockquote at send time (see useConversation's
+  // handleComposerSubmit — the quote is passed into the engine as `quote`).
+  const [quote, setQuote] = useState<string | null>(null)
+  // The turn whose question is currently being rewritten in place. Exactly one
+  // at a time. Cleared on save, on cancel, and whenever the active tab changes
+  // (an editor left open on a tab you navigated away from would come back
+  // seated over a different thread's turn).
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
+  // The turn whose copy button is showing its transient "Copied" tick.
+  const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -2206,9 +2235,22 @@ export function ChatScreen() {
   // anyone scrolling back sees what was being discussed instead of a question
   // about "this" with no referent.
   //
-  // Appended to whatever is already typed, never replacing it: a half-written
-  // question is the user's, and highlighting a passage mid-sentence must not
-  // discard it.
+  // It PARKS as the composer's quote chip rather than being pasted into the
+  // draft as raw "> " text (changed 2026-08-17, when highlight-to-reply gave
+  // the surface a real quote affordance). Three things were wrong with the
+  // draft-injection form and all three are gone:
+  //   * the reader saw blockquote markers they never typed, in the box and
+  //     again on the sent turn, and was responsible for not breaking them;
+  //   * a LEADING "> " made the query's first token ">", which silently
+  //     defeated `skillForQuery` and the backend's slash fast-path for any
+  //     message that also pinned a skill; and
+  //   * a long passage filled the composer, pushing the question out of sight.
+  // The excerpt still travels INSIDE the message (as the trailing blockquote
+  // `buildQuotedMessage` writes at send time), so the grounding doctrine above
+  // is unchanged — only where the user sees it before sending has moved.
+  //
+  // A half-written question survives absolutely: the draft is not touched at
+  // all now, where the old form appended to it.
   useEffect(() => {
     if (pendingDocumentQuote == null) return
     const { documentId: from, excerpt } = pendingDocumentQuote
@@ -2221,33 +2263,14 @@ export function ChatScreen() {
     // paths, so "the open document" is not automatically the one the user
     // highlighted.
     if (content.documentId != null && from !== content.documentId) return
-    setDraft((prev) => {
-      const quoted = `> ${excerpt}\n\n`
-      const next = prev.trim() ? `${prev.replace(/\s+$/, "")}\n\n${quoted}` : quoted
-      return next.slice(0, DRAFT_MAX_CHARS)
-    })
-    // Resize AFTER the draft is committed, not on the next animation frame.
-    // `setDraft` from a passive effect goes through React's scheduler, so a
-    // rAF can win the race, measure `scrollHeight` against the OLD value and
-    // then PIN that height inline — leaving a 600-character quote in a
-    // one-row composer until the next keystroke re-runs the auto-grow. The
-    // flag is read by the layout effect below, which runs after the commit.
-    quoteJustInsertedRef.current = true
-  }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId])
+    setQuote(normalizeQuote(excerpt))
+    composerRef.current?.focus()
+  }, [pendingDocumentQuote, setPendingDocumentQuote, content.documentId, composerRef])
 
-  // Runs after the draft above is committed, so it measures the real text.
-  useLayoutEffect(() => {
-    if (!quoteJustInsertedRef.current) return
-    quoteJustInsertedRef.current = false
-    const ta = composerRef.current
-    if (!ta) return
-    ta.style.height = "auto"
-    ta.style.height = `${Math.min(ta.scrollHeight, 240)}px`
-    ta.focus()
-    // Caret at the END, so the next keystroke starts the question rather than
-    // landing inside the quotation.
-    ta.setSelectionRange(ta.value.length, ta.value.length)
-  }, [draft])
+  // (The layout effect that used to re-measure the composer after a quote was
+  // pasted into the draft is gone with the pasting: a parked chip changes the
+  // draft not at all, so there is no height to recover and no caret to rescue
+  // from inside a quotation.)
 
   useEffect(() => {
     if (pendingOndemandDraft == null || !pendingOndemandDraft.trim()) return
@@ -2385,7 +2408,7 @@ export function ChatScreen() {
         setResumePanelTabId(tabId)
       }
       const buildRestored = (
-        turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
+        turns: { id?: number; role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -2396,6 +2419,10 @@ export function ChatScreen() {
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
             restored.push({
               id: `${keyPrefix}-${i}`,
+              // Carried through so a rehydrated thread can still be rewound to
+              // this turn (edit/retry on a past prompt) — the persistence
+              // layer's own id map only covers turns THIS session sent.
+              ...(typeof t.id === "number" ? { dbTurnId: t.id } : {}),
               query: t.content,
               reply,
               // Rehydrate persisted attachment texts so the card viewer AND a
@@ -3729,6 +3756,11 @@ export function ChatScreen() {
       shareRefFor,
       nextPrompts,
       showToast,
+      // Highlight-to-reply: the parked quote rides the next composer send as a
+      // trailing blockquote. Host state (main renders its own composer); the
+      // engine's submit appends it and calls onQuoteConsumed to clear it.
+      quote,
+      onQuoteConsumed: () => setQuote(null),
     })
 
 
@@ -3743,6 +3775,108 @@ export function ChatScreen() {
   const handleAskAgain = useCallback((turn: ThreadTurn) => {
     askAgain(turn, { submit: submitAsk, setDraft, composerRef })
   }, [submitAsk])
+
+  // ── Highlight-to-reply ────────────────────────────────────────────────────
+  // A passage the reader selected in an answer, handed up by the shell's
+  // selection toolbar. It parks above the input and rides the next message as a
+  // trailing blockquote (appended in the engine's handleComposerSubmit via the
+  // `quote` seam) — quoting is a way to point at a sentence, not a second send
+  // button, so nothing is dispatched here.
+  const handleQuoteSelection = useCallback((text: string) => {
+    setQuote(text)
+    composerRef.current?.focus()
+  }, [composerRef])
+
+  // ── Copy a past prompt ────────────────────────────────────────────────────
+  // The WORDS, not the wire form: a message that quoted a passage stores it as
+  // a trailing blockquote, and pasting "> …" markup into wherever you are
+  // taking this is never what was meant. The excerpt has its own affordance
+  // (the quote block opens in the viewer).
+  const handleCopyTurn = useCallback((turn: ThreadTurn) => {
+    const body = splitQuotedSuffix(turn.query).body || turn.query
+    if (!body) return
+    void (async () => {
+      try {
+        await navigator.clipboard.writeText(body)
+        setCopiedTurnId(turn.id)
+        if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+        copiedTimerRef.current = setTimeout(() => setCopiedTurnId(null), COPIED_HINT_MS)
+      } catch {
+        // Denied permission, an insecure origin, a browser without the API —
+        // say so rather than leaving a button that silently does nothing.
+        showToast("Couldn't copy", "Your browser blocked clipboard access — select the text and copy it manually.")
+      }
+    })()
+  }, [showToast])
+
+  // ── Re-ask a past prompt (edit / retry) ───────────────────────────────────
+  // Both rewind the conversation to that turn: it and everything after it are
+  // replaced by the new question and its answer. That is the only coherent
+  // meaning for editing something already answered — leaving the old reply
+  // underneath a rewritten question would make the thread a record of a
+  // conversation that never happened.
+  //
+  // The rewind is TWO things that must agree, which is the whole reason this is
+  // one shared helper rather than two similar ones:
+  //   * the thread on screen, truncated at `turn`; and
+  //   * the persisted conversation, rewound to the same point
+  //     (`rewindToUserTurn` → DELETE …/turns/{id}, which drops that row and
+  //     every row after it).
+  // Queued so the server sees rewind-then-add; best-effort, so a failure leaves
+  // the record longer than the screen rather than breaking the send.
+  const reAskFromTurn = useCallback((turn: ThreadTurn, nextQuery: string) => {
+    const tabId = activeTabId
+    if (!tabId || !nextQuery.trim()) return
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== tabId) return t
+      const idx = t.thread.findIndex((x) => x.id === turn.id)
+      // Not found means the thread moved under us (a background answer landed,
+      // the tab was rehydrated) — drop the whole thing rather than truncate at
+      // a guess. The user can act on the turn again.
+      return idx === -1 ? t : { ...t, thread: t.thread.slice(0, idx) }
+    }))
+    void persistence.rewindToUserTurn(tabId, turn.id, turn.dbTurnId)
+    void submitAsk(nextQuery)
+  }, [activeTabId, persistence, submitAsk, setTabs])
+
+  const handleRetryTurn = useCallback((turn: ThreadTurn) => {
+    // Verbatim — including the quoted passage, which is part of the question
+    // that is being asked again.
+    reAskFromTurn(turn, turn.query.trim())
+  }, [reAskFromTurn])
+
+  const handleEditTurn = useCallback((turnId: string) => {
+    setEditingTurnId(turnId)
+  }, [])
+  const handleCancelTurnEdit = useCallback(() => setEditingTurnId(null), [])
+
+  const handleSubmitTurnEdit = useCallback((turn: ThreadTurn, text: string) => {
+    setEditingTurnId(null)
+    const body = text.trim()
+    if (body.length < DRAFT_MIN_CHARS) return
+    // The passage the original message was replying to is kept: the editor owns
+    // your words, not the excerpt they were about. Re-composed the same way the
+    // composer would have.
+    const { quote: repliedTo } = splitQuotedSuffix(turn.query)
+    const next = buildQuotedMessage(body, repliedTo)
+    // Saving without changing anything closes the editor and stops. Re-running
+    // an identical question is what Retry is for, and doing it silently here
+    // would spend a whole generation on a keystroke the user took back.
+    if (next === turn.query) return
+    reAskFromTurn(turn, next)
+  }, [reAskFromTurn])
+
+  // An editor left open on a tab the user navigated away from would come back
+  // seated over whatever turn happens to be there now. Close it on any tab
+  // change — the thread it belonged to is no longer the one on screen. The
+  // "Copied" tick goes with it for the same reason.
+  useEffect(() => {
+    setEditingTurnId(null)
+    setCopiedTurnId(null)
+  }, [activeTabId])
+  useEffect(() => () => {
+    if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current)
+  }, [])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
   // A question typed on the top-insights surface must open its OWN chat tab, not
@@ -5229,6 +5363,13 @@ export function ChatScreen() {
               inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
               clarifyPopupOpen, pendingClarifyTurn,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
+              editingTurnId,
+              copiedTurnId,
+              onCopyTurn: handleCopyTurn,
+              onRetryTurn: handleRetryTurn,
+              onEditTurn: handleEditTurn,
+              onSubmitTurnEdit: handleSubmitTurnEdit,
+              onCancelTurnEdit: handleCancelTurnEdit,
               openReportByTitle, openArtifactInPanel, openChatArtifactItem,
               handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
               handleViewPrototype, handlePrototypeSettled,
@@ -5302,6 +5443,9 @@ export function ChatScreen() {
                 threadScrollRef={threadScrollRef}
                 handleThreadScroll={handleThreadScroll}
                 setThreadContentEl={setThreadContentEl}
+                quote={quote}
+                onRemoveQuote={() => setQuote(null)}
+                onQuoteSelection={handleQuoteSelection}
               />
             )
           })()
