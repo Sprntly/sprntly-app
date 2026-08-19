@@ -5932,6 +5932,12 @@ export type GroupTurn = {
   author_user_id: string | null
   author_name: string | null
   author_job_role: string | null
+  /** The send-identity key. On a human turn it is the poster's own
+   *  idempotency key; on the agent reply it is the SAME key the originating
+   *  ask carried. Lets the poster recognise its own turn/reply realtime echo
+   *  (id-precise correlation, never a timing guess). Null on turns written
+   *  before the key existed / by the cross-user helpers. */
+  client_message_id?: string | null
   created_at: string
   /** Artifact-open candidates for this turn (the same disambiguation shape
    *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by

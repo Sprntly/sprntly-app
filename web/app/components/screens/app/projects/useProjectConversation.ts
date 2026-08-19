@@ -187,11 +187,15 @@ export function useProjectConversation(
   const seenGroupTurnIdsRef = useRef<Set<number>>(new Set())
   // The high-water server turn id, the `since` cursor for the reconcile read.
   const lastGroupTurnIdRef = useRef<number>(0)
-  // Set while THIS viewer's own ask is in flight, so the agent reply it will
-  // render from its own poll (attached to the optimistic turn) does not ALSO
-  // render again when the server-persisted assistant turn broadcasts back.
-  // Peers (this flag unset) still get the reply live.
-  const myPendingAgentReplyRef = useRef(false)
+  // The viewer's OWN send-identity keys. A broadcast/reconcile turn carrying
+  // one of these is this poster's own user turn OR its agent reply (both
+  // already on screen from the optimistic send + the ask poll), so it is never
+  // re-rendered — id-precise correlation, never a timing guess. A per-send key
+  // is minted in `submitAsk`, keyed by the optimistic turn id so the group
+  // persistence seam AND the ask both stamp the SAME key (the reply inherits it
+  // server-side), and added here so the echo is recognised whenever it arrives.
+  const mySentCmidsRef = useRef<Set<string>>(new Set())
+  const cmidByTurnIdRef = useRef<Map<string, string>>(new Map())
 
   // One group turn DTO → a ThreadTurn. Row-per-turn (never paired): each
   // author's message is its own bubble. `author` is attached ONLY for a PEER's
@@ -206,7 +210,10 @@ export function useProjectConversation(
       }) as AskResponse
       return { id, query: "", reply }
     }
-    const isPeer = !!gt.author_user_id && gt.author_user_id !== selfUserId
+    // Attribute a PEER only when the viewer's identity is KNOWN and the author
+    // positively differs. If selfUserId is not yet resolved, NEVER render the
+    // viewer's own message as a peer — fall through to the default self render.
+    const isPeer = !!selfUserId && !!gt.author_user_id && gt.author_user_id !== selfUserId
     if (!isPeer) return { id, query: gt.content }
     const authorName = gt.author_name || "Someone"
     return {
@@ -438,13 +445,16 @@ export function useProjectConversation(
       kind: "project",
       params: { project_id: projectId, surface },
     }
-    return {
-      convId: convId ?? null,
-      grounding: convId != null
-        ? { conversation_id: convId, context_source }
-        : { context_source },
-    }
-  }, [ensureProjectConv, projectId, surface])
+    // Group only: forward this send's identity key so the backend stamps the
+    // agent reply with the SAME key (Choice A), which is how the poster
+    // recognises the reply's realtime echo as its own.
+    const cmid = isGroup ? cmidByTurnIdRef.current.get(_m.turnId) : undefined
+    const grounding: AskGrounding = convId != null
+      ? { conversation_id: convId, context_source }
+      : { context_source }
+    if (cmid) grounding.client_message_id = cmid
+    return { convId: convId ?? null, grounding }
+  }, [ensureProjectConv, projectId, surface, isGroup])
 
   const pushPendingConversation = useCallback((
     turnId: string, query: string, key: string,
@@ -457,7 +467,15 @@ export function useProjectConversation(
       // member. Mark the durable server id seen once it resolves so this
       // poster's own realtime echo of the turn is never double-rendered.
       if (!query.trim() && !(attachments && attachments.length)) return
-      void projectsApi.postGroupTurn(projectId, query, attachments && attachments.length ? { attachments } : undefined)
+      // Stamp this send's identity key so the post is idempotent (a retry
+      // replays the original turn) and so the turn — and the reply that
+      // inherits the same key server-side — are recognised as this poster's
+      // own realtime echo.
+      const cmid = cmidByTurnIdRef.current.get(turnId)
+      void projectsApi.postGroupTurn(projectId, query, {
+        ...(attachments && attachments.length ? { attachments } : {}),
+        ...(cmid ? { client_message_id: cmid } : {}),
+      })
         .then((dto) => {
           if (dto && typeof dto.id === "number") {
             seenGroupTurnIdsRef.current.add(dto.id)
@@ -931,6 +949,17 @@ export function useProjectConversation(
     // ── Plain grounded ask (fallthrough) ──────────────────────────────────────
     if (askingRef.current.has(convKey)) { settlePendingSend(); return }
     const id = newId()
+    // Group: mint this send's identity key and bind it to the optimistic turn
+    // id BEFORE persisting or asking, so the group persistence seam
+    // (postGroupTurn) and the ask (resolveAskParams grounding) both stamp the
+    // SAME key. The agent reply inherits it server-side (Choice A), so this
+    // poster recognises both its own turn and its own reply's realtime echo by
+    // this key — no timing window.
+    if (isGroup) {
+      const cmid = newId()
+      cmidByTurnIdRef.current.set(id, cmid)
+      mySentCmidsRef.current.add(cmid)
+    }
     const hasAttachments = composer.attachments.length > 0
     const displayQuery = trimmed
     setThread((prev) => [...prev, { id, query: displayQuery, ...(hasAttachments ? { attachments: composer.attachments.map((a) => ({ name: a.name })) } : {}) }])
@@ -952,16 +981,7 @@ export function useProjectConversation(
         setBusy(false); setThread((prev) => prev.filter((t) => t.id !== id)); return
       }
     }
-    // Group: the agent reply this ask produces is ALSO persisted + broadcast
-    // server-side (Choice A). Flag the in-flight ask so its broadcast echo is
-    // suppressed for THIS poster (who renders it from the poll); a short
-    // trailing window covers the poll/broadcast race. Peers see it live.
-    if (isGroup) myPendingAgentReplyRef.current = true
-    try {
-      await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
-    } finally {
-      if (isGroup) window.setTimeout(() => { myPendingAgentReplyRef.current = false }, 4000)
-    }
+    await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
   }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany, isGroup])
 
   const handleComposerSubmit = useCallback(() => {
@@ -1126,38 +1146,37 @@ export function useProjectConversation(
   // own agent reply (rendered from the poll) are filtered so nothing double-
   // renders; a since-cursor reconcile on every (re)subscribe closes any
   // at-most-once broadcast gap (AD-P22).
+  // The poster's OWN turn or reply carries a send-identity key this client
+  // minted — recognise it and never re-render (it is already on screen). Both
+  // the user turn AND the agent reply (which inherits the key server-side) are
+  // covered, at ANY broadcast delay, so no timing window is needed.
+  const isOwnEcho = useCallback(
+    (gt: GroupTurn): boolean => !!gt.client_message_id && mySentCmidsRef.current.has(gt.client_message_id),
+    [],
+  )
+
   const groupOnEvent = useCallback((event: string, payload: unknown) => {
     if (event !== "turn.created" || !payload || typeof payload !== "object") return
     const gt = payload as GroupTurn
     if (typeof gt.id !== "number") return
-    if (gt.role === "user" && !!gt.author_user_id && gt.author_user_id === selfUserId) {
-      // The poster's own turn — already on screen optimistically; capture the
-      // durable id so a reconcile never re-adds it, and stop.
-      seenGroupTurnIdsRef.current.add(gt.id)
-      if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
-      return
-    }
-    if (gt.role === "assistant" && myPendingAgentReplyRef.current) {
-      // The reply to the poster's own in-flight ask — rendered from the poll;
-      // capture the id (suppress the echo) so a later reconcile skips it too.
+    if (isOwnEcho(gt)) {
+      // Capture the durable id so a later reconcile skips it too, then stop.
       seenGroupTurnIdsRef.current.add(gt.id)
       if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
       return
     }
     mergeGroupTurns([gt])
-  }, [selfUserId, mergeGroupTurns])
+  }, [isOwnEcho, mergeGroupTurns])
 
   const groupOnReconcile = useCallback(() => {
     if (!isGroup) return
     void projectsApi.groupTurns(projectId, lastGroupTurnIdRef.current || undefined)
       .then((turns) => {
-        const gts = (turns ?? []).filter(
-          (gt) => !(gt.role === "user" && !!gt.author_user_id && gt.author_user_id === selfUserId),
-        )
+        const gts = (turns ?? []).filter((gt) => !isOwnEcho(gt))
         if (gts.length) mergeGroupTurns(gts)
       })
       .catch(() => { /* best-effort; the next poll/re-open reconciles */ })
-  }, [isGroup, projectId, selfUserId, mergeGroupTurns])
+  }, [isGroup, projectId, isOwnEcho, mergeGroupTurns])
 
   useRealtimeChannel(isGroup ? `project:${projectId}` : null, {
     onEvent: groupOnEvent,

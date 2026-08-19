@@ -111,6 +111,11 @@ export interface AskGrounding {
    *  routes it to `ProjectContextAssembler` (membership-gated server-side).
    *  Absent on main, so the unscoped path is byte-identical. */
   context_source?: { kind: string; params?: Record<string, unknown> }
+  /** Send-identity / idempotency key, forwarded to `/v1/ask` (persisted on
+   *  `ask_jobs`). The project GROUP surface sets it so the agent reply can be
+   *  stamped with the same key its ask carried — the poster's own realtime-echo
+   *  correlation. Absent on main/private, so their ask is byte-identical. */
+  client_message_id?: string
 }
 
 /**
