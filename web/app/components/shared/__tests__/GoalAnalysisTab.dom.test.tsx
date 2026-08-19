@@ -307,14 +307,65 @@ describe("the error is visible without destroying the panel", () => {
     await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
   })
 
-  it("a recovered poll clears the warning", async () => {
+  it("a recovered poll clears the warning it showed", async () => {
+    // Was vacuous: the banner only appeared on the THIRD consecutive failure,
+    // by which point polling had already stopped — so there was no moment at
+    // which it was visible and could then clear. It has to be seen before it
+    // can be seen to go.
     get.mockResolvedValueOnce({ ...RUN, status: "running" })
        .mockRejectedValueOnce(new Error("blip"))
        .mockResolvedValue(RUN)
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-running")
-    await vi.advanceTimersByTimeAsync(9_500)
+
+    await vi.advanceTimersByTimeAsync(3_500)
+    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
+
+    await vi.advanceTimersByTimeAsync(3_500)
     await waitFor(() => expect(screen.getByTestId("goal-ready")).toBeTruthy())
     expect(screen.queryByTestId("goal-error")).toBeNull()
+  })
+
+  it("the confirm button comes back so a retry is possible at all", async () => {
+    // `setConfirming(false)` in the `finally`. Without it the button stays
+    // disabled and reads "Starting…" forever after any failure — an error
+    // message beside a dead button is no better than the silent no-op it
+    // replaced.
+    get.mockResolvedValue({
+      ...RUN, status: "awaiting_confirmation",
+      prioritisation: { ask: "?", proposed_definition: "net revenue" },
+    })
+    confirm.mockRejectedValueOnce(new Error("504"))
+           .mockResolvedValue({ ...RUN, status: "running" })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-confirm")
+
+    fireEvent.click(screen.getByText("Confirm and analyse"))
+    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
+
+    const button = await screen.findByText("Confirm and analyse")
+    expect((button as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.click(button)
+    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(2))
+  })
+
+  it("a failed confirm re-arms the poll instead of stranding the run", async () => {
+    // The server claims the row BEFORE doing anything, so a response lost
+    // after the claim means the run is going and nothing is watching —
+    // `awaiting_confirmation` is terminal. Telling the user to confirm again
+    // would 409 forever against their own successful claim.
+    get.mockResolvedValue({
+      ...RUN, status: "awaiting_confirmation",
+      prioritisation: { ask: "?", proposed_definition: "net revenue" },
+    })
+    confirm.mockRejectedValue(new Error("504"))
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-confirm")
+
+    get.mockResolvedValue({ ...RUN, status: "running" })
+    fireEvent.click(screen.getByText("Confirm and analyse"))
+    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
+    // Polling resumed, so the run's real state reaches the panel on its own.
+    await waitFor(() => expect(screen.getByTestId("goal-running")).toBeTruthy())
   })
 })

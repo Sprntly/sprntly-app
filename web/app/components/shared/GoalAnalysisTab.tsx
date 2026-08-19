@@ -137,6 +137,12 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         setError("Lost contact with this analysis. It may still be running.")
         return "failed"           // stop polling; the run row survives
       }
+      // SAY SO ON THE FIRST FAILURE, not only on the last. Staying silent
+      // until we give up meant there was no state in which the warning was
+      // visible AND polling was still going — so "a recovered poll clears the
+      // warning" was untestable by construction, and the user watched a stale
+      // panel with no hint that anything was wrong.
+      setError("Lost contact — retrying…")
       // Keep polling. Returning a non-terminal status is the point: a single
       // blip during a run that takes minutes is not a reason to give up on it.
       return "running"
@@ -171,7 +177,15 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     } catch {
       // The most important click in the feature. A silent no-op here reads as
       // a dead button.
-      setError("Could not start the analysis. Try confirming again.")
+      //
+      // AND RE-ARM THE POLL. The server claims the row before it does anything
+      // else, so a response lost after that claim means the run IS going —
+      // and `awaiting_confirmation` is terminal, so nothing was watching. The
+      // old copy told the user to confirm again, which would 409 forever
+      // against their own successful claim. Poll instead and let the run say
+      // what happened.
+      setError("We could not tell whether that started. Checking…")
+      setPollKey((k) => k + 1)
     } finally {
       setConfirming(false)
     }

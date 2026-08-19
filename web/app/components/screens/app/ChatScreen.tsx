@@ -6498,7 +6498,9 @@ export function ChatScreen() {
         // still worth showing. A `failed` or `cancelled` run must NOT reopen
         // the panel: it would pin an undismissable red tab to that thread for
         // as long as the run row exists, with nothing the reader can do about
-        // it. It stays reachable from the run's own history.
+        // it. There is no run-history surface yet, so a reload-then-fail user
+        // is not shown the failure at all — a real gap, and the lesser of the
+        // two until that surface exists.
         const mine = runs.find(
           (r) => r.conversation_id === activeConvId
             && r.status !== "failed" && r.status !== "cancelled",
@@ -6515,7 +6517,12 @@ export function ChatScreen() {
       }
     })()
     return () => { live = false }
-  }, [goalAnalysisOn, activeConvId, setContent])
+    // `activeTabId` is a REAL dependency, for the same reason the content
+    // reset above lists it: two tabs can share one conversation id, so without
+    // it this effect does not re-run on the switch — the reset clears the
+    // panel, the restore never fires again, and switching back does not
+    // recover it.
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
 
   // Start a Goal Analysis run and put its panel on screen.
   //
