@@ -14,11 +14,14 @@ the caller's `(company, workspace)` 404s, a same-tenant NON-member 403s — and
 BOTH checks run BEFORE any project data is read, so knowing a project id can
 never leak its memory into an answer. The gate is NOT best-effort: it raises.
 
-Breadth only THIS phase: `extra_tools` stays empty. The 6-tool depth path
-(the sixth tool-loop branch in `qa_agent.answer`) is a later phase; with no
-extra tools the breadth block reaches the composer via
-`qa_agent._fold_project_context`, which prepends the authoritative preamble
-itself — so this assembler must NOT prepend it (doing so would double it).
+Breadth AND depth: `extra_tools` carries the 6 project tools (4 shared read
+tools + `delegate_task` + `execute_task`), so the EXISTING sixth tool-loop
+branch in `qa_agent.answer` (`_try_scoped_tool_answer`, which reads
+`scope.extra_tools`) claims a project-content / delegate / execute turn. A
+plain-Q&A project ask is NOT claimed by that branch — its own intent gate
+decides — and still reaches the composer via `qa_agent._fold_project_context`,
+which prepends the authoritative preamble itself, so this assembler must NOT
+prepend it to `context_payload` (doing so would double it on the fold path).
 
 Block assembly IS best-effort (AD-P7): a read failure degrades to an empty
 block and never blocks the answer. Returns a `SurfaceScope` (the type
@@ -112,12 +115,63 @@ class ProjectContextAssembler:
         except Exception:  # noqa: BLE001 — best-effort
             system_addendum = ""
 
+        # ── Depth tools (the breadth → depth flip) ───────────────────────────
+        # Populate `extra_tools` with the 6 project tools so the EXISTING sixth
+        # ladder branch (`qa_agent._try_scoped_tool_answer`, which reads
+        # `scope.extra_tools`) claims a project-content / delegate / execute
+        # turn. Ported in shape — NOT reimplemented — from `b09801dd^:app/
+        # ask_job_runner._build_private_scope`: the 4 shared read tools +
+        # `delegate_task` + `execute_task`, with the three sidecar fields that
+        # branch's dispatch consumes: `roster` (free-text assignee → member
+        # resolution), `assigner_identity` (delegation attribution) and
+        # `post_turn` (execute-task progress posts). All best-effort (AD-P7).
+        #
+        # This does NOT route EVERY project ask through the tool loop: the sixth
+        # branch's own intent gate (`is_project_tool_request` /
+        # `is_project_content_request` / bare-send / edit) decides which turns it
+        # claims. A plain-Q&A project ask still falls through to the breadth/
+        # composer path below the branch, exactly as it did with empty tools.
+        from app import project_delegation, project_task_execution
+        from app.db import projects as projects_db
+        from app.project_group_context import read_tools
+
+        try:
+            roster = projects_db.list_members(project_id)
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            roster = []
+
+        # `post_turn` — the execute-task progress writer. RELOCATED in shape from
+        # `_build_private_scope`: the private surface's turn writer, bound to the
+        # ask's own conversation. `None` when the ask carries no conversation
+        # (nothing to post into), which degrades `execute_task` to no progress
+        # posts rather than erroring.
+        post_turn = None
+        if req.conversation_id is not None:
+            from app.db.conversations import post_individual_turn
+
+            post_turn = (
+                lambda content: post_individual_turn(
+                    req.conversation_id, "assistant", content
+                )
+            )
+
         return SurfaceScope(
             surface=surface,
             project_id=project_id,
             context_payload=block,
             system_addendum=system_addendum,
-            # Breadth only this phase: NO depth tools. Empty `extra_tools` keeps
-            # `answer()` off the sixth tool-loop branch and on the fold path.
-            extra_tools=(),
+            # The 6 project tools, stable order: delegate + execute + the 4
+            # shared read tools. Non-empty `extra_tools` is the on-switch the
+            # sixth branch gates on (along with its intent gate).
+            extra_tools=(
+                project_delegation.DELEGATE_TASK_TOOL,
+                project_task_execution.EXECUTE_TASK_TOOL,
+                *read_tools(),
+            ),
+            roster=tuple(roster),
+            assigner_identity={
+                "assigner_user_id": req.user_id,
+                "source_conversation_id": req.conversation_id,
+            },
+            post_turn=post_turn,
         )
