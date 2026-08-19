@@ -464,6 +464,15 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
                       f"no usable embedding, so they were read but never "
                       f"grouped with anything",
         })
+    unattributed = pipeline_stats.get("claims_without_artifact") or 0
+    total_claims = pipeline_stats.get("claims") or 0
+    if total_claims and unattributed == total_claims:
+        notes.append({
+            "reason": "evidence carries no source document",
+            "actual": "no signal records which document it came from, so the "
+                      "check for a finding resting on a single conversation "
+                      "could not run",
+        })
     if pipeline_stats.get("echo_check_skipped"):
         notes.append({
             "reason": "evidence is dated by ingest, not by when it happened",

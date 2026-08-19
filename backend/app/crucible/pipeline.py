@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, Optional, Sequence
 
+from app.crucible.cluster import UNGROUPABLE_PREFIX
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
@@ -162,8 +163,12 @@ def _refute(
     # non-monotonic. Distinct source artifacts is the thing the rule was always
     # reaching for, and it is monotonic: adding evidence from a NEW artifact
     # can only ever make a finding safer.
+    # `<= 1` would read "no artifact recorded at all" as "one conversation",
+    # which is the difference between a test that fires and a test that is
+    # simply always true. Unknown provenance means the rule CANNOT run, and a
+    # check that cannot run must not return a verdict.
     sources = {c.artifact_id for c in claims if c.artifact_id}
-    one_conversation = len(sources) <= 1
+    one_conversation = len(sources) == 1
     if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
         return (
             f"all {len(claims)} supporting claims come from one source "
@@ -213,6 +218,17 @@ def build_findings(
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)
+
+        if key.startswith(UNGROUPABLE_PREFIX):
+            # OUR failure, not the evidence's. Calling this an anecdote would
+            # blame a claim for a vector we could not compute.
+            rejected.append(Rejection(
+                _label(group, key),
+                "could not be grouped with anything: this signal has no usable "
+                "embedding, so whether it corroborates another claim is "
+                "unknown rather than false",
+                "clustering", ids))
+            continue
 
         if len(group) < MIN_CLAIMS_PER_FINDING:
             rejected.append(Rejection(
@@ -305,6 +321,7 @@ def build_findings(
             "findings": len(findings), "rejected": len(rejected),
             "sizeable": sum(1 for i in impacts if i.value is not None),
             "echo_check_skipped": bool(dates_are_ingest_clock),
+            "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },
     )
 

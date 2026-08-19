@@ -286,3 +286,71 @@ def test_a_group_is_named_by_its_commonest_subject_not_its_first_claim():
     out = run(claims)
     assert "billing retries" in out.findings[0].statement
     assert "c0" not in out.findings[0].statement
+
+
+# ─── The third review: fixes that stopped at their module boundary ───────────
+
+def test_ungroupable_claims_do_not_regroup_by_kind_one_call_later():
+    """THE ONE THAT MATTERED. `assign_clusters` excluded degenerate-embedding
+    claims correctly, and then `_cluster`'s fallback chain picked them straight
+    back up by `subject` — which for a real signal is its KIND. So the 400
+    claims just excluded became "finding", "sentiment", "feature_request":
+    verbatim the category error the clustering module exists to prevent, under
+    a coverage note saying they were never grouped with anything.
+    """
+    from app.crucible.cluster import UNGROUPABLE_PREFIX
+
+    claims = []
+    for i in range(6):
+        c = claim(f"c{i}", subject="finding", days_ago=i * 30,
+                  accounts=(f"A{i}",))
+        object.__setattr__(c, "subject_cluster_id", f"{UNGROUPABLE_PREFIX}c{i}")
+        claims.append(c)
+    out = run(claims)
+    assert out.findings == ()
+    assert len(out.rejected) == 6
+    assert all("no usable embedding" in r.reason for r in out.rejected)
+
+
+def test_an_ungroupable_claim_is_not_blamed_for_being_an_anecdote():
+    """"Only one supporting claim" blames the evidence for a vector we could
+    not compute. The two lead to different actions: one says the business is
+    quiet, the other says our pipeline is broken."""
+    from app.crucible.cluster import UNGROUPABLE_PREFIX
+
+    c = claim("c1")
+    object.__setattr__(c, "subject_cluster_id", f"{UNGROUPABLE_PREFIX}c1")
+    out = run([c])
+    assert "anecdote" not in out.rejected[0].reason
+    assert "unknown rather than false" in out.rejected[0].reason
+
+
+def test_evidence_with_no_recorded_source_document_cannot_be_called_an_echo():
+    """`len(sources) <= 1` read "no artifact recorded" as "one conversation",
+    so the rule returned a verdict on a column that was empty on every row —
+    and the ledger asserted a provenance the system did not have."""
+    claims = [claim(f"c{i}", days_ago=1, accounts=(f"A{i}",)) for i in range(4)]
+    for c in claims:
+        object.__setattr__(c, "artifact_id", "")
+    out = run(claims)
+    assert len(out.findings) == 1
+    assert out.stats["claims_without_artifact"] == 4
+
+
+def test_evidence_from_two_documents_is_not_one_conversation():
+    """Two accounts, two connectors, three days apart is not an echo however
+    tight the window."""
+    claims = [claim(f"c{i}", days_ago=i + 1, accounts=(f"A{i}",)) for i in range(2)]
+    object.__setattr__(claims[0], "artifact_id", "slack/#demos")
+    object.__setattr__(claims[1], "artifact_id", "fireflies-batch-3")
+    assert len(run(claims).findings) == 1
+
+
+def test_evidence_from_one_document_in_one_window_still_is():
+    """The control: the rule must still fire on the shape it exists for."""
+    claims = [claim(f"c{i}", days_ago=i + 1, accounts=(f"A{i}",)) for i in range(4)]
+    for c in claims:
+        object.__setattr__(c, "artifact_id", "slack/#demos")
+    out = run(claims)
+    assert out.findings == ()
+    assert "one source document" in out.rejected[0].reason

@@ -93,7 +93,12 @@ AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
     "analytics":        frozenset({"magnitude", "direction"}),
     "revenue":          frozenset({"magnitude", "direction"}),
     "outcome_measured": frozenset({"magnitude", "direction", "mechanism"}),
-    "pm_manual":        frozenset({"constraint"}),
+    # A PM stating the company's own business context is authoritative about
+    # what the company is constrained by AND about what it wants — but not
+    # about mechanism or magnitude out in the world. `good_outcome` projects as
+    # `preference`, so without it here the company's own stated definition of
+    # success was refuted as "outside its source's authority".
+    "pm_manual":        frozenset({"constraint", "preference"}),
     # Neither is evidence about anything: a verbal claim is unverified
     # self-report, and an agent inference is our own guess read back to us.
     "verbal_claim":     frozenset(),
@@ -211,6 +216,35 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+def _artifact_id(signal: Mapping) -> str:
+    """Which source DOCUMENT this signal came out of.
+
+    `source_id` is the obvious column and it is NULL on every row — nothing in
+    `app/` ever sets `Signal.source_id`. Document identity actually lives in
+    `provenance["doc"]` (`"slack/#mvp-product (part 2/3)"`, a Fireflies sync
+    batch, a Drive file), which is populated on every real signal: measured 71
+    distinct docs across a 2,777-signal tenant, so it genuinely discriminates.
+
+    This matters because the refutation step asks "did all this evidence come
+    from ONE conversation" — read off a column that is always empty, that test
+    answers "yes" every time and the ledger asserts a provenance the system
+    does not have.
+    """
+    provenance = signal.get("provenance")
+    if isinstance(provenance, str):
+        import json
+
+        try:
+            provenance = json.loads(provenance)
+        except Exception:  # noqa: BLE001 — unreadable provenance is no doc
+            provenance = None
+    if isinstance(provenance, Mapping):
+        doc = provenance.get("doc")
+        if doc:
+            return str(doc)
+    return str(signal.get("source_id") or "")
+
+
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
@@ -249,7 +283,7 @@ def project_signal(
         type=claim_type,
         subject=str(props.get("subject") or kind or ""),
         source_id=source_type,
-        artifact_id=str(signal.get("source_id") or ""),
+        artifact_id=_artifact_id(signal),
         artifact_type=kind,
         strength=strength,
         observed_at=observed_at,

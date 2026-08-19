@@ -312,3 +312,49 @@ def test_the_extraction_kinds_seen_in_production_are_mapped():
         "incident", "deal_blocker", "competitor_move", "sentiment",
     }
     assert not (observed - set(KIND_TO_CLAIM_TYPE))
+
+
+def test_the_source_document_comes_from_provenance_not_source_id():
+    """`source_id` is the obvious column and it is NULL on every real row —
+    nothing in `app/` sets `Signal.source_id`. Document identity lives in
+    `provenance["doc"]`: measured 71 distinct docs across a 2,777-signal
+    tenant, so it genuinely discriminates. Read off the empty column, the
+    refutation step answered "all this came from one conversation" every time
+    and the ledger asserted a provenance the system did not have."""
+    claims, _ = project_signals([
+        sig(id="c1", provenance={"doc": "slack/#demos (part 2/2)"}),
+    ])
+    assert claims[0].artifact_id == "slack/#demos (part 2/2)"
+
+
+def test_provenance_arriving_as_a_json_string_is_still_read():
+    claims, _ = project_signals([
+        sig(id="c1", provenance='{"doc": "fireflies-sync-batch-9"}'),
+    ])
+    assert claims[0].artifact_id == "fireflies-sync-batch-9"
+
+
+def test_a_signal_with_no_document_at_all_has_no_artifact_rather_than_a_fake_one():
+    """Empty means "we do not know", which the pipeline must be able to tell
+    apart from "one document" — the difference between declining to judge and
+    asserting an echo."""
+    claims, _ = project_signals([sig(id="c1", provenance=None, source_id=None)])
+    assert claims[0].artifact_id == ""
+
+
+def test_source_id_is_still_honoured_when_something_finally_sets_it():
+    """The fallback is not dead code: nothing writes `source_id` today, and
+    the day something does it should win over nothing."""
+    claims, _ = project_signals([sig(id="c1", provenance=None, source_id="doc-77")])
+    assert claims[0].artifact_id == "doc-77"
+
+
+def test_a_companys_own_good_outcome_is_authoritative_about_what_it_wants():
+    """`good_outcome` projects as `preference`, and `pm_manual` was
+    authoritative only over `constraint` — so the company's own stated
+    definition of success was refuted as "outside its source's authority"."""
+    claims, _ = project_signals([
+        sig(id="c1", kind="good_outcome", source_type="pm_manual"),
+    ])
+    assert claims[0].type == "preference"
+    assert claims[0].authoritative is True

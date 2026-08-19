@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 #: shape of a book of business, rather than of a taxonomy.
 DEFAULT_THRESHOLD = 0.84
 
+#: Marks a claim we could not group at all (no usable embedding). The pipeline
+#: reads it to reject with the accurate reason rather than calling it an
+#: anecdote, which would blame the evidence for our own missing vector.
+UNGROUPABLE_PREFIX = "ungroupable:"
+
 #: A label is a topic, not an assertion. Anything from here on is the source's
 #: own reasoning, and carrying it into a finding's statement would put a causal
 #: claim in our mouth that the evidence does not support (I5).
@@ -107,12 +112,12 @@ def assign_clusters(
         # square off rather than silently padding. Grouping on a matrix we
         # cannot form would be arbitrary, so decline and say so.
         logger.error("crucible: embeddings are ragged; skipping clustering")
-        return list(claims), {"embedded": 0, "degenerate": len(indexed),
-                              "clusters": 0}
+        return _mark_ungroupable(claims, indexed), {
+            "embedded": 0, "degenerate": len(indexed), "clusters": 0}
     if matrix.ndim != 2:
         logger.error("crucible: embeddings are not a matrix; skipping")
-        return list(claims), {"embedded": 0, "degenerate": len(indexed),
-                              "clusters": 0}
+        return _mark_ungroupable(claims, indexed), {
+            "embedded": 0, "degenerate": len(indexed), "clusters": 0}
 
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     # DEGENERATE VECTORS ARE EXCLUDED, NOT NORMALISED TO SOMETHING.
@@ -132,8 +137,13 @@ def assign_clusters(
             "claims are left ungrouped", degenerate, matrix.shape[0],
         )
     if not usable.any():
-        return list(claims), {"embedded": 0, "degenerate": degenerate,
-                              "clusters": 0}
+        # THE MISSING-API-KEY CASE, and the one that must not take the lazy
+        # exit. Returning the claims untouched leaves every id unset, which is
+        # precisely how they get re-grouped by kind downstream — so mark them
+        # here too rather than only on the partial path.
+        return _mark_ungroupable(claims, indexed), {
+            "embedded": 0, "degenerate": degenerate, "clusters": 0,
+        }
 
     safe_norms = np.where(norms == 0, 1.0, norms)
     matrix = matrix / safe_norms
@@ -192,6 +202,22 @@ def assign_clusters(
     for position, claim_index in enumerate(indexed):
         cluster = assignment[position]
         if cluster < 0:
+            # UNGROUPABLE IS NOT UNGROUPED. Leaving `subject_cluster_id` unset
+            # sent the claim back to `_cluster`'s fallback chain, whose next
+            # rung is `subject` — which for a real signal is its KIND. So the
+            # 400 claims we had just excluded for having no usable embedding
+            # were promptly re-grouped into "finding", "sentiment",
+            # "feature_request": verbatim the category error this module
+            # exists to prevent, now wearing a coverage note that said those
+            # signals "were never grouped with anything".
+            #
+            # A unique id per claim makes it its own group, so it can be
+            # reported as unusable instead of silently corroborating a
+            # taxonomy bucket.
+            out[claim_index] = replace(
+                out[claim_index],
+                subject_cluster_id=f"{UNGROUPABLE_PREFIX}{out[claim_index].id}",
+            )
             continue
         out[claim_index] = replace(
             out[claim_index],
@@ -200,6 +226,14 @@ def assign_clusters(
         )
     return out, {"embedded": int(usable.sum()), "degenerate": degenerate,
                  "clusters": len(leaders)}
+
+
+def _mark_ungroupable(claims: Sequence[Claim], indexed: Sequence[int]) -> list[Claim]:
+    """Give each named claim its own cluster id so nothing pools them."""
+    out = list(claims)
+    for i in indexed:
+        out[i] = replace(out[i], subject_cluster_id=f"{UNGROUPABLE_PREFIX}{out[i].id}")
+    return out
 
 
 def parse_embedding(raw):
@@ -223,7 +257,10 @@ def parse_embedding(raw):
             parsed = json.loads(raw)
         except Exception:  # noqa: BLE001 — a malformed vector is a missing one
             return None
-    if not isinstance(parsed, (list, tuple)):
+    if not isinstance(parsed, (list, tuple)) or not parsed:
+        # An EMPTY list is a missing vector, not a zero-length one. Left in, it
+        # makes the whole matrix ragged and disables clustering for the entire
+        # tenant on the strength of one bad row.
         return None
     # float32 immediately. A list of 1536 Python floats is ~8x the memory of
     # the same numbers packed, and on a large tenant that difference is the

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from app.crucible.cluster import (
     DEFAULT_THRESHOLD,
+    UNGROUPABLE_PREFIX,
     assign_clusters,
     label_for,
     parse_embedding,
@@ -90,7 +91,9 @@ def test_a_zero_vector_does_not_poison_the_run():
     # Excluded, not normalised to something arbitrary — and COUNTED, so the
     # caller can say so rather than reporting a business with no patterns.
     assert stats["degenerate"] == 1
-    assert out[0].subject_cluster_id is None
+    # Marked UNGROUPABLE, not left unset: an unset id falls through to
+    # `_cluster`'s next rung, which is the claim's kind.
+    assert out[0].subject_cluster_id.startswith(UNGROUPABLE_PREFIX)
 
 
 def test_no_embeddings_at_all_is_a_no_op_rather_than_a_crash():
@@ -169,7 +172,7 @@ def test_a_corpus_of_zero_vectors_is_reported_not_silently_ungrouped():
     out, stats = assign_clusters(claims, {str(i): vec(0.0, 0.0) for i in range(6)})
     assert stats["degenerate"] == 6
     assert stats["embedded"] == 0
-    assert all(c.subject_cluster_id is None for c in out)
+    assert all(c.subject_cluster_id.startswith(UNGROUPABLE_PREFIX) for c in out)
 
 
 def test_a_non_finite_vector_is_treated_as_missing():
@@ -179,14 +182,25 @@ def test_a_non_finite_vector_is_treated_as_missing():
     out, stats = assign_clusters(
         claims, {"a": [float("nan"), 1.0], "b": vec(1.0, 0.0)})
     assert stats["degenerate"] == 1
-    assert out[0].subject_cluster_id is None
+    # Marked UNGROUPABLE, not left unset: an unset id falls through to
+    # `_cluster`'s next rung, which is the claim's kind.
+    assert out[0].subject_cluster_id.startswith(UNGROUPABLE_PREFIX)
 
 
 def test_ragged_vectors_decline_rather_than_guess():
     claims = [claim("a", "one"), claim("b", "two")]
     out, stats = assign_clusters(claims, {"a": [1.0, 0.0], "b": [1.0, 0.0, 0.0]})
     assert stats["clusters"] == 0
-    assert out == claims
+    # Declining still has to MARK them — an untouched claim falls through to
+    # grouping by kind, which is the failure this whole path exists to avoid.
+    assert all(c.subject_cluster_id.startswith(UNGROUPABLE_PREFIX) for c in out)
+
+
+def test_an_empty_vector_is_missing_rather_than_ragged():
+    """`parse_embedding("[]")` used to yield a zero-length array, making the
+    whole matrix ragged — so one bad row disabled clustering for an entire
+    tenant."""
+    assert parse_embedding("[]") is None
 
 
 # ─── The label is the medoid, not whoever sorted first ───────────────────────
