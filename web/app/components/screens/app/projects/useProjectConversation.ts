@@ -37,12 +37,15 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  slackShareApi, ticketDataApi,
+  ticketDataApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
-  type ChatArtifactItem, type SlackShareTarget, type SlackShareTargetRef,
+  type ChatArtifactItem, type SlackShareTargetRef,
 } from "../../../../lib/api"
-import { slackShareQuestionFor } from "../../../../lib/chat/slackShareQuestion"
 import { type PopupAnswer } from "../../../shared/QuestionPopup"
+import {
+  useSlackShareCardHandlers,
+  type PendingShareState,
+} from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
@@ -904,45 +907,29 @@ export function useProjectConversation(
       : tn)))
   }, [])
 
-  // The one place anything is actually posted to Slack (card's Send button).
-  const sendSlackShare = useCallback(async (turnId: string, channelId: string, note: string) => {
-    const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved || share.busy) return
-    const channelName =
-      share.preview.channel?.name
-      ?? (share.preview.channels ?? []).find((c) => c.id === channelId)?.name
-      ?? "the channel"
-    patchSlackShare(turnId, { busy: true })
-    try {
-      await slackShareApi.send(share.ref, channelId, note)
-      patchSlackShare(turnId, { busy: false, resolved: { outcome: "sent", channelName } })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Slack rejected the message"
-      patchSlackShare(turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
-    }
-  }, [patchSlackShare])
-
-  // The user picked which document from an ambiguous match — re-preview on that
-  // one, keeping the channel/note they already had.
-  const repreviewSlackShare = useCallback(async (turnId: string, target: SlackShareTarget) => {
-    const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved) return
-    const ref: SlackShareTargetRef =
-      target.type === "prd" ? { prd_id: target.id }
-      : target.type === "report" ? { report_id: target.id }
-      : target.type === "ticket_set" ? { ticket_set_id: target.id }
-      : { custom_artifact_id: target.id }
-    patchSlackShare(turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(ref, {
-        channel: share.preview.channel?.name ?? share.preview.channel_query ?? null,
-      })
-      patchSlackShare(turnId, { busy: false, ref, preview })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
-    }
-  }, [patchSlackShare])
+  // The post-preview card handlers (send / re-preview / dock question settle)
+  // come from the shared `useSlackShareCardHandlers` — main's ChatScreen calls
+  // the SAME unit. This surface injects seams over its ONE conversation:
+  // `patchTurn`/`getShare` reach the turn's card via `patchSlackShare`/
+  // `threadRef`, and `getPendingShare`/`setPendingShare` its single
+  // `pendingShare` state. `slackShareApi.send`/`.preview` ordering + the
+  // re-preview-on-answer logic live in the shared unit.
+  const slackGetShare = useCallback(
+    (turnId: string) => threadRef.current.find((tn) => tn.id === turnId)?.slackShare,
+    [],
+  )
+  const slackGetPendingShare = useCallback(() => pendingShareRef.current, [])
+  const slackSetPendingShare = useCallback(
+    (ps: PendingShareState | undefined) => setPendingShare(ps),
+    [],
+  )
+  const { sendSlackShare, repreviewSlackShare, completeShareQuestion, cancelShareQuestion } =
+    useSlackShareCardHandlers({
+      patchTurn: patchSlackShare,
+      getShare: slackGetShare,
+      getPendingShare: slackGetPendingShare,
+      setPendingShare: slackSetPendingShare,
+    })
 
   // Card's × / decline — nothing posted; record it so the thread doesn't leave
   // "here's what I'll post" as the last word on a message that never went out.
@@ -950,46 +937,6 @@ export function useProjectConversation(
     const share = threadRef.current.find((tn) => tn.id === turnId)?.slackShare
     if (!share || share.resolved) return
     patchSlackShare(turnId, { resolved: { outcome: "cancelled" } })
-  }, [patchSlackShare])
-
-  // The dock channel/target question settled — re-preview on the answer (a round
-  // trip, both kinds: only the server knows whether the chosen channel is one
-  // Sprntly can post to). Mirrors main's `completeShareQuestion`.
-  const completeShareQuestion = useCallback(async (_tabId: string, answers: PopupAnswer[]) => {
-    const ps = pendingShareRef.current
-    if (!ps) return
-    setPendingShare(undefined)
-    const share = threadRef.current.find((tn) => tn.id === ps.turnId)?.slackShare
-    if (!share || share.resolved) return
-    const picked = answers.find((a) => !a.skipped)
-    if (!picked) { patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } }); return }
-    const answer = (picked.value ?? picked.answer ?? "").trim()
-    if (!answer) { patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } }); return }
-    if (ps.kind === "target") {
-      const target = (share.preview.candidates ?? []).find((c) => `${c.type}-${c.id}` === answer)
-      if (!target) return
-      await repreviewSlackShare(ps.turnId, target)
-      return
-    }
-    patchSlackShare(ps.turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(share.ref, { channel: answer.replace(/^#/, "") })
-      patchSlackShare(ps.turnId, { busy: false, preview })
-      // A typed channel that still doesn't resolve asks again rather than
-      // silently dropping the share.
-      const next = slackShareQuestionFor(preview)
-      if (next) setPendingShare({ turnId: ps.turnId, ...next })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(ps.turnId, { busy: false, resolved: { outcome: "failed", error: msg } })
-    }
-  }, [patchSlackShare, repreviewSlackShare])
-
-  // Dock question dismissed → settle the share as NOT sent (main parity).
-  const cancelShareQuestion = useCallback((_tabId: string) => {
-    const ps = pendingShareRef.current
-    setPendingShare(undefined)
-    if (ps) patchSlackShare(ps.turnId, { resolved: { outcome: "cancelled" } })
   }, [patchSlackShare])
 
   // ── Assign: apply the dock popup's ambiguous picks (main-parity) ───────────

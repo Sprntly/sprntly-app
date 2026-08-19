@@ -14,7 +14,6 @@ import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExe
 import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
 import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
-import { slackShareQuestionFor } from "../../../lib/chat/slackShareQuestion"
 import {
   providerNoticeFromEnvelope,
   providerNoticeTitle,
@@ -33,6 +32,10 @@ import {
 } from "../../shared/ClarifyQuestionsCard"
 import { type PopupAnswer } from "../../shared/QuestionPopup"
 import {
+  useSlackShareCardHandlers,
+  type PendingShareState,
+} from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
+import {
   SlackShareMessage,
   type SlackShareResolution,
 } from "../../shared/SlackSharePreviewCard"
@@ -46,7 +49,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 import {
   type ChatIntentEnvelope,
-  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, slackShareApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTarget, type SlackShareTargetRef, type TicketAssignQuestion,
+  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -2999,133 +3002,38 @@ export function ChatScreen() {
   // (The share-to-Slack PREVIEW flow moved into the shared action layer —
   // `runShareToSlackAction`, config'd by `onShareToSlack` with main's tab/report
   // share-ref + the dock channel picker. The interactive card handlers below —
-  // send / re-preview / question — stay here until main adopts the engine.)
-
-  const sendSlackShare = useCallback(async (
-    tabId: string, turnId: string, channelId: string, note: string,
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved || share.busy) return
-    const channelName =
-      share.preview.channel?.name
-      ?? (share.preview.channels ?? []).find((c) => c.id === channelId)?.name
-      ?? "the channel"
-    patchSlackShare(tabId, turnId, { busy: true })
-    try {
-      await slackShareApi.send(share.ref, channelId, note)
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "sent", channelName },
-      })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Slack rejected the message"
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare])
-
-  /** The user picked which document from an ambiguous match — re-preview on
-   *  that one, keeping the channel and note they already had. */
-  const repreviewSlackShare = useCallback(async (
-    tabId: string, turnId: string, target: SlackShareTarget,
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const share = tab?.thread.find((tn) => tn.id === turnId)?.slackShare
-    if (!share || share.resolved) return
-    const ref: SlackShareTargetRef =
-      target.type === "prd" ? { prd_id: target.id }
-      : target.type === "report" ? { report_id: target.id }
-      : target.type === "ticket_set" ? { ticket_set_id: target.id }
-      : { custom_artifact_id: target.id }
-    patchSlackShare(tabId, turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(ref, {
-        channel: share.preview.channel?.name ?? share.preview.channel_query ?? null,
-      })
-      patchSlackShare(tabId, turnId, { busy: false, ref, preview })
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(tabId, turnId, {
-        busy: false,
-        resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare])
-
-  /** The share question settled — re-preview on the answer.
-   *
-   *  A re-preview rather than a local patch, and for both kinds: the server is
-   *  what knows whether the chosen channel is one Sprntly can post to, and
-   *  patching `status: "ready"` client-side would offer a Send for a private
-   *  channel the bot cannot join. One round trip buys the same guarantees the
-   *  first preview gave. */
-  const completeShareQuestion = useCallback(async (
-    tabId: string, answers: PopupAnswer[],
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const ps = tab?.pendingShare
-    if (!ps) return
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
-    const share = tabsRef.current
-      .find((t) => t.id === tabId)?.thread.find((tn) => tn.id === ps.turnId)?.slackShare
-    if (!share || share.resolved) return
-
-    const picked = answers.find((a) => !a.skipped)
-    if (!picked) {
-      // Skipped or dismissed — nothing was posted, and the card says exactly
-      // that rather than leaving an unanswered question in the thread.
-      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-      return
-    }
-    // A typed answer has no `value`; take the text (minus any leading '#') as
-    // the channel name, which the server matches exactly like a picked one.
-    const answer = (picked.value ?? picked.answer ?? "").trim()
-    if (!answer) {
-      patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-      return
-    }
-
-    if (ps.kind === "target") {
-      const target = (share.preview.candidates ?? [])
-        .find((c) => `${c.type}-${c.id}` === answer)
-      if (!target) return
-      await repreviewSlackShare(tabId, ps.turnId, target)
-      return
-    }
-
-    patchSlackShare(tabId, ps.turnId, { busy: true })
-    try {
-      const preview = await slackShareApi.preview(share.ref, {
-        channel: answer.replace(/^#/, ""),
-      })
-      patchSlackShare(tabId, ps.turnId, { busy: false, preview })
-      // A typed channel that still doesn't resolve asks again rather than
-      // silently dropping the share.
-      const next = slackShareQuestionFor(preview)
-      if (next) {
-        setTabs((prev) => prev.map((t) => t.id === tabId
-          ? { ...t, pendingShare: { turnId: ps.turnId, ...next } }
-          : t))
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "something went wrong"
-      patchSlackShare(tabId, ps.turnId, {
-        busy: false, resolved: { outcome: "failed", error: msg },
-      })
-    }
-  }, [patchSlackShare, repreviewSlackShare])
-
-  /** Dismissing the question settles the share as NOT SENT. Deliberate: an
-   *  abandoned question would otherwise leave a thread whose last word is
-   *  "here's what I'll post" about a message that never went anywhere. */
-  const cancelShareQuestion = useCallback((tabId: string) => {
-    const ps = tabsRef.current.find((t) => t.id === tabId)?.pendingShare
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingShare: undefined } : t))
-    if (ps) patchSlackShare(tabId, ps.turnId, { resolved: { outcome: "cancelled" } })
-  }, [patchSlackShare])
+  // send / re-preview / question — come from the shared
+  // `useSlackShareCardHandlers`; main injects seams bound to the ACTIVE tab, the
+  // only tab a share card is ever visible on: `patchTurn`/`getShare` reach the
+  // active tab's turn, `getPendingShare`/`setPendingShare` its dock question.)
+  const slackPatchTurn = useCallback(
+    (turnId: string, patch: Partial<NonNullable<ThreadTurn["slackShare"]>>) =>
+      patchSlackShare(activeTabIdRef.current ?? "", turnId, patch),
+    [patchSlackShare],
+  )
+  const slackGetShare = useCallback(
+    (turnId: string) =>
+      tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+        ?.thread.find((tn) => tn.id === turnId)?.slackShare,
+    [],
+  )
+  const slackGetPendingShare = useCallback(
+    () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.pendingShare,
+    [],
+  )
+  const slackSetPendingShare = useCallback(
+    (ps: PendingShareState | undefined) =>
+      setTabs((prev) => prev.map((t) =>
+        t.id === activeTabIdRef.current ? { ...t, pendingShare: ps } : t)),
+    [],
+  )
+  const { sendSlackShare, repreviewSlackShare, completeShareQuestion, cancelShareQuestion } =
+    useSlackShareCardHandlers({
+      patchTurn: slackPatchTurn,
+      getShare: slackGetShare,
+      getPendingShare: slackGetPendingShare,
+      setPendingShare: slackSetPendingShare,
+    })
 
   /** The one place anything is actually posted to Slack. */
   /** The assign batch's ONE landing: the popup collected every pick (owner
@@ -6033,13 +5941,13 @@ export function ChatScreen() {
               // the only one of these that reaches Slack, and only after the
               // user presses the button in the card.
               onSendSlackShare: (turnId, channelId, note) =>
-                void sendSlackShare(activeTab!.id, turnId, channelId, note),
+                void sendSlackShare(turnId, channelId, note),
               onCancelSlackShare: (turnId) =>
                 patchSlackShare(activeTab!.id, turnId, {
                   resolved: { outcome: "cancelled" },
                 }),
               onPickSlackShareTarget: (turnId, target) =>
-                void repreviewSlackShare(activeTab!.id, turnId, target),
+                void repreviewSlackShare(turnId, target),
             }
             // The main-chat active-conversation render, lifted verbatim into the
             // shared ConversationView (still driven by this screen's inline
