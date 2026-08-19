@@ -151,9 +151,15 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     return {
       turnId: turn.id,
       // Only when the user actually said something. A turn can be AGENT-ONLY.
+      // A turn that CARRIES an `author` is a project-group PEER's message: its
+      // head shows the peer's own name/initials/tint (precomputed by the group
+      // adapter), not the current viewer's. Absent (main, private, and the
+      // viewer's OWN group turns) → the viewer's name/initials, exactly as
+      // before. Data-driven: no author ⇒ byte-identical to the pre-change map.
       user: {
-        name,
-        initials: userInitials,
+        name: turn.author ? turn.author.name : name,
+        initials: turn.author ? (turn.author.initials ?? turn.author.name.slice(0, 2).toUpperCase()) : userInitials,
+        ...(turn.author?.avatarStyle ? { avatarStyle: turn.author.avatarStyle } : {}),
         query: turn.query,
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
@@ -162,6 +168,18 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         onOpenAttachment: (a) =>
           setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime }),
       },
+      // Multi-party attribution (project-group peers only): a peer turn renders
+      // start-aligned with a `${name} (${role})` head + tinted avatar, via
+      // ChatBubble's EXISTING multi-party arm, and with NO agent block — the
+      // peer's message is its own bubble; Sprntly's reply (if any) is a separate
+      // author-less turn. Unset for every single-author turn, so main/private
+      // and the viewer's own turns keep the default right-aligned rendering.
+      ...(turn.author ? {
+        speaker: turn.author.name,
+        role: turn.author.role ?? null,
+        humanAlign: "start" as const,
+        showAgent: false,
+      } : {}),
       agentName: AGENT_NAME,
       agentBadge: "Product Coworker",
       isLast,
