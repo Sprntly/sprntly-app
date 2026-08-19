@@ -191,243 +191,20 @@ def test_private_edit_matches_main_sections_changed_and_prd(
     assert project_body["prd"]["payload_md"] == main_body["prd"]["payload_md"]
 
 
-# ── AC3 — classify keeps edit_prd alive when a target is bound ──────────────
-def test_classify_keeps_edit_intent_when_target_bound(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_id)
-
-    def _fake_classify(company_id, message, history, *, prd_id=None, **kw):
-        # Mirrors the REAL `_NEEDS_PRD` downgrade (chat_intent.py): the
-        # verdict survives whenever a target resolved, downgrades otherwise.
-        if prd_id:
-            return {
-                "intent": "edit_prd", "confidence": 0.9, "instruction": message,
-                "task": None, "artifact_type": None, "artifact_query": None,
-                "reason": "r", "source": "llm",
-            }
-        return {
-            "intent": "answer", "confidence": 0.9, "instruction": None,
-            "task": None, "artifact_type": None, "artifact_query": None,
-            "reason": "r", "source": "no_target_prd",
-        }
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_classify)
-
-    ctx = SimpleNamespace(company_id=t.company_id)
-    envelope, resolved_prd_id, refusal = projects_route.resolve_project_chat_intent(
-        project_id, "make it shorter", [], "acme", ctx, prd_id,
-    )
-    assert envelope["intent"] == "edit_prd"
-    assert resolved_prd_id == prd_id
-    assert refusal is None
-
-
-# ── AC4 — group edit_prd applies in ONE turn, no pending mutation ───────────
-def test_group_edit_applies_in_one_turn_without_confirm(
-    tenant_client, isolated_settings, monkeypatch
-):
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_id)
-    before_versions = len(_versions(prd_id))
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    _mock_editor(monkeypatch)
-    _mock_edit_prd_tool_call(monkeypatch)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={
-            "content": "@Sprntly tighten the requirements section of the PRD",
-            "prd_id": prd_id,
-        },
-    )
-    assert resp.status_code == 200, resp.text
-
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_group_chat(project_id)
-    assistant = [
-        tn for tn in conversations_db.list_group_turns(conv["id"]) if tn["role"] == "assistant"
-    ]
-    assert assistant
-    last = assistant[-1]
-    assert last["content"].startswith("Done — I've updated the PRD.")
-    assert "pending_mutation" not in (last.get("reply") or {})
-
-    # The PRD changed within THIS one turn — no second confirm call (the
-    # confirm route no longer exists).
-    assert "Doc v2" in _payload(prd_id)
-    assert len(_versions(prd_id)) == before_versions + 1
-
-
-# ── Observability — every `edit_prd` dispatch is logged, invoked + outcome ──
-# The incident this ticket fixes had ZERO tool-call logging: there was no way
-# to tell from logs alone whether a failing turn never reached the handler at
-# all (model skipped the tool) or reached it and got a refusal/no-op the
-# model's own final text then silently overrode. These pin that the handler
-# now logs on every path.
-def test_group_edit_prd_tool_call_logs_invocation_and_applied_outcome(
-    tenant_client, isolated_settings, monkeypatch, caplog
-):
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_id)
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    _mock_editor(monkeypatch)
-    _mock_edit_prd_tool_call(monkeypatch)
-
-    with caplog.at_level("INFO", logger="app.routes.projects"):
-        resp = t.client.post(
-            f"/v1/projects/{project_id}/group/turns",
-            json={"content": "@Sprntly tighten the requirements section", "prd_id": prd_id},
-        )
-    assert resp.status_code == 200, resp.text
-
-    called = [r.message for r in caplog.records if "group_edit_prd_tool_called" in r.message]
-    outcomes = [r.message for r in caplog.records if "group_edit_prd_tool_outcome" in r.message]
-    assert called, "edit_prd invocation must be logged"
-    assert f"edit_target_prd_id={prd_id}" in called[0]
-    assert outcomes, "edit_prd outcome must be logged"
-    assert "outcome=applied" in outcomes[0]
-    assert f"edit_target_prd_id={prd_id}" in outcomes[0]
-
-
-def test_group_edit_prd_tool_call_logs_no_prd_open_outcome(
-    tenant_client, isolated_settings, monkeypatch, caplog
-):
-    # No `prd_id` on the POST — the handler's `edit_target_prd_id` closure
-    # resolves to None, so the outcome must log the no-PRD-open refusal, not
-    # a silent pass-through.
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    _mock_edit_prd_tool_call(monkeypatch)
-
-    with caplog.at_level("INFO", logger="app.routes.projects"):
-        resp = t.client.post(
-            f"/v1/projects/{project_id}/group/turns",
-            json={"content": "@Sprntly tighten the requirements section"},
-        )
-    assert resp.status_code == 200, resp.text
-
-    outcomes = [r.message for r in caplog.records if "group_edit_prd_tool_outcome" in r.message]
-    assert outcomes
-    assert "outcome=no_prd_open" in outcomes[0]
-
-
-# ── AC2/AC4 — group applied result matches main's for the same input ────────
-def test_group_edit_matches_main_result_shape(
-    tenant_client, isolated_settings, monkeypatch
-):
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    project_prd = _seed_prd(isolated_settings["db"], dataset="acme")
-    standalone_prd = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", project_prd)
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    _mock_editor(monkeypatch, html="<html><body><h1>Group parity v2</h1></body></html>",
-                 sections_changed=("Scope",), summary="Tightened scope.")
-    _mock_edit_prd_tool_call(monkeypatch, instruction="tighten the scope")
-
-    group_resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly tighten the requirements section of the PRD", "prd_id": project_prd},
-    )
-    assert group_resp.status_code == 200, group_resp.text
-
-    main_resp = t.client.post(
-        f"/v1/prd/{standalone_prd}/chat-edit",
-        json={"instruction": "tighten the scope"},
-    )
-    assert main_resp.status_code == 200, main_resp.text
-
-    assert _payload(project_prd) == main_resp.json()["prd"]["payload_md"]
-
-
-def _fake_no_target_downgrade(*a, **kw):
-    # Mirrors the REAL `_NEEDS_PRD` downgrade (chat_intent.py) for
-    # `prd_id=None`: an edit-phrased verdict comes back rewritten to
-    # `answer`, `source="no_target_prd"`.
-    return {
-        "intent": "answer", "confidence": 0.9, "instruction": None, "task": None,
-        "artifact_type": None, "artifact_query": None, "reason": "r",
-        "source": "no_target_prd",
-    }
-
-
-# ── AC7 — no PRD open on a 2-PRD project: simple clarify, never enumerated ──
-def test_classify_no_drawer_returns_simple_open_a_prd_clarify(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_a = _seed_prd(isolated_settings["db"], dataset="acme")
-    prd_b = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_a)
-    projects_db.add_artifact(project_id, "prd", prd_b)
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_no_target_downgrade)
-
-    ctx = SimpleNamespace(company_id=t.company_id)
-    envelope, resolved_prd_id, refusal = projects_route.resolve_project_chat_intent(
-        project_id, "make it shorter", [], "acme", ctx, None,
-    )
-    assert envelope["intent"] == "clarify"
-    assert envelope["clarification"] == "Open a PRD beside this chat and I'll edit it."
-    assert "prd_options" not in envelope
-    assert resolved_prd_id is None
-    assert refusal is None
-
-
-# ── AC7 — no PRD open on a SINGLE-PRD project: same simple clarify, no ──────
-# auto-select — proving the design does not infer a target even when exactly
-# one PRD exists.
-def test_classify_no_drawer_single_prd_still_clarifies_not_autoselects(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_id)
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", _fake_no_target_downgrade)
-
-    ctx = SimpleNamespace(company_id=t.company_id)
-    envelope, resolved_prd_id, refusal = projects_route.resolve_project_chat_intent(
-        project_id, "make it shorter", [], "acme", ctx, None,
-    )
-    assert envelope["intent"] == "clarify"
-    assert envelope["clarification"] == "Open a PRD beside this chat and I'll edit it."
-    assert "prd_options" not in envelope
-    assert resolved_prd_id is None
-    assert refusal is None
-
+# ── AC3/AC4/AC7 (classify + in-band group edit) — RETIRED ──────────────────
+# The GROUP in-band `edit_prd` tool was REMOVED with the answer-path collapse
+# (`SurfaceScope.edit_prd_handler` is unset on every surface now), and the
+# `resolve_project_chat_intent` classify helper was deleted with the per-project
+# `/chat/intent` route. So the AC3 target-bound-classify test, the four AC4
+# in-band group-edit tests, and the two AC7 no-drawer classify tests were all
+# bound to removed seams. The invariants they guarded survive with live homes:
+#   * PRD-edit NO-FABRICATION ("only claim an edit after a real prd_versions
+#     write") — the PRIVATE direct-edit route below
+#     (`test_private_edit_applies_when_two_prds_and_target_bound`: edited=True
+#     only with `len(_versions)==1`) + `test_delegation_truthfulness.py`;
+#   * the "Open a PRD beside this chat and I'll edit it." clarify + zero-write
+#     on a missing target — `test_write_route_no_prd_id_returns_open_a_prd_and_no_write`
+#     below (the write route returns the identical clarify with no write).
 
 # ── AC7 — the write route with no prd_id: same clarify, zero write ─────────
 def test_write_route_no_prd_id_returns_open_a_prd_and_no_write(
@@ -539,50 +316,12 @@ def test_cross_tenant_prd_edit_soft_404_no_write(
     assert _versions(foreign_prd_id) == []
 
 
-# ── AC8 — flag off: both surfaces no-op, zero writes ─────────────────────────
-def test_flag_off_both_surfaces_no_write(tenant_client, isolated_settings, monkeypatch):
-    monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t, isolated_settings)
-    from app.db import projects as projects_db
-
-    prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
-    projects_db.add_artifact(project_id, "prd", prd_id)
-    before = _payload(prd_id)
-
-    editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
-
-    # Private surface.
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/prd/chat-edit",
-        json={"instruction": "tighten requirements", "prd_id": prd_id},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["edited"] is False
-    assert "isn't turned on" in body["answer"]
-    assert editor_called == []
-
-    # Group surface.
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    _mock_edit_prd_tool_call(monkeypatch)
-    group_resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly tighten requirements", "prd_id": prd_id},
-    )
-    assert group_resp.status_code == 200, group_resp.text
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_group_chat(project_id)
-    assistant = [
-        tn for tn in conversations_db.list_group_turns(conv["id"]) if tn["role"] == "assistant"
-    ]
-    assert assistant
-    assert "isn't turned on" in assistant[-1]["content"]
-    assert editor_called == []
-    assert _payload(prd_id) == before
-    assert _versions(prd_id) == []
+# ── AC8 — flag off: RETIRED ─────────────────────────────────────────────────
+# The `PROJECT_PRD_EDIT_ENABLED` gate was removed — PRD edit is GA
+# (`project_prd_patch_tool.project_prd_edit_enabled()` is now always-true), so
+# there is no flag-off "isn't turned on" branch left to assert. The zero-write
+# guards survive on the target/gate paths (`test_write_route_no_prd_id_...`,
+# `test_cross_project_prd_edit_denied_and_no_write`, `test_editor_no_change_...`).
 
 
 # ── No-op instruction: editor reports empty sections_changed ────────────────
