@@ -20,7 +20,7 @@ import {
   providerNoticeTitle,
 } from "../../../lib/providerLimitNotice"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
-import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
+import { buildHomeChips, DEFAULT_HOME_CHIPS } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
@@ -733,14 +733,6 @@ const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
   fetchSuggestions: (conversationId, opts) =>
     chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
 }
-
-const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
-  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
-  { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
-  { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
-  { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
-]
-
 
 export function ChatScreen() {
   const {

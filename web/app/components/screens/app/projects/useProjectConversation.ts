@@ -47,6 +47,7 @@ import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
 import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
+import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
 import { useThreadScroll } from "../useThreadScroll"
@@ -76,6 +77,12 @@ const CLARIFY_SKIP_RE = /^\s*(generate( now)?|go|proceed|do it|just do it|skip|t
 function surfaceKey(projectId: number | string, surface: ProjectChatSurface): string {
   return `project-${projectId}-${surface}`
 }
+
+// The project chat's empty-state landing chips: main's shared default set minus
+// the "home" brief chip (its handler navigates to workspace-only screens, which
+// have no project-surface equivalent). Each starter chip submits its prompt
+// through the adapter's `submitAsk` via `handleStarterChip`.
+const PROJECT_LANDING_CHIPS = DEFAULT_HOME_CHIPS.filter((c) => c.kind === "starter")
 
 const newId = () =>
   (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`)
@@ -953,7 +960,7 @@ export function useProjectConversation(
     handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,
     handleToggleVoice: composer.handleToggleVoice,
-    showChipRow: false, displayChips: [], handleHomeCard: () => {},
+    showChipRow: !showThreadView, displayChips: PROJECT_LANDING_CHIPS, handleHomeCard: () => {},
     handleStarterChip: (text) => { void submitAsk(text) }, showEmptyStarters: false,
     activeTab,
     pendingSendHere: !!composer.pendingSend && composer.pendingSend.tabId === convKey,
