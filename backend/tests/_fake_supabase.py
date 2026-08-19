@@ -81,6 +81,11 @@ def reset_fake_db(ddl: str) -> None:
 # boundary so callers see real dicts.
 _JSONB_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"payload"},
+    "crucible_runs":         {"coverage_notes", "prioritisation"},
+    "crucible_findings":     {"claim_ids", "surfaced_by", "assumed_params",
+                              "impact", "confidence"},
+    "crucible_ledger":       {"claim_ids"},
+    "crucible_goal_definitions": {"population", "conflicts_found"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
@@ -171,7 +176,8 @@ class _Query:
         self._raw_where: list[str] = []
         self._raw_args: list = []
         self._negate_next: bool = False
-        self._order: tuple[str, bool] | None = None
+        self._order: tuple[str, bool, bool | None] | None = None
+        self._offset: int = 0
         self._limit: int | None = None
         self._values: list[dict] = []
         self._patch: dict = {}
@@ -279,12 +285,34 @@ class _Query:
             self._raw_args.append(val)
         return self
 
-    def order(self, col: str, desc: bool = False) -> "_Query":
-        self._order = (col, desc)
+    def order(
+        self,
+        col: str,
+        desc: bool = False,
+        nullsfirst: bool | None = None,
+        foreign_table: str | None = None,
+    ) -> "_Query":
+        """Mirrors postgrest-py's signature, `nullsfirst` included.
+
+        Not decoration: `crucible_findings` orders impact DESC NULLS LAST
+        because an unsizeable finding must sort after sized ones without being
+        treated as zero, and SQLite's default (NULLs first under DESC) puts them
+        at the TOP — a fake that ignored the argument would have every
+        unsizeable finding ranked highest and the test would still pass.
+        """
+        self._order = (col, desc, nullsfirst)
         return self
 
     def limit(self, n: int) -> "_Query":
         self._limit = n
+        return self
+
+    def range(self, start: int, end: int) -> "_Query":
+        """PostgREST's range is INCLUSIVE at both ends, so `range(0, 999)` is
+        1000 rows. Getting that off by one here would make a paging test pass
+        against a fake that pages differently from the server."""
+        self._limit = end - start + 1
+        self._offset = start
         return self
 
     # ── execute ────────────────────────────────────────────────────
@@ -324,9 +352,13 @@ class _Query:
             where, args = self._where_clause()
             order_sql = ""
             if self._order:
-                col, desc = self._order
+                col, desc, nullsfirst = self._order
                 order_sql = f" ORDER BY {col} {'DESC' if desc else 'ASC'}"
+                if nullsfirst is not None:
+                    order_sql += " NULLS FIRST" if nullsfirst else " NULLS LAST"
             limit_sql = f" LIMIT {self._limit}" if self._limit else ""
+            if self._offset:
+                limit_sql = (limit_sql or " LIMIT -1") + f" OFFSET {self._offset}"
             sql = f"SELECT * FROM {self.table}{where}{order_sql}{limit_sql}"
             cursor = db.execute(sql, args)
             rows = [_decode_row(self.table, r) for r in cursor.fetchall()]
