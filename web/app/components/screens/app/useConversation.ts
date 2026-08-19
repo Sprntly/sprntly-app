@@ -790,14 +790,22 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   // locally: the attachment viewer, the slash palette, and the `+` menu.
   //
   // The yield-state is read through a ref refreshed every render, NOT closed over
-  // by the listener. A `window` keydown listener that closes over the booleans
-  // captures them at registration; the same Escape that a menu's own onKeyDown
-  // uses to close itself (it does not stopPropagation) then also reaches this
-  // listener, and if the firing listener is holding the pre-open `false` it
-  // cancels the ask — losing the answer while merely closing the menu. Reading
-  // `escYieldRef.current` at event time makes the guard see the LIVE open-state
-  // regardless of when the listener was registered, so Esc yields to any open
-  // menu/palette/viewer instead of doubling as a cancel.
+  // by the listener. But reading the ref is not enough on its own: a menu's own
+  // onKeyDown closes itself on Escape (it does not stopPropagation), and that
+  // `setState(false)` is a DISCRETE-event update React can flush SYNCHRONOUSLY
+  // during the same keydown dispatch — re-running this hook's body and flipping
+  // `escYieldRef.current` to `false` BEFORE the event bubbles up to a window-level
+  // BUBBLE listener. The window listener would then read the post-close `false`
+  // and cancel the ask while the user only meant to close the menu (the 3/4
+  // cancel-on-close race), and any stray render leaving the ref latched could
+  // wedge a later bare Escape into never cancelling.
+  //
+  // Registering on the CAPTURE phase removes the race entirely: capture runs
+  // BEFORE any React synthetic handler and therefore BEFORE the menu's own close
+  // + its synchronous re-render, so `escYieldRef.current` is read as the
+  // COMMITTED open-state at the instant Escape was pressed. Menu open → yield
+  // (ask survives, menu still closes on its own bubble handler); nothing open →
+  // cancel. Deterministic, with no latched/stuck state afterward.
   const escYieldRef = useRef(false)
   escYieldRef.current = viewerAttachmentOpen || slashOpen || plusMenuOpen
   useEffect(() => {
@@ -807,8 +815,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       if (escYieldRef.current) return
       handleStopAsk()
     }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
+    window.addEventListener("keydown", onKey, true)
+    return () => window.removeEventListener("keydown", onKey, true)
   }, [busy, handleStopAsk])
 
   return { ...engine, ...generation, makeHandle, submitAsk, handleComposerSubmit, handleComposerKeyDown }
