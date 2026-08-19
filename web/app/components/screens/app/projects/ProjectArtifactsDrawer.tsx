@@ -313,10 +313,12 @@ export function ProjectArtifactsDrawerView({
     counts[a.type] = (counts[a.type] ?? 0) + 1
   }
   const filtered = filter === "all" ? artifacts : artifacts.filter((a) => a.type === filter)
+  // Only surface a type chip that has ≥1 item; the "all" chip always stays.
+  const visibleFilters = FILTERS.filter((f) => f.id === "all" || (counts[f.id] ?? 0) > 0)
 
   const chips = (
     <div className={styles.filters} role="tablist" aria-label="Filter artifacts by type">
-      {FILTERS.map((f) => (
+      {visibleFilters.map((f) => (
         <button
           key={f.id}
           type="button"
@@ -639,6 +641,7 @@ export function ProjectArtifactsDrawer({
             onAdded={handleAdded}
             onDone={() => setView("list")}
             onCancel={() => setView("list")}
+            renderIcon={(type) => <ArtifactTypeIcon type={type} />}
           />
         }
       />

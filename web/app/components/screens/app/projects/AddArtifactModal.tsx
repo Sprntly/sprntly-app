@@ -20,7 +20,7 @@
 // `btn btn-primary`) reuses the SAME global classes every other project modal
 // (`ArtifactsModal`, `CreateProjectModal`) already renders with.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent } from "react"
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { artifactsApi, projectsApi, isProjectArtifactType, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
@@ -89,9 +89,14 @@ export type AddArtifactPanelProps = {
   onDone: () => void
   /** The foot "Cancel" / abandon-add action (back to list, or close). */
   onCancel: () => void
+  /** Optional per-type icon renderer. When supplied (the drawer passes its
+   *  `ArtifactTypeIcon`), rows render the same type-glyph the artifact LIST
+   *  view shows instead of the plain colored circle. Hosts that don't pass it
+   *  (the standalone `AddArtifactModal`, `ArtifactsModal`) keep the circle. */
+  renderIcon?: (type: ProjectArtifactType) => ReactNode
 }
 
-export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onDone, onCancel }: AddArtifactPanelProps) {
+export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onDone, onCancel, renderIcon }: AddArtifactPanelProps) {
   const { activeCompany } = useCompany()
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
   const [artifacts, setArtifacts] = useState<ProjectableArtifactItem[]>([])
@@ -179,6 +184,8 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
 
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
   for (const a of artifacts) counts[a.type] = (counts[a.type] ?? 0) + 1
+  // Only surface a type chip that has ≥1 item; the "all" chip always stays.
+  const visibleFilters = FILTERS.filter((f) => f.id === "all" || (counts[f.id] ?? 0) > 0)
 
   return (
     <>
@@ -202,7 +209,7 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
               data-testid="add-artifact-search"
             />
             <div className={styles.chips} role="tablist" aria-label="Filter artifacts by type">
-              {FILTERS.map((f) => (
+              {visibleFilters.map((f) => (
                 <button
                   key={f.id}
                   type="button"
@@ -240,7 +247,11 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
                       data-testid={`add-artifact-row-${key}`}
                       data-existing={isExisting ? "true" : undefined}
                     >
-                      <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
+                      {renderIcon ? (
+                        renderIcon(a.type)
+                      ) : (
+                        <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
+                      )}
                       <div className={styles.rowMain}>
                         <div className={styles.rowTitle}>{artifactTitle(a)}</div>
                         <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>
