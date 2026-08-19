@@ -32,6 +32,9 @@ GROUP_TURN_DTO_KEYS = (
     "author_user_id",
     "author_name",
     "author_job_role",
+    # The send-identity key — on the broadcast so the poster can recognise its
+    # own turn/reply echo (id-precise correlation, never a timing guess).
+    "client_message_id",
     "created_at",
     # The FULL structured reply on an assistant turn (answer/key_points/
     # citations + any classify-envelope card data) — on the broadcast too, so

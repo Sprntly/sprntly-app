@@ -670,16 +670,26 @@ async def run_ask_job(
                 if (context_source.get("params") or {}).get("surface") == "group":
                     try:
                         from app.db import conversations as _conversations_db
+                        from app.db.asks import get_ask_job
                         from app.project_group_realtime import (
                             publish_group_turn_created,
                         )
 
+                        # Stamp the reply with the SAME send-identity key its
+                        # originating ask carried (persisted on `ask_jobs` by
+                        # `/v1/ask`). The member who posted the message renders
+                        # this reply from its own ask poll, so it uses this key
+                        # to recognise the reply's realtime echo as its own and
+                        # NOT double-render it — id-precise, never a timing
+                        # guess. A peer (a different key) still gets it live.
+                        _grp_cmid = (get_ask_job(ask_id) or {}).get("client_message_id")
                         _grp_turn = _conversations_db.post_group_turn(
                             conversation_id,
                             None,
                             payload.get("answer", ""),
                             role="assistant",
                             reply=payload,
+                            client_message_id=_grp_cmid,
                         )
                         publish_group_turn_created(
                             int(_promo_project_id), conversation_id, _grp_turn

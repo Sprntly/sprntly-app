@@ -1054,11 +1054,16 @@ def post_group_turn_route(
     ask completion (`ask_job_runner`), keyed on the same `context_source`."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
+    # `client_message_id` makes this idempotent (inside `post_group_turn`): a
+    # double-submit with the same key replays the original turn rather than
+    # posting a second one. The returned DTO carries the key back so the poster
+    # can dedup its own realtime echo.
     turn = conversations_db.post_group_turn(
         conversation["id"],
         ctx.user_id,
         payload.content,
         attachments=payload.attachments,
+        client_message_id=payload.client_message_id,
     )
     logger.info(
         "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
