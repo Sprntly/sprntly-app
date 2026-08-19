@@ -84,6 +84,24 @@ function initials(name: string | null | undefined): string {
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
 }
 
+/** The hover-tooltip label for a member avatar: the member's name, falling
+ *  back to their email when there's no name (an email-only invitee whose
+ *  profile hasn't captured a name yet), and to a generic "Member" when
+ *  neither is present. Feeds the native `title` attribute — the same
+ *  hover-tooltip primitive the surrounding top-bar controls already use
+ *  (e.g. the "+" invite button's `title="Invite members"`); no new tooltip
+ *  component or dependency is introduced. */
+export function memberAvatarLabel(
+  name: string | null | undefined,
+  email: string | null | undefined,
+): string {
+  const n = (name ?? "").trim()
+  if (n) return n
+  const e = (email ?? "").trim()
+  if (e) return e
+  return "Member"
+}
+
 // ── Small icons ──
 
 function BackArrowIcon() {
@@ -305,7 +323,7 @@ export function ProjectDetailView({
               <span
                 key={m.user_id}
                 className={styles.topAv}
-                title={m.name ?? "Member"}
+                title={memberAvatarLabel(m.name, m.email)}
                 aria-hidden="true"
                 style={personAvatarStyle(m.user_id, m.name)}
               >
