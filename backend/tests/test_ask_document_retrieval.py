@@ -2411,7 +2411,7 @@ def test_topic_question_loads_a_confluence_page_without_naming_confluence(
     )])
     fake = confluence_pages(page={
         "id": _CONFLUENCE_PAGE_ID,
-        "text": "August release ships on the 14th. ChoisBits is shurting down.",
+        "text": "August release ships on the 14th. Cyberdyne is shurting down.",
     })
 
     block, manifest = document_grounding(

@@ -111,7 +111,7 @@ const PRD = { type: "prd", id: 1, title: "Instant-quote flow — v3", status: "r
 // A PRD carrying a real (brief_id, insight_index) pointer, for the evidence
 // lazy-fetch coverage (AC-5).
 const PRD_WITH_EVIDENCE = { type: "prd", id: 1, title: "Instant-quote flow — v3", status: "ready", created_at: new Date().toISOString(), open: { prd_id: 7, brief_id: 55, insight_index: 2 } } as unknown as ArtifactItem
-const EVIDENCE = { type: "evidence", id: 2, title: "Xometry call", status: "ready", created_at: new Date().toISOString(), open: { evidence_id: 9 } } as unknown as ArtifactItem
+const EVIDENCE = { type: "evidence", id: 2, title: "Contoso call", status: "ready", created_at: new Date().toISOString(), open: { evidence_id: 9 } } as unknown as ArtifactItem
 const REPORT = { type: "report", id: 3, title: "Weekly report", status: "ready", created_at: new Date().toISOString(), open: { report_id: 11 } } as unknown as ArtifactItem
 const PROTOTYPE = { type: "prototype", id: 4, title: "Clickthrough", status: "ready", created_at: new Date().toISOString(), open: { prototype_id: 4, prd_id: 7 } } as unknown as ArtifactItem
 const PROTOTYPE_NO_PRD = { type: "prototype", id: 5, title: "Orphan proto", status: "ready", created_at: new Date().toISOString(), open: { prototype_id: 5, prd_id: null } } as unknown as ArtifactItem
@@ -181,7 +181,7 @@ describe("ProjectArtifactDrawer — per-type body routing (real GET routes)", ()
   })
 
   it("evidence → fetches evidenceApi.get and renders its body", async () => {
-    evidenceGetMock.mockResolvedValue({ title: "Xometry call", payload_md: "Quoting friction notes." })
+    evidenceGetMock.mockResolvedValue({ title: "Contoso call", payload_md: "Quoting friction notes." })
     await act(async () => {
       render(React.createElement(ProjectArtifactDrawer, { artifact: EVIDENCE, projectId: PROJECT_ID, onClose: () => {} }))
     })

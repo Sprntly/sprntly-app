@@ -66,7 +66,7 @@ describe("splitQuotedSuffix", () => {
       ["/competitive-intel how do we compare?", "their pricing page"],
       // A quoted LIST: single newlines between rows, which is the shape
       // `rangeToText` produces and the one the run-on-paragraph bug destroyed.
-      ["really?", "All set — assigned:\n\nValidate SPF record → Fortune Tede\nValidate DKIM key → Fortune Tede"],
+      ["really?", "All set — assigned:\n\nValidate SPF record → Dana Reyes\nValidate DKIM key → Dana Reyes"],
     ] as const) {
       const { body, quote: back } = splitQuotedSuffix(buildQuotedMessage(message, quote))
       expect(body).toBe(message)

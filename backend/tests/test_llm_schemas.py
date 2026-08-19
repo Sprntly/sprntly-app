@@ -18,8 +18,8 @@ not. FOUR candidate mechanisms were tested and ALL FOUR were refuted:
      so `{}` was always a legal completion.
   2. `required` membership. `app.graph.extractor._EXTRACT_SCHEMA` has exactly
      this shape at `$.signals[].properties`, is NOT in its item's `required`
-     list, and fills anyway: 292/400 (73%) of chaostrack signals and 235/333
-     (70%) of test-co signals have a non-empty properties object on the shared
+     list, and fills anyway: 292/400 (73%) of one workspace's signals and
+     235/333 (70%) of test-co signals have a non-empty properties object on the shared
      database — e.g. `{"poc_customer": "...", "recovery_eta_minutes": 15}`.
      CIR's two WERE required and came back empty: the opposite of the
      prediction.

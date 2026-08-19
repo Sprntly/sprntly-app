@@ -20,7 +20,7 @@ research PIPELINES, described in four lines of the (tenant-invariant) system
 block, so the router no longer carries a `user_cacheable_prefix` at all. Every
 test below that used `prioritize` as "the menu pick a company skill competes
 with" now uses a pipeline id — the PRECEDENCE being asserted is identical, only
-the thing on the other side of it changed. Fortune's feature is untouched:
+the thing on the other side of it changed. The custom-skill feature is untouched:
 the company block, the guard, the gates, the cap and the fail-open contract are
 all exactly as they were, and they are now the router's primary job rather than
 one job among many.

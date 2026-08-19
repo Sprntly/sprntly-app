@@ -1169,19 +1169,19 @@ class TestBothProviders:
         db = isolated_settings["supabase"]
         _seed_catalog_row(
             db, provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
-            title="Moolre integration options", source_name="Software Development",
-            summary="Three options for moving Moolre transaction data into Sprntly.",
+            title="Hooli integration options", source_name="Software Development",
+            summary="Three options for moving Hooli transaction data into Sprntly.",
             topics=["integration options", "transaction data", "API"],
         )
         catalog_candidates([_candidate(
             provider="confluence", external_id=_CONFLUENCE_PAGE_ID,
-            title="Moolre integration options", source_name="Software Development",
-            summary="Three options for moving Moolre transaction data into Sprntly.",
+            title="Hooli integration options", source_name="Software Development",
+            summary="Three options for moving Hooli transaction data into Sprntly.",
             topics=["integration options", "transaction data"],
         )])
         fake = confluence_pages(page={
             "id": _CONFLUENCE_PAGE_ID,
-            "text": "Option 2 has Sprntly expose an endpoint Moolre calls.",
+            "text": "Option 2 has Sprntly expose an endpoint Hooli calls.",
         })
         adjudicator.picks(1)
 

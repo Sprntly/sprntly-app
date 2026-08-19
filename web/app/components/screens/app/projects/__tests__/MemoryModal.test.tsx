@@ -56,7 +56,7 @@ const MEMBERS: ProjectMember[] = [
 ]
 
 const SUMMARY: ProjectMemorySummary = {
-  summary_md: "A Xometry-driven redesign of on-demand quoting.",
+  summary_md: "A Contoso-driven redesign of on-demand quoting.",
   entry_count: 2,
   stale: false,
 }
@@ -93,7 +93,7 @@ describe("MemoryModalView — synthesized summary block", () => {
     render(React.createElement(MemoryModalView, viewProps()))
     const block = screen.getByTestId("memory-synth-block")
     expect(within(block).getByTestId("memory-synth-readonly-tag").textContent).toContain("Read-only")
-    expect(within(block).getByTestId("memory-synth-body").textContent).toContain("Xometry-driven redesign")
+    expect(within(block).getByTestId("memory-synth-body").textContent).toContain("Contoso-driven redesign")
     expect(block.textContent).toContain("Synthesized from 2 memories")
     expect(within(block).queryByRole("button")).toBeNull()
   })
@@ -153,7 +153,7 @@ describe("MemoryModalView — synthesized summary block", () => {
       ),
     )
     expect(screen.queryByTestId("memory-synth-refreshing")).toBeNull()
-    expect(screen.getByTestId("memory-synth-body").textContent).toContain("Xometry-driven redesign")
+    expect(screen.getByTestId("memory-synth-body").textContent).toContain("Contoso-driven redesign")
   })
 })
 

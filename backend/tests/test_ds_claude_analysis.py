@@ -949,8 +949,8 @@ CLAUDE_SENTINEL = {"answer": "<!doctype html><div>claude</div>", "key_points": [
 
 
 def test_explicit_false_uses_the_deterministic_engine(workspace, monkeypatch):
-    """The named opt-outs (Freezing Point LLC, Chaostrack Inc.) are stored as an
-    explicit false — the ONLY thing that turns the engine off now."""
+    """A company that has opted out is stored as an explicit false — the ONLY
+    thing that turns the engine off now."""
     import app.qa_agent as qa
 
     _csv(workspace)  # Part 3 capability gate (AC10): tabular data must exist

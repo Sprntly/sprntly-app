@@ -53,7 +53,7 @@ const LIBRARY: ArtifactItem[] = [
   {
     type: "evidence",
     id: 3,
-    title: "Xometry call — quoting friction",
+    title: "Contoso call — quoting friction",
     status: "ready",
     created_at: hoursAgo(70),
     source: { brief_id: 1, week_label: "wk 31", insight_index: null },
@@ -94,7 +94,7 @@ describe("AddArtifactModal — company library (AC-10)", () => {
     const list = await screen.findByTestId("add-artifact-modal-list")
     expect(within(list).getAllByRole("button")).toHaveLength(3)
     expect(list.textContent).toContain("Instant-quote flow — v3")
-    expect(list.textContent).toContain("Xometry call — quoting friction")
+    expect(list.textContent).toContain("Contoso call — quoting friction")
   })
 
   it("fetches nothing while closed", () => {

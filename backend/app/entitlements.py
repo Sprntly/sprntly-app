@@ -19,6 +19,10 @@ FastAPI dependencies that enforce them server-side:
                        written before the rename (a migration renames stored
                        keys, but a concurrently-running old backend or a
                        restored row must not flip a company ON by accident).
+  * ``crucible``     — Goal Analysis (engine name Crucible). Experimental and
+                       ALLOWLIST-ONLY: unlike every module above, a missing key
+                       is OFF. Enforced on the Goal Analysis routes via
+                       ``require_crucible_module``.
   * ``company_research`` — the deep company-research sweep (staged web
                        research about the company's OWN public footprint →
                        KG signals). Costs real money per run, so it carries
@@ -272,6 +276,66 @@ def feature_flags_for_company(company_id: str) -> dict:
     """
     flags = read_feature_flags(company_id)
     return flags if flags is not None else {}
+
+
+def crucible_enabled(flags: dict | None) -> bool:
+    """Resolve the `crucible` flag — the Goal Analysis feature (engine name
+    Crucible; users never see that word).
+
+    FAILS CLOSED, on both of the "not an explicit true" cases:
+
+      * explicit `true`             → ON
+      * key absent                  → OFF
+      * flags UNKNOWN (read failed) → OFF
+
+    Same shape as `ask_planner_shadow_enabled`, and deliberately the opposite of
+    `agents` / `top_insights` / `company_research`. Those grandfather a missing
+    key ON so existing companies keep a capability they already had. This one
+    gates a capability nobody has: an experimental feature whose run reads a
+    tenant's whole corpus and spends real tokens doing it, behind a human
+    approval gate that a company has to have been told about. A missing key
+    means "not enrolled", never "enrolled by default", and an unreadable flags
+    row means the same — "I couldn't read your flags" is not a reason to start
+    spending a company's tokens on a feature they were never offered.
+
+    The cost of failing closed is that the composer's mode chip does not appear.
+    The cost of failing open is an unannounced multi-minute analysis of a
+    customer's data, so the asymmetry is not close.
+
+    Release plan: allowlist by company in the staff panel. See
+    backend/docs/GOAL_ANALYSIS.md §4.1.
+    """
+    if not isinstance(flags, dict):
+        return False
+    return bool(flags.get("crucible", False))
+
+
+CRUCIBLE_DISABLED_DETAIL = (
+    "Goal Analysis is not enabled for your organization."
+)
+
+
+def require_crucible_module(
+    company: WorkspaceContext = Depends(require_workspace),
+) -> WorkspaceContext:
+    """FastAPI dependency: require_workspace + the `crucible` gate.
+
+    Drop-in replacement for `Depends(require_workspace)` on the Goal Analysis
+    routes (PR9). Returns the same WorkspaceContext, or 403s with a detail the
+    frontend surfaces verbatim.
+
+    THE UI GATE IS NOT THE GATE. PR10 hides the composer's mode chip for a
+    company without the flag, but a hidden control is a cosmetic gate — the
+    route has to refuse on its own, because the client decides what to render
+    and the server decides what runs.
+    """
+    if not crucible_enabled(feature_flags_for_company(company.company_id)):
+        logger.info(
+            "Goal Analysis (crucible) disabled for company %s — rejecting",
+            company.company_id,
+        )
+        raise HTTPException(status_code=403, detail=CRUCIBLE_DISABLED_DETAIL)
+    return company
 
 
 def require_agents_module(

@@ -239,7 +239,7 @@ describe("StaffAdminScreen organizations", () => {
     expect(screen.getByText("Agents, Top Insights")).toBeTruthy()
   })
 
-  it("offers exactly the four modules — Agents, Prototype, Top Insights, Chat Intent Envelope — in the editor", async () => {
+  it("offers exactly the five modules — Agents, Prototype, Top Insights, Chat Intent Envelope, Goal Analysis — in the editor", async () => {
     listCompanies.mockResolvedValue({ companies: [ACME] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
@@ -250,13 +250,16 @@ describe("StaffAdminScreen organizations", () => {
     const labels = Array.from(modules.querySelectorAll("label")).map(
       (l) => l.textContent ?? "",
     )
-    expect(labels).toHaveLength(4)
+    expect(labels).toHaveLength(5)
     expect(labels[0]).toBe("Agents")
     expect(labels[1]).toMatch(/^Prototype/)
     expect(labels[2]).toBe("Top Insights")
     // Action-envelope chat dispatch: DEFAULT ON (missing key = on, like
     // Agents/Brief); the checkbox is the per-company kill switch.
     expect(labels[3]).toBe("Chat Intent Envelope (beta)")
+    // Goal Analysis: DEFAULT OFF and allowlist-only, the reverse of every
+    // module above it — so this checkbox is an opt-IN, not a kill switch.
+    expect(labels[4]).toBe("Goal Analysis (experimental)")
     // The retired modules leave no dead UI behind.
     expect(screen.queryByText("On-call Agent")).toBeNull()
     expect(screen.queryByText("Claude Code Handoff")).toBeNull()
@@ -547,6 +550,7 @@ describe("MODULES + agentsEnabled", () => {
       "agents",
       "top_insights",
       "chat_intent_envelope",
+      "crucible",
     ])
   })
 
