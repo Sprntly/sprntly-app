@@ -611,6 +611,51 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
+        # Individual/group project chat: promote a durable insight into project
+        # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
+        # (the assembler resolved a project `SurfaceScope` for this turn, which
+        # is exactly the `context_source["kind"] == "project"` condition; a scope
+        # that failed to resolve would have failed the answer and never reached
+        # this post-terminal `on_committed`). A project chat carries its project
+        # on `context_source`, NOT on the top-level `project_id` (which it never
+        # sends), so the gate reads the id from `context_source["params"]` — the
+        # SAME source the conv-bind in `_run_sync` uses. Best-effort: both
+        # `maybe_promote_turn` and `maybe_ingest_status` are self-swallowing
+        # (never raise, AD-P7) and are wrapped here besides, so a promotion
+        # failure can only fail to ADD a memory entry — it can never delay or
+        # break the answer, which is already durably stored by `complete_ask_job`
+        # above. Ported from `b09801dd^:ask_job_runner.py`'s `_on_committed`,
+        # re-keyed off `context_source` instead of the top-level `project_id`.
+        if (
+            context_source
+            and context_source.get("kind") == "project"
+            and conversation_id is not None
+        ):
+            _promo_project_id = (context_source.get("params") or {}).get("project_id")
+            if _promo_project_id is not None:
+                try:
+                    from app.project_memory import maybe_promote_turn
+
+                    transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
+                    maybe_promote_turn(
+                        int(_promo_project_id), conversation_id, transcript
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "maybe_promote_turn failed ask_id=%s project_id=%s",
+                        ask_id, _promo_project_id, exc_info=True,
+                    )
+                try:
+                    from app.delegation_status_ingest import maybe_ingest_status
+
+                    maybe_ingest_status(
+                        int(_promo_project_id), conversation_id, user_id, question
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "maybe_ingest_status failed ask_id=%s project_id=%s",
+                        ask_id, _promo_project_id, exc_info=True,
+                    )
 
     outcome = await run_execution_job(
         job_id=ask_id,

@@ -360,13 +360,27 @@ async def ask(
     # asking, so `conversation_id` is non-null on turn one too, and a first-turn
     # ask has no thread yet to be blind to (that's what the starter chips send).
     mid_thread = any(turn.get("role") == "assistant" for turn in history)
+    # A project chat carries its project on `context_source`
+    # (`{"kind": "project", ...}`), NOT on `body.project_id` — the project chats
+    # never send the top-level field. The authoritative project memory/breadth
+    # block is resolved by the assembler and folded into the answer inside the
+    # worker, so a cache hit here — keyed on (dataset, question) only — would
+    # serve a context-FREE answer that never read it. Treat a project-kind
+    # `context_source` exactly like `body.project_id` for cache eligibility.
+    project_scoped = bool(
+        isinstance(body.context_source, dict)
+        and body.context_source.get("kind") == "project"
+    )
     cached_payload = (
         await _timed_cache_resolve(body.dataset, body.question)
         if (
             body.prd_id is None
             # SKIPPED for project-scoped asks too: a cache hit never read the
-            # project's memory block just folded into `history` above.
+            # project's memory block just folded into `history` above. Project
+            # chats express this via `context_source` (see `project_scoped`);
+            # `body.project_id` covers any caller that sends it the old way.
             and body.project_id is None
+            and not project_scoped
             # An artifact-tab ask is context-bound for the same reason a
             # PRD-tab one is: the cache never read the open document.
             and body.evidence_id is None
