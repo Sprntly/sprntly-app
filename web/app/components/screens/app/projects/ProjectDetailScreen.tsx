@@ -11,7 +11,8 @@
 // Layout (redesign): full-bleed chat is first-class — there is no standing
 // right rail. Settings/artifacts/members/memory/invite are demoted behind a
 // top-bar gear (`ProjectSettingsModal`, a 4-tab modal) and an "Artifacts (N)"
-// button (`ArtifactsModal`); a chat-driven PRD open lands in the SAME global
+// button (`ProjectArtifactsDrawer`, a non-blocking side column with a nested
+// Add-from-library picker); a chat-driven PRD open lands in the SAME global
 // side-panel main uses (`ContentPanel`, mounted at the app root via AppShell) —
 // the `<main>` is full-bleed chat and the panel slides in as an overlay,
 // identical to main. Wired to the real
@@ -55,7 +56,7 @@ import {
 import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
 import { openArtifactCandidateAsItem } from "./artifactCandidates"
 import { ProjectMainThread } from "./ProjectMainThread"
-import { ArtifactsModal } from "./ArtifactsModal"
+import { ProjectArtifactsDrawer } from "./ProjectArtifactsDrawer"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
@@ -211,6 +212,16 @@ export type ProjectDetailViewProps = {
    *  (the sender's own `runGeneratePrd`/`runGenerateTickets`) refreshes the
    *  list + count immediately, without waiting on the realtime echo. */
   refetchArtifacts: () => void
+  /** The project-artifacts DRAWER open-state, owned by the container (the
+   *  top-bar "Artifacts" trigger sets it). When true, the `.body` grid grows a
+   *  second column hosting `ProjectArtifactsDrawer` (a non-blocking layout
+   *  column, NOT an overlay — the chat to its left stays interactive). */
+  artifactsDrawerOpen: boolean
+  /** The type the top-bar chip was opened FOR (or `undefined` for a generic
+   *  open) — the drawer owns its filter state from there. */
+  artifactsDrawerFilter?: ProjectArtifactType
+  /** Closes the artifacts drawer (container's `onCloseRailModal`). */
+  onCloseArtifactsDrawer: () => void
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -234,6 +245,9 @@ export function ProjectDetailView({
   currentUserId: _currentUserId,
   onRemoveMember: _onRemoveMember,
   refetchArtifacts,
+  artifactsDrawerOpen,
+  artifactsDrawerFilter,
+  onCloseArtifactsDrawer,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
@@ -372,7 +386,7 @@ export function ProjectDetailView({
         </button>
       </header>
 
-      <div className={styles.body}>
+      <div className={`${styles.body} ${artifactsDrawerOpen ? styles.bodyDrawerOpen : ""}`}>
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
@@ -419,10 +433,20 @@ export function ProjectDetailView({
           </div>
         </main>
 
-        {/* No in-place artifact column: the project chat opens artifacts in the
-            SAME global side-panel (`ContentPanel`) main uses, mounted at the app
-            root (`AppShell`). The `<main>` is full-bleed chat; the panel slides
-            in as an overlay via `app--cpanel-open`, identical to main. */}
+        {/* Project-artifacts DRAWER — the second `.body` grid column, present
+            only while open. A non-blocking layout column (border-left, native
+            slide, no scrim/focus-trap): browsing the project's artifacts never
+            interrupts the chat to its left. A row's OPEN still lands in the
+            SAME global side-panel (`ContentPanel`) via the app deep-link.
+            (A chat-driven PRD open likewise slides that panel in as an overlay
+            via `app--cpanel-open`, identical to main.) */}
+        <ProjectArtifactsDrawer
+          projectId={project.id}
+          open={artifactsDrawerOpen}
+          initialFilter={artifactsDrawerFilter}
+          onClose={onCloseArtifactsDrawer}
+          onArtifactsChanged={refetchArtifacts}
+        />
       </div>
     </div>
   )
@@ -953,6 +977,9 @@ export function ProjectDetailScreen({
         currentUserId={currentUserId}
         onRemoveMember={onRemoveMember}
         refetchArtifacts={refetchArtifacts}
+        artifactsDrawerOpen={railModal?.kind === "artifacts"}
+        artifactsDrawerFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
+        onCloseArtifactsDrawer={onCloseRailModal}
       />
       <ConfirmDialog
         open={removeTarget != null}
@@ -976,17 +1003,10 @@ export function ProjectDetailScreen({
         onInvited={refetchProject}
         initialTab={settingsTab ?? "instructions"}
       />
-      <ArtifactsModal
-        projectId={projectId}
-        open={railModal?.kind === "artifacts"}
-        initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
-        onClose={onCloseRailModal}
-        // Standalone-browse open is DEFERRED (by-id load, non-PRD store shapes) —
-        // no in-place handler, so the modal uses its own deep-link viewer (an
-        // honest fallback, not a dead control). Chat-driven PRD open still lands
-        // in the shared panel via `onOpenArtifactInPlace`.
-        onArtifactsChanged={refetchArtifacts}
-      />
+      {/* The project-artifacts view is now the non-blocking `ProjectArtifactsDrawer`
+          (rendered inside `.body` as a layout column, not an overlay) — mounted
+          by `ProjectDetailView` above. Its Add-from-library picker is a nested
+          in-place swap, so there is no separate add modal to mount here. */}
       <TaskModal
         open={railModal?.kind === "tasks"}
         projectId={projectId}
