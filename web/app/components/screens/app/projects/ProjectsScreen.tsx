@@ -55,11 +55,12 @@ const TYPE_BADGE: Record<ProjectArtifactType, { label: string; bg: string; color
   prototype: { label: "prototype", bg: "#DBEAFE", color: "#1E40AF" },
   report: { label: "report", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "tickets", bg: "var(--info-soft)", color: "var(--info)" },
+  custom_artifact: { label: "doc", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 // Stable render order for the per-type badges (matches ARTIFACT_FILTERS'
 // ordering intent: reports/PRD lead, tickets last).
-const TYPE_ORDER: ProjectArtifactType[] = ["prd", "prototype", "evidence", "report", "ticket_set"]
+const TYPE_ORDER: ProjectArtifactType[] = ["prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"]
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3".
  *  Mirrors `ArtifactsScreen.tsx`'s `relativeTime` (same bucketing) so a

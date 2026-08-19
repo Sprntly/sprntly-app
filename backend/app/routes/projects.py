@@ -172,7 +172,7 @@ class UpdateMemoryEntryRequest(BaseModel):
 
 
 class AddArtifactRequest(BaseModel):
-    artifact_type: Literal["prd", "evidence", "prototype", "report", "ticket_set"]
+    artifact_type: Literal["prd", "evidence", "prototype", "report", "ticket_set", "custom_artifact"]
     artifact_id: int = Field(..., ge=1)
 
 

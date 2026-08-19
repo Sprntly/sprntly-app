@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useRouter } from "next/navigation"
 import { ApiError, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
+import { documentPath } from "../../../../(app)/artifacts/doc/DocumentRoute"
 import { useEscapeToClose } from "./useEscapeToClose"
 import { AddArtifactPanel } from "./AddArtifactModal"
 import styles from "./ArtifactsModal.module.css"
@@ -36,6 +37,7 @@ const FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
+  { id: "custom_artifact", label: "Documents" },
 ]
 
 /** Verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` — the app's real
@@ -47,13 +49,14 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
+  custom_artifact: { label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 /** `BADGE`'s fallback for a type outside `ProjectArtifactType` —
  *  unreachable today (a project's own artifacts are DB-constrained to the
- *  five keys above), but `ArtifactItem["type"]` is statically wider, so
- *  every `BADGE[a.type]` lookup below goes through `badgeFor` rather than
- *  assuming the narrower set. */
+ *  keys above, which now include `custom_artifact`), but `ArtifactItem["type"]`
+ *  is statically wider, so every `BADGE[a.type]` lookup below goes through
+ *  `badgeFor` rather than assuming the narrower set. */
 const UNKNOWN_BADGE = { label: "ARTIFACT", bg: "var(--info-soft)", color: "var(--info)" }
 function badgeFor(type: ArtifactItem["type"]): { label: string; bg: string; color: string } {
   return isProjectArtifactType(type) ? BADGE[type] : UNKNOWN_BADGE
@@ -89,16 +92,17 @@ function sourceLine(a: ArtifactItem): string {
     return [count, rel].filter(Boolean).join(" · ")
   }
   if (a.type === "report") return [a.source.conversation_title ? `from ${a.source.conversation_title}` : null, rel].filter(Boolean).join(" · ")
-  // custom_artifact can't reach this modal today (project_artifacts'
-  // DB CHECK constraint has no such row to attach), but the type is
-  // reachable statically via the shared ArtifactItem union — handled here
-  // rather than assuming it away.
+  // A team document pinned to the project — its source line names the chat it
+  // was drafted in, same as a report's.
   if (a.type === "custom_artifact") return [a.source.conversation_title ? `from ${a.source.conversation_title}` : null, rel].filter(Boolean).join(" · ")
   return [`from Brief ${a.source.week_label || ""}`.trim(), rel].filter(Boolean).join(" · ")
 }
 
 function artifactTitle(a: ArtifactItem): string {
   if (a.type === "ticket_set") return a.title.trim() || "Tickets from this conversation"
+  // An unnamed document (no <h1> yet) renders the library's own placeholder
+  // rather than a blank row.
+  if (a.type === "custom_artifact") return a.title.trim() || "Untitled document"
   return a.title
 }
 
@@ -127,6 +131,11 @@ function artifactHref(a: ArtifactItem): string | null {
       return `/?evidence=${a.open.evidence_id}`
     case "prototype":
       return a.open.prd_id != null ? `/prototype?prd=${a.open.prd_id}` : null
+    case "custom_artifact":
+      // A team document has its own standalone route (the library's own open
+      // target — `documentPath`), so unlike report/ticket_set it opens rather
+      // than showing a disabled affordance.
+      return documentPath(a.open.custom_artifact_id)
     default:
       return null
   }
@@ -227,9 +236,9 @@ export function ArtifactsModalView({
   if (!open) return null
 
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
-  // A custom_artifact row can't reach this modal today (see badgeFor's own
-  // doc); skipped here rather than counted under a filter chip that has no
-  // entry for it.
+  // Count per projectable type (custom documents included, each under its own
+  // filter chip). The guard drops any future non-projectable kind that has no
+  // chip rather than counting it under one.
   for (const a of artifacts) {
     if (!isProjectArtifactType(a.type)) continue
     counts[a.type] = (counts[a.type] ?? 0) + 1

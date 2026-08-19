@@ -331,3 +331,48 @@ def maybe_pin_prototype_to_prd_projects(
             exc_info=True,
         )
         return []
+
+
+def maybe_pin_custom_artifact_to_project(
+    *,
+    company_id: str,
+    conversation_id: int | None,
+    artifact_id: int,
+) -> int | None:
+    """Attach a just-generated custom document (team document) to the project
+    its conversation is already bound to, if any. Returns the project id it
+    pinned to, or None (no conversation, no bound project, or a swallowed
+    failure). Never raises.
+
+    ATTACH-ONLY, unlike `maybe_auto_create_project_for_prd`: a custom doc is
+    NOT a project-origin trigger, so this never CREATES a project — it only
+    joins a document to a project that some earlier PRD/fork already
+    established for the thread. A doc drafted in a bare chat with no project
+    stays project-less; nothing to pin it to, and inventing one would fork a
+    project off a "draft a leadership update" the way only a PRD is meant to.
+
+    Conversation-keyed, reusing `_conversation_project_id` — the SAME
+    first-write-wins binding the PRD path reads. `add_artifact` upserts on the
+    `(project_id, artifact_type, artifact_id)` primary key, so a re-issued
+    generate re-attaching the same doc is a no-op.
+
+    Best-effort and total: called from the generate route right after the row
+    is created, so it runs server-side regardless of whether the client is
+    still connected. Any failure is logged and swallowed — a document that
+    generated fine must never fail its request because the pin missed; the
+    project's own poll/refetch reconciles a dropped realtime nudge anyway."""
+    if conversation_id is None:
+        return None
+    try:
+        project_id = _conversation_project_id(conversation_id, company_id)
+        if project_id is None:
+            return None
+        add_artifact(project_id, "custom_artifact", artifact_id)
+        return project_id
+    except Exception:  # noqa: BLE001 — best-effort, mirrors the PRD path above
+        logger.warning(
+            "Failed to pin custom artifact %s to its project (conversation %s)",
+            artifact_id, conversation_id,
+            exc_info=True,
+        )
+        return None

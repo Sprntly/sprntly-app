@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { KeyboardEvent as ReactKeyboardEvent } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
-import { artifactsApi, projectsApi, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
+import { artifactsApi, projectsApi, isProjectArtifactType, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./AddArtifactModal.module.css"
@@ -38,6 +38,7 @@ const FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
+  { id: "custom_artifact", label: "Documents" },
 ]
 
 /** Verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` — the app's real
@@ -50,6 +51,7 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
+  custom_artifact: { label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 function artifactKey(a: ProjectableArtifactItem): string {
@@ -57,7 +59,11 @@ function artifactKey(a: ProjectableArtifactItem): string {
 }
 
 function artifactTitle(a: ProjectableArtifactItem): string {
-  return a.type === "ticket_set" ? (a.title.trim() || "Tickets from this conversation") : a.title
+  if (a.type === "ticket_set") return a.title.trim() || "Tickets from this conversation"
+  // A freshly-generated document has no <h1>-derived title yet — render the
+  // same "Untitled document" the company library uses rather than a blank row.
+  if (a.type === "custom_artifact") return a.title.trim() || "Untitled document"
+  return a.title
 }
 
 // ── AddArtifactPanel — the picker body + foot (NO dialog shell) ──
@@ -105,10 +111,12 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
     artifactsApi
       .list(activeCompany)
       .then((rows) => {
-        // A project cannot hold a custom_artifact row yet (see
-        // ProjectableArtifactItem's own doc) — excluded here, at the one
-        // place the company's full library enters this panel.
-        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => r.type !== "custom_artifact"))
+        // Keep only the kinds a project can hold — every `ArtifactItem` kind
+        // is projectable today (custom documents included), but narrow through
+        // the shared guard rather than assuming it, so a future non-projectable
+        // kind is dropped here at the one place the company's full library
+        // enters this panel.
+        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => isProjectArtifactType(r.type)))
         setStatus("ready")
       })
       .catch(() => setStatus("error"))

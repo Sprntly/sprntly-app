@@ -5774,21 +5774,27 @@ export const mcpTokensApi = {
 // ── Projects (shared container + collaboration context, build spec §5) ──
 
 /** Artifact type keys a project can hold (`project_artifacts.artifact_type`). */
-export type ProjectArtifactType = "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+export type ProjectArtifactType =
+  | "prd"
+  | "evidence"
+  | "prototype"
+  | "report"
+  | "ticket_set"
+  | "custom_artifact"
 
-/** `ArtifactItem` narrowed to the five kinds a project can actually hold —
- *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates only
- *  `ProjectArtifactType`, so a `custom_artifact` row can never legitimately
- *  reach project-scoped UI. `projectsApi.artifacts()` (this project's own
- *  attached refs) is typed to this narrower shape; `artifactsApi.list()`
- *  (the whole company library, which DOES include custom_artifact rows) is
- *  not — callers that pick FROM the library to attach TO a project must
- *  filter a `custom_artifact` row out themselves before it reaches
- *  project-typed state (see `AddArtifactModal.tsx`). */
+/** `ArtifactItem` narrowed to the kinds a project can actually hold —
+ *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates exactly
+ *  `ProjectArtifactType` (which now includes `custom_artifact`, the team
+ *  document — a doc generated in a project chat pins to that project). Every
+ *  kind in the shared `ArtifactItem` union is projectable today, so this is
+ *  effectively `ArtifactItem`; it stays a distinct alias so a future non-
+ *  projectable artifact kind added to the union is narrowed OUT here (and any
+ *  library-picker attaching to a project keeps guarding with
+ *  `isProjectArtifactType`). */
 export type ProjectableArtifactItem = Extract<ArtifactItem, { type: ProjectArtifactType }>
 
 const PROJECT_ARTIFACT_TYPES = new Set<ProjectArtifactType>([
-  "prd", "evidence", "prototype", "report", "ticket_set",
+  "prd", "evidence", "prototype", "report", "ticket_set", "custom_artifact",
 ])
 
 /** Runtime guard mirroring `ProjectableArtifactItem`'s own doc — the ONE
@@ -6225,13 +6231,11 @@ export const projectsApi = {
   get: (id: number | string) =>
     api.get<ProjectDetail>(`/v1/projects/${encodeURIComponent(String(id))}`),
   /** The project's artifacts, in the same unified shape `GET /v1/artifacts`
-   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` (not
-   *  the narrower `ProjectableArtifactItem[]`) to match every existing
-   *  caller/fixture — a `custom_artifact` row is impossible here today (the
-   *  backing join table's DB CHECK constraint), but callers that index a
-   *  `Record<ProjectArtifactType, …>` off `.type` still guard with
-   *  `isProjectArtifactType` rather than relying on that being statically
-   *  provable from this return type alone. */
+   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` to match
+   *  every existing caller/fixture — this list CAN now include a
+   *  `custom_artifact` row (a team document pinned to the project), so callers
+   *  that index a `Record<ProjectArtifactType, …>` off `.type` guard with
+   *  `isProjectArtifactType` and handle the `custom_artifact` key. */
   artifacts: (id: number | string) =>
     api
       .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)
