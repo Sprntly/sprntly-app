@@ -425,26 +425,49 @@ def test_the_signal_read_is_ordered_because_it_is_paged(ctx):
     assert '.order(' in src, "a paged read must be ordered"
 
 
-def test_an_unsized_finding_comes_back_LAST_not_first(ctx):
-    """`load_findings` orders impact DESC NULLS LAST. SQLite's own default
-    under DESC puts NULLs at the TOP, so without the explicit clause every
-    finding we could not size would be presented as the biggest one in the run
-    — the exact inversion I3 exists to prevent, and it would look like a
-    ranking rather than a bug."""
+def test_the_ranking_survives_the_round_trip(ctx):
+    """THE RANK IS THE INSERTION ORDER, and nothing else can reconstruct it.
+
+    `_rank` puts an authoritative CONFLICT first regardless of size, because
+    two sources that may both speak disagreeing is worth more than either
+    claim. Re-reading the rows ordered by `impact_value` threw that away and
+    sent an unsized conflict to the bottom — while the `tier` written at rank
+    time still said `deep`, so the row claimed a standing its position
+    contradicted.
+    """
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    # Saved in the order `_rank` produced: conflict first, then by size, with
+    # the unsizeable one last.
+    runs_db.save_findings(run_id, ctx.company_id, [
+        {"statement": "conflict", "claim_ids": ["c"], "impact_value": None,
+         "adjudication": "conflict", "currency": "accounts",
+         "confidence_band": "low", "tier": "deep"},
+        {"statement": "big", "claim_ids": ["b"], "impact_value": 9.0,
+         "currency": "accounts", "confidence_band": "low", "tier": "deep"},
+        {"statement": "small", "claim_ids": ["s"], "impact_value": 1.0,
+         "currency": "accounts", "confidence_band": "low", "tier": "shallow"},
+    ], [])
+
+    findings = ctx.client.get(f"/v1/crucible/{run_id}").json()["findings"]
+    assert [f["statement"] for f in findings] == ["conflict", "big", "small"]
+    # And the tier still matches the position it was written for.
+    assert [f["tier"] for f in findings] == ["deep", "deep", "shallow"]
+
+
+def test_an_unsized_finding_is_never_rendered_as_zero(ctx):
+    """I3 at the transport layer: `impact_value` must arrive as null, not 0.
+    They read almost the same and lead to opposite decisions."""
     from app.db import crucible_runs as runs_db
 
     run_id = _start(ctx).json()["id"]
     runs_db.save_findings(run_id, ctx.company_id, [
         {"statement": "unsized", "claim_ids": ["u"], "impact_value": None,
          "currency": "accounts", "confidence_band": "low"},
-        {"statement": "small", "claim_ids": ["s"], "impact_value": 1.0,
-         "currency": "accounts", "confidence_band": "low"},
-        {"statement": "big", "claim_ids": ["b"], "impact_value": 9.0,
-         "currency": "accounts", "confidence_band": "low"},
     ], [])
-
     findings = ctx.client.get(f"/v1/crucible/{run_id}").json()["findings"]
-    assert [f["statement"] for f in findings] == ["big", "small", "unsized"]
+    assert findings[0]["impact_value"] is None
 
 
 def test_the_ledger_comes_back_with_its_claim_ids(ctx):

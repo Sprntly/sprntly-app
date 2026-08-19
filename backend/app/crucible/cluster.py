@@ -74,8 +74,8 @@ def assign_clusters(
     embeddings: Mapping[str, Sequence[float]],
     *,
     threshold: float = DEFAULT_THRESHOLD,
-) -> list[Claim]:
-    """Return the claims with `subject_cluster_id` and `subject` filled in.
+) -> tuple[list[Claim], dict]:
+    """Return the claims with `subject_cluster_id`/`subject` filled in, and stats.
 
     A claim with no embedding keeps whatever subject it already had — it is not
     forced into someone else's cluster, and it is never dropped, because a
@@ -85,7 +85,7 @@ def assign_clusters(
         import numpy as np
     except Exception:  # noqa: BLE001 — degrade to the old behaviour, loudly
         logger.exception("crucible: numpy unavailable; falling back to subject")
-        return list(claims)
+        return list(claims), {"embedded": 0, "degenerate": 0, "clusters": 0}
 
     vectors: list = []
     indexed: list[int] = []
@@ -97,47 +97,125 @@ def assign_clusters(
         indexed.append(i)
 
     if len(indexed) < 2:
-        return list(claims)
+        return list(claims), {"embedded": len(indexed), "degenerate": 0,
+                              "clusters": len(indexed)}
 
-    matrix = np.asarray(vectors, dtype=np.float32)
+    try:
+        matrix = np.asarray(vectors, dtype=np.float32)
+    except ValueError:
+        # Ragged input — vectors of differing length, which numpy refuses to
+        # square off rather than silently padding. Grouping on a matrix we
+        # cannot form would be arbitrary, so decline and say so.
+        logger.error("crucible: embeddings are ragged; skipping clustering")
+        return list(claims), {"embedded": 0, "degenerate": len(indexed),
+                              "clusters": 0}
+    if matrix.ndim != 2:
+        logger.error("crucible: embeddings are not a matrix; skipping")
+        return list(claims), {"embedded": 0, "degenerate": len(indexed),
+                              "clusters": 0}
+
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    # A zero vector would divide to NaN and then match nothing and everything
-    # by turns, depending on comparison order.
-    norms[norms == 0] = 1.0
-    matrix /= norms
+    # DEGENERATE VECTORS ARE EXCLUDED, NOT NORMALISED TO SOMETHING.
+    # `embed_texts` returns all-ZERO vectors when no OpenAI key is configured,
+    # and a zero vector has cosine 0.0 against everything — so it never reaches
+    # the threshold, every claim becomes its own cluster, and the run reports
+    # "only 1 supporting claim — an anecdote" for the entire corpus while
+    # saying `ready`. That is the quiet-failure shape this whole design is
+    # supposed to make impossible, so the caller is told (`degenerate`) and
+    # renders it.
+    finite = np.isfinite(matrix).all(axis=1)
+    usable = finite & (norms[:, 0] > 0)
+    degenerate = int((~usable).sum())
+    if degenerate:
+        logger.warning(
+            "crucible: %d of %d embeddings are zero or non-finite; those "
+            "claims are left ungrouped", degenerate, matrix.shape[0],
+        )
+    if not usable.any():
+        return list(claims), {"embedded": 0, "degenerate": degenerate,
+                              "clusters": 0}
 
-    leaders: list[int] = []          # positions within `matrix`
-    leader_matrix = np.zeros((0, matrix.shape[1]), dtype=np.float32)
+    safe_norms = np.where(norms == 0, 1.0, norms)
+    matrix = matrix / safe_norms
+
+    # PREALLOCATED AND DOUBLED, not `np.vstack` per leader. Growing by vstack
+    # reallocates and copies the whole leader block on every new cluster, which
+    # is quadratic in the number of clusters — and a real tenant produced 1,744
+    # clusters from 2,777 signals, so the pathological case IS the normal case.
+    capacity = 256
+    leader_matrix = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
+    leaders: list[int] = []
     assignment: list[int] = []
 
     for row in range(matrix.shape[0]):
+        if not usable[row]:
+            assignment.append(-1)          # ungrouped, never forced anywhere
+            continue
         if leaders:
-            sims = leader_matrix @ matrix[row]
+            sims = leader_matrix[: len(leaders)] @ matrix[row]
             best = int(np.argmax(sims))
             if float(sims[best]) >= threshold:
                 assignment.append(best)
                 continue
+        if len(leaders) == capacity:
+            capacity *= 2
+            grown = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
+            grown[: len(leaders)] = leader_matrix[: len(leaders)]
+            leader_matrix = grown
+        leader_matrix[len(leaders)] = matrix[row]
         leaders.append(row)
-        leader_matrix = np.vstack([leader_matrix, matrix[row : row + 1]])
         assignment.append(len(leaders) - 1)
+
+    # THE LABEL IS THE MEDOID, NOT THE LEADER. The leader is simply whichever
+    # member appeared first in the input, and naming a theme after an arbitrary
+    # member is how nine claims about billing end up titled with the one
+    # sentence about a calendar invite. The medoid is the member closest to the
+    # group's centre, which is the one a reader would pick as representative —
+    # and it is deterministic, unlike "first seen".
+    members: dict[int, list[int]] = {}
+    for position, cluster in enumerate(assignment):
+        if cluster >= 0:
+            members.setdefault(cluster, []).append(position)
+
+    labels: dict[int, str] = {}
+    for cluster, positions in members.items():
+        block = matrix[positions]
+        centroid = block.mean(axis=0)
+        centroid_norm = float(np.linalg.norm(centroid))
+        if centroid_norm:
+            centroid = centroid / centroid_norm
+        medoid = positions[int(np.argmax(block @ centroid))]
+        source = claims[indexed[medoid]]
+        labels[cluster] = label_for(source.assertion or source.subject)
 
     out = list(claims)
     for position, claim_index in enumerate(indexed):
         cluster = assignment[position]
-        leader_claim = claims[indexed[leaders[cluster]]]
-        label = label_for(leader_claim.assertion or leader_claim.subject)
+        if cluster < 0:
+            continue
         out[claim_index] = replace(
             out[claim_index],
             subject_cluster_id=f"c{cluster}",
-            subject=label,
+            subject=labels[cluster],
         )
-    return out
+    return out, {"embedded": int(usable.sum()), "degenerate": degenerate,
+                 "clusters": len(leaders)}
 
 
-def parse_embedding(raw) -> Optional[list[float]]:
-    """pgvector comes back as a JSON string over PostgREST, not a list."""
+def parse_embedding(raw):
+    """pgvector comes back as a JSON string over PostgREST, not a list.
+
+    Returns a float32 numpy array when numpy is available, so the caller never
+    holds 1536 boxed Python floats per signal.
+    """
     if raw is None:
         return None
+    try:
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        np = None                                        # type: ignore[assignment]
+
+    parsed = raw
     if isinstance(raw, str):
         import json
 
@@ -145,7 +223,14 @@ def parse_embedding(raw) -> Optional[list[float]]:
             parsed = json.loads(raw)
         except Exception:  # noqa: BLE001 — a malformed vector is a missing one
             return None
-        return parsed if isinstance(parsed, list) else None
-    if isinstance(raw, (list, tuple)):
-        return list(raw)
-    return None
+    if not isinstance(parsed, (list, tuple)):
+        return None
+    # float32 immediately. A list of 1536 Python floats is ~8x the memory of
+    # the same numbers packed, and on a large tenant that difference is the
+    # difference between fitting in RAM and not.
+    if np is not None:
+        try:
+            return np.asarray(parsed, dtype=np.float32)
+        except Exception:  # noqa: BLE001 — a vector we cannot pack is missing
+            return None
+    return list(parsed)

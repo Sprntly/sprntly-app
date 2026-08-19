@@ -252,3 +252,63 @@ def test_observed_at_is_always_timezone_aware():
     assert claim is not None
     assert claim.observed_at.tzinfo is not None
     assert claim.observed_at == datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+
+
+def test_a_company_s_own_stated_constraint_is_authoritative():
+    """`app/research/business_context_projection.py` writes `constraint` and
+    `good_outcome` with source_type `pm_manual`. Both were missing from the
+    map, so the company's own stated constraint projected as a generic
+    `mechanism` — which `pm_manual` has no authority over — and was refuted as
+    "outside its source's authority". `AUTHORITATIVE_FOR["pm_manual"]` grants
+    authority over `constraint` and nothing could ever produce one, which is
+    what made the gap invisible."""
+    claims, _ = project_signals([
+        sig(id="c1", kind="constraint", source_type="pm_manual"),
+        sig(id="c2", kind="good_outcome", source_type="pm_manual"),
+    ])
+    by_id = {c.id: c for c in claims}
+    assert by_id["c1"].type == "constraint"
+    assert by_id["c1"].authoritative is True
+    assert by_id["c2"].type == "preference"
+
+
+def test_every_signal_kind_a_known_writer_produces_is_mapped():
+    """A kind that falls off the map is a signal that silently never votes.
+
+    Scoped to the modules that actually create `kg_signal` rows. A blanket
+    `kind=` scan is not the guard it looks like: the graph uses that keyword
+    for edge endpoints ("entity", "signal") and the design agent for DOM nodes,
+    so it reports 44 "missing kinds" that are not signal kinds at all, and a
+    guard that cries wolf gets an exemption list and then gets ignored.
+    """
+    import re
+    from pathlib import Path
+
+    from app.crucible.claims import KIND_TO_CLAIM_TYPE
+
+    app = Path(__file__).resolve().parents[1] / "app"
+    writers = [
+        # The company's own business context — constraints and good_outcome.
+        app / "research" / "business_context_projection.py",
+    ]
+    written: set[str] = set()
+    for path in writers:
+        assert path.exists(), f"known signal writer moved: {path}"
+        written |= set(re.findall(r'kind=["\']([a-z_]+)["\']', path.read_text()))
+    written -= {"entity", "signal"}          # edge endpoints, not signal kinds
+
+    missing = {k for k in written if k not in KIND_TO_CLAIM_TYPE}
+    assert not missing, f"signal kinds written but never projected: {sorted(missing)}"
+
+
+def test_the_extraction_kinds_seen_in_production_are_mapped():
+    """The eight kinds a real tenant's corpus actually contains, measured on
+    the staging test copy (2,777 signals). Listed rather than derived: they
+    come from LLM extraction skills, so no static scan can find them."""
+    from app.crucible.claims import KIND_TO_CLAIM_TYPE
+
+    observed = {
+        "finding", "feature_request", "bug", "metric_anomaly",
+        "incident", "deal_blocker", "competitor_move", "sentiment",
+    }
+    assert not (observed - set(KIND_TO_CLAIM_TYPE))

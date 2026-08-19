@@ -155,10 +155,19 @@ def _refute(
     # created_at, across 16 distinct days. The rule is skipped and the caller
     # renders a coverage note saying so; disclosing the blind spot beats
     # exercising a check that cannot see.
-    if span < ECHO_WINDOW and not dates_are_ingest_clock:
+    # ONE CONVERSATION MEANS ONE ARTIFACT. Keying the rule on the clock alone
+    # refuted two claims from two different accounts, arriving through two
+    # different connectors three days apart, as "one conversation echoing" —
+    # which is simply false, and the count-based gate it replaced was
+    # non-monotonic. Distinct source artifacts is the thing the rule was always
+    # reaching for, and it is monotonic: adding evidence from a NEW artifact
+    # can only ever make a finding safer.
+    sources = {c.artifact_id for c in claims if c.artifact_id}
+    one_conversation = len(sources) <= 1
+    if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
         return (
-            f"all {len(claims)} supporting claims land within "
-            f"{span.days} days — this is one conversation "
+            f"all {len(claims)} supporting claims come from one source "
+            f"document within {span.days} days — this is one conversation "
             f"echoing through the corpus, not a pattern over time"
         )
     # Exactly one, not "at most one": ZERO named accounts is unsizeable, which

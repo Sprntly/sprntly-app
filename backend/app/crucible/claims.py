@@ -60,6 +60,15 @@ KIND_TO_CLAIM_TYPE: Mapping[str, ClaimType] = {
     "incident": "existence",
     "milestone": "attempt",
     "competitor_move": "direction",
+    # Written by app/research/business_context_projection.py — the company's
+    # OWN stated constraints and its definition of a good outcome. These were
+    # missing, so a constraint the company itself stated projected as a generic
+    # `mechanism`, which `pm_manual` has no authority over, and was refuted as
+    # "outside its source's authority". `AUTHORITATIVE_FOR["pm_manual"]` was
+    # unreachable in consequence: it grants authority over `constraint`, and
+    # nothing could ever produce one.
+    "constraint": "constraint",
+    "good_outcome": "preference",
 }
 DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 

@@ -281,13 +281,21 @@ def execute_run(
 
         # Grouping is what turns 2,777 claims into findings rather than into a
         # reading of our own taxonomy. See app/crucible/cluster.py.
-        embeddings = {
-            str(row.get("id")): vec
-            for row in signals
-            if (vec := parse_embedding(row.get("embedding"))) is not None
-        }
+        # Parsed to float32 AND released from the rows. Each embedding arrives
+        # as a ~19KB JSON string, and a Python list of 1536 floats is roughly
+        # eight times the size of the same numbers as float32 — so on a
+        # 10,000-signal tenant, holding the strings and the lists and the
+        # matrix at once measured near a gigabyte. Dropping the string as soon
+        # as it is parsed is most of that back, and the rows are still needed
+        # afterwards for the ingest-clock check.
+        embeddings = {}
+        for row in signals:
+            vec = parse_embedding(row.pop("embedding", None))
+            if vec is not None:
+                embeddings[str(row.get("id"))] = vec
+        cluster_stats: dict = {}
         if embeddings:
-            claims = assign_clusters(claims, embeddings)
+            claims, cluster_stats = assign_clusters(claims, embeddings)
         else:
             logger.warning(
                 "crucible: no embeddings for %s — clustering will fall back to "
@@ -305,6 +313,7 @@ def execute_run(
         ingest_clock = _dates_are_ingest_clock(signals)
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock)
+        result.stats.update(cluster_stats)
         runs_db.heartbeat(run_id, company_id)
 
         rows = []
@@ -389,6 +398,14 @@ def _bare_definition(company_id: str, goal_text: str) -> GoalDefinition:
 #: happened, and every date-based test is measuring our own backfill.
 _INGEST_CLOCK_SHARE = 0.6
 
+#: How close `valid_at` and `created_at` must be to count as the same moment.
+#: NOT an exact match: `valid_at` is stamped in Python when the Signal object
+#: is built and `created_at` by the database on insert, with an embedding call
+#: in between, so identical-in-intent timestamps routinely differ by seconds.
+#: An exact second-prefix compare would miss the very pattern it looks for on
+#: any tenant whose ingest is slightly slower than this one's.
+_INGEST_CLOCK_TOLERANCE_S = 120.0
+
 
 def _dates_are_ingest_clock(signals: list[dict]) -> bool:
     """Is this corpus dated by when we READ it rather than when it happened?
@@ -400,11 +417,29 @@ def _dates_are_ingest_clock(signals: list[dict]) -> bool:
     """
     if not signals:
         return False
-    same = sum(
-        1 for r in signals
-        if r.get("valid_at") and str(r.get("valid_at"))[:19] == str(r.get("created_at"))[:19]
-    )
+    same = 0
+    for row in signals:
+        gap = _seconds_between(row.get("valid_at"), row.get("created_at"))
+        if gap is not None and gap <= _INGEST_CLOCK_TOLERANCE_S:
+            same += 1
     return (same / len(signals)) >= _INGEST_CLOCK_SHARE
+
+
+def _seconds_between(a, b) -> Optional[float]:
+    """Absolute gap in seconds, or None if either side is unreadable."""
+    parsed = []
+    for value in (a, b):
+        if not value:
+            return None
+        text = str(value).replace("Z", "+00:00")
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        parsed.append(moment)
+    return abs((parsed[0] - parsed[1]).total_seconds())
 
 
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
@@ -416,6 +451,18 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
             "reason": "undated evidence",
             "actual": f"{claim_stats['no_timestamp']} of {claim_stats['seen']} "
                       f"signals carried no usable date and were not read",
+        })
+    degenerate = pipeline_stats.get("degenerate") or 0
+    embedded = pipeline_stats.get("embedded") or 0
+    if degenerate:
+        # The all-zero-vector case. Without this the run says `ready`, reports
+        # every claim as a lone anecdote, and looks like a business with no
+        # patterns in it rather than like a missing API key.
+        notes.append({
+            "reason": "some evidence could not be grouped",
+            "actual": f"{degenerate} of {degenerate + embedded} signals carry "
+                      f"no usable embedding, so they were read but never "
+                      f"grouped with anything",
         })
     if pipeline_stats.get("echo_check_skipped"):
         notes.append({

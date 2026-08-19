@@ -158,10 +158,15 @@ def load_findings(run_id: int, company_id: str) -> tuple[list[dict], list[dict]]
     findings = (
         client.table("crucible_findings").select("*")
         .eq("run_id", run_id).eq("company_id", company_id)
-        # NULLS LAST: an unsizeable finding sorts after sized ones but is never
-        # treated as zero, because "could not size" and "worth nothing" lead to
-        # opposite decisions.
-        .order("impact_value", desc=True, nullsfirst=False).execute()
+        # INSERTION ORDER IS THE RANK. `save_findings` writes one batch in the
+        # order `_rank` produced, and that order is not recoverable from any
+        # column: it puts an authoritative CONFLICT first regardless of size,
+        # because two sources that may both speak disagreeing is worth more
+        # than either claim. Re-sorting by `impact_value` here threw that away
+        # and sent conflicts to the bottom — while the `tier` written at rank
+        # time still said `deep`, so the row claimed a standing its position
+        # contradicted.
+        .order("id").execute()
     ).data or []
     ledger = (
         client.table("crucible_ledger").select("*")
