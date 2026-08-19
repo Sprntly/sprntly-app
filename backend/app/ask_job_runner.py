@@ -656,6 +656,40 @@ async def run_ask_job(
                         "maybe_ingest_status failed ask_id=%s project_id=%s",
                         ask_id, _promo_project_id, exc_info=True,
                     )
+                # Group surface (Choice A, mount-not-scheduler): persist the
+                # agent's reply as a GROUP turn (author NULL = Sprntly) and
+                # broadcast it, so every member sees the reply live via
+                # realtime — the server-authoritative replacement for the old
+                # server-scheduled group reply. Keyed on the SAME
+                # `context_source` the promotion block reads, additionally gated
+                # on `surface == "group"`; the individual surface already
+                # persists its own assistant turn via `_build_private_scope`'s
+                # emit hook, so only the group surface writes here. Best-effort:
+                # a persist/broadcast failure can only fail to ADD the group
+                # turn — the answer is already durably stored above.
+                if (context_source.get("params") or {}).get("surface") == "group":
+                    try:
+                        from app.db import conversations as _conversations_db
+                        from app.project_group_realtime import (
+                            publish_group_turn_created,
+                        )
+
+                        _grp_turn = _conversations_db.post_group_turn(
+                            conversation_id,
+                            None,
+                            payload.get("answer", ""),
+                            role="assistant",
+                            reply=payload,
+                        )
+                        publish_group_turn_created(
+                            int(_promo_project_id), conversation_id, _grp_turn
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                        logger.warning(
+                            "group assistant-turn persist/broadcast failed "
+                            "ask_id=%s project_id=%s",
+                            ask_id, _promo_project_id, exc_info=True,
+                        )
 
     outcome = await run_execution_job(
         job_id=ask_id,
