@@ -31,9 +31,21 @@ import type { Dispatch, RefObject, SetStateAction } from "react"
 import { addToSet, removeFromSet } from "../../../lib/chatAskState"
 import { getPendingAsk } from "../../../lib/runAskGeneration"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
-import type { AskResponse, OpenArtifactCandidate } from "../../../lib/api"
+import {
+  askApi,
+  type AskResponse,
+  type OpenArtifactCandidate,
+  type ChatIntentEnvelope,
+  type SlackShareTargetRef,
+  type PrdRecord,
+} from "../../../lib/api"
 import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
+import { resolveAttachmentRefs } from "../../shared/chatComposerController"
+import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
+import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
+import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../shared/chat-shell/conversation/actions"
+import { providerNoticeFromEnvelope, providerNoticeTitle } from "../../../lib/providerLimitNotice"
 import { useMainConversation, type MainConversation } from "./useMainConversation"
 import { useConversationGeneration } from "./useConversationGeneration"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
@@ -104,8 +116,44 @@ export interface MainConversationAdapter {
   openContentPanel: (tab: ContentPanelTab) => void
   content: AppContentState
 
+  // ── Composer state (still wrapper-owned until the composer folds in) ────────
+  attachments: { name: string; content: string; file?: File }[]
+  setAttachments: Dispatch<SetStateAction<{ name: string; content: string; file?: File }[]>>
+  setDraft: Dispatch<SetStateAction<string>>
+  setPendingSend: Dispatch<
+    SetStateAction<{ tabId: string | null; query: string; attachments: { name: string }[]; startedAt: number } | null>
+  >
+
+  // ── Submit leaf seams (tab-flavored; wrapper) ──────────────────────────────
+  setActiveTabId: Dispatch<SetStateAction<string | null>>
+  /** Resolve (and, on a fresh/brief surface, spawn) the tab a send lands on —
+   *  main's tab multiplexer. A single-conversation surface returns its one key. */
+  resolveSendTarget: (
+    newTurn: ThreadTurn,
+    handle: string,
+  ) => { targetTabId: string; spawnedNewTab: boolean; prevActiveTabId: string | null; prevTitle: string | null }
+  /** The prd-thinking guard + clarify-first intercept — returns true when the
+   *  send was intercepted before intent classification. Wrapper-injected here so
+   *  the clarify machinery can fold into the engine in a later sub-commit without
+   *  blocking submit's relocation. */
+  interceptBeforeIntent: (args: {
+    rawQuery: string
+    trimmed: string
+    docFile: File | null
+    activeTab: ChatTab | undefined
+    settlePendingSend: () => void
+  }) => Promise<boolean>
+  /** The PRD-tab command ENTRY wrappers (main-only; spawn/reuse a PRD tab). */
+  importPrdCommandFlow: (
+    file: File,
+    opts: { openTickets: boolean; seedQuery?: string; artifactTemplateId?: string | null },
+  ) => void
+  prdCommandFlow: (seedQuery?: string, taskOverride?: string | null, artifactTemplateId?: string | null) => void
+  applyPrdArtifactInTab: (tabId: string, update: { kind: "prd"; prdId: number; record: PrdRecord }) => void
+  shareRefFor: (envelope: ChatIntentEnvelope, tab: ChatTab | undefined, reportId: number | null) => SlackShareTargetRef
+
   // ── Cross-cutting ──────────────────────────────────────────────────────────
-  nextPrompts: Pick<ReturnType<typeof useNextPrompts>, "onSettled">
+  nextPrompts: Pick<ReturnType<typeof useNextPrompts>, "onSettled" | "retire">
   showToast: (title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => void
 }
 
@@ -115,6 +163,9 @@ export interface MainConversationAdapter {
 export type Conversation = MainConversation &
   ReturnType<typeof useConversationGeneration> & {
     makeHandle: (tabId: string) => ConversationHandle
+    /** Submit a raw composer draft: optimistic render → clarify/command
+     *  interception → grounded ask, over the resolved (possibly spawned) tab. */
+    submitAsk: (rawQuery: string) => Promise<void>
   }
 
 export function useConversation(adapter: MainConversationAdapter): Conversation {
@@ -145,6 +196,17 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     setContent,
     openContentPanel,
     content,
+    attachments,
+    setAttachments,
+    setDraft,
+    setPendingSend,
+    setActiveTabId,
+    resolveSendTarget,
+    interceptBeforeIntent,
+    importPrdCommandFlow,
+    prdCommandFlow,
+    applyPrdArtifactInTab,
+    shareRefFor,
     nextPrompts,
     showToast,
   } = adapter
@@ -275,5 +337,330 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postSummary,
   })
 
-  return { ...engine, ...generation, makeHandle }
+  const { runConversationAsk, runActionTurnInTab } = engine
+  const {
+    ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,
+    prdChangeTemplateFlow, ticketsChangeTemplateFlow,
+  } = generation
+
+  // ── The send pipeline (optimistic render → command/clarify intercept → ask) ─
+  // Extracted verbatim from ChatScreen's inline `submitAsk`. The surface-agnostic
+  // skeleton (optimistic pending-send, attachment early-extract, the intent
+  // dispatch, the optimistic real-turn + attachment upload/backfill/rollback, the
+  // grounded ask) lives here; the tab-spawn (`resolveSendTarget`), the PRD-tab
+  // entry flows, and the prd-thinking/clarify-first intercept stay wrapper seams.
+  const submitAsk = useCallback(
+    async (rawQuery: string) => {
+      const trimmed = rawQuery.trim()
+      // A doc-only send (empty ask + attachment) is allowed; a truly empty send is
+      // a no-op.
+      if (trimmed.length < 1 && attachments.length === 0) return
+      // Retire the previous turn's next-prompt suggestions RIGHT HERE — keyed on
+      // activeTabId (what the strip renders from), so every entry point clears
+      // identically and a command branch can't leave the strip standing.
+      if (activeTabId) nextPrompts.retire(activeTabId)
+      // Show the user's message NOW — before the dispatch decision, a network
+      // round-trip away. `settlePendingSend()` retires it at every exit below.
+      const askStartedAt = Date.now()
+      setPendingSend({
+        tabId: activeTabId,
+        query: trimmed,
+        attachments: attachments.map((a) => ({ name: a.name })),
+        startedAt: askStartedAt,
+      })
+      const settlePendingSend = () => setPendingSend(null)
+      const docFile = attachments.find((a) => a.file)?.file ?? null
+      const activeTab = activeTabId ? tabsRef.current?.find((t) => t.id === activeTabId) : undefined
+      // The prd-thinking guard + the clarify-first branch — a send landing inside
+      // a deferred PRD-ack window or a parked sufficiency gate is intercepted
+      // before intent classification. Wrapper seam until the clarify machinery
+      // folds in; returns true when it handled (and settled) the send.
+      if (await interceptBeforeIntent({ rawQuery, trimmed, docFile, activeTab, settlePendingSend })) return
+      // A ticket run already going on THIS tab: the duplicate ASK is refused (the
+      // insight path doesn't dedupe and each run is a multi-minute bill), the
+      // message handed back to the composer. Returns true when it swallowed it.
+      const ticketSetInFlightGuard = (): boolean => {
+        if (!activeTab?.ticketSetRunning) return false
+        settlePendingSend()
+        setDraft(rawQuery)
+        openContentPanel("tickets")
+        showToast(
+          "Already writing those tickets",
+          "That run is still going — it'll land in the panel on the right.",
+        )
+        return true
+      }
+      // Attachment text, read ONCE and read EARLY — before the planner is asked to
+      // decide, because the decision depends on it (a document attached to
+      // "generate a PRD" must reach the planner as a request WITH a subject).
+      let earlyExtracted: (string | null)[] | null = null
+      if (attachments.length > 0) {
+        earlyExtracted = await Promise.all(
+          attachments.map((a) =>
+            a.content
+              ? Promise.resolve<string | null>(a.content)
+              : a.file
+              ? askApi
+                  .extractFile(a.file)
+                  .then((r) => r.markdown.slice(0, 50000))
+                  .catch(() => null)
+              : Promise.resolve<string | null>(a.content ?? null),
+          ),
+        )
+      }
+
+      if (!trimmed.startsWith("/")) {
+        const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
+        // The planner sees what the answer path will see — same `[Attached files]`
+        // framing and 100k clamp — so the plan is made for the question that runs.
+        const attachedForIntent = earlyExtracted?.some((t) => t)
+          ? attachments
+              .map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`)
+              .join("\n\n")
+              .slice(0, 100000)
+          : null
+        const intentMessage = attachedForIntent
+          ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}`
+          : trimmed
+        const envelope = await import("../../../lib/api")
+          .then(({ chatIntentApi }) =>
+            chatIntentApi.resolve(intentMessage, {
+              conversationId: activeTab?.dbConvId ?? null,
+              prdId: tabPrdId,
+              hasAttachments: attachments.length > 0,
+            }),
+          )
+          .catch(() => null)
+        if (envelope) {
+          // The quiet failure: the endpoint fails open to `answer` when the model
+          // is unreachable, so a dead planner silently turns every command into a
+          // chat reply. Say it out loud instead.
+          const intentNotice = providerNoticeFromEnvelope(envelope)
+          if (intentNotice) {
+            showToast(
+              providerNoticeTitle(intentNotice),
+              `${intentNotice.message} Until then, commands like "write a PRD" or "share this on Slack" will be answered as ordinary questions.`,
+              undefined,
+              { persist: true },
+            )
+          }
+          // The doc/tab guards that decide WHICH flow runs stay here (main-tab UI
+          // state the shared dispatch primitive knows nothing about).
+          const targetPrdId =
+            !docFile && activeTab ? (envelope.prd_id ?? tabPrdId) : null
+          const ticketsTarget =
+            !docFile && activeTab
+              ? activeTab.ticketSetId != null
+                ? { ticketSetId: activeTab.ticketSetId } as const
+                : targetPrdId != null ? { prdId: targetPrdId } as const : null
+              : null
+          const result = dispatchChatIntent(
+            envelope,
+            {
+              hasEditTarget: targetPrdId != null,
+              editTargetPrdId: targetPrdId,
+              ticketsTarget,
+            },
+            useChatIntentExecutors({
+              onGenerateTickets: (env) => {
+                if (docFile) {
+                  setAttachments([])
+                  importPrdCommandFlow(docFile, {
+                    openTickets: true, seedQuery: trimmed,
+                    artifactTemplateId: env.artifact_template_id,
+                  })
+                  settlePendingSend()
+                  return
+                }
+                if (activeTab?.prd) {
+                  setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+                  openContentPanel("tickets")
+                  settlePendingSend()
+                  return
+                }
+                if (ticketSetInFlightGuard()) return
+                ticketSetCommandFlow(
+                  trimmed, env.task?.trim() || trimmed, env.artifact_template_id,
+                )
+                settlePendingSend()
+              },
+              onEditPrd: (instruction, prdId) => {
+                const tabId = activeTab!.id
+                void runEditPrdAction(instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  contextIds: { prdId },
+                  onArtifactUpdated: (u) => applyPrdArtifactInTab(tabId, u),
+                })
+                settlePendingSend()
+              },
+              onOpenArtifact: (open) => {
+                openArtifactFlow(trimmed, open)
+                settlePendingSend()
+              },
+              onGeneratePrd: (env) => {
+                if (docFile) {
+                  setAttachments([])
+                  importPrdCommandFlow(docFile, {
+                    openTickets: false, seedQuery: trimmed,
+                    artifactTemplateId: env.artifact_template_id,
+                  })
+                  settlePendingSend()
+                  return
+                }
+                prdCommandFlow(trimmed, env.task, env.artifact_template_id)
+                settlePendingSend()
+              },
+              onChangeTemplate: (env, prdId) => {
+                void prdChangeTemplateFlow(
+                  trimmed, activeTab!.id, prdId!,
+                  env.artifact_template_id!, env.artifact_template_name,
+                )
+                settlePendingSend()
+              },
+              onChangeTicketsTemplate: (env, target) => {
+                void ticketsChangeTemplateFlow(
+                  trimmed, activeTab!.id, target,
+                  env.artifact_template_id!, env.artifact_template_name,
+                )
+                settlePendingSend()
+              },
+              onListArtifacts: (env) => {
+                listArtifactsFlow(trimmed, env)
+                settlePendingSend()
+              },
+              onCreateArtifact: (env) => {
+                documentCommandFlow(trimmed, env)
+                settlePendingSend()
+              },
+              onShareToSlack: (env) => {
+                const tabId = activeTab!.id
+                void runShareToSlackAction(trimmed, env, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  resolveShareRef: (e) =>
+                    shareRefFor(e, tabsRef.current?.find((t) => t.id === tabId), content.reportFocusId ?? null),
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "slack_channel") return
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId ? { ...t, pendingShare: { turnId, ...question.question } } : t))
+                  },
+                })
+                settlePendingSend()
+              },
+              onAssignTickets: (instruction, prdId) => {
+                const tabId = activeTab!.id
+                void runAssignTicketsAction(trimmed, instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  contextIds: { prdId },
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "assign") return
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId
+                        ? { ...t, pendingAssign: { questions: question.questions, applied: question.applied, turnId } }
+                        : t))
+                  },
+                })
+                settlePendingSend()
+              },
+              onAnswer: () => {},
+            }),
+          )
+          if (result.handled) return
+        }
+      }
+      // Attached file content is folded into the ask as context. `displayQuery` is
+      // what the thread shows (the ask + a chip per attachment); `sendQuery` is
+      // what the agent receives (the same text with the parsed content folded in).
+      const displayQuery = trimmed
+      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
+      // before work. (Authoritative per-tab guard happens once targetTabId is
+      // resolved below — needed for the no-active-tab case.)
+      if (activeTabId != null && askingTabsRef.current?.has(activeTabId)) {
+        settlePendingSend()
+        return
+      }
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      const hasAttachments = attachments.length > 0
+      // OPTIMISTIC RENDER FIRST: the thread turn appears on THIS commit, BEFORE the
+      // extractFile network call, so the composer never clears into a void. Chips
+      // render from NAMES here; each attachment's content is folded on AFTER
+      // extraction resolves (below). The folded text still rides `sendQuery`.
+      const newTurn: ThreadTurn = {
+        id,
+        query: displayQuery,
+        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
+      }
+      const handle = displayQuery || attachments[0]?.name || "New chat"
+      // Resolve (and, on a fresh/brief surface, spawn) the tab this send lands on.
+      const { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle } =
+        resolveSendTarget(newTurn, handle)
+      // The real turn is on the tab now, so the placeholder has been handed off —
+      // same tick as resolveSendTarget's setTabs → React batches into ONE commit.
+      settlePendingSend()
+      // Hand the placeholder's clock over so the wait ladder measures one wait.
+      askStartRef.current?.set(id, askStartedAt)
+      // A fresh ask clears any leftover Stop flag from a prior ask.
+      stoppedTabsRef.current?.delete(targetTabId)
+
+      let sendQuery = displayQuery
+      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
+      if (hasAttachments) {
+        setBusyTabs((prev) => addToSet(prev, targetTabId))
+        const pending = attachments
+        let ctx: string
+        try {
+          // Per attachment: extract text ONCE (client-text | early-extracted |
+          // server markdown) + best-effort upload → `AttachmentRef[]`, shared with
+          // the project composers via `resolveAttachmentRefs`. `earlyExtracted`
+          // (done above for the planner) is passed so a document isn't parsed twice.
+          const extracted = await resolveAttachmentRefs(pending, { preExtracted: earlyExtracted })
+          ctx = extracted
+            .map((e) => `--- ${e.name} ---\n${e.content}`)
+            .join("\n\n")
+            .slice(0, 100000)
+          const withContent = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
+          persistedAttachments = withContent
+          setTabs((prev) => prev.map((t) => t.id === targetTabId
+            ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
+            : t))
+          sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
+          setAttachments([]) // clear after successful extraction only
+        } catch (e) {
+          // Extraction failed: roll the optimistic turn back so no ghost
+          // "thinking" bubble is stranded, but KEEP the attachments for retry.
+          setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+          if (spawnedNewTab) {
+            // Tab existed only for the failed send — remove it and restore prior.
+            setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
+            setActiveTabId(prevActiveTabId)
+          } else {
+            // Appended to an existing tab — drop just this turn and undo any
+            // New-chat rename so the tab looks exactly as before the send.
+            setTabs((prev) => prev.map((t) => t.id === targetTabId
+              ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
+              : t))
+          }
+          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+          return
+        }
+      }
+      await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
+    },
+    [
+      attachments, activeTabId, nextPrompts, setPendingSend, tabsRef, interceptBeforeIntent,
+      setDraft, openContentPanel, showToast, importPrdCommandFlow, prdCommandFlow,
+      applyPrdArtifactInTab, shareRefFor, setContent, content.reportFocusId, setAttachments,
+      setBusyTabs, askingTabsRef, stoppedTabsRef, askStartRef, resolveSendTarget, setActiveTabId,
+      emitCommandTurn, runActionTurnInTab, runConversationAsk,
+      ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,
+      prdChangeTemplateFlow, ticketsChangeTemplateFlow,
+    ],
+  )
+
+  return { ...engine, ...generation, makeHandle, submitAsk }
 }
