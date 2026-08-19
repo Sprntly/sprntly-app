@@ -76,6 +76,7 @@ import { useComposer } from "./useComposer"
 import { useConversationGeneration } from "./useConversationGeneration"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
+import { resolveShareRef } from "../../shared/chat-shell/conversation/resolveShareRef"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -3008,36 +3009,11 @@ export function ChatScreen() {
      *  passed in rather than read here so this stays a pure mapping of
      *  context → reference, testable without the content store. */
     reportId: number | null,
-  ): SlackShareTargetRef => {
-    const prdId = envelope.prd_id ?? tab?.prdId ?? null
-    // A KIND the user named wins over the tab's default document: "share the
-    // tickets" in a thread that has both a PRD and a set means the set, and
-    // falling through to prd_id there would share the wrong artifact under a
-    // name the user did give us.
-    const named = (envelope.artifact_type || "").toLowerCase()
-    if (named === "tickets" && tab?.ticketSetId) {
-      return { ticket_set_id: tab.ticketSetId }
-    }
-    if (named === "report" && reportId) {
-      return { report_id: reportId }
-    }
-    if (named === "prd" && prdId) {
-      return { prd_id: prdId }
-    }
-    // No subject named ("share this on slack") → whatever is in front of them,
-    // in the order the panel stacks it.
-    if (!envelope.artifact_query) {
-      if (prdId) return { prd_id: prdId }
-      if (tab?.ticketSetId) return { ticket_set_id: tab.ticketSetId }
-      if (reportId) return { report_id: reportId }
-    }
-    // A named subject with no matching tab context — "share the checkout PRD"
-    // — resolves by title against the caller's own library, server-side.
-    return {
-      artifact_type: envelope.artifact_type ?? null,
-      artifact_query: envelope.artifact_query ?? null,
-    }
-  }, [])
+  ): SlackShareTargetRef => resolveShareRef(envelope, {
+    prdId: tab?.prdId ?? null,
+    ticketSetId: tab?.ticketSetId ?? null,
+    reportId,
+  }), [])
 
   // (The share-to-Slack PREVIEW flow moved into the shared action layer —
   // `runShareToSlackAction`, config'd by `onShareToSlack` with main's tab/report

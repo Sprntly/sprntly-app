@@ -46,6 +46,7 @@ import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
+import { resolveShareRef } from "../../../shared/chat-shell/conversation/resolveShareRef"
 import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
 import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
@@ -725,28 +726,24 @@ export function useProjectConversation(
               void runShareToSlackAction(trimmed, env, {
                 emitTurn,
                 runActionTurn: (q, w) => engine.runActionTurnInTab(convKey, q, w),
-                // A REAL `SlackShareTargetRef` (the shipped shape used `{ kind,
-                // prdId }`, force-cast — keys the share/preview endpoint ignores,
-                // so even the PRD open in the panel never reached a valid target).
-                // Mirrors main's `shareRefFor` over this surface's PRD context:
-                // the envelope's resolved id, else this conversation's own PRD,
-                // else the shared panel's open PRD (`content.prd`). A NAMED subject
-                // with no id in context — "share the checkout PRD" — falls through
-                // to a title reference the preview resolves workspace-wide,
-                // server-side, exactly like main (project-only artifacts stay
-                // unresolvable-by-name = the deferred project-context behaviour).
-                resolveShareRef: (e): SlackShareTargetRef => {
-                  const prdId = e.prd_id ?? metaRef.current.prdId ?? content.prd?.prd_id ?? null
-                  const named = (e.artifact_type || "").toLowerCase()
-                  if (named === "prd" && prdId) return { prd_id: prdId }
-                  // "share this" with a PRD in front → that PRD.
-                  if (!e.artifact_query && prdId) return { prd_id: prdId }
-                  // A named subject → resolve by title server-side (main parity).
-                  if (e.artifact_type || e.artifact_query) {
-                    return { artifact_type: e.artifact_type ?? null, artifact_query: e.artifact_query ?? null }
-                  }
-                  return { prd_id: prdId }
-                },
+                // A REAL `SlackShareTargetRef` via the SAME shared resolver main
+                // uses (the shipped inline shape used `{ kind, prdId }`, force-cast
+                // — keys the share/preview endpoint ignores, so even the PRD open
+                // in the panel never reached a valid target; the inline copy also
+                // dropped the ticket-set and report arms). Build this surface's
+                // context — this conversation's own PRD (else the shared panel's
+                // open PRD, `content.prd`), its ticket set, and the panel's focused
+                // report — and hand it to the resolver, which applies the same
+                // precedence on every surface. A NAMED subject with no id in
+                // context — "share the checkout PRD" — falls through to a title
+                // reference the preview resolves workspace-wide, server-side,
+                // exactly like main (project-only artifacts stay unresolvable-by-
+                // name = the deferred project-context behaviour).
+                resolveShareRef: (e): SlackShareTargetRef => resolveShareRef(e, {
+                  prdId: metaRef.current.prdId ?? content.prd?.prd_id ?? null,
+                  ticketSetId: metaRef.current.ticketSetId ?? null,
+                  reportId: content.reportFocusId ?? null,
+                }),
                 canAskInDock: true,
                 onDockQuestion: (turnId, question) => {
                   if (question.kind !== "slack_channel") return
