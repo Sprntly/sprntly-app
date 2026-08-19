@@ -14,8 +14,9 @@
  * owns the scroll logic.
  */
 
-import { forwardRef, useImperativeHandle, type ReactNode } from "react"
+import { forwardRef, useImperativeHandle, useRef, type ReactNode } from "react"
 import { ChatTranscript, type ChatTranscriptTurn } from "../ChatTranscript"
+import { SelectionReplyToolbar } from "../SelectionReplyToolbar"
 import type { ChatShellHandle, ChatSurfaceDescriptor } from "./types"
 
 export interface ChatShellProps {
@@ -30,6 +31,12 @@ export interface ChatShellProps {
   /** The attachment overlay, host-rendered; gated by
    *  `descriptor.overlays.attachmentViewer`. */
   attachmentViewer?: ReactNode
+  /** MAIN ONLY: the reader highlighted a passage of an answer and pressed
+   *  Reply. The shell owns the selection toolbar; the COMPOSER is host-rendered
+   *  on main, so the parked quote lives in the host's state — hence the
+   *  callback. Unset renders no toolbar at all, so a host that hasn't opted in
+   *  is unchanged. */
+  onQuoteSelection?: (text: string) => void
 }
 
 function ChatShellInner(
@@ -39,12 +46,18 @@ function ChatShellInner(
     pendingSend,
     composerNode,
     attachmentViewer,
+    onQuoteSelection,
   }: ChatShellProps,
   ref: React.Ref<ChatShellHandle>,
 ) {
   const { frame, transcript, dock, overlays, refs } = descriptor
   const isThread = frame.mode === "thread"
 
+  // The main thread column, mirrored into a ref object the selection toolbar
+  // can read. `refs.contentColumnRef` is a CALLBACK ref owned by the host (its
+  // ResizeObserver attaches through it), so the shell composes rather than
+  // replaces it — both are called, and the host's scroll behaviour is untouched.
+  const mainColumnRef = useRef<HTMLDivElement>(null)
   // The scroll handle is a no-op: the main host owns its scrolling through the
   // `refs` channel and never calls these, so they stay inert.
   useImperativeHandle(
@@ -74,7 +87,13 @@ function ChatShellInner(
         >
           {isThread ? (
             <div className="bc-scroll">
-              <div className={frame.threadClassName ?? "bc-thread"} ref={refs?.contentColumnRef}>
+              <div
+                className={frame.threadClassName ?? "bc-thread"}
+                ref={(el) => {
+                  mainColumnRef.current = el
+                  refs?.contentColumnRef?.(el)
+                }}
+              >
                 <ChatTranscript turns={turns as ChatTranscriptTurn[]} leading={transcript.leading} />
                 {pendingSend}
               </div>
@@ -83,6 +102,18 @@ function ChatShellInner(
             frame.landing
           )}
         </div>
+
+        {/* Highlight-to-reply, scoped to the thread column (`contentColumnRef`)
+            rather than the viewport, so a selection in the landing block or
+            the dock is never mistaken for a quotable passage. Opt-in: a host
+            that passes no `onQuoteSelection` renders no toolbar and no extra
+            listeners, keeping main's DOM byte-identical. */}
+        {isThread && onQuoteSelection ? (
+          <SelectionReplyToolbar
+            containerRef={mainColumnRef}
+            onReply={onQuoteSelection}
+          />
+        ) : null}
 
         {isThread ? (
           <div className={frame.dockClassName ?? "bc-dock"}>

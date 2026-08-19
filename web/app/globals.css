@@ -519,18 +519,12 @@
     width: 100%;
   }
 
+  /* Holds the drawn lockup — same reasoning as `.legal-brand`. */
   .ob-brand-mark {
-    font-family: var(--font-body);
-    font-weight: 500;
-    font-size: 22px;
-    letter-spacing: -0.015em;
+    display: flex;
+    justify-content: center;
     margin-bottom: 48px;
-    text-align: center;
     color: var(--ink);
-  }
-
-  .ob-brand-mark span {
-    color: var(--accent);
   }
 
   .ob-step-indicator {
@@ -2850,6 +2844,62 @@
     background: var(--surface-4);
   }
 
+  /* The quoted passage parked above the input — what you highlighted in an
+     answer and pressed Reply on. A left rule plus muted text, the universal
+     quote shape, so it reads as "the thing I'm answering" rather than as
+     something you typed. Clamped to four lines: a quote points AT a passage,
+     it is not a second copy of it, and an unclamped one would push the
+     textarea off a short screen. */
+  .cx-quote {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 10px 12px 0;
+    padding: 7px 8px 7px 10px;
+    border-left: 2px solid var(--line-strong, var(--line));
+    border-radius: 0 6px 6px 0;
+    background: var(--surface-3);
+  }
+
+  .cx-quote-text {
+    flex: 1;
+    margin: 0;
+    min-width: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--ink-3, var(--ink-2));
+    white-space: pre-wrap;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  .cx-quote-x {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: none;
+    background: transparent;
+    color: var(--ink-3, var(--ink-2));
+    opacity: 0.6;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    padding: 0;
+    font-family: inherit;
+  }
+
+  .cx-quote-x:hover {
+    opacity: 1;
+    background: var(--surface-4);
+  }
+
   .cx-input {
     display: block;
     width: 100%;
@@ -4200,7 +4250,19 @@
     /* box-shadow: var(--shadow-md); */
   }
 
+  /* Pinned to the top of `.prd-scroll` while the document moves under it —
+     the same standing-chrome treatment the Evidence / PRD / Tickets tabs get
+     above it. Formatting controls that scroll away are unreachable exactly
+     when they are wanted: partway down a long PRD, mid-edit.
+
+     `background` is load-bearing here, not decoration: a transparent sticky bar
+     would let the document scroll through it. `z-index` sits under the
+     overflow menu (40) so an open dropdown still draws over the bar it hangs
+     from, and over the document either way. */
   .prd-toolbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
     padding: 9px 14px;
     background: var(--surface-2);
     border-bottom: 1px solid var(--line);
@@ -4209,10 +4271,94 @@
     justify-content: space-between;
   }
 
+  /* The tool row shrinks; the save status does NOT (see `.prd-status`). At the
+     narrowest panel width — the artifact drawer open on a laptop — this scrolls
+     rather than clipping, so no control is ever unreachable even before the
+     "More" menu is opened. */
+  /* `0 1 auto`: shrinks when the panel is narrow, but never GROWS to fill the
+     bar. Growing pushed the "More" trigger to the right edge, against the save
+     status, when it belongs at the end of the tools it overflows from. */
   .prd-tools-l {
     display: flex;
     gap: 3px;
     align-items: center;
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .prd-tools-l::-webkit-scrollbar { display: none; }
+
+  /* Overflow menu — everything that isn't reached for constantly. */
+  .prd-more {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+    /* Outside the scrolling row (which would clip the dropdown) but visually
+       part of it — this is what keeps the trigger beside Table. */
+    margin-left: 3px;
+  }
+
+  .prd-more-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 40;
+    min-width: 178px;
+    padding: 5px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
+    box-shadow: var(--shadow-lg, 0 10px 30px rgba(10, 25, 18, 0.14));
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* A menu opened from a control on the LEFT of the bar hangs left, so it
+     doesn't shoot off toward the middle of the panel. */
+  .prd-more-menu--left {
+    right: auto;
+    left: 0;
+  }
+
+  .prd-more-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .prd-more-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    flex: none;
+    color: var(--ink-3);
+  }
+
+  .prd-more-item:hover .prd-more-icon { color: var(--ink); }
+
+  /* The style menu's trigger reads as a dropdown rather than a button. */
+  .prd-tool-styletrigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .prd-more-item:hover {
+    background: var(--surface-3);
+    color: var(--ink);
   }
 
   .prd-tool {
@@ -4237,7 +4383,16 @@
     margin: 0 4px;
   }
 
+  /* NEVER shrinks and never scrolls away. This is the only thing in the bar
+     that tells anyone whether their edit reached the server, so it outranks
+     every formatting control for space. */
   .prd-status {
+    flex: 0 0 auto;
+    /* `auto` rather than a fixed gap: takes the slack the tool row no longer
+       claims, so the status stays pinned right while "More" stays left. */
+    margin-left: auto;
+    padding-left: 12px;
+    white-space: nowrap;
     font-size: 11px;
     color: var(--muted);
     display: flex;
@@ -6960,6 +7115,190 @@
     white-space: pre-wrap;
   }
 
+  /* The passage this message was a reply to, above the bubble. Same left-rule
+     shape as the composer's parked quote (`.cx-quote`), so the excerpt looks
+     the same before and after sending — right-aligned into the user lane and
+     clamped, because the answer it came from is a few turns up the thread and
+     the full text is still there. */
+  .bc-user-quote {
+    align-self: flex-end;
+    max-width: min(100%, 420px);
+    margin: 0 34px 5px 0;
+    padding: 6px 10px;
+    border: none;
+    border-right: 2px solid var(--line-strong, var(--line));
+    border-radius: 6px 0 0 6px;
+    background: var(--surface-3);
+    color: var(--ink-3, var(--ink-2));
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: left;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  /* Clickable variant — the clamp above hides the tail of a long highlight, so
+     wherever a viewer exists the block becomes a button that shows all of it.
+     The clamp moves onto the inner text node because a flex button cannot also
+     be a -webkit-box. */
+  .bc-user-quote--open {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    width: fit-content;
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.14s, border-color 0.14s;
+  }
+
+  .bc-user-quote--open:hover {
+    background: var(--surface-4);
+  }
+
+  .bc-user-quote--open:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .bc-user-quote-text {
+    min-width: 0;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  .bc-user-quote-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    margin-top: 2px;
+    opacity: 0.5;
+  }
+
+  .bc-user-quote--open:hover .bc-user-quote-icon {
+    opacity: 1;
+  }
+
+  /* Per-turn actions under a user bubble (today: edit-and-resend, offered only
+     on a message that never got an answer). Hidden until the turn is hovered
+     or something inside it takes focus — a row of controls under every message
+     you ever sent is noise — but always PRESENT in the DOM, so it is reachable
+     by keyboard and announced by a screen reader. */
+  .bc-user-actions {
+    align-self: flex-end;
+    display: flex;
+    gap: 4px;
+    margin: 3px 34px 0 0;
+    opacity: 0;
+    transition: opacity 0.14s;
+  }
+
+  .bc-turn:hover .bc-user-actions,
+  .bc-user-actions:focus-within {
+    opacity: 1;
+  }
+
+  /* One skin for every per-turn action (copy / edit / retry). `.bc-user-edit-btn`
+     rides alongside it on the edit button only, so existing selectors and tests
+     that name it keep working. */
+  .bc-user-act {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3, var(--ink-2));
+    cursor: pointer;
+  }
+
+  .bc-user-act:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .bc-user-act:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    opacity: 1;
+  }
+
+  /* The copy button's "done" tick, held for a beat by the caller. Colour is the
+     only signal — the row must not change width mid-hover. */
+  .bc-user-act[aria-label="Copied"] {
+    color: var(--accent);
+  }
+
+  /* The in-place editor that replaces the bubble while a stopped question is
+     being rewritten. Sized to the user lane rather than the full column so the
+     message does not jump sides the moment it becomes editable. */
+  .bc-user-edit {
+    align-self: flex-end;
+    width: min(100%, 560px);
+    margin-right: 34px;
+    padding: 10px 12px;
+    border: 1px solid var(--accent-alpha-40, var(--line));
+    border-radius: 14px 4px 14px 14px;
+    background: var(--surface-2);
+  }
+
+  .bc-user-edit-input {
+    display: block;
+    width: 100%;
+    min-height: 42px;
+    max-height: 240px;
+    border: none;
+    outline: none;
+    background: transparent;
+    resize: none;
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .bc-user-edit-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .bc-user-edit-cancel,
+  .bc-user-edit-save {
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .bc-user-edit-save {
+    border-color: transparent;
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .bc-user-edit-save:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
   /* Attached-file cards on a user turn — shown INSTEAD of dumping the document
      content into the bubble (the content still rides the ask to the backend).
      Claude-style: an icon tile + file name + a type/size sub-line, clickable to
@@ -7123,12 +7462,82 @@
     font-style: italic;
   }
 
+  /* A quoted passage, shown verbatim rather than re-rendered as markdown. The
+     text arrives already flattened out of a rendered answer, so its newlines
+     ARE its structure — `pre-wrap` is what keeps a quoted list a list instead
+     of the run-on paragraph markdown would collapse it into. Not monospaced:
+     it is prose that was lifted from prose. */
+  .bc-file-viewer-plain {
+    margin: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
   /* Agent turn */
   .bc-agent-head {
     display: flex;
     align-items: center;
     gap: 8px;
     flex-wrap: wrap;
+  }
+
+  /* ── The Sprntly mark's working animation ────────────────────────────────
+     Blades close toward the centre while the whole group spins, on one
+     continuous 1.8s cycle with no pause and no reset. Lifted from the
+     marketing site (`css-new.css`'s `mark-iris`) unchanged — same duration,
+     same 19-unit travel, same asymmetric spin curve — so the product and the
+     site are visibly the same product.
+
+     The spin's keyframe SPACING does the acceleration while the timing stays
+     linear: ~85 deg/s through the closing phase, peaking just after the
+     aperture shuts, easing back so the loop's start and end speeds match. 450
+     degrees is a multiple of 90 and the mark is four-fold symmetric, so the
+     cycle is seamless.
+
+     `transform-box: fill-box` is load-bearing, not tidying: with the origin in
+     view-box coordinates some renderers pivot off-centre and the mark orbits
+     instead of spinning.
+
+     Applied ONLY under `prefers-reduced-motion: no-preference`. The resting
+     frame is the static mark exactly, so anyone who asked for less movement
+     gets the logo rather than a gap. */
+  .spr-iris {
+    transform-box: fill-box;
+    transform-origin: 50% 50%;
+  }
+
+  @keyframes sprntlySpin {
+    0%   { transform: rotate(0deg); }
+    19%  { transform: rotate(29deg); }
+    40%  { transform: rotate(75deg); }
+    51%  { transform: rotate(125deg); }
+    64%  { transform: rotate(250deg); }
+    76%  { transform: rotate(375deg); }
+    88%  { transform: rotate(433deg); }
+    100% { transform: rotate(450deg); }
+  }
+
+  @keyframes sprntlyBladeTop    { 0%, 100% { transform: translateY(0); }  50% { transform: translateY(19px); } }
+  @keyframes sprntlyBladeRight  { 0%, 100% { transform: translateX(0); }  50% { transform: translateX(-19px); } }
+  @keyframes sprntlyBladeBottom { 0%, 100% { transform: translateY(0); }  50% { transform: translateY(-19px); } }
+  @keyframes sprntlyBladeLeft   { 0%, 100% { transform: translateX(0); }  50% { transform: translateX(19px); } }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .spr-iris         { animation: sprntlySpin 1.8s linear infinite; }
+    .spr-blade-top    { animation: sprntlyBladeTop 1.8s ease-in-out infinite; }
+    .spr-blade-right  { animation: sprntlyBladeRight 1.8s ease-in-out infinite; }
+    .spr-blade-bottom { animation: sprntlyBladeBottom 1.8s ease-in-out infinite; }
+    .spr-blade-left   { animation: sprntlyBladeLeft 1.8s ease-in-out infinite; }
+  }
+
+  /* The guest rail's brand chip: centres the mark instead of a text glyph,
+     and drops the serif sizing that only made sense for a letterform. */
+  .sb-rail-logo--brand .sb-rail-logo-text,
+  .sb-rail-logo--brand {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink);
   }
 
   .bc-agent-mark {
@@ -7140,7 +7549,10 @@
     align-items: center;
     justify-content: center;
     background: var(--accent-muted);
-    color: var(--accent);
+    /* The mark is monochrome by brand rule — black or white, no colour. The
+       chip keeps its tinted ground; the logo sitting in it does not take the
+       tint. */
+    color: var(--ink);
   }
 
   .bc-agent-mark--pm {
@@ -9792,24 +10204,42 @@
     margin: 0.5em 0;
   }
 
-  .ai-bar-reply-answer h2 {
-    font-family: var(--font-display);
-    font-size: 18px;
+  /* Sub-headers in an answer are PART OF THE PROSE — a label on the paragraph
+     under them — not a document's heading scale. They now render at the
+     surface's own body size and weight, separated by space rather than by
+     size, so a `##` reads as a turn in the conversation instead of a title
+     dropped into it.
+
+     ALL SIX LEVELS, deliberately. Only `h2`/`h3` were ever styled here, so a
+     `#` or `####` in an answer fell through to the BROWSER defaults — an `h1`
+     is 2em bold with 0.67em margins — which is the loudest version of exactly
+     the problem this fixes, and the easiest to hit, since a model writing a
+     structured answer often opens with `#`.
+
+     `inherit` for family/size/line-height rather than hard values: this block
+     is shared by the chat thread (14px, `.bc-agent-body`) and the AI bar
+     (13px), and pinning a number here would silently un-scale one of them. */
+  .ai-bar-reply-answer h1,
+  .ai-bar-reply-answer h2,
+  .ai-bar-reply-answer h3,
+  .ai-bar-reply-answer h4,
+  .ai-bar-reply-answer h5,
+  .ai-bar-reply-answer h6 {
+    font-family: inherit;
+    font-size: inherit;
+    line-height: inherit;
     font-weight: 600;
     color: var(--ink);
-    letter-spacing: -0.005em;
-    margin: 1.1em 0 0.4em;
+    letter-spacing: normal;
+    margin: 1em 0 0.25em;
   }
 
-  .ai-bar-reply-answer h3 {
-    font-size: 15px;
-    font-weight: 600;
-    color: var(--ink);
-    margin: 1em 0 0.3em;
-  }
-
+  .ai-bar-reply-answer h1:first-child,
   .ai-bar-reply-answer h2:first-child,
-  .ai-bar-reply-answer h3:first-child {
+  .ai-bar-reply-answer h3:first-child,
+  .ai-bar-reply-answer h4:first-child,
+  .ai-bar-reply-answer h5:first-child,
+  .ai-bar-reply-answer h6:first-child {
     margin-top: 0;
   }
 
@@ -9875,11 +10305,34 @@
     margin: 0.25em 0;
   }
 
+  /* Markdown tables. Three things have to hold together here, and the reason
+     they are all on this one selector is that a report table ("Decision
+     Register", a status matrix) is the shape that broke: a "Status" header
+     rendered stacked one letter per line as "St/at/us" while the neighbouring
+     prose column ran the full width of the chat column.
+
+     The cause is inheritance, not the table rules. This prose sits inside
+     `.bc-agent-body`, which sets `overflow-wrap: anywhere` so a pasted URL
+     can't blow the chat column open. Inherited into a table that property is
+     poison: unlike `break-word`, `anywhere` introduces soft-wrap
+     opportunities that COUNT toward a cell's min-content width. Every column
+     therefore reports a min-content of roughly one character, the auto table
+     layout concludes it may shrink any of them to nothing, and it hands the
+     width to whichever column carries the most text. So the fix is to re-set
+     the wrapping on the cells rather than to hand-tune column widths. */
   .ai-bar-reply-answer table {
+    /* `display: block` + `width: max-content` capped at the column makes the
+       table its own horizontal scroller: a narrow table renders at its
+       natural width instead of being stretched thin, a normal one fills the
+       column and wraps, and one that genuinely cannot fit scrolls instead of
+       overflowing the message. */
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
     border-collapse: collapse;
     margin: 0.7em 0;
     font-size: 12px;
-    width: 100%;
   }
 
   .ai-bar-reply-answer th,
@@ -9888,12 +10341,30 @@
     padding: 6px 10px;
     text-align: left;
     vertical-align: top;
+    /* `break-word`, NOT `anywhere` — both break a word too long for its
+       column, but only `break-word` is excluded from min-content sizing. A
+       long URL still breaks instead of overflowing; "Status" keeps a whole
+       word's worth of min width, so the column can never collapse below it. */
+    overflow-wrap: break-word;
+    word-break: normal;
+    /* A floor under every column. Without it the auto layout parks a short
+       column at exactly its min-content and gives the surplus to the prose
+       column, which is how an id like "D-001" ends up split over two lines at
+       a hyphen while the note beside it runs three times as wide. 4.5em is
+       deliberately modest — enough for an id, a status word, or a small
+       number, not enough to starve the prose column on a seven-column table. */
+    min-width: 4.5em;
   }
 
   .ai-bar-reply-answer th {
     background: var(--surface);
     font-weight: 600;
     color: var(--ink);
+    /* Headers are labels, so keep them on one line — the column is then sized
+       by the widest of (header, content) rather than by content alone, which
+       is what balances a short-value column against a prose one. Safe because
+       the table above scrolls rather than overflowing. */
+    white-space: nowrap;
   }
 
   .ai-bar-reply-answer a {
@@ -10193,28 +10664,23 @@
     min-height: 18px;
   }
 
+  /* The waiting indicator IS the mark, working. It was a generic green
+     conic-gradient ring on a 1.4s spin — a spinner any product could have
+     shipped. The mark's own 1.8s cycle says the same thing and says whose
+     product it is, and it is now the same animation as the agent's chip
+     directly above it and the splash on cold start, so "something is
+     happening" has ONE shape across the app. The `::after` hole that punched
+     the ring into a donut goes with the gradient; the aperture in the middle
+     of the mark does that job by construction. */
   .cw-orb {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
+    width: 15px;
+    height: 15px;
     flex-shrink: 0;
-    background: conic-gradient(from 0deg, var(--accent-2), var(--accent), var(--accent-2));
-    animation: cw-spin 1.4s linear infinite;
-    position: relative;
-  }
-
-  .cw-orb::after {
-    content: "";
-    position: absolute;
-    inset: 2.5px;
-    border-radius: 50%;
-    background: var(--surface-2);
-  }
-
-  @keyframes cw-spin {
-    to {
-      transform: rotate(360deg);
-    }
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    /* Monochrome, like every other instance of the mark. */
+    color: var(--ink);
   }
 
   .cw-phase {
@@ -15803,17 +16269,14 @@
     background: var(--surface);
   }
 
+  /* Holds the drawn lockup. The `span` accent tint that coloured half of the
+     old split-text wordmark is gone with it — the mark is monochrome, and that
+     rule would repaint an SVG child green. */
   .legal-brand {
-    font-family: var(--font-display);
-    font-weight: 700;
-    font-size: 18px;
-    letter-spacing: -0.02em;
+    display: inline-flex;
+    align-items: center;
     color: var(--ink);
     text-decoration: none;
-  }
-
-  .legal-brand span {
-    color: var(--accent);
   }
 
   .legal-main {
@@ -17556,7 +18019,11 @@
     justify-content: center;
   }
 
+  /* Holds the drawn lockup now; the type styling below only still applies to
+     any caller that passes text. */
   .auth-logo {
+    display: inline-flex;
+    align-items: center;
     font-size: 19px;
     font-weight: 500;
     letter-spacing: -0.015em;
@@ -18249,15 +18716,16 @@
     margin-bottom: 16px;
   }
 
+  /* Holds the drawn lockup; the type sizing below is inert now but harmless
+     for any caller still passing text. The `.dot` accent rule went with the
+     typed-out wordmark it belonged to — the mark takes no colour. */
   .onb-head .onb-brand {
+    display: inline-flex;
+    align-items: center;
     font-size: 16px;
     font-weight: 500;
     letter-spacing: -0.015em;
     color: var(--ink);
-  }
-
-  .onb-head .onb-brand .dot {
-    color: var(--accent);
   }
 
   .onb-head .save {
@@ -23179,8 +23647,10 @@
   text-decoration: none;
   flex-shrink: 0;
 }
-.docs-wordmark { display: inline-flex; align-items: baseline; }
-.docs-wordmark > span { color: var(--accent); }
+/* Holds the drawn lockup. The `> span` accent tint that coloured half of the
+   old split-text wordmark is gone with it — the mark is monochrome, and that
+   rule would have repainted an SVG child green. */
+.docs-wordmark { display: inline-flex; align-items: center; color: var(--ink); }
 .docs-brand-tag {
   font-size: 11px;
   font-weight: 600;

@@ -321,16 +321,16 @@ def test_chroma_of_stable_at_luminance_extremes():
     assert _saturation_of("#0a0a0a") == pytest.approx(0.0, abs=1e-6)
 
 
-def test_chroma_classifies_real_plotline_candidates():
+def test_chroma_classifies_real_tyrell_candidates():
     """Pin absolute-chroma classifications for every color in the measured real-file
-    set (Plotline Figma file + sprntly.ai web extraction).
+    set (Tyrell Figma file + sprntly.ai web extraction).
 
     Chromatic colours score >= CHROMA_THRESHOLD; near-neutrals score below it.
     Values are measured precisely — if a future change moves any of these, the fix
     broke something.
     """
     # Chromatic — must be >= CHROMA_THRESHOLD
-    assert _chroma_of("#e8a33d") == pytest.approx(0.671, abs=1e-3)  # Plotline gold
+    assert _chroma_of("#e8a33d") == pytest.approx(0.671, abs=1e-3)  # Tyrell gold
     assert _chroma_of("#0e6b4f") == pytest.approx(0.365, abs=1e-3)  # sprntly green
     assert _chroma_of("#d97706") == pytest.approx(0.827, abs=1e-3)  # orange
     for h in ("#e8a33d", "#0e6b4f", "#d97706"):
@@ -338,9 +338,9 @@ def test_chroma_classifies_real_plotline_candidates():
 
     # Near-neutral — must be < CHROMA_THRESHOLD
     neutrals = {
-        "#0e1116": 0.031,   # Plotline near-black canvas (was falsely chromatic under HSL gate)
-        "#161b22": 0.047,   # Plotline near-black surface (same problem)
-        "#f4f1ea": 0.039,   # Plotline warm white (same problem)
+        "#0e1116": 0.031,   # Tyrell near-black canvas (was falsely chromatic under HSL gate)
+        "#161b22": 0.047,   # Tyrell near-black surface (same problem)
+        "#f4f1ea": 0.039,   # Tyrell warm white (same problem)
         "#fafaf7": 0.012,   # sprntly surface
         "#e8e5dd": 0.043,   # sprntly border
         "#5a5751": 0.035,   # sprntly muted
@@ -355,10 +355,10 @@ def test_chroma_classifies_real_plotline_candidates():
     assert _chroma_of("notacolor") == 0.0
 
 
-def test_pick_accent_plotline_returns_gold_over_large_near_black():
+def test_pick_accent_tyrell_returns_gold_over_large_near_black():
     """Gold accent wins despite a far-larger area near-black canvas.
 
-    This reproduces the exact failure from the live Plotline Figma gate: gold
+    This reproduces the exact failure from the live Tyrell Figma gate: gold
     #e8a33d (area ~33k) was losing to near-black canvas #0e1116 (area ~3.13M)
     because the HSL gate falsely classified #0e1116 as chromatic (sat 0.222 >
     0.15). With absolute chroma, #0e1116 is correctly neutral and the gold wins.

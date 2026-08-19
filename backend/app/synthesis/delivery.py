@@ -216,34 +216,6 @@ def deliver_ping_to_slack(enterprise_id: str, *, text: str,
         return {"delivered": False, "reason": f"error: {e}", "recipients": []}
 
 
-def artifacts_deep_link() -> str:
-    """The monthly-report CTA target — the artifacts library, where the report
-    was just saved (a per-report deep link needs a URL contract the artifacts
-    screen doesn't have yet; the fresh report is the newest row). Mirrors
-    brief_deep_link's frontend_url handling."""
-    base = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
-    return f"{base}/artifacts"
-
-
-def report_ping_slack_blocks(report_label: str) -> tuple[str, list[dict]]:
-    """(plain-text fallback, Block Kit blocks) announcing a scheduled monthly
-    report. Static copy like the brief's ready-ping — a notification, not the
-    report itself, which lives in the artifacts library."""
-    text = f"Your monthly {report_label} is ready."
-    blocks: list[dict] = [
-        {"type": "section",
-         "text": {"type": "mrkdwn", "text": text}},
-        {"type": "actions",
-         "elements": [
-             {"type": "button",
-              "text": {"type": "plain_text", "text": "Open your reports"},
-              "url": artifacts_deep_link(),
-              "style": "primary"},
-         ]},
-    ]
-    return text, blocks
-
-
 # ── PRD-ready ping ────────────────────────────────────────────────────────────
 
 

@@ -298,11 +298,11 @@ def test_confluence_body_resolves_through_open_session_and_get_page(
 ):
     """AC3: the page id IS the catalog row's external_id, and the two calls
     are the ones the chat lookup path already uses."""
-    fake = fake_confluence(page={"id": "page-42", "text": "ChoisBits is shurting down"})
+    fake = fake_confluence(page={"id": "page-42", "text": "Cyberdyne is shurting down"})
 
     resolved = document_bodies.BodyResolver(_CID).resolve_confluence("page-42")
 
-    assert resolved.text == "ChoisBits is shurting down"
+    assert resolved.text == "Cyberdyne is shurting down"
     assert fake.pages_fetched == ["page-42"]
 
 

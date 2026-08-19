@@ -7,6 +7,7 @@ import {
   type FieldCheck,
   type ValidationResult,
 } from "../../lib/onboarding/validation"
+import { SprntlyLockup } from "../shared/SprntlyMark"
 
 type InterviewLayoutProps = {
   step: number
@@ -87,7 +88,7 @@ export function InterviewLayout({
     <div className="interview-shell">
       <header className="interview-header">
         <div className="interview-logo">
-          spr<span>ntly</span>
+          <SprntlyLockup height={19} />
         </div>
         <div className="interview-progress">
           {Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i + 1).map((s) => (

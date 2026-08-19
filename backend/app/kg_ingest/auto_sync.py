@@ -532,7 +532,7 @@ def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
 # So it gets the same two triggers every other connector has — the moment it
 # connects, and every scheduler cycle thereafter — plus a third the others do
 # not need: `call_index.ensure_fresh` tops it up inline on the read path when a
-# call may have landed since the last cycle. This is the same gap Fortune's
+# call may have landed since the last cycle. This is the same gap commit
 # d30ca7ee closed for Slack ("sync the moment it's connected, not six hours
 # later"), with the read-path top-up added because a 6-hour-old call list is
 # not merely incomplete — `answer_listing` states a COUNT, so it is WRONG.

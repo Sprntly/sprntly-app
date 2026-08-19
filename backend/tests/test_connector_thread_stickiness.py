@@ -3,7 +3,7 @@
 Reported 2026-08-03, three turns, reproduced verbatim below:
 
   1. "give me all information on confluence"     → the wiki listing (correct)
-  2. 'tell me more about "ChoisBits Decision Making"'
+  2. 'tell me more about "Cyberdyne Decision Making"'
                                                  → "no tracker is connected yet.
                                                     Connect Jira or ClickUp"
   3. "so check confluence"                       → the page (correct again)
@@ -31,8 +31,8 @@ _WIKI_LISTING = """Here is a full overview of everything in your Confluence work
 - 8 Pages/Posts in total (7 pages + 1 blog post)
 
 ## Pages
-1. ChoisBits Decision Making — Last Updated: 2026-08-03 | Version: 2
-   Content: Describes what a "Bit" is on the ChoisBits platform.
+1. Cyberdyne Decision Making — Last Updated: 2026-08-03 | Version: 2
+   Content: Describes what a "Bit" is on the Cyberdyne platform.
 2. Product Requirements — Last Updated: 2026-08-03 | Version: 1
    Content: Objective, Success metrics, Milestones, Quick links —
    "Work tracker: Add Jira work item links or other relevant project links here"
@@ -43,7 +43,7 @@ _HISTORY = [
     {"role": "assistant", "content": _WIKI_LISTING},
 ]
 
-_FOLLOWUP = 'tell me more about "ChoisBits Decision Making"'
+_FOLLOWUP = 'tell me more about "Cyberdyne Decision Making"'
 
 
 def test_the_followup_is_not_stolen_by_the_tracker():

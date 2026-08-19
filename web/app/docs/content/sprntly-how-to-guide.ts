@@ -11,8 +11,8 @@ export const sprntlyHowToGuide: Doc = {
   description:
     "From signals to PRD to prototype to build — the step-by-step guide to using Sprntly end to end.",
   category: "Guides",
-  version: "1.0",
-  updated: "July 2026",
+  version: "1.1",
+  updated: "August 2026",
   sections: [
     {
       id: "overview",
@@ -21,7 +21,7 @@ export const sprntlyHowToGuide: Doc = {
 
 By the end, you will know how to:
 
-- Turn your Top Insights brief, or an uploaded file, into a PRD
+- Turn your Top Insights brief, an uploaded file, or a question you ask in chat into a PRD
 - Generate and assign tickets that sync to your project management tool
 - Generate, edit, and finalize a prototype
 - Pull all of that context into your code environment using MCP`,
@@ -54,7 +54,7 @@ By the end, you will know how to:
       title: "Section 1 — Creating a PRD and tickets",
       body: `### Step 1: Start your PRD
 
-There are two ways to start. Pick whichever fits your situation.
+There are three ways to start. Pick whichever fits your situation.
 
 #### Option A — From your Top Insights brief (recommended)
 
@@ -65,12 +65,25 @@ There are two ways to start. Pick whichever fits your situation.
 #### Option B — From a file you upload
 
 1. Go to your **Top Insights** (the home page).
-2. Click the **+ icon in the navigation bar** to open a new workspace.
+2. Start a new chat — click **New chat** in the left sidebar, or the **+** at the right end of the chat tab strip.
 3. In the text field, click **Attach a File** and upload your document.
 4. Type a prompt such as: *"Create a PRD based on this document."*
 5. Click **Send**.
 
 > **This takes about 2 minutes 30 seconds.** Sprntly reads the attachment, extracts the information, and generates the PRD. Leave the tab open.
+
+#### Option C — From a question in chat
+
+Start from your customer signals rather than from a document. This is the one to reach for when you know something came up last week but not yet what to build.
+
+1. Start a new chat — click **New chat** in the left sidebar, or the **+** at the right end of the chat tab strip.
+2. **Ask for what you want, in your own words.** Type it, or click the **mic** in the message box and dictate it — what you say is added to whatever you have already typed. For example: *"Give me a summary of all product requests from last week's conversations. Focus on existing customers where the request is about the product. For each one, show the company name, the product request, and the customer's own words."*
+3. **Prioritize what comes back**, in the same thread: *"Use RICE to prioritize these and explain which ones are most important to work on. Show the reach, impact, confidence and effort you used for each."* Ask for the numbers, not just the ranking — that is what makes the order something you can argue with.
+4. **Generate the PRD for the one you picked:** *"Generate the PRD for #1."* You can reference it by title instead of by number. This takes about 2 minutes 30 seconds; leave the tab open.
+
+Sprntly writes the PRD from the whole conversation, not just your last message, so everything the thread established about the request is already in it.
+
+> **Sprntly answers from what you have connected.** For a question like this it reads your connected sources live, so the more of your stack is connected under **Settings → Connectors**, the fuller the picture. If a source could not be read in time, the answer names it — a gap is never left silent.
 
 ### Step 2: Review and edit the PRD
 
@@ -78,10 +91,9 @@ Read through the PRD and edit it directly. Tighten the problem statement, adjust
 
 ### Step 3: Generate tickets
 
-1. In the **Artifacts** section on the right, scroll down to the bottom.
-2. At the bottom right, click **Generate Artifact**.
+At the bottom of the PRD, click **Create tickets**. Sprntly breaks the PRD into individual tickets and lands them on the **Tickets** tab.
 
-Sprntly breaks the PRD into individual tickets.
+Once the tickets exist, that same button reads **View tickets**.
 
 ### Step 4: Assign and refine tickets
 
@@ -91,11 +103,13 @@ Sprntly breaks the PRD into individual tickets.
 
 > **Person not showing up?** If a team member has not been added to the workspace yet, you can add them through **Settings → Team and Roles**.
 
-### Step 5: Tickets sync to your project management tool
+### Step 5: Push tickets to your project management tool
 
-> **This happens automatically.** Once generated, tickets are pushed to your connected project management tool.
+Connect your tool first, in **Settings → Connectors → Project Management**.
 
-If you want to sync manually, click **Push to Project Management** at the top of the page (Jira, Asana, or ClickUp).`,
+Then, on the **Tickets** tab, click **Push to Jira** (or ClickUp, or Asana) and choose where the tickets should land. For Jira you also pick the project, the issue type, and who gets each ticket.
+
+> **You only do this once.** After the first push, Sprntly keeps that set in sync on its own. The button becomes **Synced with Jira 4m ago** — click it any time to sync again on the spot.`,
     },
     {
       id: "prototype",

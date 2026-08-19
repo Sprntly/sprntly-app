@@ -96,6 +96,10 @@ vi.mock("../../../../../context/WorkspaceContext", () => ({
 // provider exists in jsdom, so the shell throws on mount without this.
 // `onOpenInPlace` is always wired here, so the router `push` is never
 // actually reached. Same stub `ProjectDetailScreen.test.tsx` uses.
+// The container also reads `useSearchParams` (to preserve the other query
+// params when it writes `?chat=…` on a surface switch) — provide it alongside
+// `useRouter`, an empty param set by default. A mock missing it does not fail
+// one assertion, it throws on every mount in this file.
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),

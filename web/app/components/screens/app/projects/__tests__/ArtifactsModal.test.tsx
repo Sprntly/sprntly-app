@@ -89,7 +89,7 @@ const ARTIFACTS: ArtifactItem[] = [
   {
     type: "evidence",
     id: 3,
-    title: "Xometry call — quoting friction",
+    title: "Contoso call — quoting friction",
     status: "ready",
     created_at: hoursAgo(70),
     source: { brief_id: 1, week_label: "wk 31", insight_index: null },

@@ -40,7 +40,25 @@ import { describe, expect, it } from "vitest"
 const APP_ROOT = path.resolve(__dirname, "..", "..")
 const CHAT_PERSISTENCE = path.join(APP_ROOT, "lib", "chatPersistence.ts")
 
-/** Every method `chatPersistence` calls on the api it resolves dynamically. */
+/**
+ * Every method `chatPersistence` calls UNCONDITIONALLY on the api it resolves
+ * dynamically.
+ *
+ * "Unconditionally" is the whole rule, not a detail. The defect this file
+ * exists for is a missing method THROWING into `chatPersistence`'s deliberate
+ * `.catch`, which silently voids every persistence assertion in a suite. A
+ * method the module calls with optional-call syntax — `api.x?.(…)` — cannot do
+ * that: absent, it evaluates to undefined and the surrounding work simply does
+ * not happen. Demanding it of every partial mock in the repo would be pure
+ * noise, and noise is how a guard gets deleted.
+ *
+ * So the syntax IS the contract, in both directions. `api.x(…)` in
+ * chatPersistence means "every mock must supply this"; `api.x?.(…)` means
+ * "optional, and this module handles its absence". The regex below distinguishes
+ * them for free — `?.` between the name and the paren stops the match — and
+ * `test_optional_calls_are_not_required` pins that so it cannot regress into an
+ * accident.
+ */
 function requiredApiMethods(): string[] {
   const src = fs.readFileSync(CHAT_PERSISTENCE, "utf8")
   const names = new Set<string>()
@@ -275,6 +293,23 @@ describe("partial mocks of dynamically-imported modules", () => {
     expect(fs.existsSync(CHAT_PERSISTENCE)).toBe(true)
     expect(required).toContain("create")
     expect(required).toContain("addTurn")
+  })
+
+  it("test_optional_calls_are_not_required", () => {
+    // The other half of the derivation's contract (see `requiredApiMethods`).
+    // `rewindToUserTurn` calls `api.rewindToTurn?.(…)` — optional by
+    // construction, because an api without it loses only a best-effort tidy-up,
+    // never a whole suite's persistence. It must therefore NOT be demanded of
+    // the ~50 partial `conversationsApi` mocks in this repo.
+    //
+    // Pinned on the real module, not a fixture: the risk is somebody "fixing"
+    // that call site to `api.rewindToTurn(…)` and turning every one of those
+    // mocks red for no defect at all.
+    const src = fs.readFileSync(CHAT_PERSISTENCE, "utf8")
+    expect(src, "the optional-call site this pin is about has moved").toContain(
+      "api.rewindToTurn?.(",
+    )
+    expect(required).not.toContain("rewindToTurn")
   })
 
   it("finds the test suite it is supposed to scan", () => {

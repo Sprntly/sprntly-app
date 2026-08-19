@@ -29,7 +29,7 @@ const SKILL = {
   trigger: "/estimation-helper",
   name: "Estimation helper",
   description: "Scores features by reach × confidence.",
-  uploader_name: "Fortune Tede",
+  uploader_name: "Dana Whitfield",
   created_at: "2026-07-28T18:00:00+00:00",
   has_file: true,
   name_conflict: false,

@@ -227,7 +227,7 @@ def _dominant_board_class(pages: list[dict]) -> tuple[str, bool, set[str]]:
             area = float(w) * float(h)
             # Layer 1 + 2: frame's own fills and backgroundColor.
             # Layer 3: fall back to the page/canvas backgroundColor when the frame
-            # itself is fully transparent.  This is the Plotline case: a single
+            # itself is fully transparent.  This is the Tyrell case: a single
             # top-level frame whose backgroundColor has alpha=0 sits on a page
             # canvas with backgroundColor={0.118, 0.118, 0.118, a:1} (#1e1e1e).
             # The page dict is already in scope here, so no extra fetch is needed.

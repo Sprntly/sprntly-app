@@ -18,7 +18,7 @@ Pipeline (deterministic control flow; model only where judgement is needed):
        regex fast-path  (skill_router.detect_intent) → that PIPELINE
        else the LLM router (haiku), unchanged in shape and now serving:
          * the company's OWN uploaded skills — the per-request block on the
-           uncached `input`, judged first, which is what Fortune's
+           uncached `input`, judged first, which is what per-company
            custom-skill selection runs on; and
          * the four dedicated research PIPELINES, which is all the ~78-entry
            built-in menu collapsed to; and
@@ -524,7 +524,7 @@ def _custom_skill_block(enterprise_id: Optional[str]) -> str:
 # The interceptions above `route()` are deterministic and answer BEFORE the
 # classifier ever runs, so a company's own uploaded skill is not merely
 # outranked there — it is never offered. Reported case: a company uploads
-# "Churn Autopsy", asks "we lost the Genworth account last month, what
+# "Churn Autopsy", asks "we lost the Initech account last month, what
 # happened", and `windowed_call_question` claims the turn (the question names a
 # window and the company has calls in it). They get a generic call summary. The
 # answer is not wrong — it read the right calls — it just is not their method,
@@ -2448,7 +2448,7 @@ def answer(
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
     # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
-    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # listing verb. "get me the Initech transcript" matches `_LISTING_VERB`
     # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
     # the "the index holds titles and dates, not transcripts" line — for a
     # question that names one call and asks for its content. The single-call
@@ -2469,9 +2469,9 @@ def answer(
         except Exception:  # noqa: BLE001 — never let the index break the answer
             logger.exception("call-index listing failed for %s", enterprise_id)
 
-    # SINGLE named call: "summarize the Mayer Brown call". The index holds that
-    # call's external_id, so this fetches ONE transcript instead of every call in
-    # the window. Before the index this question fell through to the KG and
+    # SINGLE named call: "summarize the Vandelay Industries call". The index
+    # holds that call's external_id, so this fetches ONE transcript instead of
+    # every call in the window. Before the index this fell through to the KG and
     # answered "you'd need to connect the recording or transcript directly (e.g.
     # via Fireflies)" — while Fireflies was connected and working. A wrong answer
     # that blames the user's setup is worse than a slow one, so this sits ahead
