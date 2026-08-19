@@ -48,6 +48,7 @@ import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntent
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../../shared/chat-shell/conversation/resolveShareRef"
 import { useDocumentReopenProbe } from "../../../shared/chat-shell/conversation/useDocumentReopenProbe"
+import { matchReportByTitle } from "../../../shared/chat-shell/conversation/matchReportByTitle"
 import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-shell/useNextPrompts"
 import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
@@ -876,15 +877,7 @@ export function useProjectConversation(
     const reports = content.threadReportsConversationId === dbConvIdRef.current
       ? (content.threadReports ?? [])
       : []
-    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
-    const want = norm(title)
-    const match =
-      reports.find((r) => r.title === title) ??
-      reports.find((r) => norm(r.title) === want) ??
-      reports.find((r) => {
-        const have = norm(r.title)
-        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
-      })
+    const match = matchReportByTitle(reports, title)
     if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
     openContentPanel("reports")
   }, [content.threadReports, content.threadReportsConversationId, setContent, openContentPanel])

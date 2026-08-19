@@ -77,6 +77,7 @@ import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { runAssignTicketsAction, runEditPrdAction, runShareToSlackAction } from "../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../shared/chat-shell/conversation/resolveShareRef"
 import { useDocumentReopenProbe } from "../../shared/chat-shell/conversation/useDocumentReopenProbe"
+import { matchReportByTitle } from "../../shared/chat-shell/conversation/matchReportByTitle"
 import type { PrdRecord } from "../../../lib/api"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -2099,33 +2100,13 @@ export function ChatScreen() {
     [content.threadReports, content.threadReportsConversationId, activeConvId],
   )
 
-  // Open the report a CHAT TURN is about, from its title.
-  //
-  // Title is the join key because the reply the thread holds carries no report
-  // id: capture runs after the ask completes, deliberately (it must never delay
-  // the answer), so the id doesn't exist yet when the reply is stored. Both sides
-  // derive the title from the document's own <h1> — the client via
-  // reportTitleFromHtml, the server via report_capture.report_title — so they
-  // agree by construction.
-  //
-  // Matched exactly first, then leniently (case/whitespace, then either side
-  // being a prefix of the other) — a title that drifts by a dash or a truncation
-  // should still open the right document rather than dumping the reader on a
-  // list, which is the failure this whole path exists to avoid.
-  //
-  // No match at all means capture hasn't landed yet (or the row is gone): open
-  // the tab and let it show what it has, rather than pointing at a report that
-  // isn't there.
+  // Open the report a CHAT TURN is about, from its title — the shared
+  // `matchReportByTitle` (exact → lenient → prefix) over this surface's thread
+  // report list, with main's own panel wiring around it. No match means capture
+  // hasn't landed yet (or the row is gone): open the tab and let it show what it
+  // has, rather than pointing at a report that isn't there.
   const openReportByTitle = useCallback((title: string) => {
-    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ")
-    const want = norm(title)
-    const match =
-      threadReports.find((r) => r.title === title) ??
-      threadReports.find((r) => norm(r.title) === want) ??
-      threadReports.find((r) => {
-        const have = norm(r.title)
-        return have.length > 0 && (have.startsWith(want) || want.startsWith(have))
-      })
+    const match = matchReportByTitle(threadReports, title)
     if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
     openContentPanel("reports")
   }, [threadReports, setContent, openContentPanel])
