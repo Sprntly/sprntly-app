@@ -26,7 +26,7 @@
  * still consume from the wrapper). submitAsk / composer / clarify fold in next.
  */
 
-import { useCallback, useEffect } from "react"
+import { useCallback, useEffect, useRef } from "react"
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, RefObject, SetStateAction } from "react"
 import { addToSet, removeFromSet } from "../../../lib/chatAskState"
 import { getPendingAsk } from "../../../lib/runAskGeneration"
@@ -767,16 +767,28 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
 
   // Esc stops the active tab's answer, yielding to anything that owns Esc more
   // locally: the attachment viewer, the slash palette, and the `+` menu.
+  //
+  // The yield-state is read through a ref refreshed every render, NOT closed over
+  // by the listener. A `window` keydown listener that closes over the booleans
+  // captures them at registration; the same Escape that a menu's own onKeyDown
+  // uses to close itself (it does not stopPropagation) then also reaches this
+  // listener, and if the firing listener is holding the pre-open `false` it
+  // cancels the ask — losing the answer while merely closing the menu. Reading
+  // `escYieldRef.current` at event time makes the guard see the LIVE open-state
+  // regardless of when the listener was registered, so Esc yields to any open
+  // menu/palette/viewer instead of doubling as a cancel.
+  const escYieldRef = useRef(false)
+  escYieldRef.current = viewerAttachmentOpen || slashOpen || plusMenuOpen
   useEffect(() => {
     if (!busy) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return
-      if (viewerAttachmentOpen || slashOpen || plusMenuOpen) return
+      if (escYieldRef.current) return
       handleStopAsk()
     }
     window.addEventListener("keydown", onKey)
     return () => window.removeEventListener("keydown", onKey)
-  }, [busy, viewerAttachmentOpen, slashOpen, plusMenuOpen, handleStopAsk])
+  }, [busy, handleStopAsk])
 
   return { ...engine, ...generation, makeHandle, submitAsk, handleComposerSubmit, handleComposerKeyDown }
 }
