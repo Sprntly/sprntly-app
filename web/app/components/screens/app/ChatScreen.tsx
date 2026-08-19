@@ -36,6 +36,7 @@ import {
   type PendingShareState,
 } from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../shared/chat-shell/conversation/useAssignCompletion"
+import { askAgain } from "../../shared/chat-shell/conversation/askAgain"
 import {
   SlackShareMessage,
   type SlackShareResolution,
@@ -4289,14 +4290,7 @@ export function ChatScreen() {
   // its text back to the composer instead, which is also what the failure copy
   // ("try it with fewer files attached") tells the reader to do.
   const handleAskAgain = useCallback((turn: ThreadTurn) => {
-    const q = turn.query.trim()
-    if (!q) return
-    if (turn.attachments?.length) {
-      setDraft(turn.query)
-      composerRef.current?.focus()
-      return
-    }
-    void submitAsk(q)
+    askAgain(turn, { submit: submitAsk, setDraft, composerRef })
   }, [submitAsk])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────

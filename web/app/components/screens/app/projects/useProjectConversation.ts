@@ -46,6 +46,7 @@ import {
   type PendingShareState,
 } from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../../shared/chat-shell/conversation/useAssignCompletion"
+import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
@@ -832,14 +833,7 @@ export function useProjectConversation(
   // the shared `submitAsk`; a turn that carried attachments can't be replayed
   // (the files aren't re-uploadable), so it refills the composer for the user.
   const handleAskAgain = useCallback((turn: ThreadTurn) => {
-    const q = turn.query.trim()
-    if (!q) return
-    if (turn.attachments?.length) {
-      composer.setDraft(turn.query)
-      composer.composerRef.current?.focus()
-      return
-    }
-    void submitAsk(q)
+    askAgain(turn, { submit: submitAsk, setDraft: composer.setDraft, composerRef: composer.composerRef })
   }, [composer, submitAsk])
 
   // ── Reopen this conversation's PRD ─────────────────────────────────────────
