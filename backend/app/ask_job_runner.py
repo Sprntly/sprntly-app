@@ -28,6 +28,7 @@ from app.db.asks import (
     set_ask_job_route,
     touch_ask_job,
 )
+from app.context_assembler import AssembleRequest, resolve_context_scope
 from app.db.conversations import post_individual_turn
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
@@ -74,6 +75,89 @@ _PRIVATE_SCOPE_SYSTEM = (
 )
 
 
+# The @Sprntly GROUP agent's system-prompt base — the SAME project-surface
+# behavioral contract `_PRIVATE_SCOPE_SYSTEM` carries (read-tool + retrieval +
+# synthesis + tenancy framing, the delegate_task WHEN/HOW guidance, and the
+# edit_prd direct-apply framing), re-cast for the multi-party register (one
+# voice in a shared thread). Ported in shape from `b09801dd^:routes/projects.py`'s
+# `_GROUP_SCOPE_SYSTEM`, with ONE deliberate change from the reference: the
+# opening does NOT assert "you were tagged with @Sprntly", because in a SOLO
+# project Sprntly replies to every message with no mention — the 2-mode gate has
+# already decided a reply is warranted before this prompt is used. The
+# `_ADDRESSING_NOTES` per-turn block is intentionally NOT ported (it was coupled
+# to the deleted `trigger_kind` scheduler; mount-not-scheduler has no trigger
+# kinds). Fed to the group scope's `system_addendum` alongside the roster block,
+# so the group model gets WHEN/HOW guidance for delegate_task / edit_prd + the
+# roster (free-text assignee → member) — not just the project facts.
+_GROUP_SCOPE_SYSTEM = (
+    "You are Sprntly, a project teammate embedded in this team's group chat. "
+    "Read the recent conversation below (each line is \"Name (job role): "
+    "message\", or \"Sprntly: message\" for your own prior turns) and reply "
+    "helpfully to the latest message, as one more voice in the thread — not a "
+    "formal report. Match the room's register: be conversational, but give the "
+    "ask the depth it needs — retrieve and synthesize from the project's real "
+    "data rather than deflecting or narrating a non-answer. If the ask is "
+    "unclear or out of scope, say so plainly rather than guessing.\n\n"
+    "You KNOW this project. The PROJECT CONTEXT block below gives you the "
+    "project's shared memory, its members (the roster), its open tasks (the "
+    "delegation ledger), and its artifacts (PRDs, prototypes, evidence, "
+    "reports). Answer questions about any of these directly — never say you "
+    "\"can't see\" the team's files, tasks, or members. You have tools to read "
+    "the project's shared memory, its artifact list, a specific artifact's "
+    "content, and its task ledger — call them when the answer depends on "
+    "project data rather than guessing. When someone asks what a document says, "
+    "read that artifact's content and answer from the real content. When the "
+    "ask is for the whole picture — \"catch us up\", \"what's the why and goal "
+    "here\" — first read the project's shared memory (and its artifacts/ledger "
+    "as needed), then synthesize the why, the goal, the current state, who's "
+    "assigned to what, and prior work — grounded in what you read, never "
+    "generic.\n\n"
+    "You have a delegate_task tool: when someone asks you to hand a specific "
+    "task to a teammate (by name, @handle, or role — resolve them against the "
+    "roster below), call it. Do not call it for a plain question, an FYI, or "
+    "human-to-human chatter. You must ACTUALLY CALL delegate_task to hand a "
+    "task off — NEVER reply that you are delegating, assigning, handing off, "
+    "or \"on it\" without calling the tool on THIS turn. A message like \"On "
+    "it — delegating that now\" or \"I'll assign this to <name>\" with no "
+    "delegate_task call is a failure: the handoff never happened, no brief was "
+    "sent, nothing was recorded. Either call delegate_task, or — if you are "
+    "not delegating — do not claim you are. Once you call delegate_task, the "
+    "handoff has happened — you are DONE. Do NOT then do the task yourself, "
+    "write the deliverable you just handed off, or answer the underlying "
+    "question in the teammate's place. Do NOT say the teammate has replied, "
+    "finished, agreed, or done anything at all — they have not. Confirm the "
+    "handoff plainly in your own voice (\"I've asked <name> to <task> — I'll "
+    "bring their answer back here once it's in.\") and stop there; never end a "
+    "delegation reply on a fabricated result.\n\n"
+    "You have a complete_task tool: when the person speaking says a task that "
+    "was delegated to THEM is finished or done (\"I'm done with the pricing "
+    "one-pager\", \"finished that\", \"sent it over\", \"the review's done\"), "
+    "call complete_task to record it on the ledger. You must ACTUALLY CALL the "
+    "tool for the completion to be recorded — never just say \"noted\" or "
+    "\"marked it done\" without calling complete_task on THIS turn; a bare "
+    "acknowledgment updates nothing. Only for the speaker's OWN task, and only "
+    "for a real completion — not a question about status, not a request to "
+    "start work. Relay whatever complete_task tells you (recorded, "
+    "already-done, or nothing-to-mark) — do not claim a completion the tool "
+    "did not confirm. When someone reports a task DONE, ONLY record the "
+    "completion — do NOT also call delegate_task to re-assign or hand off the "
+    "task they just finished.\n\n"
+    "You can edit this project's PRD. When the latest turn asks for a PRD "
+    "change, call the edit_prd tool with a plain-language instruction — you do "
+    "NOT choose or pass a PRD id; the right PRD is resolved for you, and if the "
+    "project has more than one PRD you will be asked which one to change. The "
+    "edit is applied to the document in place and a new version is saved "
+    "automatically so the change is undoable — it is NOT queued for approval "
+    "and does not need a teammate to manually accept it. Never describe your "
+    "role as merely advisory, or claim you cannot edit the PRD. You must "
+    "ACTUALLY call the edit_prd tool to make a PRD change happen — never say "
+    "\"Done\" or that you have updated the PRD unless you called edit_prd on "
+    "THIS turn and are relaying what it told you.\n\n"
+    "Everything you can read or edit is scoped to THIS project only; never "
+    "assume data from another project or company.\n\n" + PROJECT_TOOL_NUDGE
+)
+
+
 def _private_roster_block(roster: list[dict]) -> str:
     """"PROJECT ROSTER:\n- {first} — {job_role}" — RELOCATED verbatim from
     the deleted `project_individual_agent._roster_prompt_block`, so the
@@ -86,54 +170,6 @@ def _private_roster_block(roster: list[dict]) -> str:
         role = m.get("job_role") or "no role set"
         lines.append(f"- {first} — {role}")
     return "PROJECT ROSTER:\n" + ("\n".join(lines) if lines else "(no other members yet)")
-
-
-def _build_private_scope(
-    *, project_id: int, conversation_id: int | None, user_id: str | None,
-) -> SurfaceScope:
-    """Construct the `SurfaceScope` for a project-private ask — the six
-    project tools (4 read tools + delegate_task + execute_task), the
-    relocated system text + roster, and the assigner identity
-    (`user_id`/`conversation_id`) delegation attribution depends on
-    (#1174). Best-effort roster fetch (AD-P7): a read failure degrades to an
-    empty roster rather than breaking the ask."""
-    from app import project_delegation, project_task_execution
-    from app.db import projects as projects_db
-    from app.project_group_context import _instructions_block, read_tools
-
-    try:
-        roster = projects_db.list_members(project_id)
-    except Exception:  # noqa: BLE001 — best-effort, AD-P7
-        roster = []
-    try:
-        instructions = projects_db.get_instructions(project_id)
-    except Exception:  # noqa: BLE001 — best-effort, AD-P7
-        instructions = None
-    system_addendum = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
-    instr_block = _instructions_block(instructions)
-    if instr_block:
-        system_addendum = f"{system_addendum}\n\n{instr_block}"
-    post_turn = (
-        (lambda content: post_individual_turn(conversation_id, "assistant", content))
-        if conversation_id is not None else None
-    )
-    return SurfaceScope(
-        surface=Surface.project_private,
-        project_id=project_id,
-        system_addendum=system_addendum,
-        extra_tools=(
-            project_delegation.DELEGATE_TASK_TOOL,
-            project_task_execution.EXECUTE_TASK_TOOL,
-            *read_tools(),
-        ),
-        roster=tuple(roster),
-        assigner_identity={
-            "assigner_user_id": user_id,
-            "source_conversation_id": conversation_id,
-        },
-        post_turn=post_turn,
-        capabilities={"streaming": True, "cancel": True},
-    )
 
 
 @dataclass
@@ -356,6 +392,7 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
+    context_source: dict | None = None,
 ) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -452,23 +489,51 @@ def _run_sync(
     )
     history_token = ask_runner.set_active_history(history)
 
-    # Project-scoped individual chat (`project_id is not None`): the sixth
-    # ladder branch inside `qa_agent.answer()` owns the turn via the SAME
-    # `_single_shot` call below — no fork, no second call site. Constructing
-    # `SurfaceScope(project_private, ...)` here (once) is the collapse's
-    # entire private-surface change: `_single_shot` already wires
-    # `on_delta`/`is_cancelled`/`on_route`/`on_phase` into `answer()`, and
-    # `answer()` honours them on the composer path exactly as it does for
-    # main chat — a scoped ask that engages `scope.extra_tools` takes the
-    # sixth branch instead and does not stream (AC5; matches how main
-    # chat's own tracker/ticket/connector-lookup turns behave today). `None`
-    # for every non-project ask — byte-identical to before this change.
-    scope = (
-        _build_private_scope(
-            project_id=project_id, conversation_id=conversation_id, user_id=user_id,
-        )
-        if project_id is not None else None
+    # Pluggable context seam: resolve any caller-supplied `context_source`
+    # (`{"kind": str, "params": dict}`) to a `ContextScope` through the
+    # assembler registry. The registry is EMPTY in this phase, so
+    # `resolve_context_scope` returns None for every ask — `qa_agent.answer()`
+    # runs the exact current (unscoped) main path, byte-identical to before.
+    scope = resolve_context_scope(
+        context_source,
+        AssembleRequest(
+            user_id=user_id,
+            company_id=enterprise_id,
+            dataset=dataset,
+            conversation_id=conversation_id,
+            question=question,
+            workspace_id=workspace_id,
+            params=(context_source or {}).get("params") or {},
+        ),
     )
+
+    # Conv-bind (ported from `b09801dd^:routes/ask.py`): when a project scope
+    # resolves, point this conversation at the project — first-write-wins and
+    # best-effort (mirrors `bind_conversation_to_prd`), so navigating away
+    # mid-generation can't orphan the conversation↔project link. The membership
+    # gate already ran inside the assembler (raising before we get here) on the
+    # SAME `(company, workspace, member)` facts, so a bind only ever fires for a
+    # caller the gate admitted. Never blocks the answer.
+    if (
+        scope is not None
+        and conversation_id is not None
+        and context_source
+        and context_source.get("kind") == "project"
+    ):
+        _bind_project_id = ((context_source.get("params") or {}).get("project_id"))
+        if _bind_project_id is not None:
+            try:
+                from app.db.conversations import bind_conversation_to_project
+
+                bind_conversation_to_project(
+                    conversation_id, int(_bind_project_id), enterprise_id, user_id
+                )
+            except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+                logger.warning(
+                    "bind_conversation_to_project failed conversation_id=%s "
+                    "project_id=%s",
+                    conversation_id, _bind_project_id, exc_info=True,
+                )
 
     def _single_shot() -> dict:
         return qa_agent.answer(
@@ -573,6 +638,7 @@ async def run_ask_job(
     user_id: str | None = None,
     workspace_id: str | None = None,
     project_id: int | None = None,
+    context_source: dict | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -606,6 +672,7 @@ async def run_ask_job(
             project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            context_source=context_source,
         )
 
     def _on_committed(outcome: ExecutionOutcome) -> None:
@@ -627,37 +694,94 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
-        # Individual project chat (build spec §5.3): promote a durable insight
-        # into project memory + ingest inbound task-status — gated on a
-        # project-scoped ask, so a non-project ask is byte-for-byte unaffected.
-        if project_id is not None and conversation_id is not None and user_id is not None:
-            # Persist the assistant's OWN answer (AC1) — owned, idempotent,
-            # linked to this run via ask_job_id (a resumed poll reuses the
-            # same ask_id, so it can't duplicate this row). Best-effort: the
-            # authoritative answer already lives in `ask_jobs.response`, so a
-            # persist failure here never breaks the already-stored answer.
-            from app.db.conversations import post_owned_individual_assistant_turn
+        # Individual/group project chat: promote a durable insight into project
+        # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
+        # (the assembler resolved a project `SurfaceScope` for this turn, which
+        # is exactly the `context_source["kind"] == "project"` condition; a scope
+        # that failed to resolve would have failed the answer and never reached
+        # this post-terminal `on_committed`). A project chat carries its project
+        # on `context_source`, NOT on the top-level `project_id` (which it never
+        # sends), so the gate reads the id from `context_source["params"]` — the
+        # SAME source the conv-bind in `_run_sync` uses. Best-effort: both
+        # `maybe_promote_turn` and `maybe_ingest_status` are self-swallowing
+        # (never raise, AD-P7) and are wrapped here besides, so a promotion
+        # failure can only fail to ADD a memory entry — it can never delay or
+        # break the answer, which is already durably stored by `complete_ask_job`
+        # above. Ported from `b09801dd^:ask_job_runner.py`'s `_on_committed`,
+        # re-keyed off `context_source` instead of the top-level `project_id`.
+        if (
+            context_source
+            and context_source.get("kind") == "project"
+            and conversation_id is not None
+        ):
+            _promo_project_id = (context_source.get("params") or {}).get("project_id")
+            if _promo_project_id is not None:
+                try:
+                    from app.project_memory import maybe_promote_turn
 
-            try:
-                post_owned_individual_assistant_turn(
-                    project_id=project_id,
-                    user_id=user_id,
-                    content=payload.get("answer", ""),
-                    ask_job_id=ask_id,
-                )
-            except Exception:  # noqa: BLE001 — best-effort, AD-P7
-                logger.warning(
-                    "failed to persist individual-chat assistant turn "
-                    "ask_id=%s project_id=%s", ask_id, project_id, exc_info=True,
-                )
+                    transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
+                    maybe_promote_turn(
+                        int(_promo_project_id), conversation_id, transcript
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "maybe_promote_turn failed ask_id=%s project_id=%s",
+                        ask_id, _promo_project_id, exc_info=True,
+                    )
+                try:
+                    from app.delegation_status_ingest import maybe_ingest_status
 
-            from app.project_memory import maybe_promote_turn
+                    maybe_ingest_status(
+                        int(_promo_project_id), conversation_id, user_id, question
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "maybe_ingest_status failed ask_id=%s project_id=%s",
+                        ask_id, _promo_project_id, exc_info=True,
+                    )
+                # Group surface (Choice A, mount-not-scheduler): persist the
+                # agent's reply as a GROUP turn (author NULL = Sprntly) and
+                # broadcast it, so every member sees the reply live via
+                # realtime — the server-authoritative replacement for the old
+                # server-scheduled group reply. Keyed on the SAME
+                # `context_source` the promotion block reads, additionally gated
+                # on `surface == "group"`; the individual surface already
+                # persists its own assistant turn via `_build_private_scope`'s
+                # emit hook, so only the group surface writes here. Best-effort:
+                # a persist/broadcast failure can only fail to ADD the group
+                # turn — the answer is already durably stored above.
+                if (context_source.get("params") or {}).get("surface") == "group":
+                    # 2-mode response gate (server BACKSTOP): in a MULTI-human
+                    # project (≥2 human members), Sprntly replies ONLY to a turn
+                    # that @Sprntly-mentions it. The PRIMARY gate now runs at the
+                    # /v1/ask route BEFORE generation (routes/ask.py), so a
+                    # suppressed ask never reaches this post-terminal hook at all;
+                    # this stays as defense-in-depth for any future path that
+                    # spawns a group ask without the route gate. FAIL CLOSED — a
+                    # count-read hiccup treats the project as multi-human and
+                    # suppresses the persist+broadcast, matching the route gate's
+                    # posture (never let the agent interject into a shared thread
+                    # on a read failure). Solo projects and @Sprntly-mentioning
+                    # turns still reply.
+                    import re as _re
 
-            transcript = f"{question}\n\nSprntly: {payload.get('answer', '')}"
-            maybe_promote_turn(project_id, conversation_id, transcript)
-            from app.delegation_status_ingest import maybe_ingest_status
+                    try:
+                        from app.db import projects as _projects_db
+                        _multi_human = _projects_db.count_project_members(int(_promo_project_id)) >= 2
+                    except Exception:  # noqa: BLE001 — fail CLOSED toward suppression
+                        _multi_human = True
+                    _mentions_agent = bool(_re.search(r"@sprntly\b", question or "", _re.IGNORECASE))
+                    if _multi_human and not _mentions_agent:
+                        logger.info(
+                            "group_reply_gated project_id=%s conversation_id=%s "
+                            "reason=multi_human_no_mention",
+                            _promo_project_id, conversation_id,
+                        )
+                    else:
+                        _persist_group_reply(
+                            ask_id, int(_promo_project_id), conversation_id, payload
+                        )
 
-            maybe_ingest_status(project_id, conversation_id, user_id, question)
 
     outcome = await run_execution_job(
         job_id=ask_id,
@@ -680,3 +804,38 @@ async def run_ask_job(
         # Terminal SSE frame AFTER complete_ask_job (inside the primitive) so a
         # client woken by `done` reads a `ready` row on its next poll.
         token_stream.close(channel, kind="done")
+
+
+def _persist_group_reply(
+    ask_id: int, project_id: int, conversation_id: int, payload: dict
+) -> None:
+    """Persist + broadcast the group agent reply (Choice A). Extracted so the
+    2-mode gate above reads as a single decision. Best-effort throughout."""
+    try:
+        from app.db import conversations as _conversations_db
+        from app.db.asks import get_ask_job
+        from app.project_group_realtime import (
+            publish_group_turn_created,
+        )
+
+        # Stamp the reply with the SAME send-identity key its originating ask
+        # carried (persisted on `ask_jobs` by `/v1/ask`). The member who posted
+        # the message renders this reply from its own ask poll, so it uses this
+        # key to recognise the reply's realtime echo as its own and NOT
+        # double-render it — id-precise, never a timing guess. A peer (a
+        # different key) still gets it live.
+        _grp_cmid = (get_ask_job(ask_id) or {}).get("client_message_id")
+        _grp_turn = _conversations_db.post_group_turn(
+            conversation_id,
+            None,
+            payload.get("answer", ""),
+            role="assistant",
+            reply=payload,
+            client_message_id=_grp_cmid,
+        )
+        publish_group_turn_created(project_id, conversation_id, _grp_turn)
+    except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+        logger.warning(
+            "group assistant-turn persist/broadcast failed ask_id=%s project_id=%s",
+            ask_id, project_id, exc_info=True,
+        )

@@ -17,12 +17,29 @@ export type PrdSaveStatus = "saved" | "saving" | "unsaved"
 export interface PrdHtmlHandle {
   /** Force an immediate save of the current iframe document. */
   save: () => Promise<void>
+  /**
+   * Run a formatting command against the document INSIDE the iframe.
+   *
+   * The toolbar lives in the panel, the text lives in a child browsing
+   * context, and `execCommand` only ever acts on the document that owns the
+   * current selection — so it has to be invoked on `contentDocument`, not on
+   * the parent. Same-origin (`allow-same-origin`) is what makes that legal;
+   * the iframe still runs no scripts of its own.
+   *
+   * Returns false when there is nothing to act on yet (document not ready, or
+   * read-only), so the caller can stay silent rather than pretend it worked.
+   */
+  exec: (command: string, value?: string) => boolean
 }
 
 /** Panel-only presentation overrides injected into the iframe document.
  *  NEVER persisted: readDoc strips this tag before serializing, so the stored
  *  PRD stays byte-clean of viewer styling. Keep in sync with the panel's
  *  `.cpanel-prd-wrap .prd-title` sizing in globals.css. */
+/** Debounce between an edit and the autosave it triggers. Named because two
+ *  paths now share it — native typing and the toolbar. */
+const AUTOSAVE_MS = 2000
+
 const PANEL_STYLE_ID = "sprntly-panel-overrides"
 const PANEL_OVERRIDE_CSS = `
   h1 { font-size: 20px !important; line-height: 1.25 !important; }
@@ -210,12 +227,52 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       baseDoc.current = doc
       onStatus?.("saved")
     } catch {
-      // Local draft is preserved; surface as saved so the UI isn't stuck.
-      onStatus?.("saved")
+      // SAY SO. This used to report "saved" on a failed request, on the
+      // reasoning that the UI shouldn't look stuck — but the status line is the
+      // only thing telling anyone whether their work reached the server, and a
+      // save that 4xx'd or timed out then read as done. The edit was still in
+      // the local draft and would come back on the next open, but nobody knew
+      // to wait for that: it looked saved, the tab got closed or refreshed, and
+      // the work looked lost.
+      //
+      // "Unsaved" is the truth, the draft is still on disk (deliberately NOT
+      // cleared above), and the next edit re-arms the debounce so it retries.
+      onStatus?.("unsaved")
     }
   }, [prdId, onStatus, readDoc, readOnly, onSave])
 
-  useImperativeHandle(ref, () => ({ save: persist }), [persist])
+  /** Shared by the toolbar and the native `input` listener: an edit happened,
+   *  so mark it unsaved and re-arm the debounce. Declared here so both paths
+   *  land on ONE definition of "the document changed". */
+  const markEdited = useCallback(() => {
+    onStatus?.("unsaved")
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    saveTimer.current = setTimeout(persist, AUTOSAVE_MS)
+  }, [onStatus, persist])
+
+  const exec = useCallback((command: string, value?: string): boolean => {
+    if (readOnly) return false
+    const cdoc = frameRef.current?.contentDocument
+    const target = cdoc?.querySelector<HTMLElement>("[contenteditable='true']")
+    if (!cdoc || !target) return false
+    // The command applies to whatever is selected INSIDE the iframe, so the
+    // iframe has to hold focus first — clicking a toolbar button in the parent
+    // moves focus out of it, and an unfocused document has no selection for
+    // `execCommand` to act on. Focusing restores the caret the browser kept.
+    try {
+      frameRef.current?.contentWindow?.focus()
+      target.focus()
+      const ok = cdoc.execCommand(command, false, value)
+      if (ok) markEdited()
+      return ok
+    } catch {
+      // Deprecated API on an engine that has dropped it, or a command this
+      // document can't take — the panel simply reports nothing happened.
+      return false
+    }
+  }, [readOnly, markEdited])
+
+  useImperativeHandle(ref, () => ({ save: persist, exec }), [persist, exec])
 
   // How many more observer-driven height changes to accept. Normally a reflow
   // converges in one or two (scrollHeight is max(content, viewport), so once
@@ -300,16 +357,14 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     // this keeps the read-only path from scheduling any persist() call.
     if (readOnly) return
     const onInput = () => {
-      onStatus?.("unsaved")
       // Typing genuinely changes the document's height — refill the budget so a
       // long editing session keeps tracking it.
       resizeBudget.current = RESIZE_BUDGET
       resize()
-      if (saveTimer.current) clearTimeout(saveTimer.current)
-      saveTimer.current = setTimeout(persist, 2000)
+      markEdited()
     }
     cdoc.addEventListener("input", onInput)
-  }, [resize, persist, onStatus, onViewMoreEvidence, readOnly])
+  }, [resize, markEdited, onViewMoreEvidence, readOnly])
 
   useEffect(() => () => {
     if (saveTimer.current) clearTimeout(saveTimer.current)

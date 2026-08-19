@@ -116,6 +116,51 @@ def enrich_chat_envelope(
     return envelope
 
 
+def project_prd_edit_target(
+    company, project_id: int, dataset: str | None = None
+) -> int | None:
+    """The PRD a project chat's act-on-PRD intent (`edit_prd`,
+    `change_prd_template`, `assign_tickets`) targets when the client named none.
+
+    `edit_prd` and its `_NEEDS_PRD` siblings downgrade to a plain `answer` when
+    `chat_intent` has no target `prd_id` — the right call on main chat, where
+    "make the PRD shorter" with nothing open is genuinely ambiguous. In a
+    PROJECT chat it is not: the project OWNS its PRDs, so "make the PRD shorter"
+    means the project's PRD even when the user hasn't opened it in the panel.
+    Without this the edit silently becomes a summary (the reported defect).
+
+    Returns the project's NEWEST openable PRD id — the common single-PRD project
+    has exactly one answer, and with several the newest matches the recency
+    collapse the open-resolver and listing legs already use. It is a FALLBACK:
+    the route resolves the client's open-panel / conversation-bound PRD first,
+    so a user with a specific PRD in front of them still edits that one. The
+    downstream write is still gated by `project_prd_gate` (the PRD must be on
+    this project), so a stale/foreign id can never be written. Best-effort: an
+    empty project or any lookup failure → None (the intent degrades to answer
+    exactly as before)."""
+    try:
+        if dataset is None:
+            dataset = _dataset_for(company)
+        if not dataset:
+            return None
+        from app.db.artifacts import list_artifacts_for_project
+
+        # `list_artifacts_for_project` is already recency-sorted; the first
+        # openable PRD row is therefore the newest.
+        for row in list_artifacts_for_project(
+            project_id=project_id, dataset=dataset, company_id=company.company_id,
+        ):
+            if row.get("type") != "prd":
+                continue
+            if (row.get("status") or "") in ("failed", "invalidated"):
+                continue
+            return (row.get("open") or {}).get("prd_id")
+        return None
+    except Exception:  # noqa: BLE001 — a target lookup must never fail the send
+        logger.exception("project prd edit-target lookup failed; no target")
+        return None
+
+
 #: How many rows a chat listing carries. The chat is a picker, not the
 #: library — the Artifacts screen is one click away for the long tail, and a
 #: reply with two hundred cards is not an answer anyone can read.

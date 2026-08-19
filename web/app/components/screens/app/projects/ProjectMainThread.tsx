@@ -3,69 +3,131 @@
 // ── ProjectMainThread — the group⇆individual swap host ──
 //
 // AD-P14 (flat routes): the swap is REACT STATE ONLY — `activeChat` selects
-// which of the two chats renders, in place, on the one `/projects?id=<id>`
-// route. No route change, no `[id]` segment, ever.
+// which chat renders, in place, on the one `/projects?id=<id>` route. No route
+// change, no `[id]` segment, ever.
 //
-// AD-P13 (never fork the monolith, one chat presentation layer): NEITHER
-// side of this swap touches the app's existing multi-tab chat container.
-// The group side composes the shared primitives (`ProjectGroupChat`); the
-// private side is a thin host (`ProjectPrivateChat`) that renders the private
-// thread through the shared `ChatShell` — the engine (`useProjectPrivateThread`)
-// owns the project-genuine machinery, the shell owns the presentation. Neither
-// side imports the chat monolith; this file doesn't either.
-//
-// The private/group toggle is surface-keyed (each host keys its `<ChatShell>`
-// by surface) so React does not reuse the subtree across the toggle and leak
-// scroll/draft/focus between the two chats (spec §2.5/§6.2).
-import { ProjectGroupChat, type ProjectGroupChatProps } from "./ProjectGroupChat"
-import { ProjectPrivateChat } from "./ProjectPrivateChat"
+// The prior per-surface chat implementations (`ProjectGroupChat` /
+// `ProjectPrivateChat`) were DELETED and rebuilt as a SINGLE configurable mount
+// of main's ACTUAL chat: `useProjectConversation` composes the shared unit
+// (`useComposer`/`useThreadScroll`/`useMainConversation`) over a
+// single-conversation store bound to a project-scoped `conversations` row, and
+// hands the exact host-bag to the same `ConversationView` main renders per tab.
+// The group/individual switch (react-state-only, AD-P14) selects which surface
+// mounts — each is its own conversation.
 import type { OpenArtifactCandidate } from "../../../../lib/api"
+import { ConversationView } from "../ConversationView"
+import { AttachmentViewer } from "../../../shared/AttachmentViewer"
+import { useProjectConversation, type ProjectChatSurface } from "./useProjectConversation"
+import { MentionPickerOverlay } from "./MentionPickerOverlay"
+import { useMentionNotifications } from "./useMentionNotifications"
 import styles from "./ProjectMainThread.module.css"
+
+/** One project chat surface = main's chat, configured for that surface's single
+ *  conversation. A distinct component so its hook mounts/unmounts cleanly on the
+ *  group⇆individual swap. */
+function ProjectChatSurface({
+  projectId,
+  surface,
+  onOpenArtifact,
+  projectName,
+  humanMemberCount,
+  memberNames,
+}: {
+  projectId: number | string
+  surface: ProjectChatSurface
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
+  projectName?: string
+  humanMemberCount?: number
+  memberNames?: readonly string[]
+}) {
+  // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
+  // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
+  // surface root — mirroring how ChatScreen mounts the same component beside its
+  // own conversation view. Everything else is the exact `ConversationViewProps`.
+  const { viewerAttachment, setViewerAttachment, mentionPickerNode, mentionPickerOpen, ...viewProps } =
+    useProjectConversation(projectId, surface, onOpenArtifact, projectName, humanMemberCount, memberNames)
+  return (
+    <>
+      <ConversationView {...viewProps} />
+      {viewerAttachment ? (
+        <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
+      ) : null}
+      <MentionPickerOverlay open={mentionPickerOpen} node={mentionPickerNode} anchorRef={viewProps.composerRef} />
+    </>
+  )
+}
 
 export type ActiveChat = "group" | "individual"
 
 export type ProjectMainThreadProps = {
   projectId: number | string
   activeChat: ActiveChat
-  onOpenArtifact?: ProjectGroupChatProps["onOpenArtifact"]
-  /** The cross-chat INSIGHT turn (design-spec AC7/AC11) — a note surfaced
-   *  from the group chat, rendered by `ProjectIndividualChat` with the SAME
-   *  `bc-turn--insight`/`bc-insight-msg-kind` CSS the app's existing
-   *  insight-opening card wears. No real data source feeds this yet —
-   *  omitted (the default), it renders nothing. */
+  /** The project's display name — threaded into the GROUP chat's empty-state
+   *  greeting ("Welcome to the {name} team chat"). Optional: absent falls back
+   *  to a name-less greeting. The individual chat ignores it (keeps default). */
+  projectName?: string
+  /** The project's HUMAN member count — drives the group chat's 2-mode response
+   *  gate (≤1 → Sprntly replies to every message; ≥2 → only on @Sprntly).
+   *  Absent → the client defaults to reply (the server backstop still enforces
+   *  the multi-human rule). The individual chat ignores it. */
+  humanMemberCount?: number
+  /** The project's HUMAN member display names — lets a group `@mention` chip
+   *  wrap a FULL multi-word name ("@Bob Baker") instead of only its first word.
+   *  Absent → the chip renderer falls back to single-token matching. Ignored by
+   *  the individual chat (it renders no mention chips). */
+  memberNames?: readonly string[]
+  onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
+  /** DEFERRED (dropped with the old chats): the cross-chat insight banner. Kept
+   *  in the prop type so callers are unchanged; unused until the rebuilt chat
+   *  re-adds it. */
   insightNote?: { by: string; text: string } | null
-  /** #9-count artifact invalidation: fired after the PRIVATE thread's own
-   *  generate settles a fresh attach, so the sender's own artifacts list +
-   *  count refresh immediately without waiting on the realtime echo. Not
-   *  wired into the group side — that surface has no per-branch generate
-   *  seam this ticket touches. */
+  /** DEFERRED: fired after a client-driven generate settles. Unused while the
+   *  chat mount is a placeholder. */
   onArtifactsChanged?: () => void
-  /** The PRD open in the artifact drawer beside this thread — the explicit
-   *  chat-edit target both surfaces bind (parity with main chat's open-tab
-   *  `prd_id`). `null` when no PRD is open. Forwarded to BOTH sides of the
-   *  swap unchanged. */
+  /** DEFERRED: the open-PRD edit target. Unused until the rebuilt chat wires it. */
   openPrdId: number | null
 }
 
 /** Swaps the main pane between the group chat and the individual chat per
- *  `activeChat` — in place, no route change (AD-P14). Renders exactly one. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, insightNote, onArtifactsChanged, openPrdId }: ProjectMainThreadProps) {
+ *  `activeChat` — in place, no route change (AD-P14). Renders exactly one: main's
+ *  chat, mounted on that surface's project-bound conversation.
+ *
+ *  The surface component is KEYED on project+surface so toggling group⇆private
+ *  forces a fresh unmount+remount rather than a re-render in place. Without the
+ *  key React reconciles the two branches to the same `ProjectChatSurface`
+ *  position and only changes its `surface` prop; the single-conversation store
+ *  (thread/dbConvId) then persists and the previous surface's messages stay on
+ *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
+ *  resets the whole store and re-resolves the conversation, exactly like a page
+ *  load — which was already showing the correct thread. */
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName, humanMemberCount, memberNames }: ProjectMainThreadProps) {
+  // Recipient side of @-mention tagging — mounted HERE (above the keyed surface)
+  // so it survives the group⇆individual swap and notifies wherever the viewer
+  // is in the project.
+  const mentions = useMentionNotifications(projectId)
+  const unreadPill = mentions.unreadCount > 0 ? (
+    <button
+      type="button"
+      className={styles.mentionUnread}
+      data-testid="gc-mention-unread"
+      onClick={mentions.clear}
+    >
+      {mentions.unreadCount} new mention{mentions.unreadCount > 1 ? "s" : ""}
+    </button>
+  ) : null
+
   if (activeChat === "group") {
     return (
-      <div className={styles.host} data-testid="main-thread-group">
-        <ProjectGroupChat projectId={projectId} onOpenArtifact={onOpenArtifact} openPrdId={openPrdId} />
+      <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
+        {unreadPill}
+        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} humanMemberCount={humanMemberCount} memberNames={memberNames} />
       </div>
     )
   }
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      <ProjectPrivateChat
-        projectId={projectId}
-        onOpenArtifact={onOpenArtifact}
-        insightNote={insightNote}
-        onArtifactsChanged={onArtifactsChanged}
-        openPrdId={openPrdId}
-      />
+      {unreadPill}
+      <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" onOpenArtifact={onOpenArtifact} />
     </div>
   )
 }

@@ -38,12 +38,14 @@ export type ChatSurfaceKind = "main" | "project_private" | "project_group"
 
 /** The on-join greeting's short/expandable-body split marker — mirrors
  *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an inert
- *  HTML comment). It rides persisted greeting `content`; the shell's
- *  single-party mapper strips it when wrapping history content into a reply so
- *  it never renders as literal text (`AskReplyBody` runs react-markdown WITHOUT
- *  rehype-raw, so a raw comment would leak). Lives here — the shared contract
- *  module both the private engine and the shell already depend on — so exactly
- *  ONE copy of the string exists on the front end. */
+ *  HTML comment). It rides persisted greeting `content`. The project surface's
+ *  `renderAgentBody` override (see `GreetingTurnBody`) splits the turn on it —
+ *  the pre-marker text as the visible lead plus a Show more/less toggle over the
+ *  rest — and the marker itself never renders (`AskReplyBody` runs react-markdown
+ *  WITHOUT rehype-raw, so a raw comment left in place would otherwise leak).
+ *  Lives here — the shared contract module both the project surface and the shell
+ *  already depend on — so exactly ONE copy of the string exists on the front
+ *  end. */
 export const MORE_MARKER = "<!--more-->"
 
 /** The agent run-status vocabulary. Contract-only in the current wave — the
@@ -415,6 +417,20 @@ export interface MapMainTurnsDeps {
   name: string
   userInitials: string
   skillForQuery: (query: string) => SkillInfo | null
+  /** Optional per-surface user-body override (the project GROUP chat supplies a
+   *  mention-chip renderer). When set AND the turn has query text, the mapper
+   *  routes the body through it (ChatBubble's `user.bodyNode`); unset → main's
+   *  plain-query rendering, byte-identical. Structural turn type keeps this
+   *  module decoupled from the main screen's ThreadTurn. */
+  renderUserBody?: (turn: { query: string }) => ReactNode
+  /** Optional per-surface AGENT-body override (the project chats supply the
+   *  on-join greeting's `MORE_MARKER` lead/Show-more split — the shell's default
+   *  reply ladder would otherwise render the raw marker inline). Returns a node
+   *  to REPLACE the reply ladder (routed through ChatBubble's `agentBodyNode`
+   *  escape hatch) or `null`/`undefined` to leave the turn on the default reply
+   *  render. Unset on main → byte-identical to before. Structural turn type
+   *  keeps this module decoupled from the main screen's ThreadTurn. */
+  renderAgentBody?: (turn: { reply?: { answer: string } | null }) => ReactNode
 
   // footer / afterNode inputs
   ticketSetActionState: "running" | "ready" | "failed" | null
@@ -438,12 +454,34 @@ export interface MapMainTurnsDeps {
   // main-chat screen's private types — the idiomatic bivariant-handler pattern)
   handleAskAgain(turn: { id: string }): void
   handleStopAsk: () => void
+  // ── Acting on a past prompt: copy / edit / retry ──────────────────────────
+  // Optional as a bag, like the Slack-share trio: a host with no such flow
+  // omits these and no affordance renders. `editingTurnId` names the ONE turn
+  // currently open in the editor and `copiedTurnId` the one showing its
+  // transient "Copied" tick — both host-owned, like every other in-flight
+  // signal here.
+  //
+  // Edit and retry both RE-ASK, which rewinds the conversation to that turn.
+  // The host owns what that means (thread truncation plus the persisted
+  // rewind); the mapper only decides which turns are eligible.
+  editingTurnId?: string | null
+  copiedTurnId?: string | null
+  onCopyTurn?(turn: { id: string; query: string }): void
+  onRetryTurn?(turn: { id: string; query: string }): void
+  onEditTurn?: (turnId: string) => void
+  /** The edited text. The host re-composes anything the editor doesn't own (a
+   *  quoted passage) and re-sends. */
+  onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
+  onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
   setViewerAttachment: (a: {
     name: string
     content: string
     key?: string | null
     mime?: string | null
+    /** Render verbatim rather than through markdown — the quoted-passage
+     *  viewer, whose text was already lifted out of a rendered answer. */
+    plain?: boolean
   }) => void
   openReportByTitle: (title: string) => void
   openArtifactInPanel: (candidate: OpenArtifactCandidate) => void

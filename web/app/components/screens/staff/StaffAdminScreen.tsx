@@ -31,7 +31,7 @@ import {
   type StaffCompany,
   type StaffEntitlementsPatch,
 } from "../../../lib/api"
-import { chatIntentEnvelopeOn } from "../../../lib/onboarding/types"
+import { chatIntentEnvelopeOn, crucibleOn } from "../../../lib/onboarding/types"
 
 // The module toggles stored in companies.feature_flags — mirrors the
 // FeatureFlags keys in lib/onboarding/types.ts. The Modules group shows
@@ -49,7 +49,24 @@ export const MODULES: { key: string; label: string }[] = [
   // as ON (see chatIntentEnvelopeEnabled), so this checkbox is a per-company
   // kill switch.
   { key: "chat_intent_envelope", label: "Chat Intent Envelope (beta)" },
+  // Goal Analysis (engine name Crucible; users never see that word).
+  // DEFAULT OFF and allowlist-only — the reverse of every other module here,
+  // where a missing key means ON. A run reads the tenant's whole corpus and
+  // spends real tokens, so nobody gets it without being told (see
+  // crucibleEnabled and backend crucible_enabled).
+  { key: "crucible", label: "Goal Analysis (experimental)" },
 ]
+
+/** Whether Goal Analysis is on — DEFAULT OFF, mirroring backend
+ *  app/entitlements.py crucible_enabled. A missing key is OFF, unlike every
+ *  other module on this screen: this gates an experimental capability nobody
+ *  has rather than grandfathering one people already had, so enrolment is
+ *  explicit. Display-level only — never written back.
+ *
+ *  DELEGATES to the shared predicate rather than restating it. Two copies of
+ *  "what does a missing key mean" is exactly how the staff panel ends up
+ *  showing a company as enrolled while the app hides the control from them. */
+export const crucibleEnabled = crucibleOn
 
 /** Whether the Agents module is on, mirroring backend
  *  app/entitlements.py agents_enabled: an explicit `agents` key wins; rows
@@ -103,6 +120,7 @@ const MODULE_RESOLVERS: Record<
   agents: agentsEnabled,
   top_insights: topInsightsEnabled,
   chat_intent_envelope: chatIntentEnvelopeEnabled,
+  crucible: crucibleEnabled,
 }
 
 export function keyModeLabel(c: {
@@ -124,6 +142,10 @@ function enabledModules(company: {
   if (agentsEnabled(flags)) on.push("Agents")
   if (company.prototype_enabled) on.push("Prototype")
   if (topInsightsEnabled(flags)) on.push("Top Insights")
+  // Listed only when ON. Every other module here is on by default, so naming
+  // it unconditionally would read as "this org is missing something" for the
+  // overwhelming majority that were never offered an experimental feature.
+  if (crucibleEnabled(flags)) on.push("Goal Analysis")
   if (!on.length) return "No modules enabled"
   return on.join(", ")
 }

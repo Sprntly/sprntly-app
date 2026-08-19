@@ -7,6 +7,7 @@ import {
   useImperativeHandle,
   useRef,
   useState,
+  type ComponentType,
   type ReactNode,
 } from "react"
 import { prdApi } from "../../lib/api"
@@ -18,6 +19,26 @@ import {
   IconRedo,
   IconUndo,
 } from "./app-icons"
+import {
+  IconAlignCenter,
+  IconAlignLeft,
+  IconAlignRight,
+  IconBlockquote,
+  IconChevronDown,
+  IconClearFormatting,
+  IconCode,
+  IconDots,
+  IconH1,
+  IconH2,
+  IconH3,
+  IconIndentDecrease,
+  IconIndentIncrease,
+  IconLetterP,
+  IconLineDashed,
+  IconListNumbers,
+  IconStrikethrough,
+  IconUnlink,
+} from "@tabler/icons-react"
 
 export type { PrdSaveStatus } from "./PrdHtmlView"
 
@@ -46,30 +67,251 @@ function saveDraft(prdId: number, html: string, scope?: string) {
  *  PrdPanelContent so both consumers render the identical control. Exported so
  *  the panel can also render the DISABLED no-document variant it shows in the
  *  empty / generating states (unchanged pre-extraction behavior). */
+/** A 3x2 starter table — the shape you almost always want, and trivially
+ *  extendable once it is in the document. `insertHTML` rather than a command,
+ *  because execCommand has never had a table primitive. */
+const STARTER_TABLE =
+  "<table><thead><tr><th>Column</th><th>Column</th><th>Column</th></tr></thead>" +
+  "<tbody><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>" +
+  "<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr></tbody></table><p><br></p>"
+
+/** The block formats the style menu offers. `formatBlock` takes a tag name, and
+ *  every one of these is a tag the PRD stylesheet already styles. */
+const BLOCK_FORMATS: MenuEntry[] = [
+  { cmd: "formatBlock", value: "p", label: "Body", Icon: IconLetterP },
+  { cmd: "formatBlock", value: "h1", label: "Title", Icon: IconH1 },
+  { cmd: "formatBlock", value: "h2", label: "Heading", Icon: IconH2 },
+  { cmd: "formatBlock", value: "h3", label: "Subheading", Icon: IconH3 },
+  { cmd: "formatBlock", value: "blockquote", label: "Quote", Icon: IconBlockquote },
+  { cmd: "formatBlock", value: "pre", label: "Code", Icon: IconCode },
+]
+
+/**
+ * The less-reached-for half of the toolbar, behind a "More" menu.
+ *
+ * The split is by FREQUENCY, not by category: the panel is narrow whenever the
+ * artifact drawer is open, and a toolbar that simply wraps or clips pushes the
+ * save status off the end — which is the one control in that bar that must
+ * never be hidden, because it is the only thing telling anyone whether their
+ * edit reached the server. So the row carries what people use constantly and
+ * everything else is one click away, at any width.
+ */
+const OVERFLOW_TOOLS: MenuEntry[] = [
+  { cmd: "strikeThrough", label: "Strikethrough", Icon: IconStrikethrough },
+  { cmd: "outdent", label: "Decrease indent", Icon: IconIndentDecrease },
+  { cmd: "indent", label: "Increase indent", Icon: IconIndentIncrease },
+  { cmd: "justifyLeft", label: "Align left", Icon: IconAlignLeft },
+  { cmd: "justifyCenter", label: "Align centre", Icon: IconAlignCenter },
+  { cmd: "justifyRight", label: "Align right", Icon: IconAlignRight },
+  { cmd: "unlink", label: "Remove link", Icon: IconUnlink },
+  { cmd: "insertHorizontalRule", label: "Divider", Icon: IconLineDashed },
+  { cmd: "removeFormat", label: "Clear formatting", Icon: IconClearFormatting },
+]
+
+/** One row of a toolbar dropdown: what it runs, what it says, what it shows.
+ *
+ *  `Icon` is the COMPONENT, never a rendered element. These arrays live at
+ *  module scope, and module-level JSX evaluates at IMPORT time — before a
+ *  classic-runtime test file has set its React global, which takes down every
+ *  suite that transitively imports this module with "React is not defined".
+ *  Same footgun `ChatBubble` and `ArtifactListCards` already carry notes on. */
+type MenuEntry = {
+  cmd: string
+  value?: string
+  label: string
+  Icon: ComponentType<{ size?: number; stroke?: number }>
+}
+
+/**
+ * The PRD formatting toolbar — shared by the markdown editor below and, since
+ * the HTML PRD gained one, by `PrdPanelContent`'s iframe view too. One control,
+ * both document formats.
+ *
+ * Every button is a `document.execCommand`. That API is formally deprecated and
+ * is still the only thing that edits a `contenteditable` selection across all
+ * current browsers without pulling in an editor framework — and a framework
+ * here would have to own the document, which the HTML PRD cannot allow (it
+ * round-trips the model's own markup). So: deprecated, universally implemented,
+ * and deliberate.
+ *
+ * Every control suppresses `mousedown`. Without that, pressing a button moves
+ * focus out of the document and collapses the selection the command is supposed
+ * to act on — the same reason the HTML PRD's `exec` re-focuses its iframe.
+ */
 export function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus: PrdSaveStatus; exec: (cmd: string, value?: string) => void }) {
   const statusLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved" : "Saved · Draft"
   const statusColor = saveStatus === "saving" ? "var(--accent)" : saveStatus === "unsaved" ? "var(--ink-3)" : "var(--accent)"
+  // WHICH menu is open, not whether one is — opening either must close the
+  // other, and two independent booleans would let both sit open at once.
+  const [openMenu, setOpenMenu] = useState<"style" | "more" | null>(null)
+  const barRef = useRef<HTMLDivElement>(null)
+
+  // Click-away and Escape close the menu. Bound only while it is open, so the
+  // toolbar adds no document listeners in its resting state.
+  useEffect(() => {
+    if (!openMenu) return
+    const onDown = (e: MouseEvent) => {
+      if (!barRef.current?.contains(e.target as Node)) setOpenMenu(null)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpenMenu(null)
+    }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [openMenu])
+
+  const Tool = ({ cmd, value, title, children, testId }: {
+    cmd: string
+    value?: string
+    title: string
+    children: ReactNode
+    testId: string
+  }) => (
+    <button
+      type="button"
+      className="prd-tool"
+      disabled={!hasDoc}
+      title={title}
+      aria-label={title}
+      data-testid={testId}
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => exec(cmd, value)}
+    >
+      {children}
+    </button>
+  )
+
+  /** A toolbar dropdown: a trigger plus a list of icon + label rows. Both the
+   *  style menu and the overflow menu are this, so they cannot drift apart in
+   *  look or in close-behaviour. */
+  const ToolMenu = ({ id, trigger, title, entries, testId, align }: {
+    id: "style" | "more"
+    trigger: ReactNode
+    title: string
+    entries: MenuEntry[]
+    testId: string
+    align?: "left" | "right"
+  }) => (
+    <div className="prd-more">
+      <button
+        type="button"
+        className="prd-tool"
+        disabled={!hasDoc}
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={openMenu === id}
+        data-testid={testId}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpenMenu((cur) => (cur === id ? null : id))}
+      >
+        {trigger}
+      </button>
+      {openMenu === id && (
+        <div
+          className={`prd-more-menu${align === "left" ? " prd-more-menu--left" : ""}`}
+          role="menu"
+          data-testid={`${testId}-menu`}
+        >
+          {entries.map((t) => (
+            <button
+              key={`${t.cmd}:${t.value ?? ""}`}
+              type="button"
+              role="menuitem"
+              className="prd-more-item"
+              data-testid={`prd-more-${t.value ?? t.cmd}`}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => { exec(t.cmd, t.value); setOpenMenu(null) }}
+            >
+              <span className="prd-more-icon" aria-hidden><t.Icon size={15} stroke={1.9} /></span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+
   return (
-    <div className="prd-toolbar">
+    <div className="prd-toolbar" ref={barRef}>
       <div className="prd-tools-l">
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Undo" onClick={() => exec("undo")}><IconUndo size={16} /></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Redo" onClick={() => exec("redo")}><IconRedo size={16} /></button>
+        <Tool cmd="undo" title="Undo" testId="prd-tool-undo"><IconUndo size={16} /></Tool>
+        <Tool cmd="redo" title="Redo" testId="prd-tool-redo"><IconRedo size={16} /></Tool>
         <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Bold" onClick={() => exec("bold")}><strong>B</strong></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Italic" onClick={() => exec("italic")}><em>I</em></button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Underline" onClick={() => exec("underline")}><u>U</u></button>
+
+        {/* Block style. A CUSTOM menu, not a native <select>: an <option>
+            cannot render an icon, and these read far faster as glyphs than as
+            the words "Heading" and "Subheading" stacked side by side. */}
+        <ToolMenu
+          id="style"
+          title="Text style"
+          testId="prd-tool-block"
+          entries={BLOCK_FORMATS}
+          align="left"
+          trigger={<span className="prd-tool-styletrigger">Style<IconChevronDown size={13} stroke={2} /></span>}
+        />
         <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Heading 1" onClick={() => exec("formatBlock", "h1")}>H1</button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Heading 2" onClick={() => exec("formatBlock", "h2")}>H2</button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Bullet list" onClick={() => exec("insertUnorderedList")}><IconListBullet size={16} /></button>
+
+        <Tool cmd="bold" title="Bold" testId="prd-tool-bold"><strong>B</strong></Tool>
+        <Tool cmd="italic" title="Italic" testId="prd-tool-italic"><em>I</em></Tool>
+        <Tool cmd="underline" title="Underline" testId="prd-tool-underline"><u>U</u></Tool>
         <div className="prd-tool-divider" />
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Insert link" style={{ display: "inline-flex", alignItems: "center" }} onClick={() => { const url = prompt("Enter URL"); if (url) exec("createLink", url) }}>
+
+        <Tool cmd="insertUnorderedList" title="Bulleted list" testId="prd-tool-ul"><IconListBullet size={16} /></Tool>
+        <Tool cmd="insertOrderedList" title="Numbered list" testId="prd-tool-ol"><IconListNumbers size={16} stroke={1.9} /></Tool>
+        <div className="prd-tool-divider" />
+
+        <button
+          type="button"
+          className="prd-tool"
+          disabled={!hasDoc}
+          title="Insert link"
+          aria-label="Insert link"
+          data-testid="prd-tool-link"
+          style={{ display: "inline-flex", alignItems: "center" }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => { const url = prompt("Enter URL"); if (url) exec("createLink", url) }}
+        >
           <IconLinkInsert size={15} /><span style={{ marginLeft: 5 }}>Link</span>
         </button>
-        <button type="button" className="prd-tool" disabled={!hasDoc} title="Insert table" style={{ display: "inline-flex", alignItems: "center" }}>
+        {/* This button shipped with NO onClick — it has been inert the whole
+            time. `insertHTML` because execCommand has no table primitive. */}
+        <button
+          type="button"
+          className="prd-tool"
+          disabled={!hasDoc}
+          title="Insert table"
+          aria-label="Insert table"
+          data-testid="prd-tool-table"
+          style={{ display: "inline-flex", alignItems: "center" }}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => exec("insertHTML", STARTER_TABLE)}
+        >
           <IconGrid size={15} /><span style={{ marginLeft: 5 }}>Table</span>
         </button>
+
       </div>
+
+      {/* Everything else, one click away at any panel width.
+          OUTSIDE `.prd-tools-l` deliberately, and this is load-bearing: that
+          row scrolls (`overflow-x: auto`) so no tool is unreachable when the
+          panel is narrow, and an absolutely-positioned menu inside a scroll
+          container is CLIPPED by it — the button opened and nothing appeared.
+          Pinned out here beside the status, it also stays reachable without
+          scrolling, which is what an overflow affordance is for. */}
+      <ToolMenu
+        id="more"
+        title="More formatting"
+        testId="prd-tool-more"
+        entries={OVERFLOW_TOOLS}
+        align="left"
+        trigger={<IconDots size={16} stroke={1.9} />}
+      />
+
       <div className="prd-status">
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: hasDoc ? statusColor : "var(--muted)", transition: "background 0.3s" }} />
         {hasDoc ? statusLabel : "No draft"}

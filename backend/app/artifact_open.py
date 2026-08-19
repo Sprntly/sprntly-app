@@ -227,6 +227,14 @@ def resolve_open_artifact(
     keyed by both); a `project_id` with no `company_id` is treated as absent
     rather than guessed at.
 
+    A GENERIC (empty/whitespace) `query` is legal: it is what a bare "open the
+    PRD" — an open with no named title — produces. Rather than `not_found`, it
+    resolves to the SOLE openable artifact of `kind` (a project chat with one
+    PRD is the common case), or asks which when several exist. Project-scoped,
+    "the one PRD" is the project's; unscoped (main chat), it is the workspace's
+    single PRD or an ambiguous chip list — never the "UI action" refusal a bare
+    open used to fall through to.
+
     Never raises: a lookup failure degrades to `not_found`, which the client
     renders as "I couldn't find that" — the same thing the user sees when the
     phrase genuinely matches nothing, and strictly better than failing a send.
@@ -245,7 +253,9 @@ def resolve_open_artifact(
     if kind not in OPENABLE_TYPES:
         out["status"] = "unsupported_type"
         return out
-    if not (query or "").strip() or not dataset:
+    # A generic (no-title) open still needs a tenant scope, but NOT a query.
+    generic = not (query or "").strip()
+    if not dataset:
         return out
 
     try:
@@ -278,6 +288,28 @@ def resolve_open_artifact(
             items = list_document_artifacts(dataset=dataset, openable_only=True)
     except Exception:  # noqa: BLE001 — an open must never break the send
         logger.exception("artifact open lookup failed; reporting not_found")
+        return out
+
+    if generic:
+        # No title named — resolve to the openable artifacts of this kind
+        # themselves (the listing is already recency-sorted and family-collapsed,
+        # so one logical PRD is one row). One → open it; several → ask which,
+        # with real chips. This is the bare "open the PRD" path.
+        candidates = [
+            i for i in items
+            if i.get("type") == kind
+            and (i.get("status") or "") not in _UNOPENABLE_STATUSES
+        ]
+        candidates.sort(key=lambda i: i.get("created_at") or "", reverse=True)
+        if not candidates:
+            return out
+        if len(candidates) == 1:
+            out["status"] = "resolved"
+            out["artifact"] = _candidate(candidates[0])
+            out["candidates"] = [out["artifact"]]
+            return out
+        out["status"] = "ambiguous"
+        out["candidates"] = [_candidate(i) for i in candidates[:MAX_CANDIDATES]]
         return out
 
     ranked = rank_artifacts(items, query, kind)

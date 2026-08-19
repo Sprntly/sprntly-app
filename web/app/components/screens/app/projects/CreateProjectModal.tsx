@@ -64,6 +64,7 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
+  custom_artifact: { label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 /** `BADGE`'s fallback for a type outside `ProjectArtifactType` (a

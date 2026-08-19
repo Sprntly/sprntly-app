@@ -20,9 +20,9 @@
 // `btn btn-primary`) reuses the SAME global classes every other project modal
 // (`ArtifactsModal`, `CreateProjectModal`) already renders with.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import type { KeyboardEvent as ReactKeyboardEvent } from "react"
+import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
-import { artifactsApi, projectsApi, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
+import { artifactsApi, projectsApi, isProjectArtifactType, type ProjectableArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import { IconClose } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./AddArtifactModal.module.css"
@@ -38,6 +38,7 @@ const FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
+  { id: "custom_artifact", label: "Documents" },
 ]
 
 /** Verbatim from `ArtifactsScreen.tsx`'s `ARTIFACT_BADGE` — the app's real
@@ -50,6 +51,7 @@ const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: str
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },
   ticket_set: { label: "TICKETS", bg: "var(--info-soft)", color: "var(--info)" },
+  custom_artifact: { label: "DOC", bg: "var(--surface-2, #F0EDE7)", color: "var(--ink-2, #5A5853)" },
 }
 
 function artifactKey(a: ProjectableArtifactItem): string {
@@ -57,7 +59,11 @@ function artifactKey(a: ProjectableArtifactItem): string {
 }
 
 function artifactTitle(a: ProjectableArtifactItem): string {
-  return a.type === "ticket_set" ? (a.title.trim() || "Tickets from this conversation") : a.title
+  if (a.type === "ticket_set") return a.title.trim() || "Tickets from this conversation"
+  // A freshly-generated document has no <h1>-derived title yet — render the
+  // same "Untitled document" the company library uses rather than a blank row.
+  if (a.type === "custom_artifact") return a.title.trim() || "Untitled document"
+  return a.title
 }
 
 // ── AddArtifactPanel — the picker body + foot (NO dialog shell) ──
@@ -83,9 +89,14 @@ export type AddArtifactPanelProps = {
   onDone: () => void
   /** The foot "Cancel" / abandon-add action (back to list, or close). */
   onCancel: () => void
+  /** Optional per-type icon renderer. When supplied (the drawer passes its
+   *  `ArtifactTypeIcon`), rows render the same type-glyph the artifact LIST
+   *  view shows instead of the plain colored circle. Hosts that don't pass it
+   *  (the standalone `AddArtifactModal`, `ArtifactsModal`) keep the circle. */
+  renderIcon?: (type: ProjectArtifactType) => ReactNode
 }
 
-export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onDone, onCancel }: AddArtifactPanelProps) {
+export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onDone, onCancel, renderIcon }: AddArtifactPanelProps) {
   const { activeCompany } = useCompany()
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading")
   const [artifacts, setArtifacts] = useState<ProjectableArtifactItem[]>([])
@@ -105,10 +116,12 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
     artifactsApi
       .list(activeCompany)
       .then((rows) => {
-        // A project cannot hold a custom_artifact row yet (see
-        // ProjectableArtifactItem's own doc) — excluded here, at the one
-        // place the company's full library enters this panel.
-        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => r.type !== "custom_artifact"))
+        // Keep only the kinds a project can hold — every `ArtifactItem` kind
+        // is projectable today (custom documents included), but narrow through
+        // the shared guard rather than assuming it, so a future non-projectable
+        // kind is dropped here at the one place the company's full library
+        // enters this panel.
+        setArtifacts(rows.filter((r): r is ProjectableArtifactItem => isProjectArtifactType(r.type)))
         setStatus("ready")
       })
       .catch(() => setStatus("error"))
@@ -171,6 +184,8 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
 
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
   for (const a of artifacts) counts[a.type] = (counts[a.type] ?? 0) + 1
+  // Only surface a type chip that has ≥1 item; the "all" chip always stays.
+  const visibleFilters = FILTERS.filter((f) => f.id === "all" || (counts[f.id] ?? 0) > 0)
 
   return (
     <>
@@ -194,7 +209,7 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
               data-testid="add-artifact-search"
             />
             <div className={styles.chips} role="tablist" aria-label="Filter artifacts by type">
-              {FILTERS.map((f) => (
+              {visibleFilters.map((f) => (
                 <button
                   key={f.id}
                   type="button"
@@ -232,7 +247,11 @@ export function AddArtifactPanel({ projectId, active, existingKeys, onAdded, onD
                       data-testid={`add-artifact-row-${key}`}
                       data-existing={isExisting ? "true" : undefined}
                     >
-                      <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
+                      {renderIcon ? (
+                        renderIcon(a.type)
+                      ) : (
+                        <span className={styles.icon} style={{ background: cfg.bg, color: cfg.color }} aria-hidden="true" />
+                      )}
                       <div className={styles.rowMain}>
                         <div className={styles.rowTitle}>{artifactTitle(a)}</div>
                         <span className={styles.badge} style={{ background: cfg.bg, color: cfg.color }}>

@@ -9,8 +9,8 @@ Two paths by whether the email already has a Supabase auth account:
     token via `verifyOtp` only on an explicit button click. Corporate mail
     scanners (SafeLinks etc.) prefetch every link in an email with a GET; the
     raw Supabase `/auth/v1/verify` action link is consumed by that GET, so it
-    must never appear in an email (2026-07-22 Freezing Point incident — all
-    their invite links were dead before a human ever clicked). After verifyOtp
+    must never appear in an email (2026-07-22 incident — an entire batch of
+    invite links was dead before a human ever clicked). After verifyOtp
     the confirm page routes to `/set-password` so the invitee MUST create a
     password before entering, then `postLoginPath`'s `tryAutoAcceptInvite`
     hook converts the pending workspace_invites row into a company_members row.

@@ -196,8 +196,10 @@ def _patch_send(monkeypatch) -> list[dict]:
 
 
 def test_send_alert_emails_each_connector_owner(monkeypatch):
-    """Each disconnected connector is emailed to its OWNER (user_id → email),
-    grouped so one owner with two dead connectors gets a single email."""
+    """WITH OWNER ALERTS OPTED IN, each disconnected connector is emailed to its
+    OWNER (user_id → email), grouped so one owner with two dead connectors gets
+    a single email. Off by default — see the tests below."""
+    monkeypatch.setattr(settings, "connector_health_alert_owners", True)
     monkeypatch.setattr(settings, "resend_api_key", "re_key")
     sent = _patch_send(monkeypatch)
 
@@ -226,8 +228,10 @@ def test_send_alert_emails_each_connector_owner(monkeypatch):
 
 
 def test_send_alert_falls_back_to_admin_when_owner_unresolved(monkeypatch):
-    """A connector whose owner email can't be resolved goes to the admin
-    fallback address rather than being silently dropped."""
+    """WITH OWNER ALERTS OPTED IN, a connector whose owner email can't be
+    resolved goes to the admin fallback address rather than being silently
+    dropped."""
+    monkeypatch.setattr(settings, "connector_health_alert_owners", True)
     monkeypatch.setattr(settings, "resend_api_key", "re_key")
     monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
     sent = _patch_send(monkeypatch)
@@ -241,3 +245,117 @@ def test_send_alert_falls_back_to_admin_when_owner_unresolved(monkeypatch):
     assert len(sent) == 1
     assert sent[0]["to"] == "ops@sprntly.ai"
     assert "figma" in sent[0]["text"]
+
+
+# ── Owner alerts are OFF by default ──────────────────────────────────────────
+# This is the one mail path that ignores `notification_settings.email_enabled`,
+# on the grounds that an ops alert is not product mail. Sound for our own
+# connectors, wrong for a customer's: a tenant whose corpus we are reading for
+# testing would get an unsolicited "your connector is broken" email about a
+# connection they may not know we are exercising. Found 2026-08-18, when the
+# connector behind a test tenant turned out to be owned by a real employee at
+# that customer.
+
+def test_owner_alerts_are_off_by_default():
+    """The default is the whole fix. If this flips, real people get mailed."""
+    assert settings.connector_health_alert_owners is False
+
+
+def test_by_default_no_owner_is_emailed_and_the_admin_gets_it(monkeypatch):
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+    monkeypatch.setattr(
+        profiles_db, "emails_for_user_ids",
+        lambda ids: {"u-c1": "real.person@customer.test"},
+    )
+
+    rows = [
+        {**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"},
+        {**_row("c2", "slack", user_id="u-c1"), "_health_error": "token rejected"},
+    ]
+    connector_health._send_alert(rows)
+
+    recipients = {s["to"] for s in sent}
+    assert recipients == {"ops@sprntly.ai"}
+    assert "real.person@customer.test" not in recipients
+    # Still ONE email carrying both dead connectors — we lose nothing.
+    assert len(sent) == 1
+    assert "figma" in sent[0]["text"] and "slack" in sent[0]["text"]
+
+
+def test_by_default_owner_emails_are_never_even_looked_up(monkeypatch):
+    """Not just unused — not READ. With owner alerts off there is no reason to
+    pull a customer's staff addresses out of `profiles` only to discard them.
+
+    ASSERTS ON A CALL RECORD, not on an exception. The first version stubbed the
+    lookup with a function that raised `AssertionError` — which is an
+    `Exception`, and the opt-in branch wraps the lookup in `except Exception`.
+    So the exact regression this test names (someone deletes the
+    `if settings.connector_health_alert_owners:` guard while keeping the
+    surrounding try, which is verbatim the pre-PR shape) would have been
+    swallowed: the stub raises, the handler logs, `owner_emails = {}`, routing
+    falls to the admin address, and the test passes green while production
+    reads a customer's staff emails on every hourly sweep.
+    """
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+    _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+    calls: list = []
+    monkeypatch.setattr(
+        profiles_db, "emails_for_user_ids",
+        lambda ids: (calls.append(ids), {})[1],
+    )
+    connector_health._send_alert(
+        [{**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"}]
+    )
+    assert calls == [], "profiles was read despite owner alerts being off"
+
+
+def test_that_lookup_assertion_would_survive_the_except_clause(monkeypatch):
+    """Proves the point above rather than asserting it in a comment.
+
+    A stub that RAISES cannot detect the regression, because the code path it
+    would land in catches Exception. This test documents that by showing the
+    swallow is real — if the handler ever stops catching, this fails and the
+    call-record test above becomes belt-and-braces rather than the only guard.
+    """
+    monkeypatch.setattr(settings, "connector_health_alert_owners", True)
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+
+    def _raises(ids):
+        raise AssertionError("boom")
+
+    monkeypatch.setattr(profiles_db, "emails_for_user_ids", _raises)
+    # Does NOT propagate — it is caught, logged, and routing continues.
+    connector_health._send_alert(
+        [{**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"}]
+    )
+    assert [s["to"] for s in sent] == ["ops@sprntly.ai"]
+
+
+def test_with_owners_off_and_no_admin_address_nothing_is_sent(monkeypatch):
+    """Log-only beats mailing a customer. A missing ops address must not fall
+    through to the owner."""
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "")
+    monkeypatch.setattr(settings, "signin_monitor_alert_email", "")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+    monkeypatch.setattr(
+        profiles_db, "emails_for_user_ids",
+        lambda ids: {"u-c1": "real.person@customer.test"},
+    )
+    connector_health._send_alert(
+        [{**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"}]
+    )
+    assert sent == []

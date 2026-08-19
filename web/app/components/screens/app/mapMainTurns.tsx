@@ -18,6 +18,7 @@
  */
 
 import { AGENT_NAME } from "../../../lib/agent"
+import { QUOTE_VIEWER_NAME, splitQuotedSuffix } from "../../../lib/chatQuote"
 import type { ChatTranscriptTurn } from "../../shared/ChatTranscript"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
@@ -53,6 +54,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleStopAsk,
     submitClarifyAnswers,
     setViewerAttachment,
+    editingTurnId,
+    copiedTurnId,
+    onCopyTurn,
+    onRetryTurn,
+    onEditTurn,
+    onSubmitTurnEdit,
+    onCancelTurnEdit,
     openReportByTitle,
     openArtifactInPanel,
     openChatArtifactItem,
@@ -64,6 +72,8 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onCancelSlackShare,
     onPickSlackShareTarget,
     handlePrototypeSettled,
+    renderUserBody,
+    renderAgentBody,
   } = deps
 
   return thread.map((turn, idx): ChatTranscriptTurn => {
@@ -148,13 +158,93 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       extra: shareNode,
     })
 
+    // The passage this message was a reply to, lifted out of the stored query
+    // so it renders as a quote block above the bubble instead of as literal
+    // "> " text inside it. A turn that carries none is unaffected — every user
+    // turn ever written before quoting existed goes down this path.
+    const { body: queryBody, quote } = splitQuotedSuffix(turn.query)
+
+    // ── What can be done to this past prompt ──────────────────────────────
+    // Copy is free: it changes nothing, so any turn the user actually spoke
+    // offers it, answered or not.
+    const canCopyTurn = !!onCopyTurn && !!queryBody
+
+    // Edit and retry both RE-ASK, which rewinds the thread to this point —
+    // everything below is replaced by the new answer. That is the Claude
+    // behaviour and it is what makes editing a past prompt coherent rather than
+    // orphaning the reply underneath it. Four exclusions, each for its own
+    // reason:
+    //  * still generating — the question is live; Stop is the affordance there.
+    //  * a summary still being written — same, one rung down.
+    //  * attachments — re-sending drops them (their bytes left component state
+    //    on the original send), and quietly re-asking WITHOUT the files is a
+    //    different question. Those turns keep "Ask again", which hands the text
+    //    back to the composer instead. Same rule `handleAskAgain` already uses.
+    //  * an open clarify batch — the turn is mid-conversation with the gate,
+    //    and rewriting the question under it would strand the answers.
+    //
+    // Note what is NOT excluded any more: an ANSWERED turn. It was, while there
+    // was no way to take its answer back out of the record; the rewind
+    // (`rewindToUserTurn` → `DELETE …/turns/{id}`) is what made past prompts
+    // editable at all.
+    //  * a PEER'S message (project GROUP surface): a turn that carries `author`
+    //    belongs to someone else in the shared thread. Copy is fine on it, but
+    //    editing or re-asking a message the viewer didn't write is never theirs
+    //    to do. `author` is unset on main, private, and the viewer's OWN group
+    //    turns, so this is byte-identical for every single-author surface.
+    const canReAskTurn =
+      !!queryBody &&
+      !turn.author &&
+      !isGenerating &&
+      !turn.summaryPending &&
+      !turn.attachments?.length &&
+      !turn.clarify?.length
+    const canEditTurn = !!onEditTurn && canReAskTurn
+    const canRetryTurn = !!onRetryTurn && canReAskTurn
+    const isEditing = canEditTurn && editingTurnId === turn.id
+
+    // Per-surface AGENT-body override (the project chats' on-join greeting
+    // `MORE_MARKER` lead/Show-more split). Returns a node ONLY for the turns it
+    // owns (a greeting carrying the marker); every other turn — and every main
+    // turn, which never passes `renderAgentBody` — returns null and stays on the
+    // default reply ladder, so the mapped output is byte-identical there.
+    const surfaceAgentBody = renderAgentBody ? renderAgentBody(turn) : null
+
     return {
       turnId: turn.id,
+      onCopyUserTurn: canCopyTurn ? () => onCopyTurn!(turn) : undefined,
+      copied: copiedTurnId === turn.id,
+      onRetryUserTurn: canRetryTurn ? () => onRetryTurn!(turn) : undefined,
+      onEditUserTurn: canEditTurn ? () => onEditTurn!(turn.id) : undefined,
+      editing: isEditing,
+      onSubmitEdit: isEditing ? (text: string) => onSubmitTurnEdit?.(turn, text) : undefined,
+      onCancelEdit: isEditing ? () => onCancelTurnEdit?.() : undefined,
       // Only when the user actually said something. A turn can be AGENT-ONLY.
+      // A turn that CARRIES an `author` is a project-group PEER's message: its
+      // head shows the peer's own name/initials/tint (precomputed by the group
+      // adapter), not the current viewer's. Absent (main, private, and the
+      // viewer's OWN group turns) → the viewer's name/initials, exactly as
+      // before. Data-driven: no author ⇒ byte-identical to the pre-change map.
       user: {
-        name,
-        initials: userInitials,
-        query: turn.query,
+        // A turn that CARRIES an `author` is a project-group PEER's message: its
+        // head shows the peer's own name/initials/tint; absent (main, private,
+        // own group turns) → the viewer's, exactly as before.
+        name: turn.author ? turn.author.name : name,
+        initials: turn.author ? (turn.author.initials ?? turn.author.name.slice(0, 2).toUpperCase()) : userInitials,
+        ...(turn.author?.avatarStyle ? { avatarStyle: turn.author.avatarStyle } : {}),
+        query: queryBody,
+        quote,
+        // The quote block is clamped, so the tail of a long highlight would be
+        // unreachable without this. Reuses the SAME overlay a file card opens
+        // (`AttachmentViewer` with text and no storage key) rather than
+        // inventing a second read-this-passage surface.
+        onOpenQuote: quote
+          ? () => setViewerAttachment({ name: QUOTE_VIEWER_NAME, content: quote, plain: true })
+          : undefined,
+        // Per-surface user-body override (project GROUP → mention chips). Only
+        // for a turn that HAS query text, so an agent-only turn (query === "")
+        // never grows an empty user body. Unset on main/private → plain query.
+        ...(renderUserBody && turn.query ? { bodyNode: renderUserBody(turn) } : {}),
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,
@@ -162,6 +252,25 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         onOpenAttachment: (a) =>
           setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime }),
       },
+      // Multi-party attribution (project-group peers only): a peer turn renders
+      // start-aligned with a `${name} (${role})` head + tinted avatar, via
+      // ChatBubble's EXISTING multi-party arm, and with NO agent block — the
+      // peer's message is its own bubble; Sprntly's reply (if any) is a separate
+      // author-less turn. Unset for every single-author turn, so main/private
+      // and the viewer's own turns keep the default right-aligned rendering.
+      ...(turn.author ? {
+        speaker: turn.author.name,
+        role: turn.author.role ?? null,
+        humanAlign: "start" as const,
+        showAgent: false,
+      } : {}),
+      // A GROUP post the agent was never addressed on (2-mode gate's post-only
+      // branch — multi-member, untagged — or its hydrated form). The viewer's
+      // OWN such message keeps its default right-aligned head, but drops the
+      // agent block entirely so it never renders the "No response was generated"
+      // placeholder for a turn that was intentionally silent. Peer posts already
+      // suppress the agent block via `author` above.
+      ...(turn.postedOnly && !turn.author ? { showAgent: false } : {}),
       agentName: AGENT_NAME,
       agentBadge: "Product Coworker",
       isLast,
@@ -189,6 +298,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       onSubmitClarify: (answers) => submitClarifyAnswers(answers),
       onSkipClarify: () => submitClarifyAnswers([]),
       reply: turn.reply,
+      // The greeting's lead/Show-more body REPLACES the reply ladder (via
+      // ChatBubble's `agentBodyNode` escape hatch). Spread only when the
+      // surface owns this turn, so a normal turn never grows the field.
+      ...(surfaceAgentBody ? { agentBodyNode: surfaceAgentBody } : {}),
       // A report answer is an ARTIFACT: it reads in the panel's Reports tab.
       onOpenReport: openReportByTitle,
       openCandidates: turn.openCandidates,

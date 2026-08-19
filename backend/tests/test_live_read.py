@@ -345,7 +345,7 @@ def test_local_only_reads_our_tables_and_skips_the_network(
     monkeypatch.setattr(
         call_index, "resolve_calls",
         lambda eid, q: [_indexed_call("1", "2026-08-13T20:00:00+00:00",
-                                      "Maverik + ChaosTrack", "Maverik")],
+                                      "Maverik + Northwind", "Maverik")],
     )
 
     result = live_read.read_sources(
@@ -353,7 +353,7 @@ def test_local_only_reads_our_tables_and_skips_the_network(
     )
 
     by_key = {s.key: s for s in result.sources}
-    assert "Maverik + ChaosTrack" in by_key["fireflies"].text
+    assert "Maverik + Northwind" in by_key["fireflies"].text
     # Slack was NAMED but not opened — and says so, rather than being dropped,
     # which would read as "I looked and there was nothing".
     assert stub_registry["slack"].calls == []
@@ -368,8 +368,8 @@ def test_a_call_line_names_who_was_on_it(stub_registry, monkeypatch):
     import app.call_index as call_index
 
     call = _indexed_call(
-        "1", "2026-08-13T20:00:00+00:00", "Maverik + ChaosTrack", "Maverik",
-        participants=["dtung@chaostrack.com", "daniel.hagen@maverik.com"],
+        "1", "2026-08-13T20:00:00+00:00", "Maverik + Northwind", "Maverik",
+        participants=["dtung@northwind.com", "daniel.hagen@maverik.com"],
         duration_min=51.0,
     )
     monkeypatch.setattr(call_index, "resolve_calls", lambda eid, q: [call])
@@ -377,7 +377,7 @@ def test_a_call_line_names_who_was_on_it(stub_registry, monkeypatch):
     result = live_read.read_sources("co-1", ["fireflies"], query="Maverik")
 
     text = result.read[0].text
-    assert "with: dtung@chaostrack.com, daniel.hagen@maverik.com" in text
+    assert "with: dtung@northwind.com, daniel.hagen@maverik.com" in text
     assert "51 min" in text
 
 
@@ -412,9 +412,9 @@ def test_a_windowed_plan_renders_the_whole_window_not_a_keyword_probe(
 
     calls = [
         _indexed_call("1", "2026-07-13T15:00:00+00:00",
-                      "TransUnion + Demo", "TransUnion"),
+                      "Woodgrove + Demo", "Woodgrove"),
         _indexed_call("2", "2026-07-28T15:00:00+00:00",
-                      "Woodward + Demo", "Woodward"),
+                      "Proseware + Demo", "Proseware"),
     ]
     seen = {}
 
@@ -439,13 +439,13 @@ def test_a_windowed_plan_renders_the_whole_window_not_a_keyword_probe(
     text = result.read[0].text
     assert seen["since"] is not None and seen["until"] is not None
     assert "2 recorded calls in the index between 2026-07-11 and 2026-08-01" in text
-    assert "week of 2026-07-13: 1 call(s) — TransUnion" in text
+    assert "week of 2026-07-13: 1 call(s) — Woodgrove" in text
     # The zero week is rendered EXPLICITLY: a missing line and a zero are
     # different claims, and only the zero stops "no data" readings.
     assert "week of 2026-07-20: 0 call(s)" in text
     # The newest individual calls ride along so a "group last week's calls"
     # follow-up has titles, not just counts.
-    assert "Woodward + Demo" in text
+    assert "Proseware + Demo" in text
 
 
 def test_an_empty_window_is_a_fact_not_a_missing_sync(stub_registry, monkeypatch):

@@ -27,8 +27,9 @@
  * escape hatch for content that doesn't fit that ladder at all (a static
  * insight card, a "loading conversation…" skeleton).
  */
-import type { CSSProperties, ReactNode } from "react"
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react"
 import { IconSparkle } from "./app-icons"
+import { SprntlyMark } from "./SprntlyMark"
 import { AskReplyBody } from "./AskReplyBody"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import {
@@ -90,6 +91,17 @@ export type ChatBubbleUserBlock = {
    *  multi-party surface's own bubble-fill styling lives here, keyed off its
    *  own CSS module rather than a new global rule. */
   bubbleClassName?: string
+  /** The passage of an earlier answer this message was a reply TO, rendered as
+   *  a quote block above the words. Callers split it off the stored message
+   *  with `splitQuotedSuffix` — it is not a separate field on the wire (see
+   *  `lib/chatQuote.ts` for why). Unset/null renders nothing. */
+  quote?: string | null
+  /** Open the full excerpt. The block is clamped to a few lines so a long
+   *  highlight doesn't push the conversation off screen — which makes the rest
+   *  of it unreachable unless something can show it, so a caller that can open
+   *  a viewer wires this and the quote becomes a button. Unset renders the
+   *  same static blockquote, no affordance. */
+  onOpenQuote?: () => void
 }
 
 export interface ChatBubbleProps {
@@ -203,6 +215,34 @@ export interface ChatBubbleProps {
    *  own turn id. */
   onPickOption?: (option: { id: string; title: string; instruction?: string }) => void
 
+  // ── Acting on a past prompt: copy / edit / retry ─────────────────────────
+  // A message you already sent used to be inert. These make it a thing you can
+  // do something with: take the words somewhere else, fix a typo and re-ask, or
+  // just run it again.
+  //
+  // Every one is caller-OWNED, like every other in-flight signal here (see the
+  // header note). Which turn is being edited, whether a turn is eligible at all,
+  // and what re-asking DOES to the conversation are decisions this leaf must
+  // not make — each unset prop simply renders no button, and a turn with none
+  // of them set has byte-identical DOM to before they existed.
+  /** Copy this message's text. The caller owns the clipboard write (and any
+   *  "Copied" feedback) — a leaf that reached for `navigator.clipboard` would
+   *  be untestable and would fight the surface's own toast conventions. */
+  onCopyUserTurn?: () => void
+  /** Re-ask this message unchanged. */
+  onRetryUserTurn?: () => void
+  /** Show the edit affordance on this turn's user bubble. */
+  onEditUserTurn?: () => void
+  /** This turn is the one currently being edited. */
+  editing?: boolean
+  /** The edited text, on save. The caller re-composes anything the editor does
+   *  not own (a quoted passage, a pinned skill trigger) and re-sends. */
+  onSubmitEdit?: (text: string) => void
+  onCancelEdit?: () => void
+  /** Transient "Copied" confirmation on this turn's copy button. Caller-owned
+   *  and caller-expired, for the same reason the copy itself is. */
+  copied?: boolean
+
   /** Rendered after both blocks, inside the turn wrapper — an artifact
    *  action row, a "save as artifact" button. Turn-scoped, caller-composed. */
   footer?: ReactNode
@@ -221,6 +261,124 @@ function attachmentMeta(name: string, content?: string): string {
   if (!content) return type || "File"
   const lines = content.split("\n").length
   return [type, `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`].filter(Boolean).join(" · ")
+}
+
+/** The in-place editor for a question that never got an answer.
+ *
+ *  Its own component so the draft is LOCAL state that mounts with the edit and
+ *  dies with it — a `useState` seeded inside `ChatBubble` would keep the last
+ *  edit alive across turns and re-seat stale text the next time any turn was
+ *  edited. Enter saves, Shift+Enter adds a line, Escape cancels: the same
+ *  contract as the composer this text came from. */
+function UserTurnEditor({ initial, onSubmit, onCancel }: {
+  initial: string
+  onSubmit: (text: string) => void
+  onCancel: () => void
+}) {
+  const [text, setText] = useState(initial)
+  const ref = useRef<HTMLTextAreaElement>(null)
+  // Focus with the caret at the END, not selecting the whole message: the
+  // common edit is a tweak to what you wrote, and a select-all means the first
+  // keystroke silently destroys it.
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.focus()
+    try {
+      el.setSelectionRange(el.value.length, el.value.length)
+    } catch {
+      /* jsdom/older engines may reject setSelectionRange */
+    }
+    el.style.height = "auto"
+    el.style.height = `${Math.min(el.scrollHeight, 240)}px`
+  }, [])
+  const save = () => {
+    const next = text.trim()
+    if (!next) return
+    onSubmit(next)
+  }
+  return (
+    <div className="bc-user-edit" data-testid="user-turn-editor">
+      <textarea
+        ref={ref}
+        className="bc-user-edit-input"
+        aria-label="Edit your message"
+        value={text}
+        rows={1}
+        onChange={(e) => {
+          setText(e.target.value)
+          e.target.style.height = "auto"
+          e.target.style.height = `${Math.min(e.target.scrollHeight, 240)}px`
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault()
+            save()
+            return
+          }
+          if (e.key === "Escape") {
+            // Stops the surface-level Esc listeners (which cancel a running
+            // generation) from also firing on a keystroke that meant "close
+            // this box".
+            e.preventDefault()
+            e.stopPropagation()
+            onCancel()
+          }
+        }}
+      />
+      <div className="bc-user-edit-actions">
+        <button type="button" className="bc-user-edit-cancel" onClick={onCancel} data-testid="user-turn-edit-cancel">
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="bc-user-edit-save"
+          onClick={save}
+          disabled={!text.trim()}
+          data-testid="user-turn-edit-save"
+        >
+          Send
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** The quoted passage above a user message — the reply-to excerpt, rendered
+ *  the way the composer parked it.
+ *
+ *  Clamped to a few lines, because a quote is a pointer at a passage and a
+ *  400-word highlight would otherwise bury the question it belongs to. With
+ *  `onOpen` wired it becomes a button that shows the whole thing, so the
+ *  clamping never actually costs the reader anything; without one it stays a
+ *  plain `<blockquote>` and the DOM is what it was before. */
+function UserQuote({ text, onOpen }: { text: string; onOpen?: () => void }) {
+  if (!onOpen) {
+    return (
+      <blockquote className="bc-user-quote" data-testid="turn-quote">
+        {text}
+      </blockquote>
+    )
+  }
+  return (
+    <button
+      type="button"
+      className="bc-user-quote bc-user-quote--open"
+      data-testid="turn-quote"
+      onClick={onOpen}
+      title="View the full quoted passage"
+      aria-label="View the full quoted passage"
+    >
+      <span className="bc-user-quote-text">{text}</span>
+      <span className="bc-user-quote-icon" aria-hidden>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M15 3h6v6" />
+          <path d="M10 14 21 3" />
+          <path d="M21 14v7H3V3h7" />
+        </svg>
+      </span>
+    </button>
+  )
 }
 
 // A function, not a module-level element: module-level JSX evaluates at
@@ -285,6 +443,13 @@ export function ChatBubble(props: ChatBubbleProps) {
     agentBodyNode,
     pickOptions,
     onPickOption,
+    onCopyUserTurn,
+    onRetryUserTurn,
+    onEditUserTurn,
+    editing,
+    onSubmitEdit,
+    onCancelEdit,
+    copied,
     footer,
     afterNode,
   } = props
@@ -317,12 +482,42 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <span className={styles.otherName}>{userHeadName}</span>
                 {userHeadExtra ?? null}
               </div>
+              {user.quote ? <UserQuote text={user.quote} onOpen={user.onOpenQuote} /> : null}
               {user.query || user.bodyNode ? (
                 <div
                   className={`bc-user-bubble ${styles.otherBubble}${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
                   data-testid={user.dataTestId}
                 >
                   {user.bodyNode ?? user.query}
+                </div>
+              ) : null}
+              {/* A peer's message is not the viewer's to edit or re-ask, but
+                  copying it is free — so a multi-party turn offers Copy ALONE.
+                  Edit/retry are withheld upstream (the mapper hands no
+                  onEdit/onRetry for a turn that carries an `author`); this arm
+                  only ever wires copy. Unwired (onCopyUserTurn absent) → no row,
+                  so every existing peer-bubble caller is unchanged. */}
+              {onCopyUserTurn && (user.query || user.bodyNode) ? (
+                <div className="bc-user-actions">
+                  <button
+                    type="button"
+                    className="bc-user-act"
+                    onClick={onCopyUserTurn}
+                    aria-label={copied ? "Copied" : "Copy this message"}
+                    title={copied ? "Copied" : "Copy"}
+                    data-testid="user-turn-copy"
+                  >
+                    {copied ? (
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    ) : (
+                      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                        <rect x="9" y="9" width="12" height="12" rx="2" />
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                      </svg>
+                    )}
+                  </button>
                 </div>
               ) : null}
             </div>
@@ -365,13 +560,90 @@ export function ChatBubble(props: ChatBubbleProps) {
                 })}
               </div>
             ) : null}
-            {user?.query || user?.bodyNode ? (
-              <div
-                className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
-                data-testid={user.dataTestId}
-              >
-                {user.bodyNode ?? user.query}
-              </div>
+            {user?.quote && !editing ? <UserQuote text={user.quote} onOpen={user.onOpenQuote} /> : null}
+            {/* Editing REPLACES the bubble rather than sitting beside it — two
+                copies of the same message on screen, one live and one stale,
+                is the state this affordance exists to get rid of. The quoted
+                passage is hidden with it and re-attached on send: the editor
+                owns your words, not the excerpt they were about. */}
+            {editing && onSubmitEdit && onCancelEdit ? (
+              <UserTurnEditor
+                initial={user?.query ?? ""}
+                onSubmit={onSubmitEdit}
+                onCancel={onCancelEdit}
+              />
+            ) : user?.query || user?.bodyNode ? (
+              <>
+                <div
+                  className={`bc-user-bubble${user.bubbleClassName ? ` ${user.bubbleClassName}` : ""}`}
+                  data-testid={user.dataTestId}
+                >
+                  {user.bodyNode ?? user.query}
+                </div>
+                {onCopyUserTurn || onRetryUserTurn || onEditUserTurn ? (
+                  // Revealed on hover/focus of the turn (see `.bc-user-actions`)
+                  // — always in the DOM, so it is reachable by keyboard and by a
+                  // screen reader on a surface that has no hover at all.
+                  //
+                  // Ordered least- to most-consequential left to right: copy
+                  // changes nothing, edit opens a box you can still cancel out
+                  // of, retry re-runs immediately. The destructive-ish one is
+                  // last, where a mis-aimed click is least likely to land.
+                  <div className="bc-user-actions">
+                    {onCopyUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act"
+                        onClick={onCopyUserTurn}
+                        aria-label={copied ? "Copied" : "Copy this message"}
+                        title={copied ? "Copied" : "Copy"}
+                        data-testid="user-turn-copy"
+                      >
+                        {copied ? (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                        ) : (
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <rect x="9" y="9" width="12" height="12" rx="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                        )}
+                      </button>
+                    ) : null}
+                    {onEditUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act bc-user-edit-btn"
+                        onClick={onEditUserTurn}
+                        aria-label="Edit and resend this message"
+                        title="Edit and resend"
+                        data-testid="user-turn-edit"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M12 20h9" />
+                          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                        </svg>
+                      </button>
+                    ) : null}
+                    {onRetryUserTurn ? (
+                      <button
+                        type="button"
+                        className="bc-user-act"
+                        onClick={onRetryUserTurn}
+                        aria-label="Ask this again"
+                        title="Ask again"
+                        data-testid="user-turn-retry"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <path d="M21 12a9 9 0 1 1-3.2-6.9" />
+                          <polyline points="21 3 21 9 15 9" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+              </>
             ) : null}
           </>
         )}
@@ -379,8 +651,13 @@ export function ChatBubble(props: ChatBubbleProps) {
         {showAgent ? (
           <>
             <div className="bc-agent-head">
+              {/* The agent's identity, at rest. Deliberately NOT animated:
+                  the working state belongs to the wait row directly below
+                  (`AssistantWaitState`'s mark), and two things moving in the
+                  same corner reads as a glitch rather than as progress. This
+                  chip says WHO is answering; that one says it is still going. */}
               <span className="bc-agent-mark">
-                <IconSparkle size={14} />
+                <SprntlyMark size={13} />
               </span>
               <span className="bc-agent-name">{agentName}</span>
               {agentBadge ? (

@@ -106,6 +106,38 @@ def get_report(report_id: int, company_id: str) -> dict | None:
 
 
 @retry_on_disconnect
+def latest_scheduled_report(
+    company_id: str, *, skill: str, question: str,
+) -> dict | None:
+    """The newest report row matching (company, skill, question), or None.
+
+    Same match as `latest_report_at` — the canonical `question` marker is what
+    identifies a scheduler-generated row — but returns the ROW, because the
+    monthly reports' ingest-reconcile pass needs the document itself.
+
+    A report is saved before it is extracted into the KG, and those are
+    separate failures: the save can succeed while the ingest raises (a stale
+    Supabase connection mid-extraction, a provider outage). The durable ledger
+    keys on this row existing, so without a way to re-read the saved document
+    an ingest failure would cost a whole month of retrievability — the tick
+    would consider the cycle done and never revisit it. See
+    `monthly_reports.pending_ingests`.
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select("id, skill, title, html, question, created_at")
+        .eq("company_id", company_id)
+        .eq("skill", skill)
+        .eq("question", question)
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
 def latest_report_at(
     company_id: str, *, skill: str, question: str,
 ) -> str | None:

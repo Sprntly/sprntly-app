@@ -219,6 +219,54 @@ def get_conversation_prd_id(
         return None
 
 
+def get_conversation_project_id(
+    conversation_id: int,
+    company_id: str,
+) -> int | None:
+    """The project a chat conversation belongs to, or None.
+
+    A project-bound conversation is a `conversations` row with a non-null
+    `project_id`; `kind` is `individual` (the private per-user project chat) or
+    `group` (the one shared project chat). A MAIN-CHAT row shares `kind`'s
+    `individual` default but carries `project_id = NULL`, so it returns None and
+    stays workspace-scoped — `project_id` is the real discriminator, and the
+    `kind` guard only fences off any future non-project kind. Company-scoped
+    only — no per-user gate, because a `kind='group'` row is owned by its
+    creator, not the member currently classifying a message; the caller already
+    reached this conversation_id through an ownership/membership-checked surface,
+    and the value only NARROWS the read-only artifact listing to that project's
+    own documents (never widens it, never mutates), so the company scope is the
+    boundary that matters. Best-effort: any error → None.
+
+    Used by the chat-intent route to resolve a project chat's `open_artifact` /
+    `list_artifacts` legs against THE PROJECT's own artifacts even when the
+    client did not send a `context_source` — closing the class where a project
+    chat silently answers workspace-wide.
+    """
+    try:
+        c = require_client()
+        rows: Any = (
+            c.table("conversations")
+            .select("project_id, kind")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+            .execute()
+        )
+        if not rows.data:
+            return None
+        row = rows.data[0]
+        if row.get("kind") not in ("individual", "group"):
+            return None
+        return row.get("project_id")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to read project binding for conversation %s", conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
 # ── Evidence half of the binding (mirrors the PRD pair above exactly) ───────
 #
 # Extends the SAME mechanism to Evidence rather than inventing a parallel one
@@ -439,7 +487,9 @@ def _author_display(
     return name, prof.get("role")
 
 
-def list_group_turns(conversation_id: int, since: int | None = None) -> list[dict[str, Any]]:
+def list_group_turns(
+    conversation_id: int, since: int | None = None, project_id: int | None = None
+) -> list[dict[str, Any]]:
     """Turns in a group chat, ascending, after the `since` cursor (a turn
     id — AD-P4 poll read, mirrors the `prototype_comments` refetch
     posture). Each turn carries `author_name`/`author_job_role` (joined
@@ -449,17 +499,25 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
     Refuses (returns []) when `conversation_id` does not resolve to a
     `kind='group'` row — the group path can never read an individual
     chat's turns, even if a caller forgets to resolve the id via
-    `get_group_chat` first (isolation regression, R4/§9)."""
+    `get_group_chat` first (isolation regression, R4/§9).
+
+    Optional `project_id` — when passed, the `conversation_id` must ALSO
+    belong to that project, else `[]`. Belt-and-suspenders cross-project /
+    cross-tenant scoping for callers that accept a CLIENT-supplied
+    conversation_id (e.g. `routes.ask._load_group_history`): even if the
+    caller's own conversation↔project binding is ever bypassed, a foreign
+    project's turns can never be read through this path. Default `None`
+    preserves the exact behavior every pre-existing caller relies on."""
     client = require_client()
-    conv = (
+    conv_q = (
         client.table("conversations")
         .select("id")
         .eq("id", conversation_id)
         .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
     )
+    if project_id is not None:
+        conv_q = conv_q.eq("project_id", project_id)
+    conv = conv_q.limit(1).execute().data
     if not conv:
         return []
 
@@ -497,6 +555,12 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
                 "author_user_id": author_id,
                 "author_name": name,
                 "author_job_role": job_role,
+                # The send-identity key: on a human turn it is the poster's own
+                # idempotency key; on the agent reply it is the SAME key the
+                # originating ask carried. Exposed (unlike `attachments`) so the
+                # poster can recognise its own turn/reply realtime echo and not
+                # double-render it. Null on turns written before the key existed.
+                "client_message_id": t.get("client_message_id"),
                 "created_at": t["created_at"],
                 # The FULL structured reply (assistant turns persisted after
                 # the `reply` column landed); None renders from `content`.
@@ -577,6 +641,7 @@ def post_group_turn(
     role: str = "user",
     reply: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
+    client_message_id: str | None = None,
 ) -> dict[str, Any] | None:
     """Insert one turn into a group chat. Human turn: pass the poster's
     `author_user_id` (role defaults to 'user'). Agent turn (on an
@@ -598,6 +663,19 @@ def post_group_turn(
     reply can fold them into its question. The read DTO's whitelist still
     strips them from every group read/broadcast.
 
+    `client_message_id` (both roles): the send-identity key.
+      * Human turn — the IDEMPOTENCY key: a double-submit carrying the SAME
+        (conversation_id, role='user', client_message_id) returns the EXISTING
+        turn instead of inserting a second one, with the partial-unique
+        `conversation_turns_client_msg_uidx` as the concurrency backstop (the
+        SAME index individual owned turns use — it is role-partial, so a user
+        turn and the agent reply below can share one key without colliding).
+      * Agent turn — the CORRELATION key: the reply is stamped with the SAME
+        key its originating ask (and user turn) carried, so a member who posted
+        the message can recognise the reply's realtime echo as its own and not
+        double-render it. The read DTO exposes it (unlike `attachments`) so the
+        client can correlate.
+
     Refuses (returns None, no write) when `conversation_id` does not
     resolve to a `kind='group'` row — mirrors `list_group_turns`'
     isolation guard (R4/§9)."""
@@ -614,6 +692,15 @@ def post_group_turn(
     if not conv:
         return None
 
+    # Idempotency (human sends): a retry/double-submit with the same key replays
+    # the original turn rather than posting a second one.
+    if client_message_id is not None:
+        existing = _find_owned_turn(
+            conversation_id, role, client_message_id=client_message_id
+        )
+        if existing is not None:
+            return existing
+
     row_payload: dict[str, Any] = {
         "conversation_id": conversation_id,
         "role": role,
@@ -622,11 +709,26 @@ def post_group_turn(
     }
     if attachments:
         row_payload["attachments"] = attachments
-    resp = (
-        client.table("conversation_turns")
-        .insert(row_payload)
-        .execute()
-    )
+    if client_message_id is not None:
+        row_payload["client_message_id"] = client_message_id
+    try:
+        resp = (
+            client.table("conversation_turns")
+            .insert(row_payload)
+            .execute()
+        )
+    except APIError as exc:
+        # A concurrent send with the same key won the race — the partial-unique
+        # backstop refused this insert; replay the row it wrote.
+        if client_message_id is not None and _is_unique_violation(
+            exc, "conversation_turns_client_msg_uidx"
+        ):
+            existing = _find_owned_turn(
+                conversation_id, role, client_message_id=client_message_id
+            )
+            if existing is not None:
+                return existing
+        raise
     client.table("conversations").update({"updated_at": utc_now()}).eq(
         "id", conversation_id
     ).execute()

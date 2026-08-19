@@ -695,6 +695,21 @@ async def generate(
         created_by_user_id=company.user_id,
     )
 
+    # When this prototype's source PRD belongs to one or more projects, pin the
+    # prototype to them too — a prototype built off a project's PRD is part of
+    # that project's work, so it should show on the project's artifact rail +
+    # injected context alongside the PRD. Resolved off the PRD's own
+    # `project_artifacts('prd', prd_id)` ref (the prototype path has no
+    # conversation_id, and `prds` has no conversation column). Server-side (runs
+    # regardless of the client), best-effort (a failed pin never blocks
+    # generation). A non-project prototype resolves no project and writes
+    # nothing. Adds a pin only — the generation loop below is untouched.
+    from app.project_from_prd import maybe_pin_prototype_to_prd_projects
+
+    maybe_pin_prototype_to_prd_projects(
+        body.prd_id, prototype_id, company.company_id
+    )
+
     # Persist the ownership-checked screenshot keys (if any) into the new join
     # table, position = submitted list index. No-op when omitted/empty.
     if body.screenshot_keys:

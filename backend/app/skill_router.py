@@ -1169,7 +1169,7 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
     listed page was Atlassian's stock product-requirements template, and that
     template's body says "Add Jira work item links or other relevant project
     links here". The quoted word made the next turn a tracker thread, so "tell
-    me more about ChoisBits Decision Making" — `more` matches _TRACKER_DETAIL —
+    me more about Cyberdyne Decision Making" — `more` matches _TRACKER_DETAIL —
     was answered "no tracker is connected, connect Jira or ClickUp" about a
     Confluence page the assistant had just read. The user had to type "so check
     confluence" to get back to the thread they were already in.
@@ -1931,7 +1931,14 @@ _PROJECT_TOOL_DELEGATE_VERB = re.compile(
     r"hand\s+off\b|"
     r"send\s+(?:this|that|it)\s+to|"
     r"have\s+\w+\s+(?:do|handle|take|work\s+on|own)|"
-    r"ask\s+\w+\s+to\s+(?:do|handle|take|own)|"
+    # "ask <someone-not-me> to <verb>" — a hand-off to a teammate ("ask Bob to
+    # review the PRD by Friday"). Broadened past the original do/handle/take/own
+    # verb list: any verb after "to" is a delegable action, and the assignee is
+    # re-resolved against the roster in `handle_delegate_task` (a non-member —
+    # "ask him to wait" — declines gracefully), so admitting the shape is safe
+    # and closes the gap where "ask <member> to <task>" fell through to an
+    # out-of-scope refusal instead of delegating.
+    r"ask\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+to\s+\w+|"
     r"give\s+(?:this|that|it)\s+to",
     re.I,
 )
@@ -1982,6 +1989,53 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
     if _PROJECT_TOOL_MENTION_VETO.search(q):
         return False
     return bool(_PROJECT_TOOL_DELEGATE_VERB.search(q) or _PROJECT_TOOL_EXECUTE_VERB.search(q))
+
+
+#: COMPLETION-shaped phrasing: the speaker reporting a task of THEIRS is
+#: finished — "I'm done with the pricing one-pager", "finished that",
+#: "the review is done", "wrapped up the deck", "sent it over". First-person
+#: framing (the assignee signalling their OWN completion) so it does not fire
+#: on "is the review done?" (a question — vetoed below) or "mark X done"
+#: aimed at someone else's task. Feeds the group tool-loop's `complete_task`
+#: admission gate; a false positive costs at most one graceful "no open task
+#: to mark done" reply from the handler, never a wrong write.
+_PROJECT_TOOL_COMPLETE_VERB = re.compile(
+    r"\b(?:i'?m|i am|it'?s|its|that'?s|thats|this is|we'?re|we are|all)\s+"
+    r"(?:now\s+)?(?:done|finished|complete|completed|wrapped\s+up|ready|good\s+to\s+go)\b"
+    r"|\bi(?:'?ve| have)\s+(?:just\s+)?(?:finished|completed|wrapped\s+up|done|sent|shipped|"
+    r"delivered|handed\s+in)\b"
+    r"|\b(?:finished|completed|wrapped\s+up|knocked\s+out)\s+(?:the|that|my|it)\b"
+    # "done with <the task>" / "finished with that" — a completion claim with
+    # an explicit object ("done with the onboarding checklist"). The "with"
+    # object is what distinguishes it from a bare "done for the day".
+    r"|\b(?:done|finished|complete|completed)\s+with\s+(?:the|that|my|it|this|his|her|their)?\s*\w+"
+    r"|\bsent\s+(?:it|that|this)\s+(?:over|off|in)\b"
+    r"|\ball\s+set\b|\bit'?s?\s+ready\b"
+    # "<the task> is/are (now) done/complete/finished" — a completion CLAIM,
+    # not a question (the interrogative "is X done?" is caught by the veto).
+    r"|\b\w+\s+(?:is|are)\s+(?:now\s+)?(?:done|complete|completed|finished)\b",
+    re.I,
+)
+
+
+def is_project_completion_request(question: str, history: list[dict] | None = None) -> bool:
+    """True when the speaker is reporting that a task assigned to THEM is
+    finished — the entry gate for the group tool-loop's `complete_task`.
+
+    Sibling of `is_project_tool_request`: cheap regex, veto-set discipline.
+    The mention/interrogative veto is reused so "is the review done?" (a
+    status QUESTION) never trips it — only a first-person completion CLAIM
+    admits. A message this declines still falls through to the composer, and
+    the accept-with-nudge system prompt covers the residual gap; a false
+    positive is absorbed by `handle_complete_task`, which no-ops gracefully
+    when the speaker has no open task to close.
+
+    `history` is accepted for signature parity with its sibling gates but is
+    not consulted in this v1 (the claim is judged on the message's own words)."""
+    q = question or ""
+    if _PROJECT_TOOL_MENTION_VETO.search(q):
+        return False
+    return bool(_PROJECT_TOOL_COMPLETE_VERB.search(q))
 
 
 #: Read/recall/summary INTENT — an interrogative lead or a summary/read

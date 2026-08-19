@@ -19,6 +19,20 @@
 // project surfaces are folded; the durable semantic assertions live in
 // chat-shell/__tests__/ChatShell.unit.dom.test.tsx.
 //
+// BASELINE MOVED, deliberately and twice, for the past-prompt actions
+// (2026-08-17). Every golden with a user turn in it now carries a
+// `.bc-user-actions` row: copy on all 18, edit + retry on the 14 that can be
+// re-asked (the other four are excluded by attachments, an open clarify gate,
+// or being mid-generation). That is a FEATURE changing rendered DOM, not the
+// extraction changing it — verified by stripping the action rows from the new
+// goldens and diffing against the old, which comes back byte-identical. That
+// equality is what still makes the C1→C3 argument above hold for everything
+// the migration covered.
+//
+// A future diff here that is NOT a named, intended feature is still the bug
+// this suite exists to catch. The check to run before accepting one: strip the
+// nodes the feature added and confirm the rest is unchanged.
+//
 // NOTE (authorized overage): this ticket's diff exceeds the ~500-line guideline
 // by design. It is a byte-identical extraction whose bulk is this file plus the
 // auto-generated .snap goldens — authorized overage, not a split trigger.

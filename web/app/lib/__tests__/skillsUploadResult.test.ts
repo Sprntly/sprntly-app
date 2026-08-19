@@ -15,7 +15,7 @@ const SINGLE: SkillUploadResult = {
   trigger: "/estimation-helper",
   name: "Estimation helper",
   description: "Scores features.",
-  uploader_name: "Fortune Tede",
+  uploader_name: "Dana Whitfield",
   created_at: "2026-08-04T10:00:00+00:00",
   has_file: true,
   name_conflict: false,

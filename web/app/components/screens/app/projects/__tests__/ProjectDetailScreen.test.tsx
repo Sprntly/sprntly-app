@@ -224,7 +224,7 @@ const ARTIFACTS: ArtifactItem[] = [
   {
     type: "evidence",
     id: 2,
-    title: "Xometry call",
+    title: "Contoso call",
     status: "ready",
     created_at: hoursAgo(70),
     source: { brief_id: 1, week_label: null, insight_index: null },
@@ -243,7 +243,7 @@ const ARTIFACTS: ArtifactItem[] = [
 
 const MEMORY: ProjectMemorySummary = {
   summary_md:
-    "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
+    "A Contoso-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
   entry_count: 24,
   stale: false,
 }
@@ -319,6 +319,35 @@ describe("ProjectDetailView — top bar", () => {
     expect(screen.getByTestId("topbar-avatars")).toBeTruthy()
     expect(screen.queryByText(/status/i)).toBeNull()
     expect(screen.queryByTestId("status-pill")).toBeNull()
+  })
+
+  it("test_avatar_tooltip_name — a member avatar's hover tooltip (native title) shows the member's NAME when present", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    // David M. + Shristi are the two human members in PROJECT — the native
+    // `title` is the hover tooltip, addressable via getByTitle.
+    expect(screen.getByTitle("David M.")).toBeTruthy()
+    expect(screen.getByTitle("Shristi")).toBeTruthy()
+  })
+
+  it("test_avatar_tooltip_email_fallback — a member with NO name falls back to their EMAIL in the tooltip", () => {
+    const emailOnlyProject = {
+      ...PROJECT,
+      members: [
+        {
+          kind: "human" as const,
+          user_id: "u9",
+          name: null,
+          email: "newbie@example.com",
+          avatar_url: null,
+          job_role: null,
+          added_at: hoursAgo(1),
+        },
+      ],
+    }
+    render(React.createElement(ProjectDetailView, viewProps({ project: emailOnlyProject })))
+    expect(screen.getByTitle("newbie@example.com")).toBeTruthy()
+    // The generic "Member" fallback is NOT used when an email is available.
+    expect(screen.queryByTitle("Member")).toBeNull()
   })
 })
 
@@ -479,7 +508,7 @@ describe("ProjectDetailView — state", () => {
 
   it("the chat note bar swaps group ⇆ individual copy", () => {
     const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
-    expect(screen.getByTestId("chat-note").textContent).toContain("smart interjection")
+    expect(screen.getByTestId("chat-note").textContent).toContain("replies to every message")
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
     expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
@@ -491,7 +520,7 @@ describe("ProjectDetailView — state", () => {
     expect(groupNote.querySelector('[data-surface="group"]')).toBeNull()
     expect(groupNote.querySelector('[data-surface="individual"]')).toBeNull()
     // The explanatory copy stays even though the badge is gone.
-    expect(groupNote.textContent).toContain("smart interjection")
+    expect(groupNote.textContent).toContain("replies to every message")
 
     rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
     const indivNote = screen.getByTestId("chat-note")

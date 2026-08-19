@@ -370,30 +370,49 @@ describe("a genuine thread change still retires the document", () => {
 // ── Highlight → chat composer (the PR5 requirement) ─────────────────────────
 //
 // The panel hands over a passage; this is the half that puts it in front of the
-// user. What matters: it lands in the CURRENT thread's composer, it is quoted
-// so the thread still reads honestly later, and it never eats a half-written
-// question.
+// user. What matters: it lands on the CURRENT thread's composer, it is visibly
+// a quotation so the thread still reads honestly later, and it never eats a
+// half-written question.
+//
+// It PARKS as the composer's quote chip now, where it used to be pasted into
+// the draft as raw "> " text (2026-08-17, when highlight-to-reply gave the
+// surface a real quote affordance). The excerpt still travels inside the
+// message — `buildQuotedMessage` appends it at send time — so the grounding
+// property these tests were written for is unchanged; only where the user sees
+// it BEFORE sending has moved.
 describe("a highlighted passage arrives in the composer", () => {
   const composer = () => document.querySelector(".cx-input") as HTMLTextAreaElement
+  const quoteChip = () => document.querySelector('[data-testid="composer-quote"]')
 
-  it("quotes the passage into the draft", async () => {
+  it("parks the passage as a quote on the composer", async () => {
     await act(async () => { renderChat() })
     await act(async () => {
       screen.getByTestId("send-quote").click()
     })
-    await waitFor(() => expect(composer().value).toContain("the pilot-partner scoping track"))
-    // Quoted, not pasted raw: the reader of this thread later sees what was
-    // being discussed rather than a question about "this".
-    expect(composer().value.startsWith("> ")).toBe(true)
+    await waitFor(() => expect(quoteChip()).not.toBeNull())
+    expect(quoteChip()!.textContent).toContain("the pilot-partner scoping track")
   })
 
-  it("appends to what the user has already typed instead of replacing it", async () => {
+  it("shows no blockquote markers to the user", async () => {
+    // The regression this replaced: the draft was handed back with "> " on it,
+    // syntax the user never typed and was then responsible for preserving.
+    await act(async () => { renderChat() })
+    await act(async () => { screen.getByTestId("send-quote").click() })
+    await waitFor(() => expect(quoteChip()).not.toBeNull())
+    expect(quoteChip()!.textContent).not.toContain(">")
+    expect(composer().value).not.toContain(">")
+  })
+
+  it("leaves what the user has already typed completely alone", async () => {
+    // Stronger than the old "appends instead of replacing": the draft is not
+    // touched at all now.
     await act(async () => { renderChat() })
     await act(async () => {
       fireEvent.change(composer(), { target: { value: "is this still true?" } })
     })
     await act(async () => { screen.getByTestId("send-quote").click() })
-    await waitFor(() => expect(composer().value).toContain("the pilot-partner"))
-    expect(composer().value).toContain("is this still true?")
+    await waitFor(() => expect(quoteChip()).not.toBeNull())
+    expect(composer().value).toBe("is this still true?")
+    expect(quoteChip()!.textContent).toContain("the pilot-partner")
   })
 })

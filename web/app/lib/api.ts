@@ -589,6 +589,92 @@ export type AskStatusResponse = AskResponse & {
   [extra: string]: unknown
 }
 
+// ── Goal Analysis (engine name Crucible; users never see that word) ────────
+//
+// Every route here is gated server-side by `require_crucible_module`, which
+// 403s for a company without the flag. The UI gate is a courtesy — this client
+// will happily be called by a company that is not enrolled, and should be, so
+// the failure is one honest 403 rather than a control that half-works.
+
+/** Where a run is. `awaiting_confirmation` is the I9 gate: the analysis has not
+ *  started and will not, until a person confirms what the goal MEANS. */
+export type GoalRunStatus =
+  | "draft" | "resolving_goal" | "awaiting_confirmation" | "planning"
+  | "awaiting_approval" | "running" | "ready" | "failed" | "cancelled"
+
+export type GoalRun = {
+  id: number
+  status: GoalRunStatus
+  goal_text: string
+  /** Closed-set machine code. The raw error text is deliberately NOT sent by
+   *  the backend — it carries URLs and provider messages. */
+  error_code: string | null
+  coverage_notes: { reason: string; actual: string }[]
+  claim_count: number
+  conversation_id: number | null
+  created_at: string | null
+  finished_at: string | null
+}
+
+export type GoalFinding = {
+  id: number
+  statement: string
+  claim_ids: string[]
+  adjudication: string | null
+  /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
+   *  decisions, so the panel must render them differently (I3). */
+  impact_value: number | null
+  currency: string | null
+  confidence_band: string | null
+  assumed_params: { name: string; basis: string }[]
+  impact: { value: number | null; affected_population: number | null }
+  confidence: {
+    band: string
+    weakest_leg: string | null
+    weakest_leg_reason: string | null
+    cap_reason: string | null
+  }
+}
+
+/** A candidate that did not survive, and why. Rendering this is not optional:
+ *  the considered list is what makes the ranking credible. */
+export type GoalRejection = {
+  id: number
+  label: string
+  reason: string
+  stopped_at_stage: string | null
+  claim_ids: string[]
+}
+
+export type GoalRunDetail = GoalRun & {
+  findings: GoalFinding[]
+  considered: GoalRejection[]
+  /** Stage 0's question and its prefilled proposal, when the run is waiting. */
+  prioritisation?: {
+    ask?: string
+    resolution?: string
+    proposed_definition?: string
+    proposed_source?: string | null
+    conflicts?: unknown[]
+  }
+}
+
+export const goalAnalysisApi = {
+  /** Start a run. Returns immediately — the row is durable before any work,
+   *  so this id is safe to poll even if the worker dies. */
+  start: (goal_text: string, opts?: { conversation_id?: number }) =>
+    api.post<GoalRun>("/v1/crucible", {
+      goal_text,
+      ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
+    }),
+  list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
+  get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),
+  /** The I9 gate. Sends the definition the user confirmed — their words, which
+   *  may be an edit of what we proposed. */
+  confirm: (runId: number, definition_text: string) =>
+    api.post<GoalRun>(`/v1/crucible/${runId}/confirm`, { definition_text }),
+}
+
 export const askApi = {
   /** Kick off an Ask in the background. Returns immediately with an ask_id;
    *  poll askApi.get(ask_id) until status !== 'generating'. */
@@ -612,6 +698,12 @@ export const askApi = {
        *  folded into the answer's question server-side. Ignored on every
        *  other branch. */
       attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
+      /** Pluggable context source ({kind, params}) — the wire form of a
+       *  surface's own context assembler. The project surfaces send
+       *  `{ kind: "project", params: { project_id, surface } }`; the backend
+       *  routes it to `ProjectContextAssembler` (membership-gated server-side).
+       *  Omitted on every main-chat ask ⇒ the unscoped path is byte-identical. */
+      context_source?: { kind: string; params?: Record<string, unknown> }
     },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
@@ -634,6 +726,9 @@ export const askApi = {
       // Structured attachments (project branch): the server persists them onto
       // the user turn and folds their text into the answer's question.
       ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
+      // Pluggable context source: routed server-side to the matching context
+      // assembler (membership-gated). Absent on main ⇒ unscoped path unchanged.
+      ...(opts?.context_source != null ? { context_source: opts.context_source } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
@@ -1222,6 +1317,15 @@ export const chatIntentApi = {
       conversationId?: number | null
       prdId?: number | null
       hasAttachments?: boolean
+      /** The surface's context source — `{ kind: "project", params: {
+       *  project_id, surface } }` on a project chat. When present the backend
+       *  scopes the listing legs (`artifact_list`/`artifact_counts`) and the
+       *  `open_artifact` lookup to THAT project's own artifacts, so the
+       *  intent envelope's cards agree with the project-scoped ask path
+       *  (`resolveAskParams` sends the same shape). Omitted (main chat) leaves
+       *  every leg workspace-wide — the request body is byte-identical to
+       *  before. */
+      contextSource?: { kind: string; params: Record<string, unknown> } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -1229,6 +1333,7 @@ export const chatIntentApi = {
       ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
+      ...(opts?.contextSource ? { context_source: opts.contextSource } : {}),
     })
     // Guarded so a console-less environment (SSR, a jsdom run without one)
     // can never turn a diagnostic into a broken send.
@@ -5179,6 +5284,18 @@ export const conversationsApi = {
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
     }),
+  /** REWIND the conversation to just before `turnId` — deletes that turn and
+   *  every turn after it. `turnId` must be a USER turn: you rewind to a
+   *  question, never into the middle of an answer.
+   *
+   *  The callers are edit-and-resend and retry on a past prompt. The thread on
+   *  screen rewinds to the point being re-asked, and the record follows, or the
+   *  same conversation reopened from history shows the old pair AND the new
+   *  one. 409 when the turn isn't in this conversation (the client's thread has
+   *  moved on) or isn't a user turn — every caller treats that as "leave it
+   *  alone". */
+  rewindToTurn: (conversationId: number, turnId: number) =>
+    api.delete(`/v1/conversations/${conversationId}/turns/${turnId}`),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------
@@ -5755,21 +5872,27 @@ export const mcpTokensApi = {
 // ── Projects (shared container + collaboration context, build spec §5) ──
 
 /** Artifact type keys a project can hold (`project_artifacts.artifact_type`). */
-export type ProjectArtifactType = "prd" | "evidence" | "prototype" | "report" | "ticket_set"
+export type ProjectArtifactType =
+  | "prd"
+  | "evidence"
+  | "prototype"
+  | "report"
+  | "ticket_set"
+  | "custom_artifact"
 
-/** `ArtifactItem` narrowed to the five kinds a project can actually hold —
- *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates only
- *  `ProjectArtifactType`, so a `custom_artifact` row can never legitimately
- *  reach project-scoped UI. `projectsApi.artifacts()` (this project's own
- *  attached refs) is typed to this narrower shape; `artifactsApi.list()`
- *  (the whole company library, which DOES include custom_artifact rows) is
- *  not — callers that pick FROM the library to attach TO a project must
- *  filter a `custom_artifact` row out themselves before it reaches
- *  project-typed state (see `AddArtifactModal.tsx`). */
+/** `ArtifactItem` narrowed to the kinds a project can actually hold —
+ *  `project_artifacts.artifact_type`'s DB CHECK constraint enumerates exactly
+ *  `ProjectArtifactType` (which now includes `custom_artifact`, the team
+ *  document — a doc generated in a project chat pins to that project). Every
+ *  kind in the shared `ArtifactItem` union is projectable today, so this is
+ *  effectively `ArtifactItem`; it stays a distinct alias so a future non-
+ *  projectable artifact kind added to the union is narrowed OUT here (and any
+ *  library-picker attaching to a project keeps guarding with
+ *  `isProjectArtifactType`). */
 export type ProjectableArtifactItem = Extract<ArtifactItem, { type: ProjectArtifactType }>
 
 const PROJECT_ARTIFACT_TYPES = new Set<ProjectArtifactType>([
-  "prd", "evidence", "prototype", "report", "ticket_set",
+  "prd", "evidence", "prototype", "report", "ticket_set", "custom_artifact",
 ])
 
 /** Runtime guard mirroring `ProjectableArtifactItem`'s own doc — the ONE
@@ -5913,6 +6036,12 @@ export type GroupTurn = {
   author_user_id: string | null
   author_name: string | null
   author_job_role: string | null
+  /** The send-identity key. On a human turn it is the poster's own
+   *  idempotency key; on the agent reply it is the SAME key the originating
+   *  ask carried. Lets the poster recognise its own turn/reply realtime echo
+   *  (id-precise correlation, never a timing guess). Null on turns written
+   *  before the key existed / by the cross-user helpers. */
+  client_message_id?: string | null
   created_at: string
   /** Artifact-open candidates for this turn (the same disambiguation shape
    *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by
@@ -6128,9 +6257,8 @@ export const projectsApi = {
    *  main chat's own open-tab `prd_id`); omitted/`null` means no PRD is open,
    *  and the route returns the "open a PRD" clarify rather than a write. The
    *  route's ★ cross-project + cross-tenant gate still runs on WHATEVER id
-   *  reaches it before any write, unconditionally. Membership-gated and
-   *  `PROJECT_PRD_EDIT_ENABLED`-gated, both degrading to `edited: false`
-   *  rather than an error. */
+   *  reaches it before any write, unconditionally. Membership-gated; a denied
+   *  target degrades to `edited: false` rather than an error. */
   prdChatEdit: (id: number | string, instruction: string, prdId?: number | null, clientMessageId?: string) =>
     api.post<ProjectChatEditResult>(
       `/v1/projects/${encodeURIComponent(String(id))}/prd/chat-edit`,
@@ -6201,13 +6329,11 @@ export const projectsApi = {
   get: (id: number | string) =>
     api.get<ProjectDetail>(`/v1/projects/${encodeURIComponent(String(id))}`),
   /** The project's artifacts, in the same unified shape `GET /v1/artifacts`
-   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` (not
-   *  the narrower `ProjectableArtifactItem[]`) to match every existing
-   *  caller/fixture — a `custom_artifact` row is impossible here today (the
-   *  backing join table's DB CHECK constraint), but callers that index a
-   *  `Record<ProjectArtifactType, …>` off `.type` still guard with
-   *  `isProjectArtifactType` rather than relying on that being statically
-   *  provable from this return type alone. */
+   *  returns, filtered to this project's refs. Typed `ArtifactItem[]` to match
+   *  every existing caller/fixture — this list CAN now include a
+   *  `custom_artifact` row (a team document pinned to the project), so callers
+   *  that index a `Record<ProjectArtifactType, …>` off `.type` guard with
+   *  `isProjectArtifactType` and handle the `custom_artifact` key. */
   artifacts: (id: number | string) =>
     api
       .get<{ artifacts: ArtifactItem[] }>(`/v1/projects/${encodeURIComponent(String(id))}/artifacts`)
@@ -6272,6 +6398,12 @@ export const projectsApi = {
    *  reuses the SAME `conversation_id`. */
   individualChat: (id: number | string) =>
     api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
+  /** Get-or-create the project's ONE shared group chat (a real `conversations`
+   *  row, `kind='group'`, per project) and return it — its `id` is what the
+   *  rebuilt group chat mount binds to and threads into main's unscoped
+   *  `/v1/ask`. Mirrors `individualChat` one level up (per-project vs per-user). */
+  groupChat: (id: number | string) =>
+    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/group`),
   /** Load-on-open read of the caller's own individual project chat (create-if-
    *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
    *  `since` omitted fetches the whole history. Empty (never a crash) when

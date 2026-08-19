@@ -91,7 +91,19 @@ export function useArtifactUrlSync() {
   // "GET /prototype" ("No PRD selected") within the same session. This param
   // name collision is specific to `/prototype`; every other `(app)` page is
   // fair game for the drawer params.
-  const ownsPrdParamElsewhere = pathname === "/prototype"
+  const reflectDisabled = pathname === "/prototype"
+
+  // The Projects surface OWNS the `?prd=`/`?evidence=` params on its OWN route:
+  // it opens the artifact IN-PLACE in the shared side-panel beside the project
+  // chat (ProjectDetailScreen restores it from the URL on mount) rather than
+  // letting this global hook CONSUME the param via `openPrdTab`, which routes to
+  // `/` (main) unconditionally — a refresh of `/projects?…&prd=` would otherwise
+  // yank the user out of the project into a main chat tab. So this hook does NOT
+  // consume the artifact params on `/projects` (exactly as it bows out entirely
+  // on `/prototype`, which owns `?prd=` for its canvas). The drawer→URL REFLECT
+  // still runs on `/projects` (only `/prototype` disables it) so the open PRD is
+  // reflected onto the URL for that project-side restore.
+  const consumeDisabled = pathname === "/prototype" || pathname === "/projects"
 
   // ── URL → drawer (one-shot per distinct param value; re-arms when the
   // param is removed — mirrors the existing `?new=1` / legacy `?prd=`
@@ -112,7 +124,7 @@ export function useArtifactUrlSync() {
   const urlEvidenceMetaRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (ownsPrdParamElsewhere) return
+    if (consumeDisabled) return
     const raw = searchParams.get(PRD_PARAM)
     if (!raw) {
       consumedRef.current.prd = null
@@ -147,10 +159,10 @@ export function useArtifactUrlSync() {
         // the evidence effect's own failure handling just below.
         pendingUrlOpenRef.current = false
       })
-  }, [searchParams, openPrdTab, ownsPrdParamElsewhere])
+  }, [searchParams, openPrdTab, consumeDisabled])
 
   useEffect(() => {
-    if (ownsPrdParamElsewhere) return
+    if (consumeDisabled) return
     const raw = searchParams.get(EVIDENCE_PARAM)
     if (!raw) {
       consumedRef.current.evidence = null
@@ -180,14 +192,14 @@ export function useArtifactUrlSync() {
         // disclosure, per require_owned_evidence): no content, no crash.
         pendingUrlOpenRef.current = false
       })
-  }, [searchParams, openPrdTab, setContent])
+  }, [searchParams, openPrdTab, setContent, consumeDisabled])
 
   // Once the ticket's PRD is loaded, switch the panel to the Tickets tab.
   const { openContentPanel } = useNavigation()
   const pendingTicketPrdRef = useRef<number | null>(null)
 
   useEffect(() => {
-    if (ownsPrdParamElsewhere) return
+    if (consumeDisabled) return
     const raw = searchParams.get(TICKET_PARAM)
     if (!raw) {
       consumedRef.current.ticket = null
@@ -201,7 +213,7 @@ export function useArtifactUrlSync() {
     pendingUrlOpenRef.current = true
     pendingTicketPrdRef.current = prdId
     openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
-  }, [searchParams, openPrdTab, ownsPrdParamElsewhere])
+  }, [searchParams, openPrdTab, consumeDisabled])
 
   useEffect(() => {
     if (pendingTicketPrdRef.current == null) return
@@ -223,7 +235,7 @@ export function useArtifactUrlSync() {
 
   // ── drawer → URL ─────────────────────────────────────────────────────────
   useEffect(() => {
-    if (ownsPrdParamElsewhere) return
+    if (reflectDisabled) return
     if (contentPanelTab != null) pendingUrlOpenRef.current = false
     if (pendingUrlOpenRef.current) return // mid-open from a URL param — don't fight it
 
@@ -306,5 +318,5 @@ export function useArtifactUrlSync() {
     params.set(want.key, want.value)
     router.replace(`${pathname}?${params}`, { scroll: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, pathname, router, ownsPrdParamElsewhere])
+  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, pathname, router, reflectDisabled])
 }

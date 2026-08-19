@@ -23,6 +23,13 @@ export type FeatureFlags = {
    *  counts as ON — same grandfathering as agents/top_insights — so the staff
    *  toggle is a per-company kill switch, not an opt-in. */
   chat_intent_envelope: boolean
+  /** Goal Analysis (engine name Crucible; users never see that word).
+   *  DEFAULT OFF and allowlist-only — a MISSING key is OFF, which is the
+   *  opposite of every other module here. The siblings grandfather ON so a
+   *  company predating them is not silently downgraded; this one is an
+   *  unfinished experimental engine, and the equivalent mistake is shipping
+   *  it to every tenant at once. See backend app/entitlements.py. */
+  crucible?: boolean
   // Legacy keys — superseded by `agents` but kept so old stored rows and the
   // dormant FeatureFlagsSettings surface still typecheck.
   on_demand_analysis: boolean
@@ -506,6 +513,24 @@ export function chatIntentEnvelopeOn(
   flags: Partial<FeatureFlags> | Record<string, boolean> | null | undefined,
 ): boolean {
   return flags?.chat_intent_envelope !== false
+}
+
+/**
+ * Is Goal Analysis on for this company? DEFAULT OFF.
+ *
+ * The one predicate for the app gate and the staff panel both, so the two
+ * cannot drift into disagreeing about what a missing key means. Mirrors
+ * `crucible_enabled` in backend app/entitlements.py — and the backend gate is
+ * the REAL one: this hides the control, the route refuses the request.
+ */
+export function crucibleOn(
+  flags: Partial<FeatureFlags> | Record<string, boolean> | null | undefined,
+): boolean {
+  // `!!` rather than `=== true`, matching backend `bool(flags.get("crucible",
+  // False))`. Narrowing it to a strict identity check would disagree with the
+  // server on any truthy non-boolean a hand-edited row might hold — which is
+  // exactly the frontend/backend drift this shared predicate exists to stop.
+  return !!flags?.crucible
 }
 
 export function parseCompanyIcp(raw: unknown): CompanyIcp {

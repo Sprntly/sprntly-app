@@ -1214,7 +1214,10 @@ def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
     )
     # The resolved `pinned_skill` is threaded through (None here — no explicit
     # pick and the source turn carries no routable slash trigger).
-    assert calls == [((1, 2, ctx, "mention"), {"job_id": 99, "run_id": "r", "pinned_skill": None})]
+    assert calls == [(
+        (1, 2, ctx, "mention"),
+        {"job_id": 99, "run_id": "r", "pinned_skill": None, "edit_target_prd_id": None},
+    )]
     assert projects_route._group_reply_tasks == before  # no task was ever scheduled
 
 
@@ -1278,6 +1281,11 @@ def test_background_input_is_extensible_structure():
         # deterministic routing input (the FE's skill pick, or the source
         # turn's own trigger on a retry), also not the message.
         "source_turn_id", "client_message_id", "job_id", "run_id", "pinned_skill",
+        # `edit_target_prd_id` joined them when project chat learned to edit a
+        # PRD in place: also a routing input (WHICH document a confirmed edit
+        # applies to), never the message itself. Extending this list is the
+        # point of the test's name; what it forbids is message CONTENT.
+        "edit_target_prd_id",
     ]
     # None of these IS "the message" itself — the reply re-derives the live
     # transcript from the DB inside `_respond_as_group_agent`, so a future

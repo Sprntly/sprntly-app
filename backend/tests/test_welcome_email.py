@@ -41,19 +41,19 @@ def _welcome(isolated_settings):
 def test_render_fills_first_name_and_workspace(isolated_settings):
     we = _welcome(isolated_settings)
     subject, text, html = we.render_welcome_email(
-        first_name="Fortune", workspace_name="Acme Product"
+        first_name="Dana", workspace_name="Acme Product"
     )
-    assert subject == "Welcome to Sprntly, Fortune — your workspace is ready"
-    assert "Hi Fortune," in text
+    assert subject == "Welcome to Sprntly, Dana — your workspace is ready"
+    assert "Hi Dana," in text
     assert "Your workspace, Acme Product, is ready." in text
-    assert "Fortune" in html
+    assert "Dana" in html
     assert "Acme Product" in html
 
 
 def test_render_guide_is_a_link_not_an_attachment(isolated_settings):
     we = _welcome(isolated_settings)
     _subject, text, html = we.render_welcome_email(
-        first_name="Fortune", workspace_name="Acme"
+        first_name="Dana", workspace_name="Acme"
     )
     # The founder note's "I've attached a one-page guide" becomes a LINK.
     assert "attached" not in text.lower()
@@ -69,7 +69,7 @@ def test_render_guide_url_override(isolated_settings, monkeypatch):
     importlib.reload(sys.modules["app.config"])
     we = _welcome(isolated_settings)
     _s, text, html = we.render_welcome_email(
-        first_name="Fortune", workspace_name="Acme"
+        first_name="Dana", workspace_name="Acme"
     )
     assert "https://docs.sprntly.ai/start" in text
     assert "https://docs.sprntly.ai/start" in html
@@ -98,7 +98,7 @@ def test_render_escapes_user_data(isolated_settings):
 def test_render_branded_shell(isolated_settings):
     we = _welcome(isolated_settings)
     _s, _t, html = we.render_welcome_email(
-        first_name="Fortune", workspace_name="Acme"
+        first_name="Dana", workspace_name="Acme"
     )
     assert "Sprntly<span" in html          # wordmark
     assert "#1a8a52" in html               # brand green
@@ -140,12 +140,12 @@ def test_send_success_posts_both_parts(isolated_settings, monkeypatch):
 
     monkeypatch.setattr(we.httpx, "post", _fake_post)
     ok = we.send_welcome_email(
-        to_email="a@b.com", first_name="Fortune", workspace_name="Acme"
+        to_email="a@b.com", first_name="Dana", workspace_name="Acme"
     )
     assert ok is True
     assert captured["url"] == we.RESEND_API_URL
     assert captured["json"]["to"] == ["a@b.com"]
-    assert "Fortune" in captured["json"]["subject"]
+    assert "Dana" in captured["json"]["subject"]
     assert "Acme" in captured["json"]["text"]
     assert "Open Sprntly" in captured["json"]["html"]
     assert "Bearer re_test" in captured["headers"]["Authorization"]
@@ -197,7 +197,7 @@ def _bearer_with_email(user_id: str, email: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
-def _complete_client(monkeypatch, *, email="fortune@acme.com", first_name="Fortune"):
+def _complete_client(monkeypatch, *, email="dana@acme.com", first_name="Dana"):
     """A TestClient authed as a fresh user who owns one seeded company, with a
     profile row (email + first_name) so the endpoint can personalise."""
     setup_supabase_auth(monkeypatch)
@@ -230,8 +230,8 @@ def test_complete_sends_and_records_once(isolated_settings, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"ok": True, "sent": True}
     assert len(sent) == 1
-    assert sent[0]["to_email"] == "fortune@acme.com"
-    assert sent[0]["first_name"] == "Fortune"
+    assert sent[0]["to_email"] == "dana@acme.com"
+    assert sent[0]["first_name"] == "Dana"
     assert sent[0]["workspace_name"] == "Acme"  # companies.display_name
 
     rows = require_client().table("drip_email_sends").select(

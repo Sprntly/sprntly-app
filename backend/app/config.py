@@ -387,10 +387,29 @@ class Settings(BaseSettings):
     connector_health_enabled: bool = True
     connector_health_interval_minutes: int = 60
     connector_health_min_recheck_minutes: int = 50
-    # FALLBACK alert address only. Disconnect alerts go to each connector's
-    # OWNER (resolved from profiles); this catches connectors whose owner email
-    # can't be resolved. Empty => fall back to signin_monitor_alert_email; both
-    # empty => unrouted connectors are log-only.
+    # May a disconnect alert be emailed to the connector's OWNER — a real
+    # person at a customer — or only to us?
+    #
+    # DEFAULT OFF, and it used to be unconditionally on. This is the one mail
+    # path in the product that ignores `notification_settings.email_enabled`,
+    # because it is an ops alert rather than product mail. That reasoning is
+    # sound for OUR connectors and wrong for a tenant's: a customer whose data
+    # we are reading for testing receives an unsolicited "your connector is
+    # broken" email from a product they may not know we are running against
+    # their corpus. Found 2026-08-18, when a real employee at a customer turned
+    # out to own the connector behind a test tenant.
+    #
+    # With this off, every alert routes to `connector_health_alert_email` (then
+    # `signin_monitor_alert_email`), so WE still find out and nothing reaches a
+    # customer. Turn it on per-deployment only where every connector owner is
+    # someone who has asked to hear from us.
+    #
+    # To stop the check running at all, use `connector_health_enabled`.
+    connector_health_alert_owners: bool = False
+    # Alert address. With `connector_health_alert_owners` off (the default) this
+    # is the ONLY recipient; with it on, it is the fallback for connectors whose
+    # owner email cannot be resolved. Empty => fall back to
+    # signin_monitor_alert_email; both empty => alerts are log-only.
     connector_health_alert_email: str = ""
 
     # Cross-connector chat sweep (app/connector_lookup/sweep.py). A GLOBAL kill

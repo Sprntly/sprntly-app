@@ -18,7 +18,7 @@ Pipeline (deterministic control flow; model only where judgement is needed):
        regex fast-path  (skill_router.detect_intent) → that PIPELINE
        else the LLM router (haiku), unchanged in shape and now serving:
          * the company's OWN uploaded skills — the per-request block on the
-           uncached `input`, judged first, which is what Fortune's
+           uncached `input`, judged first, which is what per-company
            custom-skill selection runs on; and
          * the four dedicated research PIPELINES, which is all the ~78-entry
            built-in menu collapsed to; and
@@ -86,6 +86,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_project_completion_request,
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
@@ -524,7 +525,7 @@ def _custom_skill_block(enterprise_id: Optional[str]) -> str:
 # The interceptions above `route()` are deterministic and answer BEFORE the
 # classifier ever runs, so a company's own uploaded skill is not merely
 # outranked there — it is never offered. Reported case: a company uploads
-# "Churn Autopsy", asks "we lost the Genworth account last month, what
+# "Churn Autopsy", asks "we lost the Initech account last month, what
 # happened", and `windowed_call_question` claims the turn (the question names a
 # window and the company has calls in it). They get a generic call summary. The
 # answer is not wrong — it read the right calls — it just is not their method,
@@ -1822,6 +1823,41 @@ _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: The delegation sibling of the edit-claim regex above — a model turn that
+#: PROMISES a hand-off ("On it — delegating the PRD review to Malina now…",
+#: "I'll assign that to Ada", "handing this off to Sam", "let me loop Fortune
+#: in") but never actually called `delegate_task`. A pre-action promise like
+#: this must NEVER be the terminal answer for a delegation ask (the handoff
+#: never happened — no brief, no ledger row); detecting it triggers the
+#: forcing pass that makes `delegate_task` actually fire so the confirmation
+#: reflects the REAL outcome. Scoped to a delegation verb + a forward-looking
+#: framing so it doesn't fire on `delegate_task`'s own past-tense confirmation
+#: ("I've asked Ada to …", already grounded by the handler).
+_DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
+    r"\b(?:on it|i'?ll|i will|i'?m going to|i am going to|let me|going to|gonna)\b"
+    r"[^.!?\n]{0,60}?"
+    r"\b(?:delegat\w*|assign\w*|hand(?:ing|\s+off)?|loop\w*\s+\w+\s+in|"
+    r"pass(?:ing)?\s+(?:this|that|it)\s+(?:to|off)|route\w*|send\w*\s+(?:this|that|it)\s+to)\b"
+    r"|\bdelegating\b|\bassigning\b"
+    r"|\bhanding\s+(?:this|that|it)\b|\blooping\s+\w+\s+in\b|\brouting\s+(?:this|that|it)\b",
+    re.IGNORECASE,
+)
+
+#: The completion sibling — a model turn that claims a delegated task is
+#: recorded/marked done ("noted, I'll mark that done", "got it, recorded",
+#: "marking the review complete") but never called `complete_task`, so the
+#: ledger was never written. Triggers the completion forcing pass. Scoped to
+#: a record/mark-done framing so it doesn't fire on `complete_task`'s own
+#: grounded confirmation ("I've marked … as done on the ledger").
+_COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
+    r"\b(?:i'?ll|i will|let me|going to|gonna)\b[^.!?\n]{0,40}?"
+    r"\b(?:mark\w*|record\w*|log\w*|updat\w*|clos\w*)\b[^.!?\n]{0,30}?"
+    r"\b(?:done|complete\w*|finished|off)\b"
+    r"|\b(?:noted|recorded|logged)\b[^.!?\n]{0,30}\b(?:done|complete\w*|finished)\b"
+    r"|\b(?:marking|recording|logging)\b[^.!?\n]{0,30}\b(?:done|complete\w*|as\s+finished)\b",
+    re.IGNORECASE,
+)
+
 
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
@@ -1866,6 +1902,27 @@ def _try_scoped_tool_answer(
     # narration the user sees is grounded in the tool's actual return, never
     # in the model's own claim.
     edit_prd_narrations: list[str] = []
+    # Captures every `delegate_task` dispatch's handoff confirmation, in call
+    # order. `delegate_task` is a TERMINAL action: `_GROUP_SCOPE_SYSTEM`'s
+    # "once you call delegate_task ... you are DONE" contract says the turn
+    # ends on the plain handoff, and the agent must NOT then also answer the
+    # underlying question in the teammate's place. But `run_tool_loop` always
+    # grants the model a post-tool turn, and guidance ALONE does not stop the
+    # model from composing a substantive answer there. So — exactly as with
+    # `edit_prd` above — when `delegate_task` was called this turn, the LAST
+    # captured confirmation (authored by the handler to reflect the real
+    # outcome: delivered, declined, or ambiguous) OVERRIDES the model's free
+    # text below, mechanically terminating the turn on the handoff.
+    delegate_task_narrations: list[str] = []
+    # Captures every `complete_task` dispatch's confirmation, in call order —
+    # the completion sibling of `delegate_task_narrations`. `complete_task` is
+    # a TERMINAL ledger write (the assignee reported their task done): the LAST
+    # captured confirmation (authored by `handle_complete_task` to reflect the
+    # real outcome — a `completed` row actually written, already-done, or
+    # nothing-to-mark) OVERRIDES the model's free text below, so the reply is
+    # truthful (it only claims "marked done" when a row was written) and never
+    # ends on a bare "noted" the ledger doesn't back.
+    complete_task_narrations: list[str] = []
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -1888,7 +1945,7 @@ def _try_scoped_tool_answer(
         if name == "delegate_task":
             from app import project_delegation
 
-            return project_delegation.handle_delegate_task(
+            narration = project_delegation.handle_delegate_task(
                 project_id=scope.project_id,
                 assigner_user_id=assigner_user_id,
                 source_conversation_id=identity.get("source_conversation_id"),
@@ -1904,6 +1961,21 @@ def _try_scoped_tool_answer(
                 # the agent was looking at can never drift.
                 source_content=user,
             )
+            delegate_task_narrations.append(narration)
+            return narration
+        if name == "complete_task":
+            from app import project_delegation
+
+            narration = project_delegation.handle_complete_task(
+                project_id=scope.project_id,
+                # The speaker (the current user) is the assignee reporting
+                # THEIR OWN task done — the same identity the scope carries as
+                # `assigner_user_id` for this turn (the person asking).
+                completer_user_id=assigner_user_id,
+                tool_input=tool_input,
+            )
+            complete_task_narrations.append(narration)
+            return narration
         if name == "execute_task":
             from app import project_task_execution
 
@@ -1937,6 +2009,36 @@ def _try_scoped_tool_answer(
             max_iters=5,
             meta_out=meta,
         )
+        # Forcing pass (Defect: "agent confirms without doing") — a delegation
+        # or completion turn where the model narrated a PRE-ACTION promise
+        # ("On it, delegating now…", "noted, I'll mark that done") WITHOUT ever
+        # calling the tool. `run_tool_loop` returns as soon as the model emits
+        # a text-only turn, so such a promise becomes the terminal answer with
+        # NO handoff and NO ledger write. When that happens, re-run the loop
+        # forcing the tool so it actually fires; the handler's real return then
+        # overrides the promise below. Runs at most one forcing pass per tool
+        # and only on a detected promise-without-call, so ordinary turns and
+        # turns that DID call the tool are byte-unchanged (no extra LLM call).
+        if not delegate_task_narrations and _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
+            logger.warning(
+                "group_delegation_promise_without_tool_call project_id=%s — forcing delegate_task",
+                scope.project_id,
+            )
+            run_tool_loop(
+                system=system, user=user, tools=list(scope.extra_tools),
+                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
+                meta_out=meta, force_tool="delegate_task",
+            )
+        elif not complete_task_narrations and _COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
+            logger.warning(
+                "group_completion_promise_without_tool_call project_id=%s — forcing complete_task",
+                scope.project_id,
+            )
+            run_tool_loop(
+                system=system, user=user, tools=list(scope.extra_tools),
+                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
+                meta_out=meta, force_tool="complete_task",
+            )
     except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
         logger.warning(
             "scoped_tool_reply_failed project_id=%s surface=%s",
@@ -1946,7 +2048,35 @@ def _try_scoped_tool_answer(
             return None
         raise
 
-    if edit_prd_narrations:
+    if complete_task_narrations:
+        # A completion report is terminal, like a delegation handoff: the
+        # ledger write already happened (or was truthfully declined) inside
+        # `handle_complete_task`, whose return OVERRIDES the model's free text
+        # so the reply only claims "marked done" when a `completed` row was
+        # actually written. Checked FIRST so a completion turn never ends on
+        # the model's own unearned "noted". A model that calls complete_task
+        # more than once this turn gets the first-write's SUCCESS confirmation
+        # ("Got it — I've marked …"), not the idempotent second call's
+        # "already marked done" — the turn DID complete it, so surface that.
+        text = next(
+            (n for n in complete_task_narrations if n.startswith("Got it")),
+            complete_task_narrations[-1],
+        )
+    elif delegate_task_narrations:
+        # Once you delegate, you're DONE. `delegate_task` is a terminal
+        # handoff: the turn must end on the plain confirmation, never on a
+        # substantive answer the model composed for the underlying question
+        # in the teammate's place (which `run_tool_loop`'s post-tool turn is
+        # otherwise free to produce — guidance alone does not stop it). The
+        # handler's own confirmation is authoritative regardless of outcome
+        # (delivered, declined, or an ambiguity/who-did-you-mean prompt), so
+        # it OVERRIDES the model's free text — mechanical enforcement of the
+        # `_GROUP_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
+        # below. Last call wins, matching the `edit_prd` precedent. (Checked
+        # before `edit_prd`: when no delegation occurred this list is empty
+        # and the `edit_prd` path below is reached byte-for-byte unchanged.)
+        text = delegate_task_narrations[-1]
+    elif edit_prd_narrations:
         # Ground the final answer in the tool's real outcome (the critical
         # fix): never let the model's own free-text final turn override an
         # `edit_prd` call's actual result. Last call wins — mirrors "the
@@ -2152,6 +2282,17 @@ def answer(
         scope is not None and scope.surface != Surface.main and scope.extra_tools
         and (
             is_project_tool_request(routing_text, history)
+            # A first-person "I'm done with <task>" completion claim must REACH
+            # the tool loop so the model can call `complete_task` and the
+            # ledger actually records the completion — otherwise it falls to
+            # the composer, which answers conversationally but writes nothing
+            # (the completion-ledger defect). GROUP-only (the surface that
+            # carries `complete_task`); authz is enforced inside the handler,
+            # so admitting on the phrasing alone is safe.
+            or (
+                scope.surface == Surface.project_group
+                and is_project_completion_request(routing_text, history)
+            )
             or is_project_content_request(routing_text, history)
             # A bare "send/assign/hand/route to <roster member>" — no
             # pronoun object — is a delegation signal `is_project_tool_
@@ -2420,7 +2561,7 @@ def answer(
     # narrower: any summarize/recap verb means the caller wants the analysis and
     # keeps the full path. See app/call_index.py for the measurements.
     # A NAMED ASK FOR CONTENT IS NOT A LISTING, even when it opens with a
-    # listing verb. "get me the Genworth transcript" matches `_LISTING_VERB`
+    # listing verb. "get me the Initech transcript" matches `_LISTING_VERB`
     # (get) and `_CALL_NOUN` (transcript), so it was answered with the LIST and
     # the "the index holds titles and dates, not transcripts" line — for a
     # question that names one call and asks for its content. The single-call
@@ -2441,9 +2582,9 @@ def answer(
         except Exception:  # noqa: BLE001 — never let the index break the answer
             logger.exception("call-index listing failed for %s", enterprise_id)
 
-    # SINGLE named call: "summarize the Mayer Brown call". The index holds that
-    # call's external_id, so this fetches ONE transcript instead of every call in
-    # the window. Before the index this question fell through to the KG and
+    # SINGLE named call: "summarize the Vandelay Industries call". The index
+    # holds that call's external_id, so this fetches ONE transcript instead of
+    # every call in the window. Before the index this fell through to the KG and
     # answered "you'd need to connect the recording or transcript directly (e.g.
     # via Fireflies)" — while Fireflies was connected and working. A wrong answer
     # that blames the user's setup is worse than a slow one, so this sits ahead

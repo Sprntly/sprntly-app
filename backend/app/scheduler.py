@@ -21,7 +21,8 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
   monthly_reports_tick — once a month per company (first configured brief
                        weekday, at the brief time), runs each registered
                        intelligence report, saves it into the artifacts
-                       library and announces it (app.monthly_reports).
+                       library and extracts it into the KG so questions can
+                       be answered from it (app.monthly_reports).
 """
 from __future__ import annotations
 
@@ -552,9 +553,9 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
     reports themselves, so a restart can never double-run a month.
 
     Single-phase by design, unlike the brief's generate-then-deliver split:
-    the report takes minutes to research and its announcement says "is
-    ready", so generating at the fire time and announcing on completion IS
-    the honest behaviour — there is no exact-instant delivery to protect.
+    nobody is waiting at an exact instant for a report. It takes minutes to
+    research, and what follows generation is an ingest into the KG rather
+    than a push to a person, so there is no delivery time to protect.
 
     Company-scoped, not per-workspace: the engines read company-level state
     (companies.competitors, company profile) and the reports library is
@@ -602,6 +603,39 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
             except Exception as exc:  # noqa: BLE001 — isolate per report
                 logger.error(
                     "Monthly reports tick: %s failed for %s: %s",
+                    spec.skill, company_id, exc,
+                )
+
+        # Repair pass: a report can be SAVED and still never reach the KG (the
+        # ingest is best-effort, and the extraction is a long network-bound
+        # call that a stale Supabase connection can kill mid-run). The durable
+        # ledger keys on the saved row, so without this the tick would count
+        # that cycle done and the month's findings would stay unretrievable.
+        # Re-ingesting a saved report costs only the extraction calls — the
+        # expensive web sweep is not repeated — and is a permanent no-op once
+        # its ledger row exists.
+        try:
+            pending = await asyncio.to_thread(
+                monthly_reports.pending_ingests, company_id
+            )
+        except Exception as exc:  # noqa: BLE001 — never stops the tick
+            logger.error(
+                "Monthly reports tick: pending-ingest check failed for %s: %s",
+                company_id, exc,
+            )
+            continue
+        for spec, report in pending:
+            logger.info(
+                "Monthly reports tick: re-ingesting saved %s (report %s) for "
+                "company %s", spec.skill, report.get("id"), company_id,
+            )
+            try:
+                await asyncio.to_thread(
+                    monthly_reports.ingest_saved_report, company_id, spec, report
+                )
+            except Exception as exc:  # noqa: BLE001 — isolate per report
+                logger.error(
+                    "Monthly reports tick: re-ingest of %s failed for %s: %s",
                     spec.skill, company_id, exc,
                 )
 
@@ -788,6 +822,18 @@ def _run_orphan_ask_job_sweep() -> None:
                 "generating", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan business-context refresh sweep failed")
+    try:
+        # Goal Analysis runs whose worker stopped reporting. A run is the most
+        # expensive thing on this list and the only one with a human gate in
+        # the middle, so an abandoned row is both the costliest to leave
+        # spinning and the easiest to mistake for "still thinking".
+        from app.db.crucible_runs import sweep_orphans
+
+        n = sweep_orphans()
+        if n:
+            logger.info("Failed %d abandoned Goal Analysis run(s)", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan Goal Analysis sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -922,11 +968,12 @@ def start_scheduler() -> None:
         replace_existing=True,
     )
     # Monthly intelligence reports: once a month per company, run each
-    # registered report (competitive intelligence today), save it into the
-    # artifacts library, and announce it. The day/time/tz decisions are the
-    # pure app.brief_schedule functions with the frequency forced to MONTHLY;
-    # this cadence just has to be finer than the 24h due window, and the
-    # durable reports-row ledger makes extra ticks free no-ops.
+    # registered report (competitive intelligence, 3P feedback, market
+    # intelligence), save it into the artifacts library, and extract it into
+    # the KG. The day/time/tz decisions are the pure app.brief_schedule
+    # functions with the frequency forced to MONTHLY; this cadence just has
+    # to be finer than the 24h due window, and the durable reports-row ledger
+    # makes extra ticks free no-ops.
     if settings.monthly_reports_enabled:
         report_minutes = (
             getattr(settings, "monthly_reports_tick_minutes", 60) or 60

@@ -1,0 +1,44 @@
+/* The floating "Reply" button over a highlighted passage of an answer.
+
+   `position: fixed` off the selection's own client rect — the transcript
+   scrolls inside its own viewport, so an absolutely-positioned toolbar would
+   be clipped by that overflow. The z-index sits above the dock but below
+   modals/overlays: quoting is a transcript-level action, and it must never
+   float over an open panel. */
+
+.toolbar {
+  position: fixed;
+  z-index: 60;
+  /* Anchored at the TOP-CENTRE of the selection, then lifted clear of it —
+     the button sits above the words it is about, never covering them. */
+  transform: translate(-50%, calc(-100% - 8px));
+  pointer-events: auto;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 11px;
+  border: 1px solid var(--line, #12201a17);
+  border-radius: 999px;
+  background: var(--surface-2, #fff);
+  color: var(--ink, #15201b);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(10, 25, 18, 0.16);
+  transition: background 0.14s, border-color 0.14s;
+}
+
+.button:hover {
+  background: var(--surface-3, #f2f7f4);
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--accent, #0e6e49);
+  outline-offset: 2px;
+}

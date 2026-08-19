@@ -52,7 +52,7 @@ misses. "There is no AI in routing" is not an accurate description of the system
 In order, each returning before `route()` is ever consulted:
 
 1. `call_index.is_listing_request` — "give me the 5 latest transcripts"
-2. `call_index.is_single_call_request` — "summarize the Mayer Brown call"
+2. `call_index.is_single_call_request` — "summarize the Vandelay Industries call"
 3. `is_call_digest` — live fetch + VoC over a call window
 4. `is_voc_report_request` — bare "VoC report" (gated on a connected call source)
 5. `is_data_analysis_request` — DS engine over uploaded tables

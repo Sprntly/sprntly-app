@@ -11,9 +11,11 @@
 // Layout (redesign): full-bleed chat is first-class — there is no standing
 // right rail. Settings/artifacts/members/memory/invite are demoted behind a
 // top-bar gear (`ProjectSettingsModal`, a 4-tab modal) and an "Artifacts (N)"
-// button (`ArtifactsModal`); selecting an artifact opens it in-place beside
-// the still-interactive chat (`ProjectArtifactDrawer`), the ONLY thing that
-// ever occupies a second body-grid column. Wired to the real
+// button (`ProjectArtifactsDrawer`, a non-blocking side column with a nested
+// Add-from-library picker); a chat-driven PRD open lands in the SAME global
+// side-panel main uses (`ContentPanel`, mounted at the app root via AppShell) —
+// the `<main>` is full-bleed chat and the panel slides in as an overlay,
+// identical to main. Wired to the real
 // `GET /v1/projects/{id}`, `/artifacts`, `/memory/summary` endpoints.
 //
 // AD-P13 (one chat presentation layer): this file renders NO bespoke chat
@@ -29,7 +31,7 @@
 // same-tenant non-member, 404 for a foreign-tenant/absent project. Both are
 // rendered as an in-chrome "can't open this" state, never a crash or blank
 // screen.
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AppLayout } from "../AppLayout"
@@ -37,10 +39,12 @@ import { Spinner } from "../../../auth/icons"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { ConfirmDialog } from "../../../shared/ConfirmDialog"
 import { useAuth } from "../../../../lib/auth"
-import { PROJECTS_PATH } from "../../../../lib/routes"
+import { PROJECTS_PATH, projectPath } from "../../../../lib/routes"
+import { memberAddedLandingTarget } from "./memberAddedLanding"
 import {
   ApiError,
   projectsApi,
+  prdApi,
   type ArtifactItem,
   type DelegationCounts,
   type DelegationLedgerRow,
@@ -54,9 +58,12 @@ import {
 import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
 import { openArtifactCandidateAsItem } from "./artifactCandidates"
 import { ProjectMainThread } from "./ProjectMainThread"
-import { ArtifactsModal } from "./ArtifactsModal"
+import { ProjectArtifactsDrawer } from "./ProjectArtifactsDrawer"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
-import { ProjectArtifactDrawer } from "./ProjectArtifactDrawer"
+import { useContent } from "../../../../context/ContentContext"
+import { useNavigation } from "../../../../context/NavigationContext"
+import { loadPrdById } from "../../../../lib/runPrdGeneration"
+import { loadTicketSet } from "../../../../lib/runTicketSetGeneration"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -77,6 +84,24 @@ type HumanMember = Extract<ProjectMember, { kind: "human" }>
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+}
+
+/** The hover-tooltip label for a member avatar: the member's name, falling
+ *  back to their email when there's no name (an email-only invitee whose
+ *  profile hasn't captured a name yet), and to a generic "Member" when
+ *  neither is present. Feeds the native `title` attribute — the same
+ *  hover-tooltip primitive the surrounding top-bar controls already use
+ *  (e.g. the "+" invite button's `title="Invite members"`); no new tooltip
+ *  component or dependency is introduced. */
+export function memberAvatarLabel(
+  name: string | null | undefined,
+  email: string | null | undefined,
+): string {
+  const n = (name ?? "").trim()
+  if (n) return n
+  const e = (email ?? "").trim()
+  if (e) return e
+  return "Member"
 }
 
 // ── Small icons ──
@@ -171,13 +196,10 @@ export type ProjectDetailViewProps = {
    *  `onOpenArtifacts` (the browse modal). Same handler the ArtifactsModal's
    *  "Open ↗" routes through. */
   onOpenArtifactInPlace: (artifact: ArtifactItem) => void
-  /** The artifact currently open IN-PLACE beside the chat (`null` = closed).
-   *  AD-HOC (live-rig): when set, the drawer renders as the RIGHT LAYOUT
-   *  COLUMN of the body grid — replacing the rail — so the chat stays a
-   *  fully interactive column to its left. */
-  openArtifact: ArtifactItem | null
-  /** Closes the in-place drawer and restores the rail. */
-  onCloseArtifactDrawer: () => void
+  /** The PRD open in the shared side-panel (`content.prd` when the panel is on
+   *  its "prd" tab), threaded to both chat surfaces as the edit target — parity
+   *  with main chat's open-tab `prd_id`. `null` when no PRD is open. */
+  openPrdId: number | null
   onOpenTasks: () => void
   /** Opens the top-bar "Project settings" gear (`ProjectSettingsModal`),
    *  landing on its default Instructions tab — the container owns the
@@ -211,6 +233,16 @@ export type ProjectDetailViewProps = {
    *  (the sender's own `runGeneratePrd`/`runGenerateTickets`) refreshes the
    *  list + count immediately, without waiting on the realtime echo. */
   refetchArtifacts: () => void
+  /** The project-artifacts DRAWER open-state, owned by the container (the
+   *  top-bar "Artifacts" trigger sets it). When true, the `.body` grid grows a
+   *  second column hosting `ProjectArtifactsDrawer` (a non-blocking layout
+   *  column, NOT an overlay — the chat to its left stays interactive). */
+  artifactsDrawerOpen: boolean
+  /** The type the top-bar chip was opened FOR (or `undefined` for a generic
+   *  open) — the drawer owns its filter state from there. */
+  artifactsDrawerFilter?: ProjectArtifactType
+  /** Closes the artifacts drawer (container's `onCloseRailModal`). */
+  onCloseArtifactsDrawer: () => void
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -226,8 +258,7 @@ export function ProjectDetailView({
   ledgerRows: _ledgerRows,
   onOpenArtifacts,
   onOpenArtifactInPlace,
-  openArtifact,
-  onCloseArtifactDrawer,
+  openPrdId,
   onOpenTasks,
   onOpenSettings,
   onOpenInvite,
@@ -235,19 +266,17 @@ export function ProjectDetailView({
   currentUserId: _currentUserId,
   onRemoveMember: _onRemoveMember,
   refetchArtifacts,
+  artifactsDrawerOpen,
+  artifactsDrawerFilter,
+  onCloseArtifactsDrawer,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
-  // AD-HOC (live-rig): the in-place artifact drawer is a LAYOUT COLUMN, not
-  // an overlay. When one is open it takes the right region (where the
-  // former rail sat), the body grid reflows to [ chat | drawer ], and the
-  // chat column to the left stays fully interactive.
-  const drawerOpen = openArtifact != null
-  // The edit target BOTH chat surfaces bind — parity with main chat's own
-  // open-tab `prd_id`. `null` when no PRD is open (or a non-PRD artifact is
-  // open beside the chat), in which case an edit-phrased message gets the
-  // "open a PRD" clarify rather than a guess.
-  const openPrdId = openArtifact?.type === "prd" ? Number(openArtifact.id) : null
-
+  // The human member display names — threaded to the group chat so a multi-word
+  // `@mention` chip ("@Bob Baker") wraps the FULL name, not only its first word.
+  const memberNames = useMemo(
+    () => humans.map((m) => m.name).filter((n): n is string => !!n && n.trim().length > 0),
+    [humans],
+  )
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
   // branch, resume-conversation-first, reuse-by-prd-id and null-id guards all
   // live in `openArtifactDestination`; this project surface supplies the
@@ -259,11 +288,17 @@ export function ProjectDetailView({
   // browse-modal-by-type fallback rather than opening an empty drawer.
   const onOpenArtifactCandidate = (candidate: OpenArtifactCandidate) => {
     const opened = openArtifactDestination(candidate, {
+      // Evidence — exactly like main: scope the shared panel's Evidence tab to
+      // this insight (by-context, not by-id), and it self-loads the existing
+      // evidence. The shared decision only routes here when the candidate is
+      // brief-anchored, so the (briefId, insightIndex) pair is real.
       openEvidence: (c) => {
         onOpenArtifactInPlace(openArtifactCandidateAsItem(c))
         return true
       },
       resumeConversation: () => false,
+      // The PRIMARY path — exactly like main: load the PRD by id into the global
+      // content store and open the shared side-panel.
       openPrd: (c, prdId) => {
         onOpenArtifactInPlace(openArtifactCandidateAsItem(c, prdId))
         return true
@@ -290,7 +325,7 @@ export function ProjectDetailView({
               <span
                 key={m.user_id}
                 className={styles.topAv}
-                title={m.name ?? "Member"}
+                title={memberAvatarLabel(m.name, m.email)}
                 aria-hidden="true"
                 style={personAvatarStyle(m.user_id, m.name)}
               >
@@ -378,14 +413,19 @@ export function ProjectDetailView({
         </button>
       </header>
 
-      <div className={`${styles.body} ${drawerOpen ? styles.bodyDrawerOpen : ""}`}>
+      <div className={`${styles.body} ${artifactsDrawerOpen ? styles.bodyDrawerOpen : ""}`}>
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
-              <>
-                Open to all members. Sprntly uses <b>smart interjection</b> — jumps in when a
-                turn is for it, stays out otherwise.
-              </>
+              humans.length > 1 ? (
+                <>
+                  Open to all members. Tag <b>@Sprntly</b> to bring the agent in.
+                </>
+              ) : (
+                <>
+                  Open to all members. Sprntly <b>replies to every message</b> here.
+                </>
+              )
             ) : (
               <>
                 Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
@@ -409,6 +449,9 @@ export function ProjectDetailView({
               // asserted flat-route premise hold rather than patching a live bug.
               key={project.id}
               projectId={project.id}
+              projectName={project.name}
+              humanMemberCount={humans.length}
+              memberNames={memberNames}
               activeChat={activeChat}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}
@@ -418,13 +461,21 @@ export function ProjectDetailView({
           </div>
         </main>
 
-        {drawerOpen ? (
-          // Right region: the in-place artifact drawer, side-by-side with the
-          // still-interactive chat column (redesign: this is now the ONLY
-          // right-hand column the body grid ever renders — the standing rail
-          // is gone; the chat is full-bleed whenever no artifact is open).
-          <ProjectArtifactDrawer artifact={openArtifact} projectId={project.id} onClose={onCloseArtifactDrawer} />
-        ) : null}
+        {/* Project-artifacts DRAWER — the second `.body` grid column, present
+            only while open. A non-blocking layout column (border-left, native
+            slide, no scrim/focus-trap): browsing the project's artifacts never
+            interrupts the chat to its left. A row's OPEN still lands in the
+            SAME global side-panel (`ContentPanel`) via the app deep-link.
+            (A chat-driven PRD open likewise slides that panel in as an overlay
+            via `app--cpanel-open`, identical to main.) */}
+        <ProjectArtifactsDrawer
+          projectId={project.id}
+          open={artifactsDrawerOpen}
+          initialFilter={artifactsDrawerFilter}
+          onClose={onCloseArtifactsDrawer}
+          onOpenInPlace={onOpenArtifactInPlace}
+          onArtifactsChanged={refetchArtifacts}
+        />
       </div>
     </div>
   )
@@ -471,6 +522,17 @@ export function ProjectDetailScreen({
   const auth = useAuth()
   const router = useRouter()
   const searchParams = useSearchParams()
+  // The `?prd=` this route was (re)loaded WITH — captured once during the FIRST
+  // render, before any effect (in particular `useArtifactUrlSync`'s drawer→URL
+  // reflect, which strips the param while no PRD is yet open) can clear it. The
+  // restore effect below re-opens that PRD IN-PLACE on the project surface, so a
+  // refresh of `/projects?…&prd=` lands back here with the PRD open instead of
+  // being routed to `/` (main) by the global hook (which now bows out of the
+  // CONSUME on `/projects` — see useArtifactUrlSync's `consumeDisabled`).
+  const initialPrdParamRef = useRef<string | null | undefined>(undefined)
+  if (initialPrdParamRef.current === undefined) {
+    initialPrdParamRef.current = searchParams?.get("prd") ?? null
+  }
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
@@ -500,7 +562,13 @@ export function ProjectDetailScreen({
   const [ledgerRows, setLedgerRows] = useState<DelegationLedgerRow[]>([])
   // The artifact opened IN-PLACE beside the chat (AD-HOC: no route change).
   // `null` = drawer closed. Driven purely by local state, never the URL.
-  const [openArtifact, setOpenArtifact] = useState<ArtifactItem | null>(null)
+  // The SAME global content store + side-panel main uses (mounted via AppShell).
+  const { content, setContent } = useContent()
+  const { openContentPanel, contentPanelTab } = useNavigation()
+  // The PRD open in that panel — parity with main chat's open-tab `prd_id`,
+  // threaded to both chat surfaces as the edit target. `null` when no PRD is open.
+  const openPrdId =
+    contentPanelTab === "prd" && content.prd?.prd_id != null ? content.prd.prd_id : null
   // Monotonic signal bumped whenever a live `delegation.event` (or a reconnect
   // reconcile) lands on the caller's per-user channel — passed to `TaskModal`
   // so an OPEN modal refetches its party-filtered reads without a reopen
@@ -536,6 +604,18 @@ export function ProjectDetailScreen({
   useEffect(() => {
     load()
   }, [load])
+
+  // Leaving the project must not leave the (non-blocking) artifacts drawer /
+  // task modal lingering open. This screen is reused across `?id` changes
+  // (`ProjectsRoute` mounts it without a `key`), so switching projects swaps
+  // `projectId` WITHOUT unmounting — local `railModal` state would otherwise
+  // persist and the drawer would stay open over the newly-entered project.
+  // Reset it whenever the active project id changes so re-entering (or
+  // switching to) a project always starts with the drawer closed. In-project
+  // open/close/Escape still works normally via `setRailModal`.
+  useEffect(() => {
+    setRailModal(null)
+  }, [projectId])
 
   // Live individual-unread signal (AD-P25 S2): the caller's OWN, member+
   // owner-gated per-user channel (`project:{id}:user:{uid}`) flips the badge
@@ -584,10 +664,22 @@ export function ProjectDetailScreen({
   // the unread badge) and `delegation.event` (the ledger status change): the
   // latter refetches the rail counts and bumps `ledgerVersion` so an open
   // modal re-reads. Any other event is ignored — one subscription, one topic.
+  // "Added to a project" live landing: the SAME per-user channel also carries
+  // `member.added` (both add paths — POST /members and POST /tag — publish it).
+  // Bring the just-added user straight into the project's private chat (the
+  // invite-modal promise: "they land straight in its chats"), unless they're
+  // mid-task or already sitting in it. Held on a ref so the stable
+  // `handleUnreadEvent` subscription reads the freshest activeChat/nav closures
+  // without re-subscribing (channel identity keys on topic only).
+  const landOnMemberAddedRef = useRef<(payload: unknown) => void>(() => {})
   const handleUnreadEvent = useCallback(
-    (event: string) => {
+    (event: string, payload: unknown) => {
       if (event === "brief.delivered") {
         setIndividualUnread(true)
+        return
+      }
+      if (event === "member.added") {
+        landOnMemberAddedRef.current(payload)
         return
       }
       if (event === "delegation.event") {
@@ -703,6 +795,29 @@ export function ProjectDetailScreen({
     },
     [projectId, router, searchParams],
   )
+
+  // The freshest `member.added` landing closure (see `handleUnreadEvent`).
+  // Reassigned every render so it reads the current `activeChat` and the
+  // current nav callbacks; the stable subscription reaches it via the ref.
+  landOnMemberAddedRef.current = (payload: unknown) => {
+    // A focused composer/search field means the user is mid-task — never yank.
+    const el = typeof document !== "undefined" ? document.activeElement : null
+    const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
+    const target = memberAddedLandingTarget(payload, {
+      currentProjectId: projectId,
+      alreadyInPrivateChat: activeChat === "individual",
+      busy,
+    })
+    if (target == null) return
+    // Same project → switch its tab to the private chat in place (also persists
+    // the tab + clears the unread badge). A different project → route to it,
+    // opening on its private chat.
+    if (String(target) === String(projectId)) {
+      onSelectChat("individual")
+    } else {
+      router.push(projectPath(target, { chat: "individual" }))
+    }
+  }
 
   // Re-fetches ONLY the project row (members + count) after a roster
   // mutation — deliberately not `load()`: that flashes the whole shell back
@@ -827,13 +942,93 @@ export function ProjectDetailScreen({
     refetchLedgerRows()
   }, [projectId, refetchLedgerRows])
 
-  // Open an artifact IN-PLACE beside the chat (no route change) — the handoff
-  // the ArtifactsModal's "Open" button now uses instead of router.push.
+  // Load a PRD by its internal id into the SAME global side-panel main uses
+  // (mounted at the app root via AppShell) and open the panel on the "prd" tab.
+  // Extracted from `onOpenArtifactInPlace` so the URL-restore effect below can
+  // reuse the EXACT same terminal action (no second content-set path to drift).
+  const openPrdInPanelById = useCallback((prdId: number) => {
+    void loadPrdById(prdId).then((r) => {
+      if (r.ok) {
+        setContent({ prd: r.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+        openContentPanel("prd")
+      }
+    })
+  }, [setContent, openContentPanel])
+
+  // One-shot restore: on (re)load of `/projects?…&prd=<id|public_id>`, re-open
+  // that PRD IN-PLACE beside the project chat. The global `useArtifactUrlSync`
+  // no longer consumes `?prd=` here (it would route to `/`/main), so the project
+  // surface owns the restore — the panel comes back on THIS surface, never a main
+  // tab. Waits for the project shell to be ready so the panel opens over a live
+  // surface; accepts both the canonical `public_id` (uuid) and the still-valid
+  // legacy bare-integer id, exactly as `useArtifactUrlSync` does.
+  const restoredPrdRef = useRef(false)
+  useEffect(() => {
+    if (restoredPrdRef.current) return
+    if (state.status !== "ready") return
+    const raw = initialPrdParamRef.current
+    if (!raw) {
+      restoredPrdRef.current = true
+      return
+    }
+    restoredPrdRef.current = true
+    const asInt = Number(raw)
+    if (Number.isInteger(asInt) && asInt > 0) {
+      openPrdInPanelById(asInt)
+      return
+    }
+    void prdApi
+      .resolveIdByPublicId(raw)
+      .then(({ id }) => openPrdInPanelById(id))
+      .catch(() => {
+        // Unknown/foreign public_id — no content, no crash (mirrors
+        // useArtifactUrlSync's own 404 handling).
+      })
+  }, [state.status, openPrdInPanelById])
+
+  // Open a chat artifact in the SAME global side-panel main uses — exactly main's
+  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
+  // evidence, report and ticket_set all open like main's STANDALONE branch (no
+  // chat-resume: the drawer is a library view, not a thread turn); prototype and
+  // custom_artifact are routed by the drawer itself (own full-page surfaces).
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
-    setOpenArtifact(artifact)
-  }, [])
-  const onCloseArtifactDrawer = useCallback(() => setOpenArtifact(null), [])
+    if (artifact.type === "prd") {
+      openPrdInPanelById(artifact.open.prd_id)
+    } else if (artifact.type === "evidence" && artifact.open.insight_index != null) {
+      // Byte-for-byte main's chat evidence-open content-set (ChatScreen's
+      // openPrdInTab evidence branch): scope the Evidence tab to this insight via
+      // `prdMeta` and clear any lingering PRD; the tab self-loads the existing
+      // evidence through the SHARED `loadEvidenceByInsight`. No DetailState is
+      // built (main builds none here either).
+      setContent({
+        detail: null,
+        prd: null,
+        prdMeta: { briefId: artifact.open.brief_id, insightIndex: artifact.open.insight_index },
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      openContentPanel("evidence")
+    } else if (artifact.type === "report") {
+      // Main's `openChatArtifactItem` report STANDALONE branch (the no-surviving-
+      // chat fallback), verbatim: focus the Reports tab on this report id, no
+      // conversation scope. The tab self-loads the report body by id.
+      setContent({
+        conversationId: null,
+        reportFocusId: artifact.open.report_id,
+        reportFocusStandalone: true,
+      })
+      openContentPanel("reports")
+    } else if (artifact.type === "ticket_set") {
+      // Main's `openChatArtifactItem` ticket_set STANDALONE branch, verbatim:
+      // mark the set standalone, open the Tickets tab, and load the set by id
+      // through the SHARED `loadTicketSet` (which clears sibling PRD/evidence
+      // slots so the tab shows only this set).
+      setContent({ ticketSetStandalone: true })
+      openContentPanel("tickets")
+      void loadTicketSet(artifact.open.ticket_set_id, setContent)
+    }
+  }, [setContent, openContentPanel, openPrdInPanelById])
 
   const onRemoveMember = useCallback((member: HumanMember) => {
     setRemoveError(null)
@@ -919,14 +1114,16 @@ export function ProjectDetailScreen({
         ledgerRows={ledgerRows}
         onOpenArtifacts={onOpenArtifacts}
         onOpenArtifactInPlace={onOpenArtifactInPlace}
-        openArtifact={openArtifact}
-        onCloseArtifactDrawer={onCloseArtifactDrawer}
+        openPrdId={openPrdId}
         onOpenTasks={onOpenTasks}
         onOpenSettings={onOpenSettings}
         onOpenInvite={onOpenInvite}
         currentUserId={currentUserId}
         onRemoveMember={onRemoveMember}
         refetchArtifacts={refetchArtifacts}
+        artifactsDrawerOpen={railModal?.kind === "artifacts"}
+        artifactsDrawerFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
+        onCloseArtifactsDrawer={onCloseRailModal}
       />
       <ConfirmDialog
         open={removeTarget != null}
@@ -950,14 +1147,10 @@ export function ProjectDetailScreen({
         onInvited={refetchProject}
         initialTab={settingsTab ?? "instructions"}
       />
-      <ArtifactsModal
-        projectId={projectId}
-        open={railModal?.kind === "artifacts"}
-        initialFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
-        onClose={onCloseRailModal}
-        onOpenInPlace={onOpenArtifactInPlace}
-        onArtifactsChanged={refetchArtifacts}
-      />
+      {/* The project-artifacts view is now the non-blocking `ProjectArtifactsDrawer`
+          (rendered inside `.body` as a layout column, not an overlay) — mounted
+          by `ProjectDetailView` above. Its Add-from-library picker is a nested
+          in-place swap, so there is no separate add modal to mount here. */}
       <TaskModal
         open={railModal?.kind === "tasks"}
         projectId={projectId}

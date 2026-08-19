@@ -16,17 +16,47 @@ const AGENT_MENTION = "sprntly"
  *  into the source text (`@` at `start`, caret at `end`). */
 export type MentionQuery = { query: string; start: number; end: number }
 
-/** A rendered-message segment: plain text (rendered as-is / through markdown)
- *  or a people-mention chip. */
+/** A rendered-message segment: plain text (rendered as-is / through markdown),
+ *  a people-mention chip, or the agent (`@Sprntly`) mention — a DISTINCT,
+ *  recognized token rendered as an agent chip (never a person). */
 export type MentionSegment =
   | { type: "text"; value: string }
   | { type: "mention"; label: string }
+  | { type: "agent"; label: string }
 
 /** True when `s` looks like a bare email — drives the "Invite <email> by
  *  email" affordance. Intentionally permissive (`local@domain.tld`); the
  *  backend's `resolve_candidate` is the real classifier. */
 export function isEmailNeedle(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim())
+}
+
+/** True when `content` @-mentions the AGENT (`@Sprntly`, case-insensitive, at a
+ *  word boundary). The single source of truth for "does this turn address
+ *  Sprntly" — reused by the 2-mode response gate (a multi-human group turn
+ *  gets an agent reply ONLY when this is true) and it mirrors the backend
+ *  `_MENTION_RE`. Distinct from the people-mention parse (an `@Ada` never
+ *  matches; `foo@sprintly` doesn't either — the word boundary guards it). */
+export function mentionsAgent(content: string): boolean {
+  return new RegExp(`@${AGENT_MENTION}\\b`, "i").test(content)
+}
+
+/** Remove the AGENT invoke token (`@Sprntly`, case-insensitive, at a word
+ *  boundary) from `content`, collapsing the whitespace it leaves behind.
+ *
+ *  The `@Sprntly` mention is an ADDRESSING token — "this turn is for the agent"
+ *  — NOT part of the command the user is issuing. It must be stripped before the
+ *  message is interpreted as a command (intent classification + generation task
+ *  extraction), or the addressing token pollutes what the planner reads: a
+ *  "@Sprntly generate a PRD titled X" send has the agent word sitting in front of
+ *  the verb the classifier keys off. The DISPLAYED/persisted user turn keeps the
+ *  mention verbatim (so the `@Sprntly` chip still renders) — this is only for the
+ *  command-interpretation copy. People-mentions (`@Ada`) are left untouched. */
+export function stripAgentMention(content: string): string {
+  return content
+    .replace(new RegExp(`@${AGENT_MENTION}\\b`, "gi"), " ")
+    .replace(/\s+/g, " ")
+    .trim()
 }
 
 /**
@@ -81,28 +111,70 @@ export function insertMentionChip(
   return { text: next, caret: q.start + marker.length }
 }
 
+/** A single `@name` token — `@` + `[A-Za-z0-9]` followed by `[A-Za-z0-9._-]*`.
+ *  The fallback when no known display name matches at an `@` position. */
+const SINGLE_TOKEN_RE = /^@([A-Za-z0-9][A-Za-z0-9._-]*)/
+
 /**
- * Split rendered message `content` into text / people-mention segments so an
- * `@name` reads as a chip. `@sprntly` (case-insensitive) is left as plain text
- * — it is the agent token, never a people chip (AC-8). A mention is `@` +
- * `[A-Za-z0-9]` followed by `[A-Za-z0-9._-]*` (a single name token; a
- * multi-word display name chips only its first word, which is acceptable
- * presentational fidelity in v1). Always returns at least one segment.
+ * Split rendered message `content` into text / people-mention / agent-mention
+ * segments so an `@name` reads as a chip. `@sprntly` (case-insensitive) is the
+ * AGENT token — emitted as a distinct `agent` segment (rendered as an agent
+ * chip, never a people chip). Handles multiple mentions and `@Sprntly` +
+ * `@user` in one message. Always returns at least one segment.
+ *
+ * `knownNames` (the project's member display names + the agent name) makes the
+ * chip wrap the FULL matched display name: `@Bob Baker` chips as one unit
+ * instead of chipping only `@Bob` and leaving ` Baker` as trailing prose. At
+ * each `@`, the LONGEST known display name that matches (case-insensitive, ended
+ * by whitespace/punctuation/end so a name never eats the word after it) wins;
+ * with no known-name match it falls back to the single-token rule. Omit
+ * `knownNames` (or pass an empty list) for the legacy single-token behaviour.
  */
-export function parseMentionChips(content: string): MentionSegment[] {
+export function parseMentionChips(
+  content: string,
+  knownNames?: readonly string[],
+): MentionSegment[] {
+  // Longest first so `@Bob Baker` is preferred over a `@Bob` that is also a
+  // member — a multi-word name must win over its own first word.
+  const names = (knownNames ?? [])
+    .filter((n) => !!n && n.trim().length > 0)
+    .slice()
+    .sort((a, b) => b.length - a.length)
   const segments: MentionSegment[] = []
-  const re = /@([A-Za-z0-9][A-Za-z0-9._-]*)/g
-  let last = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(content)) != null) {
-    const label = m[1]
-    if (label.toLowerCase() === AGENT_MENTION) continue // agent token — plain text
-    if (m.index > last) segments.push({ type: "text", value: content.slice(last, m.index) })
-    segments.push({ type: "mention", label })
-    last = m.index + m[0].length
+  let i = 0
+  let textStart = 0
+  while (i < content.length) {
+    if (content[i] === "@") {
+      let label: string | null = null
+      // Prefer the longest known display name anchored at this `@`.
+      for (const nm of names) {
+        const slice = content.slice(i + 1, i + 1 + nm.length)
+        if (slice.toLowerCase() !== nm.toLowerCase()) continue
+        const after = content[i + 1 + nm.length]
+        // A name must end at a boundary, else `@Bo` would match inside `@Bob`.
+        if (after === undefined || /[\s.,!?;:'")\]}]/.test(after)) { label = nm; break }
+      }
+      // No known name here — fall back to the single-token rule.
+      if (label === null) {
+        const m = SINGLE_TOKEN_RE.exec(content.slice(i))
+        if (m) label = m[1]
+      }
+      if (label !== null) {
+        if (i > textStart) segments.push({ type: "text", value: content.slice(textStart, i) })
+        segments.push(
+          label.toLowerCase() === AGENT_MENTION
+            ? { type: "agent", label }   // agent token — a distinct agent chip
+            : { type: "mention", label },
+        )
+        i += 1 + label.length
+        textStart = i
+        continue
+      }
+    }
+    i++
   }
-  if (last < content.length || segments.length === 0) {
-    segments.push({ type: "text", value: content.slice(last) })
+  if (textStart < content.length || segments.length === 0) {
+    segments.push({ type: "text", value: content.slice(textStart) })
   }
   return segments
 }

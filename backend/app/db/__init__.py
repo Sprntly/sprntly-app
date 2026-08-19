@@ -80,6 +80,7 @@ from app.db.asks import (
     log_ask,
     start_ask_job,
     start_cached_ask,
+    suppress_ask_job,
 )
 
 # Competitive-intelligence runs (state + captured records + rendered reports)
@@ -101,6 +102,7 @@ from app.db.reports import (
     find_report_by_share_token,
     get_report,
     latest_report_at,
+    latest_scheduled_report,
     list_reports_for_conversation,
     save_report,
     set_report_share_config,
@@ -309,10 +311,12 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    "suppress_ask_job",
     # reports (captured HTML report documents)
     "find_report_by_share_token",
     "get_report",
     "latest_report_at",
+    "latest_scheduled_report",
     "list_reports_for_conversation",
     "save_report",
     "set_report_share_config",

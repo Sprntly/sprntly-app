@@ -525,12 +525,12 @@ async def test_goto_uses_wait_until_load(monkeypatch):
 async def test_extract_load_path_returns_design_system(monkeypatch):
     """P7-08 creation (AC6): a resolving goto (no side-effect) on the load path +
     a valid sampler return yields a confident full design system — the
-    preserve-functionality contract (tester proto-54 Plotline success behaviour).
+    preserve-functionality contract (tester proto-54 Tyrell success behaviour).
     "Reachable fixture site" = the scriptable fake page whose goto resolves."""
     h = _build_fake()  # goto_side_effect=None -> resolves; _GOOD_RAW sampler return
     _install(monkeypatch, h)
 
-    ds = await website.extract_website_design_system("https://plotline.studio")
+    ds = await website.extract_website_design_system("https://tyrell.example")
 
     assert ds is not None
     # The success ran through the load path.

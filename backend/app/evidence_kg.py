@@ -448,6 +448,22 @@ async def generate_task_evidence(
             bind_conversation_to_evidence(
                 conversation_id, evidence_id, company_id, user_id
             )
+            # When the commanding chat belongs to a project (its individual/group
+            # project chat, or a chat auto-forked into one), pin this Evidence doc
+            # to that project too — the PRD sibling is already pinned by
+            # maybe_auto_create_project_for_prd at its route, so without this the
+            # evidence generated in the same project chat would orphan from the
+            # project's artifact rail + injected context. Server-side, so it's
+            # robust to the client closing mid-generation; best-effort, so a
+            # failed pin never disturbs the run. Non-project chats read None here
+            # and are unaffected.
+            from app.project_from_prd import (
+                maybe_pin_conversation_artifact_to_project,
+            )
+
+            maybe_pin_conversation_artifact_to_project(
+                conversation_id, company_id, "evidence", evidence_id
+            )
         await asyncio.to_thread(
             _run_sync_task, evidence_id, insight, trail["signals"],
             enterprise_id, trail.get("kg_refs") or [],

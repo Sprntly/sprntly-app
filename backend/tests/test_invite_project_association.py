@@ -78,6 +78,9 @@ def test_accept_adds_project_member_new_company_path(isolated_settings):
     # newbie has NO prior membership → the new-company accept path.
     result = team_db.accept_invite_for_user(user_id=newbie, email=email)
     assert result is not None and result["company_id"] == company_id
+    # The accept result surfaces the carried project so the client can land the
+    # invitee in its private chat.
+    assert result["project_id"] == project["id"]
     assert newbie in {m["user_id"] for m in _project_member_rows(project["id"])}
 
 
@@ -104,6 +107,7 @@ def test_accept_adds_project_member_same_company_path(isolated_settings):
     # member_y already belongs to company_id → the same-company idempotent path.
     result = team_db.accept_invite_for_user(user_id=member_y, email=email)
     assert result is not None
+    assert result["project_id"] == project["id"]
     assert member_y in {m["user_id"] for m in _project_member_rows(project["id"])}
 
 
@@ -123,8 +127,104 @@ def test_projectless_invite_adds_no_project_member(isolated_settings):
     result = team_db.accept_invite_for_user(user_id=newbie, email=email)
     # Membership landed (existing behaviour intact) …
     assert result is not None and result["company_id"] == company_id
-    # … but NO project_members row was added.
+    # … the accept result carries no project (so the client keeps the plain
+    # dashboard landing) …
+    assert result["project_id"] is None
+    # … and NO project_members row was added.
     assert newbie not in {m["user_id"] for m in _project_member_rows(project["id"])}
+
+
+# ── join-greeting seeded at invite-ACCEPT time (email-invitee blank-chat fix) ──
+
+
+def _individual_turns(project_id: int, user_id: str) -> list[dict]:
+    from app.db import conversations as conversations_db
+
+    chat = conversations_db.get_individual_project_chat(project_id, user_id)
+    if not chat:
+        return []
+    return conversations_db.list_individual_turns(chat["id"], user_id)
+
+
+def test_accept_seeds_join_greeting_for_new_email_invitee(isolated_settings):
+    """A brand-new EMAIL invitee (no prior account/membership) becomes a project
+    member at invite-accept time via a path that does NOT go through the
+    greeting-posting routes. The accept must now seed EXACTLY ONE assistant
+    greeting turn into their individual project chat, so they don't land in a
+    blank thread."""
+    owner = "owner-" + uuid.uuid4().hex[:6]
+    company_id = seed_company(user_id=owner)
+    project = _new_project(company_id, owner)
+
+    newbie = "newbie-" + uuid.uuid4().hex[:6]
+    email = f"{newbie}@acme.example"
+    team_db.create_invite(
+        company_id=company_id,
+        email=email,
+        role="member",
+        invited_by=owner,
+        project_id=project["id"],
+    )
+    result = team_db.accept_invite_for_user(user_id=newbie, email=email)
+    assert result is not None
+
+    turns = _individual_turns(project["id"], newbie)
+    assert len(turns) == 1, f"expected exactly one greeting turn, got {len(turns)}"
+    assert turns[0]["role"] == "assistant"
+    assert (turns[0]["content"] or "").strip(), "greeting turn must have content"
+
+
+def test_accept_does_not_duplicate_greeting_for_existing_project_member(isolated_settings):
+    """Dedupe guard: a user already ON the project (added earlier via the /members
+    or /tag route, and thus already greeted) who then accepts a project-carrying
+    invite must NOT receive a second greeting — the accept greets only a
+    net-new membership."""
+    from app.db import conversations as conversations_db
+    from app.db.client import require_client
+
+    owner = "owner-" + uuid.uuid4().hex[:6]
+    company_id = seed_company(user_id=owner)
+    project = _new_project(company_id, owner)
+
+    member_y = "member-y-" + uuid.uuid4().hex[:6]
+    require_client().table("company_members").insert(
+        {"id": uuid.uuid4().hex, "company_id": company_id, "user_id": member_y, "role": "member"}
+    ).execute()
+
+    # Pre-existing project membership + the single greeting that add path posted.
+    projects_db.add_member(project["id"], member_y)
+    conv = conversations_db.create_individual_project_chat(project["id"], member_y)
+    conversations_db.post_individual_turn(conv["id"], "assistant", "prior greeting")
+
+    email = f"{member_y}@acme.example"
+    team_db.create_invite(
+        company_id=company_id,
+        email=email,
+        role="member",
+        invited_by=owner,
+        project_id=project["id"],
+    )
+    result = team_db.accept_invite_for_user(user_id=member_y, email=email)
+    assert result is not None
+
+    turns = conversations_db.list_individual_turns(conv["id"], member_y)
+    assert len(turns) == 1, f"accept duplicated the greeting: {len(turns)} turns"
+
+
+def test_projectless_accept_seeds_no_greeting(isolated_settings):
+    """Non-breakage: a plain WJ/org invite (no project_id) seeds no greeting —
+    there is no project chat to greet into."""
+    owner = "owner-" + uuid.uuid4().hex[:6]
+    company_id = seed_company(user_id=owner)
+    project = _new_project(company_id, owner)  # exists, but the invite ignores it
+
+    newbie = "plain-" + uuid.uuid4().hex[:6]
+    email = f"{newbie}@acme.example"
+    team_db.create_invite(
+        company_id=company_id, email=email, role="member", invited_by=owner
+    )
+    team_db.accept_invite_for_user(user_id=newbie, email=email)
+    assert _individual_turns(project["id"], newbie) == []
 
 
 # ── AC-10 non-breakage: send_invite_email copy ───────────────────────────

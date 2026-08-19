@@ -54,6 +54,7 @@ from app.routes import (
     company,
     connectors,
     conversations,
+    crucible as crucible_routes,
     custom_artifacts as custom_artifacts_routes,
     custom_skills as custom_skills_routes,
     datasets as datasets_routes,
@@ -441,6 +442,9 @@ app.include_router(documents.router)
 # document_catalog (pointers into Confluence/Drive); these are documents
 # Sprntly itself stores and edits. See routes/custom_artifacts.py.
 app.include_router(custom_artifacts_routes.router)
+# Goal Analysis (engine: Crucible). Every route is behind
+# require_crucible_module, which fails closed for any company without the flag.
+app.include_router(crucible_routes.router)
 # No-auth share viewer for reports (`/r/<token>`). Registered separately from
 # reports.router so the unauthenticated surface stays visible in this list.
 app.include_router(reports_public.router)

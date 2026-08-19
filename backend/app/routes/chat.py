@@ -43,10 +43,11 @@ from app.chat_envelope import (  # noqa: F401 — re-exported for existing impor
     _chat_artifact_list,
     _dataset_for,
     enrich_chat_envelope,
+    project_prd_edit_target,
 )
 from app.chat_intent import resolve_chat_intent
 from app.chat_suggestions import suggest_next_prompts
-from app.db.conversations import get_conversation_prd_id
+from app.db.conversations import get_conversation_prd_id, get_conversation_project_id
 from app.deps.ownership import require_owned_prd
 from app.entitlements import require_agents_module
 from app.routes.ask import _load_history
@@ -64,6 +65,15 @@ class ChatIntentIn(BaseModel):
     # The active tab's open PRD, when there is one. Ownership-gated below.
     prd_id: int | None = Field(default=None, ge=1)
     has_attachments: bool = False
+    # Optional pluggable context source: `{"kind": str, "params": dict}`,
+    # accepted so a surface that brings its own context can carry it symmetric
+    # with `/v1/ask`. `/intent` runs BEFORE dispatch and is not on the answer
+    # path, but a `{"kind": "project", ...}` source DOES scope the classify
+    # envelope's render-data legs (artifact list / counts / open lookup) to the
+    # project via `enrich_chat_envelope(project_id=...)`, so the cards a project
+    # chat renders match its project-scoped prose. No source (every main-chat
+    # client) ⇒ workspace-wide listing, unchanged.
+    context_source: dict | None = None
 
 
 @router.post("/intent")
@@ -106,6 +116,44 @@ def chat_intent(
             except HTTPException:
                 prd_id = None
 
+    # Resolve the project scope BEFORE classify: a project-bound conversation
+    # scopes both the render-data legs (below) AND the act-on-PRD target here.
+    # Server-derived from the conversation's project binding first (a
+    # `conversations` row with a non-null `project_id`), so it holds even when
+    # the client sent no `context_source`; the client source is the fallback for
+    # a first-turn classify with no conversation row yet. A main-chat row carries
+    # `project_id = NULL`, so it derives None and stays workspace-scoped.
+    project_id = None
+    if body.conversation_id is not None:
+        project_id = get_conversation_project_id(
+            body.conversation_id, company.company_id
+        )
+    if project_id is None and (
+        isinstance(body.context_source, dict)
+        and body.context_source.get("kind") == "project"
+    ):
+        params = body.context_source.get("params") or {}
+        raw = params.get("project_id")
+        if raw is not None:
+            project_id = int(raw)
+
+    # In a project chat, an act-on-PRD intent ("make the PRD shorter") targets
+    # the project's OWN PRD even when the user hasn't opened it — otherwise
+    # `chat_intent` finds no target `prd_id` and silently downgrades the edit to
+    # a summary (`_NEEDS_PRD` → answer). The client's open-panel / conversation-
+    # bound PRD, resolved above, still wins; this only fills the gap when neither
+    # is present. The write itself stays gated by `project_prd_gate`.
+    if prd_id is None and project_id is not None:
+        target = project_prd_edit_target(company, project_id)
+        if target is not None:
+            try:
+                prd_row = require_owned_prd(
+                    target, company.company_id, company.workspace_id
+                )
+                prd_id = target
+            except HTTPException:
+                prd_id = None
+
     history = _load_history(body.conversation_id, company.company_id, company.user_id)
     prd_title = (prd_row or {}).get("title") or None
 
@@ -127,7 +175,15 @@ def chat_intent(
     # run, so a card main chat can render always has the same data there.
     # No dataset is passed: it resolves per leg inside the enrichment,
     # exactly where this route resolved it before the extraction.
-    enrich_chat_envelope(envelope, company)
+    #
+    # A project chat's listing / open legs must resolve against THAT project's
+    # own artifacts, never the whole workspace's — otherwise "open the PRD" in a
+    # project chat goes ambiguous against every workspace PRD, and "which PRDs
+    # exist?" returns the workspace's newest rows instead of the project's. The
+    # `project_id` was derived above (server-side from the conversation binding,
+    # client `context_source` as fallback); main-chat rows carry None and stay
+    # workspace-scoped, byte-identical to today.
+    enrich_chat_envelope(envelope, company, project_id=project_id)
     return envelope
 
 

@@ -40,6 +40,7 @@ from app.db.client import require_client
 from app.db.conversations import bind_conversation_to_project
 from app.db.projects import add_artifact, create_project
 from app.project_origin_seed import seed_project_origin_memory
+from app.project_title import generate_project_title
 
 logger = logging.getLogger(__name__)
 
@@ -176,10 +177,14 @@ def maybe_auto_create_project_for_prd(
             if existing_project_id is not None:
                 return existing_project_id
 
+        # Name the project for what the PRD is ABOUT, not the PRD's title
+        # verbatim — the shared name-derivation point both fork paths route
+        # through. Best-effort: falls back to `prd_title` on any failure.
+        project_name = generate_project_title(prd_id=prd_id, fallback_title=prd_title)
         project = create_project(
             company_id=company_id,
             workspace_id=workspace_id,
-            name=prd_title,
+            name=project_name,
             created_by=user_id,
             origin="prd_auto",
         )
@@ -205,6 +210,174 @@ def maybe_auto_create_project_for_prd(
         logger.warning(
             "Failed to auto-create a project for PRD %s (conversation %s)",
             prd_id, conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
+def maybe_pin_conversation_artifact_to_project(
+    conversation_id: int | None,
+    company_id: str | None,
+    artifact_type: str,
+    artifact_id: int,
+) -> int | None:
+    """Pin `artifact_id` to whatever project `conversation_id` is bound to.
+
+    The generalised, artifact-type-agnostic sibling of the PRD-specific
+    `maybe_auto_create_project_for_prd`'s already-bound branch (line ~168):
+    given a conversation that already belongs to a project (a project's own
+    individual/group chat, or a chat auto-forked into a project), UPSERT the
+    generated artifact into that project's `project_artifacts` so it shows up
+    on the project's artifact rail AND in the project context manifest the
+    context-assembler injects (both are derived at read time from
+    `project_artifacts`, so this single write is all that's needed).
+
+    Called from the generation loci that mint a NON-PRD artifact server-side
+    (evidence / ticket-set), which had no project-pin of their own — so a doc
+    generated inside a project chat used to orphan from the project. PRDs are
+    already pinned by `maybe_auto_create_project_for_prd` at their generation
+    routes and do not go through here.
+
+    Robust to client-close by construction: it runs server-side wherever the
+    generation job does, not on the client. Idempotent (add_artifact upserts
+    on the PK), so a force-regen that mints a NEW artifact id simply pins the
+    new id — resolve-forward on the rail covers the superseded old pin.
+
+    `artifact_type` must be a pinnable type (prd/evidence/prototype/report/
+    ticket_set); a `custom_artifact` team document is excluded by the
+    `project_artifacts` CHECK constraint and must never be passed here.
+
+    Best-effort — never raises (mirrors `bind_conversation_to_prd` /
+    `add_artifact`): a failed pin must never break the generation it
+    accompanies. Non-project (main-chat) generation is unaffected: an unbound
+    conversation (or none at all) reads None and nothing is written. Returns
+    the project id it pinned to, or None."""
+    if conversation_id is None or not company_id:
+        return None
+    try:
+        project_id = _conversation_project_id(conversation_id, company_id)
+        if project_id is None:
+            return None
+        add_artifact(project_id, artifact_type, artifact_id)
+        return project_id
+    except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
+        logger.warning(
+            "Failed to pin %s %s to conversation %s's project",
+            artifact_type, artifact_id, conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
+def maybe_pin_prototype_to_prd_projects(
+    prd_id: int,
+    prototype_id: int,
+    company_id: str | None,
+) -> list[int]:
+    """Pin `prototype_id` to every project that already holds `prd_id`.
+
+    The prototype-generation path (`routes/design_agent.py`) is PRD-scoped, not
+    conversation-scoped — it carries a `prd_id` but no `conversation_id` — so the
+    conversation-keyed `maybe_pin_conversation_artifact_to_project` doesn't fit.
+    A prototype built off a project's PRD is part of that project's work, so it
+    belongs on the project's artifact rail + injected context alongside the PRD.
+
+    The PRD is the join key: every project-bound PRD is already pinned as a
+    `project_artifacts('prd', prd_id)` ref — by `maybe_auto_create_project_for_prd`
+    at the PRD generation routes, or by a manual `POST .../artifacts` add — so
+    that ref IS the authoritative "which project(s) own this PRD" fact. There is
+    no `prds.conversation_id` to walk back to a project the other way, which is
+    why this resolves via the artifact ref rather than the conversation binding.
+
+    Reverse-look up the ref (company-scoped, mirroring `find_existing_prd_auto_project`
+    minus the `origin='prd_auto'` narrowing — a MANUAL project that added the PRD
+    must get the prototype too) and upsert the prototype into each project.
+    Usually exactly one; a PRD shared across several is pinned into all of them,
+    each `add_artifact` upsert idempotent on the PK.
+
+    Best-effort — never raises: a failed pin must never break prototype
+    generation. A prototype whose PRD is in no project (a non-project prototype)
+    writes nothing and is unaffected. Returns the project ids pinned (possibly
+    empty)."""
+    if not company_id:
+        return []
+    try:
+        client = require_client()
+        artifact_rows = (
+            client.table("project_artifacts")
+            .select("project_id")
+            .eq("artifact_type", "prd")
+            .eq("artifact_id", prd_id)
+            .execute()
+            .data
+            or []
+        )
+        candidate_ids = {row["project_id"] for row in artifact_rows}
+        if not candidate_ids:
+            return []
+        project_rows = (
+            client.table("projects")
+            .select("id")
+            .in_("id", list(candidate_ids))
+            .eq("company_id", company_id)
+            .execute()
+            .data
+            or []
+        )
+        pinned: list[int] = []
+        for row in project_rows:
+            add_artifact(row["id"], "prototype", prototype_id)
+            pinned.append(row["id"])
+        return pinned
+    except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
+        logger.warning(
+            "Failed to pin prototype %s to prd %s's project(s)",
+            prototype_id, prd_id,
+            exc_info=True,
+        )
+        return []
+
+
+def maybe_pin_custom_artifact_to_project(
+    *,
+    company_id: str,
+    conversation_id: int | None,
+    artifact_id: int,
+) -> int | None:
+    """Attach a just-generated custom document (team document) to the project
+    its conversation is already bound to, if any. Returns the project id it
+    pinned to, or None (no conversation, no bound project, or a swallowed
+    failure). Never raises.
+
+    ATTACH-ONLY, unlike `maybe_auto_create_project_for_prd`: a custom doc is
+    NOT a project-origin trigger, so this never CREATES a project — it only
+    joins a document to a project that some earlier PRD/fork already
+    established for the thread. A doc drafted in a bare chat with no project
+    stays project-less; nothing to pin it to, and inventing one would fork a
+    project off a "draft a leadership update" the way only a PRD is meant to.
+
+    Conversation-keyed, reusing `_conversation_project_id` — the SAME
+    first-write-wins binding the PRD path reads. `add_artifact` upserts on the
+    `(project_id, artifact_type, artifact_id)` primary key, so a re-issued
+    generate re-attaching the same doc is a no-op.
+
+    Best-effort and total: called from the generate route right after the row
+    is created, so it runs server-side regardless of whether the client is
+    still connected. Any failure is logged and swallowed — a document that
+    generated fine must never fail its request because the pin missed; the
+    project's own poll/refetch reconciles a dropped realtime nudge anyway."""
+    if conversation_id is None:
+        return None
+    try:
+        project_id = _conversation_project_id(conversation_id, company_id)
+        if project_id is None:
+            return None
+        add_artifact(project_id, "custom_artifact", artifact_id)
+        return project_id
+    except Exception:  # noqa: BLE001 — best-effort, mirrors the PRD path above
+        logger.warning(
+            "Failed to pin custom artifact %s to its project (conversation %s)",
+            artifact_id, conversation_id,
             exc_info=True,
         )
         return None

@@ -6,4 +6,25 @@
   min-height: 0;
   flex: 1 1 auto;
   height: 100%;
+  position: relative;
 }
+
+/* Unread-mention affordance — a small dismissible pill floated at the top of
+   the chat host. Tokens only; the toast is the primary notify, this is the
+   at-a-glance count you clear by clicking. */
+.mentionUnread {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.75rem;
+  z-index: 40;
+  padding: 0.2rem 0.6rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+

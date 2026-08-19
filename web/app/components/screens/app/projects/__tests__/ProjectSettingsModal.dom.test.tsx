@@ -84,7 +84,7 @@ const PROJECT: ProjectDetail = {
 
 const MEMORY: ProjectMemorySummary = {
   summary_md:
-    "A Xometry-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
+    "A Contoso-driven redesign of on-demand quoting — a priced quote in under 60 seconds. It also covers the guest path for first-time buyers.",
   entry_count: 24,
   stale: false,
 }

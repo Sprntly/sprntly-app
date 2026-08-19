@@ -160,14 +160,14 @@ def test_upload_zip_with_form_fields_still_honours_them(tenant_client):
 
 
 def test_uploader_identity_comes_from_session(tenant_client):
-    t = tenant_client.make(slug="acme", user_id="user-fortune")
+    t = tenant_client.make(slug="acme", user_id="user-dana")
     resp = _upload(t.client)
     assert resp.status_code == 201
 
     from app import db
 
     row = db.get_custom_skill(t.company_id, "estimation-helper")
-    assert row["uploader_id"] == "user-fortune"
+    assert row["uploader_id"] == "user-dana"
     # The uploading workspace is stamped even though scoping is company-level.
     assert row["workspace_id"]
 
