@@ -64,6 +64,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onCancelSlackShare,
     onPickSlackShareTarget,
     handlePrototypeSettled,
+    renderUserBody,
   } = deps
 
   return thread.map((turn, idx): ChatTranscriptTurn => {
@@ -161,6 +162,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
         initials: turn.author ? (turn.author.initials ?? turn.author.name.slice(0, 2).toUpperCase()) : userInitials,
         ...(turn.author?.avatarStyle ? { avatarStyle: turn.author.avatarStyle } : {}),
         query: turn.query,
+        // Per-surface user-body override (project GROUP → mention chips). Only
+        // for a turn that HAS query text, so an agent-only turn (query === "")
+        // never grows an empty user body. Unset on main/private → plain query.
+        ...(renderUserBody && turn.query ? { bodyNode: renderUserBody(turn) } : {}),
         attachments: turn.attachments?.map((a) => ({
           name: a.name, content: a.content, downloadable: !!a.key,
           key: a.key, mime: a.mime,
