@@ -262,3 +262,72 @@ def maybe_pin_conversation_artifact_to_project(
             exc_info=True,
         )
         return None
+
+
+def maybe_pin_prototype_to_prd_projects(
+    prd_id: int,
+    prototype_id: int,
+    company_id: str | None,
+) -> list[int]:
+    """Pin `prototype_id` to every project that already holds `prd_id`.
+
+    The prototype-generation path (`routes/design_agent.py`) is PRD-scoped, not
+    conversation-scoped — it carries a `prd_id` but no `conversation_id` — so the
+    conversation-keyed `maybe_pin_conversation_artifact_to_project` doesn't fit.
+    A prototype built off a project's PRD is part of that project's work, so it
+    belongs on the project's artifact rail + injected context alongside the PRD.
+
+    The PRD is the join key: every project-bound PRD is already pinned as a
+    `project_artifacts('prd', prd_id)` ref — by `maybe_auto_create_project_for_prd`
+    at the PRD generation routes, or by a manual `POST .../artifacts` add — so
+    that ref IS the authoritative "which project(s) own this PRD" fact. There is
+    no `prds.conversation_id` to walk back to a project the other way, which is
+    why this resolves via the artifact ref rather than the conversation binding.
+
+    Reverse-look up the ref (company-scoped, mirroring `find_existing_prd_auto_project`
+    minus the `origin='prd_auto'` narrowing — a MANUAL project that added the PRD
+    must get the prototype too) and upsert the prototype into each project.
+    Usually exactly one; a PRD shared across several is pinned into all of them,
+    each `add_artifact` upsert idempotent on the PK.
+
+    Best-effort — never raises: a failed pin must never break prototype
+    generation. A prototype whose PRD is in no project (a non-project prototype)
+    writes nothing and is unaffected. Returns the project ids pinned (possibly
+    empty)."""
+    if not company_id:
+        return []
+    try:
+        client = require_client()
+        artifact_rows = (
+            client.table("project_artifacts")
+            .select("project_id")
+            .eq("artifact_type", "prd")
+            .eq("artifact_id", prd_id)
+            .execute()
+            .data
+            or []
+        )
+        candidate_ids = {row["project_id"] for row in artifact_rows}
+        if not candidate_ids:
+            return []
+        project_rows = (
+            client.table("projects")
+            .select("id")
+            .in_("id", list(candidate_ids))
+            .eq("company_id", company_id)
+            .execute()
+            .data
+            or []
+        )
+        pinned: list[int] = []
+        for row in project_rows:
+            add_artifact(row["id"], "prototype", prototype_id)
+            pinned.append(row["id"])
+        return pinned
+    except Exception:  # noqa: BLE001 — best-effort, mirrors bind_conversation_to_prd
+        logger.warning(
+            "Failed to pin prototype %s to prd %s's project(s)",
+            prototype_id, prd_id,
+            exc_info=True,
+        )
+        return []
