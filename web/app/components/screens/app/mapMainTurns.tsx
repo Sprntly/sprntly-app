@@ -186,8 +186,14 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     // was no way to take its answer back out of the record; the rewind
     // (`rewindToUserTurn` → `DELETE …/turns/{id}`) is what made past prompts
     // editable at all.
+    //  * a PEER'S message (project GROUP surface): a turn that carries `author`
+    //    belongs to someone else in the shared thread. Copy is fine on it, but
+    //    editing or re-asking a message the viewer didn't write is never theirs
+    //    to do. `author` is unset on main, private, and the viewer's OWN group
+    //    turns, so this is byte-identical for every single-author surface.
     const canReAskTurn =
       !!queryBody &&
+      !turn.author &&
       !isGenerating &&
       !turn.summaryPending &&
       !turn.attachments?.length &&
