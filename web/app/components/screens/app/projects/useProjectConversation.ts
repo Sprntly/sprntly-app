@@ -672,8 +672,20 @@ export function useProjectConversation(
       // (meta.prdId is only set on in-conversation generate/edit), so the same
       // commands fell through to a grounded ask. Workspace-scoped, same as main.
       const openPanelPrdId = content.prd?.prd_id ?? null
+      // Pin THIS project's context source on the intent resolve, exactly as
+      // `resolveAskParams` does for the ask path. Without it the backend's
+      // `list_artifacts`/`open_artifact` legs default to the workspace-wide
+      // listing, so "which PRDs are in this project?" returned the whole
+      // workspace's newest artifacts (matching main's parity default) rather
+      // than this project's — the same project_id the ask path already sends
+      // makes the intent envelope's cards agree with the project-scoped prose.
       const envelope: ChatIntentEnvelope | null = await chatIntentApi
-        .resolve(intentMessage, { conversationId: dbConvIdRef.current, prdId: metaRef.current.prdId ?? openPanelPrdId, hasAttachments: composer.attachments.length > 0 })
+        .resolve(intentMessage, {
+          conversationId: dbConvIdRef.current,
+          prdId: metaRef.current.prdId ?? openPanelPrdId,
+          hasAttachments: composer.attachments.length > 0,
+          contextSource: { kind: "project", params: { project_id: projectId, surface } },
+        })
         .catch(() => null)
       if (envelope) {
         const targetPrdId = !docFile ? (envelope.prd_id ?? metaRef.current.prdId ?? openPanelPrdId) : null

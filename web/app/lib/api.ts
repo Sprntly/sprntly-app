@@ -1231,6 +1231,15 @@ export const chatIntentApi = {
       conversationId?: number | null
       prdId?: number | null
       hasAttachments?: boolean
+      /** The surface's context source — `{ kind: "project", params: {
+       *  project_id, surface } }` on a project chat. When present the backend
+       *  scopes the listing legs (`artifact_list`/`artifact_counts`) and the
+       *  `open_artifact` lookup to THAT project's own artifacts, so the
+       *  intent envelope's cards agree with the project-scoped ask path
+       *  (`resolveAskParams` sends the same shape). Omitted (main chat) leaves
+       *  every leg workspace-wide — the request body is byte-identical to
+       *  before. */
+      contextSource?: { kind: string; params: Record<string, unknown> } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -1238,6 +1247,7 @@ export const chatIntentApi = {
       ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
+      ...(opts?.contextSource ? { context_source: opts.contextSource } : {}),
     })
     // Guarded so a console-less environment (SSR, a jsdom run without one)
     // can never turn a diagnostic into a broken send.
