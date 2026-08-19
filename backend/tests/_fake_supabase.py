@@ -150,6 +150,24 @@ def _encode_row(table: str, row: dict) -> dict:
     return out
 
 
+def _project_row(row: dict | None, cols: str) -> dict | None:
+    """Keep only the selected columns, mirroring PostgREST.
+
+    `*`, an embedded resource ("a,b(c)"), or anything with a modifier is passed
+    through untouched — the point is to catch a plainly forgotten column, not
+    to reimplement PostgREST's grammar and start failing on valid selects.
+    """
+    if row is None:
+        return None
+    spec = (cols or "*").strip()
+    if not spec or spec == "*" or "(" in spec or ":" in spec:
+        return row
+    wanted = {c.strip() for c in spec.split(",") if c.strip()}
+    if not wanted or "*" in wanted:
+        return row
+    return {k: v for k, v in row.items() if k in wanted}
+
+
 def _decode_row(table: str, row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
@@ -362,6 +380,14 @@ class _Query:
             sql = f"SELECT * FROM {self.table}{where}{order_sql}{limit_sql}"
             cursor = db.execute(sql, args)
             rows = [_decode_row(self.table, r) for r in cursor.fetchall()]
+            # HONOUR THE PROJECTION. This used to build `SELECT *` and ignore
+            # `.select(cols)` entirely, so a caller that forgot a column got it
+            # anyway here and failed only in production. That is not
+            # hypothetical: `routes/crucible.py` read `provenance` while its
+            # query never selected it, and 452 passing tests could not see it.
+            # Filtered in Python rather than in SQL so embedded resources
+            # ("a,b(c)") and `*` keep working unchanged.
+            rows = [_project_row(r, self._cols) for r in rows]
             count = None
             if self._count_mode == "exact":
                 c = db.execute(f"SELECT COUNT(*) FROM {self.table}{where}", args).fetchone()

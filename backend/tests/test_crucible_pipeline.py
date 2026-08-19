@@ -308,8 +308,11 @@ def test_ungroupable_claims_do_not_regroup_by_kind_one_call_later():
         claims.append(c)
     out = run(claims)
     assert out.findings == ()
-    assert len(out.rejected) == 6
-    assert all("no usable embedding" in r.reason for r in out.rejected)
+    # ONE ledger row, not six: a tenant with no embeddings produces one per
+    # signal (2,777 on a real one), which buries every genuine rejection.
+    assert len(out.rejected) == 1
+    assert "no usable embedding" in out.rejected[0].reason
+    assert len(out.rejected[0].claim_ids) == 6
 
 
 def test_an_ungroupable_claim_is_not_blamed_for_being_an_anecdote():
@@ -323,6 +326,7 @@ def test_an_ungroupable_claim_is_not_blamed_for_being_an_anecdote():
     out = run([c])
     assert "anecdote" not in out.rejected[0].reason
     assert "unknown rather than false" in out.rejected[0].reason
+    assert out.rejected[0].claim_ids == ("c1",)
 
 
 def test_evidence_with_no_recorded_source_document_cannot_be_called_an_echo():

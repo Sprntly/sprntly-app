@@ -53,6 +53,14 @@ ECHO_WINDOW = timedelta(days=10)
 #: is not a decision aid.
 DEFAULT_DEEP_CAP = 5
 
+#: How many rejections are listed individually. A real tenant produced 1,577 —
+#: too many to insert in one request and far too many to read. The remainder is
+#: NOT dropped: it collapses into one row that says how many and why, because a
+#: silently truncated considered list reads as "we looked at everything" when
+#: it did not. The ones kept are the largest, since a rejection backed by nine
+#: claims is the one a reader is most likely to want to reopen.
+MAX_LISTED_REJECTIONS = 100
+
 
 @dataclass(frozen=True)
 class Rejection:
@@ -167,8 +175,15 @@ def _refute(
     # which is the difference between a test that fires and a test that is
     # simply always true. Unknown provenance means the rule CANNOT run, and a
     # check that cannot run must not return a verdict.
+    # EVERY claim must name its document, not just one of them. Declining only
+    # when ALL are unattributed still refuted "one known doc plus two unknowns"
+    # as a single conversation — and mixed corpora are the normal case, since
+    # `business_context_projection` and `ds/analyses` write provenance with no
+    # `doc` key at all. If we cannot see where a claim came from, we cannot say
+    # it came from the same place as the others.
     sources = {c.artifact_id for c in claims if c.artifact_id}
-    one_conversation = len(sources) == 1
+    fully_attributed = len(sources) > 0 and all(c.artifact_id for c in claims)
+    one_conversation = fully_attributed and len(sources) == 1
     if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
         return (
             f"all {len(claims)} supporting claims come from one source "
@@ -215,19 +230,20 @@ def build_findings(
     impacts: list[Impact] = []
     confidences: list[Confidence] = []
     rejected: list[Rejection] = []
+    ungroupable: list[str] = []
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)
 
         if key.startswith(UNGROUPABLE_PREFIX):
-            # OUR failure, not the evidence's. Calling this an anecdote would
-            # blame a claim for a vector we could not compute.
-            rejected.append(Rejection(
-                _label(group, key),
-                "could not be grouped with anything: this signal has no usable "
-                "embedding, so whether it corroborates another claim is "
-                "unknown rather than false",
-                "clustering", ids))
+            # OUR failure, not the evidence's. Calling these anecdotes would
+            # blame the claims for a vector we could not compute.
+            #
+            # COLLECTED, not one row each. A tenant with no embeddings produces
+            # one of these per signal — 2,777 on a real one — and writing that
+            # many identical rows into the ledger buries every genuine
+            # rejection under it and makes the considered list unreadable.
+            ungroupable.extend(ids)
             continue
 
         if len(group) < MIN_CLAIMS_PER_FINDING:
@@ -306,6 +322,27 @@ def build_findings(
         findings.append(finding)
         impacts.append(score_impact(finding))
         confidences.append(score_confidence(finding, now=now))
+
+    if len(rejected) > MAX_LISTED_REJECTIONS:
+        rejected.sort(key=lambda r: (-len(r.claim_ids), r.label))
+        overflow = rejected[MAX_LISTED_REJECTIONS:]
+        rejected = rejected[:MAX_LISTED_REJECTIONS]
+        rejected.append(Rejection(
+            f"{len(overflow)} further candidates",
+            f"{len(overflow)} more groups were considered and dropped, each "
+            f"backed by fewer claims than the {MAX_LISTED_REJECTIONS} listed "
+            f"above — most of them single-claim anecdotes",
+            "clustering",
+            tuple(cid for r in overflow for cid in r.claim_ids)[:2000],
+        ))
+
+    if ungroupable:
+        rejected.append(Rejection(
+            f"{len(ungroupable)} ungroupable signals",
+            f"{len(ungroupable)} signals have no usable embedding, so whether "
+            f"they corroborate anything is unknown rather than false — they "
+            f"were read but could not be grouped",
+            "clustering", tuple(ungroupable)))
 
     order = _rank(findings, impacts, confidences, deep_cap=deep_cap)
     findings = [findings[i] for i in order]

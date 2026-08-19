@@ -484,3 +484,119 @@ def test_the_ledger_comes_back_with_its_claim_ids(ctx):
     considered = ctx.client.get(f"/v1/crucible/{run_id}").json()["considered"]
     assert considered[0]["claim_ids"] == ["c1", "c2"]
     assert considered[0]["stopped_at_stage"] == "verification"
+
+
+# ─── End to end through execute_run, which is where the last fixes failed ────
+
+def _signal(company_id: str, i: int, *, doc: str | None = "doc-a",
+            embedding=None, kind: str = "finding") -> dict:
+    from app.db.client import require_client
+
+    row = {
+        "id": f"sig-{i:04d}", "enterprise_id": company_id, "kind": kind,
+        "source_type": "customer_voice", "content": f"signal {i}",
+        "properties": {"customer": f"Acct{i % 5}"},
+        "provenance": {"doc": doc} if doc else {},
+        "valid_at": f"2026-0{1 + i % 6}-1{i % 9}T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }
+    if embedding is not None:
+        row["embedding"] = embedding
+    require_client().table("kg_signal").insert(row).execute()
+    return row
+
+
+def test_the_signal_read_actually_selects_what_the_code_reads(ctx):
+    """THE ONE THE UNIT TESTS COULD NOT SEE. `_artifact_id` reads `provenance`
+    while `_load_signals` never selected it, so every claim came out
+    unattributed and every run shipped a coverage note saying no signal
+    recorded its document — false, and invisible because the fake Supabase
+    used to ignore column projection entirely. Asserted THROUGH the route."""
+    import app.routes.crucible as mod
+
+    for i in range(4):
+        _signal(ctx.company_id, i, doc="slack/#demos",
+                embedding=str([0.1 * (i + 1)] * 4))
+
+    rows = mod._load_signals(ctx.company_id)
+    assert rows, "no signals read"
+    assert all("provenance" in r for r in rows), "provenance is not selected"
+    # And deliberately NOT the embeddings: 1536 floats per row alongside
+    # everything else times the statement out on a real tenant. They come from
+    # a separate, much smaller-paged read.
+    assert all("embedding" not in r for r in rows)
+
+    vectors = mod._load_embeddings(ctx.company_id, {str(r["id"]) for r in rows})
+    assert len(vectors) == len(rows)
+
+
+def test_a_timed_out_embedding_page_does_not_cost_the_rest(ctx, monkeypatch):
+    """Bailing out on the first failure threw away every page after it:
+    measured against a real tenant, ONE slow page cost 577 of 2,777 vectors,
+    and the run then reported those signals as ungroupable when the only thing
+    wrong was one slow request."""
+    import app.routes.crucible as mod
+
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    monkeypatch.setattr(mod, "_EMBED_PAGE", 2)
+
+    real = mod.require_client if hasattr(mod, "require_client") else None
+    calls = {"n": 0}
+    from app.db import client as client_mod
+
+    original = client_mod.require_client
+
+    class Flaky:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def table(self, name):
+            if name == "kg_signal":
+                calls["n"] += 1
+                if calls["n"] == 2:          # the SECOND page explodes
+                    raise RuntimeError("canceling statement due to timeout")
+            return self._inner.table(name)
+
+    monkeypatch.setattr(client_mod, "require_client",
+                        lambda: Flaky(original()))
+    ids = {str(r["id"]) for r in mod._load_signals(ctx.company_id)}
+    monkeypatch.setattr(client_mod, "require_client",
+                        lambda: Flaky(original()))
+    calls["n"] = 0
+    vectors = mod._load_embeddings(ctx.company_id, ids)
+    # Two lost to the failed page, the remaining four still fetched.
+    assert 0 < len(vectors) < len(ids)
+
+
+def test_a_tenant_with_no_embeddings_gets_no_taxonomy_findings(ctx):
+    """The missing-API-key shape, end to end. Skipping the clustering call
+    entirely left every cluster id unset, so the claims were pooled by kind and
+    the run reported "40 claims concern finding" with no coverage note."""
+    for i in range(8):
+        _signal(ctx.company_id, i, kind="finding")          # no embedding
+
+    run_id = _start(ctx).json()["id"]
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "renewal revenue"})
+    body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+
+    statements = " ".join(f["statement"] for f in body["findings"])
+    assert "concern “finding”" not in statements, statements
+    assert any("could not be grouped" in n["reason"]
+               or "no usable embedding" in n["actual"]
+               for n in body["coverage_notes"]) or body["findings"] == []
+
+
+def test_the_ledger_does_not_get_one_row_per_ungroupable_signal(ctx):
+    """A real tenant would write 2,777 identical rows, burying every genuine
+    rejection underneath them."""
+    for i in range(12):
+        _signal(ctx.company_id, i)                          # no embedding
+
+    run_id = _start(ctx).json()["id"]
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "renewal revenue"})
+    considered = ctx.client.get(f"/v1/crucible/{run_id}").json()["considered"]
+    assert len(considered) <= 2, [c["reason"][:60] for c in considered]

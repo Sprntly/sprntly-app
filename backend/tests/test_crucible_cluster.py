@@ -73,13 +73,18 @@ def test_the_same_input_gives_the_same_grouping():
     assert first == second
 
 
-def test_a_claim_with_no_embedding_is_kept_untouched():
+def test_a_claim_with_no_embedding_is_marked_ungroupable_not_left_unset():
     """A missing vector says nothing about whether the claim matters, so it is
-    never dropped and never forced into someone else's group."""
+    never dropped and never forced into someone else's group — but it must be
+    MARKED. Left unset it falls through to the pipeline's fallback chain, whose
+    next rung is the claim's kind, and it silently corroborates a taxonomy
+    bucket. Only rows that HAD a vector were being marked, so a NULL
+    `embedding` column arrived at that bug through the other door."""
     claims = [claim("a", "one"), claim("b", "two")]
-    out, _ = assign_clusters(claims, {"a": vec(1.0, 0.0)})
+    out, stats = assign_clusters(claims, {"a": vec(1.0, 0.0)})
     assert len(out) == 2
-    assert out[1].subject_cluster_id is None
+    assert out[1].subject_cluster_id.startswith(UNGROUPABLE_PREFIX)
+    assert stats["degenerate"] == 1
 
 
 def test_a_zero_vector_does_not_poison_the_run():
@@ -96,9 +101,20 @@ def test_a_zero_vector_does_not_poison_the_run():
     assert out[0].subject_cluster_id.startswith(UNGROUPABLE_PREFIX)
 
 
-def test_no_embeddings_at_all_is_a_no_op_rather_than_a_crash():
-    claims = [claim("a", "one")]
-    assert assign_clusters(claims, {})[0] == claims
+def test_no_embeddings_at_all_marks_everything_rather_than_crashing():
+    claims = [claim("a", "one"), claim("b", "two")]
+    out, stats = assign_clusters(claims, {})
+    assert all(c.subject_cluster_id.startswith(UNGROUPABLE_PREFIX) for c in out)
+    assert stats["degenerate"] == 2
+
+
+def test_a_subject_that_merely_looks_like_the_marker_is_not_mistaken_for_it():
+    """"Ungroupable: legacy import" is a string a real signal can contain. The
+    marker leads with NUL so it cannot be spelled by accident."""
+    from app.crucible.cluster import UNGROUPABLE_PREFIX as P
+
+    assert P.startswith("\x00")
+    assert not "Ungroupable: legacy import".lower().startswith(P)
 
 
 # ── Labels are topics, not assertions ────────────────────────────────────────

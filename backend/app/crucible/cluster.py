@@ -43,7 +43,11 @@ DEFAULT_THRESHOLD = 0.84
 #: Marks a claim we could not group at all (no usable embedding). The pipeline
 #: reads it to reject with the accurate reason rather than calling it an
 #: anecdote, which would blame the evidence for our own missing vector.
-UNGROUPABLE_PREFIX = "ungroupable:"
+#:
+#: Leads with NUL because a plain "ungroupable:" is a string a signal could
+#: actually contain — a claim whose subject was "Ungroupable: legacy import"
+#: was rejected for having no embedding when it had a perfectly good one.
+UNGROUPABLE_PREFIX = "\x00ungroupable:"
 
 #: A label is a topic, not an assertion. Anything from here on is the source's
 #: own reasoning, and carrying it into a finding's statement would put a causal
@@ -94,16 +98,35 @@ def assign_clusters(
 
     vectors: list = []
     indexed: list[int] = []
+    missing: list[int] = []
     for i, c in enumerate(claims):
         raw = embeddings.get(c.id)
         if raw is None:
+            # NO EMBEDDING AT ALL is ungroupable too. Only the rows that HAD a
+            # vector were being marked, so a claim whose `embedding` column is
+            # NULL kept an unset cluster id and was pooled by kind downstream —
+            # the same phantom "12 claims concern feature_request" the marking
+            # was introduced to stop, arriving through the other door.
+            missing.append(i)
             continue
         vectors.append(raw)
         indexed.append(i)
 
     if len(indexed) < 2:
-        return list(claims), {"embedded": len(indexed), "degenerate": 0,
-                              "clusters": len(indexed)}
+        # Nothing to compare against is NOT the same as nothing to compare
+        # with. A lone embedded claim has a perfectly good vector; it simply
+        # has no peers, so it becomes its own group and the pipeline rejects it
+        # as the anecdote it is. Calling it degenerate would blame our
+        # embedding for the corpus being small.
+        out = _mark_ungroupable(claims, missing)
+        for rank, i in enumerate(indexed):
+            out[i] = replace(
+                out[i],
+                subject_cluster_id=f"c{rank}",
+                subject=label_for(out[i].assertion or out[i].subject),
+            )
+        return out, {"embedded": len(indexed), "degenerate": len(missing),
+                     "clusters": len(indexed)}
 
     try:
         matrix = np.asarray(vectors, dtype=np.float32)
@@ -112,12 +135,14 @@ def assign_clusters(
         # square off rather than silently padding. Grouping on a matrix we
         # cannot form would be arbitrary, so decline and say so.
         logger.error("crucible: embeddings are ragged; skipping clustering")
-        return _mark_ungroupable(claims, indexed), {
-            "embedded": 0, "degenerate": len(indexed), "clusters": 0}
+        return _mark_ungroupable(claims, missing + indexed), {
+            "embedded": 0, "degenerate": len(indexed) + len(missing),
+            "clusters": 0}
     if matrix.ndim != 2:
         logger.error("crucible: embeddings are not a matrix; skipping")
-        return _mark_ungroupable(claims, indexed), {
-            "embedded": 0, "degenerate": len(indexed), "clusters": 0}
+        return _mark_ungroupable(claims, missing + indexed), {
+            "embedded": 0, "degenerate": len(indexed) + len(missing),
+            "clusters": 0}
 
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)
     # DEGENERATE VECTORS ARE EXCLUDED, NOT NORMALISED TO SOMETHING.
@@ -141,8 +166,9 @@ def assign_clusters(
         # exit. Returning the claims untouched leaves every id unset, which is
         # precisely how they get re-grouped by kind downstream — so mark them
         # here too rather than only on the partial path.
-        return _mark_ungroupable(claims, indexed), {
-            "embedded": 0, "degenerate": degenerate, "clusters": 0,
+        return _mark_ungroupable(claims, missing + indexed), {
+            "embedded": 0, "degenerate": degenerate + len(missing),
+            "clusters": 0,
         }
 
     safe_norms = np.where(norms == 0, 1.0, norms)
@@ -198,7 +224,7 @@ def assign_clusters(
         source = claims[indexed[medoid]]
         labels[cluster] = label_for(source.assertion or source.subject)
 
-    out = list(claims)
+    out = _mark_ungroupable(list(claims), missing)
     for position, claim_index in enumerate(indexed):
         cluster = assignment[position]
         if cluster < 0:
@@ -224,7 +250,8 @@ def assign_clusters(
             subject_cluster_id=f"c{cluster}",
             subject=labels[cluster],
         )
-    return out, {"embedded": int(usable.sum()), "degenerate": degenerate,
+    return out, {"embedded": int(usable.sum()),
+                 "degenerate": degenerate + len(missing),
                  "clusters": len(leaders)}
 
 

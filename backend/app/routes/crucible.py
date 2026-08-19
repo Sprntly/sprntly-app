@@ -46,10 +46,13 @@ router = APIRouter(prefix="/v1/crucible", tags=["crucible"])
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crucible")
 
 #: Rows per page of the signal read. Small BECAUSE of the embeddings: each row
-#: carries a 1536-float vector, and a 1000-row page of those is large enough to
-#: time out — the failure that made the original version exclude embeddings
-#: entirely. 250 x 1536 floats is roughly 1.5MB of JSON, which is fine.
-_PAGE = 250
+#: Rows per page of the metadata read. No embeddings in it, so it can be big.
+_PAGE = 1000
+
+#: Rows per page of the EMBEDDING read. Far smaller, because each row carries
+#: ~19KB of JSON. Measured against a real 2,777-signal tenant: 250 alongside
+#: the other columns timed out outright, and 100 on its own still lost a page.
+_EMBED_PAGE = 50
 
 #: asyncio holds only a WEAK reference to a task, so a bare create_task can be
 #: garbage-collected mid-run.
@@ -288,20 +291,19 @@ def execute_run(
         # matrix at once measured near a gigabyte. Dropping the string as soon
         # as it is parsed is most of that back, and the rows are still needed
         # afterwards for the ingest-clock check.
-        embeddings = {}
-        for row in signals:
-            vec = parse_embedding(row.pop("embedding", None))
-            if vec is not None:
-                embeddings[str(row.get("id"))] = vec
-        cluster_stats: dict = {}
-        if embeddings:
-            claims, cluster_stats = assign_clusters(claims, embeddings)
-        else:
+        embeddings = _load_embeddings(
+            company_id, {str(r.get("id")) for r in signals})
+        # ALWAYS called, even with nothing to cluster on. Skipping it left
+        # every claim's cluster id unset, which is precisely how they get
+        # pooled by kind downstream — so a tenant with no embeddings at all got
+        # "40 claims concern finding" and no coverage note, which is the
+        # failure the whole module exists to prevent.
+        if not embeddings:
             logger.warning(
-                "crucible: no embeddings for %s — clustering will fall back to "
-                "claim kind, which produces taxonomy rather than findings",
+                "crucible: no embeddings for %s — nothing can be grouped",
                 company_id,
             )
+        claims, cluster_stats = assign_clusters(claims, embeddings)
         runs_db.update(run_id, company_id, claim_count=len(claims))
 
         if not claims:
@@ -497,11 +499,14 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
 
 
 def _load_signals(company_id: str) -> list[dict]:
-    """Read the company's signals, paged.
+    """Read the company's signals, paged, metadata only.
 
-    `GraphFacade.all_signals` uses `select("*")`, which pulls 1536-float
-    embeddings and hits PostgREST's default row cap — measured to time out on a
-    5,700-signal tenant. Explicit columns and explicit paging instead.
+    NO EMBEDDINGS HERE. They are 1536 floats each, and asking for them
+    alongside everything else times the statement out on a real tenant — a
+    250-row page was already enough. `GraphFacade.all_signals` uses
+    `select("*")` and hits the same wall, which is why this exists at all.
+    Explicit columns, explicit paging, and the heavy column fetched separately
+    by `_load_embeddings`.
     """
     from app.db.client import require_client
 
@@ -511,7 +516,14 @@ def _load_signals(company_id: str) -> list[dict]:
         chunk = (
             client.table("kg_signal")
             .select(
-                "id,kind,source_type,content,properties,valid_at,created_at,source_id,embedding"
+                # `provenance` carries the source DOCUMENT id, which the
+                # refutation step needs. It was missing here while
+                # `_artifact_id` read it, so every claim came out unattributed
+                # and every run shipped a coverage note saying so — false, and
+                # invisible to the unit suite because the fake Supabase used to
+                # ignore column projection entirely.
+                "id,kind,source_type,content,properties,provenance,"
+                "valid_at,created_at,source_id"
             )
             .eq("enterprise_id", company_id)
             # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
@@ -527,3 +539,51 @@ def _load_signals(company_id: str) -> list[dict]:
         if len(chunk) < _PAGE:
             break
     return rows
+
+
+def _load_embeddings(company_id: str, ids: set[str]) -> dict:
+    """Fetch the vectors on their own, in small pages.
+
+    Separate request and a much smaller page BECAUSE of the size: each row is
+    ~19KB of JSON, so this is the query that decides whether a run completes or
+    dies on a statement timeout. A failure here degrades the run to ungrouped
+    rather than killing it — the coverage note then says so.
+    """
+    from app.db.client import require_client
+
+    client = require_client()
+    out: dict = {}
+    for page in range(400):
+        try:
+            chunk = (
+                client.table("kg_signal")
+                .select("id,embedding")
+                .eq("enterprise_id", company_id)
+                .order("id")
+                .range(page * _EMBED_PAGE, page * _EMBED_PAGE + _EMBED_PAGE - 1)
+                .execute()
+            ).data or []
+        except Exception:  # noqa: BLE001 — a slow page degrades the run, it
+            # does not end it.
+            #
+            # SKIP AND CONTINUE, never return. Bailing out on the first failure
+            # threw away every page after it: measured against a real tenant,
+            # one timed-out page cost 577 of 2,777 vectors, and the run then
+            # reported those signals as ungroupable when the only thing wrong
+            # was one slow request.
+            logger.warning(
+                "crucible: embedding page %d timed out for %s; continuing",
+                page, company_id,
+            )
+            continue
+        for row in chunk:
+            key = str(row.get("id"))
+            if key in ids:
+                vec = parse_embedding(row.get("embedding"))
+                if vec is not None:
+                    out[key] = vec
+        if len(chunk) < _EMBED_PAGE:
+            break
+        if len(out) >= len(ids):
+            break
+    return out
