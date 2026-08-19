@@ -439,7 +439,9 @@ def _author_display(
     return name, prof.get("role")
 
 
-def list_group_turns(conversation_id: int, since: int | None = None) -> list[dict[str, Any]]:
+def list_group_turns(
+    conversation_id: int, since: int | None = None, project_id: int | None = None
+) -> list[dict[str, Any]]:
     """Turns in a group chat, ascending, after the `since` cursor (a turn
     id — AD-P4 poll read, mirrors the `prototype_comments` refetch
     posture). Each turn carries `author_name`/`author_job_role` (joined
@@ -449,17 +451,25 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
     Refuses (returns []) when `conversation_id` does not resolve to a
     `kind='group'` row — the group path can never read an individual
     chat's turns, even if a caller forgets to resolve the id via
-    `get_group_chat` first (isolation regression, R4/§9)."""
+    `get_group_chat` first (isolation regression, R4/§9).
+
+    Optional `project_id` — when passed, the `conversation_id` must ALSO
+    belong to that project, else `[]`. Belt-and-suspenders cross-project /
+    cross-tenant scoping for callers that accept a CLIENT-supplied
+    conversation_id (e.g. `routes.ask._load_group_history`): even if the
+    caller's own conversation↔project binding is ever bypassed, a foreign
+    project's turns can never be read through this path. Default `None`
+    preserves the exact behavior every pre-existing caller relies on."""
     client = require_client()
-    conv = (
+    conv_q = (
         client.table("conversations")
         .select("id")
         .eq("id", conversation_id)
         .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
     )
+    if project_id is not None:
+        conv_q = conv_q.eq("project_id", project_id)
+    conv = conv_q.limit(1).execute().data
     if not conv:
         return []
 

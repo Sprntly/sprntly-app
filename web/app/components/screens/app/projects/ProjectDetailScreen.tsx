@@ -39,7 +39,8 @@ import { Spinner } from "../../../auth/icons"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { ConfirmDialog } from "../../../shared/ConfirmDialog"
 import { useAuth } from "../../../../lib/auth"
-import { PROJECTS_PATH } from "../../../../lib/routes"
+import { PROJECTS_PATH, projectPath } from "../../../../lib/routes"
+import { memberAddedLandingTarget } from "./memberAddedLanding"
 import {
   ApiError,
   projectsApi,
@@ -662,10 +663,22 @@ export function ProjectDetailScreen({
   // the unread badge) and `delegation.event` (the ledger status change): the
   // latter refetches the rail counts and bumps `ledgerVersion` so an open
   // modal re-reads. Any other event is ignored — one subscription, one topic.
+  // "Added to a project" live landing: the SAME per-user channel also carries
+  // `member.added` (both add paths — POST /members and POST /tag — publish it).
+  // Bring the just-added user straight into the project's private chat (the
+  // invite-modal promise: "they land straight in its chats"), unless they're
+  // mid-task or already sitting in it. Held on a ref so the stable
+  // `handleUnreadEvent` subscription reads the freshest activeChat/nav closures
+  // without re-subscribing (channel identity keys on topic only).
+  const landOnMemberAddedRef = useRef<(payload: unknown) => void>(() => {})
   const handleUnreadEvent = useCallback(
-    (event: string) => {
+    (event: string, payload: unknown) => {
       if (event === "brief.delivered") {
         setIndividualUnread(true)
+        return
+      }
+      if (event === "member.added") {
+        landOnMemberAddedRef.current(payload)
         return
       }
       if (event === "delegation.event") {
@@ -781,6 +794,29 @@ export function ProjectDetailScreen({
     },
     [projectId, router, searchParams],
   )
+
+  // The freshest `member.added` landing closure (see `handleUnreadEvent`).
+  // Reassigned every render so it reads the current `activeChat` and the
+  // current nav callbacks; the stable subscription reaches it via the ref.
+  landOnMemberAddedRef.current = (payload: unknown) => {
+    // A focused composer/search field means the user is mid-task — never yank.
+    const el = typeof document !== "undefined" ? document.activeElement : null
+    const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
+    const target = memberAddedLandingTarget(payload, {
+      currentProjectId: projectId,
+      alreadyInPrivateChat: activeChat === "individual",
+      busy,
+    })
+    if (target == null) return
+    // Same project → switch its tab to the private chat in place (also persists
+    // the tab + clears the unread badge). A different project → route to it,
+    // opening on its private chat.
+    if (String(target) === String(projectId)) {
+      onSelectChat("individual")
+    } else {
+      router.push(projectPath(target, { chat: "individual" }))
+    }
+  }
 
   // Re-fetches ONLY the project row (members + count) after a roster
   // mutation — deliberately not `load()`: that flashes the whole shell back

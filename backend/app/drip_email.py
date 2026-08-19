@@ -284,14 +284,19 @@ _SERIF = "'Spectral',Georgia,'Times New Roman',serif"
 _SANS = "'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
 
 
-def render_drip_html(*, subject: str, body_text: str) -> str:
+def render_drip_html(*, subject: str, body_text: str, cta_url: str | None = None) -> str:
     """Wrap a plain-text drip body in the branded HTML shell (paper
     background, white card, serif headline, green 'Open Sprntly' CTA).
     The text body stays in the Resend payload as the plain-text fallback.
 
+    `cta_url` overrides the CTA-button destination (e.g. a specific project
+    deep-link); omitted → the app root, so every existing caller is
+    byte-identical. The footer link always points at the app root.
+
     Pure + deterministic: paragraphs are split on blank lines and escaped;
     the '— The Sprntly team' sign-off renders muted."""
     base = (config_mod.settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    cta = cta_url or base
     paragraphs = [p.strip() for p in body_text.split("\n\n") if p.strip()]
 
     body_html = ""
@@ -326,7 +331,7 @@ def render_drip_html(*, subject: str, body_text: str) -> str:
             <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:28px">
               <tr>
                 <td align="center" style="border-radius:10px;background-color:#1a8a52">
-                  <a href="{base}" style="display:inline-block;padding:13px 28px;font-family:{_SANS};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">Open Sprntly</a>
+                  <a href="{cta}" style="display:inline-block;padding:13px 28px;font-family:{_SANS};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">Open Sprntly</a>
                 </td>
               </tr>
             </table>
@@ -383,6 +388,73 @@ def send_drip_email(*, to_email: str, subject: str, body_text: str) -> bool:
         return True
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.warning("Resend drip send raised for %s: %s", to_email, exc)
+        return False
+
+
+def send_project_added_email(
+    *,
+    to_email: str,
+    project_name: str,
+    project_url: str | None = None,
+    recipient_name: str = "",
+) -> bool:
+    """Notify an existing in-tenant user that they've been added to a project.
+
+    A brand-new email invitee already gets the GoTrue/branded invite email;
+    an EXISTING in-tenant user added to a project (POST /members, or the
+    /tag t_workspace add) previously got nothing. This is that email: the
+    project NAME plus a link to it — never any project content (AD-TNM2).
+
+    Best-effort, mirroring `send_drip_email`'s contract exactly: a missing
+    RESEND_API_KEY is a no-op that returns False, and every failure (network,
+    non-2xx, raise) is caught and returned as False so the caller — the add
+    route — is never broken or delayed by the notification (AD-P22). Reuses
+    the same branded Resend shell (`render_drip_html`), sender, and transport,
+    so no new email dependency or provider is introduced."""
+    api_key = getattr(config_mod.settings, "resend_api_key", "") or ""
+    if not api_key:
+        logger.info(
+            "send_project_added_email skipped: RESEND_API_KEY not configured (to=%s)",
+            to_email,
+        )
+        return False
+
+    project = project_name.strip() or "a project"
+    subject = f"You've been added to {project} on Sprntly"
+    body_text = (
+        f"Hi {recipient_name.strip() or 'there'},\n\n"
+        f"You've been added to the {project} project on Sprntly. Open it to "
+        f"see its chats, artifacts, and shared context.\n\n"
+        f"— The Sprntly team"
+    )
+
+    try:
+        resp = httpx.post(
+            RESEND_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "from": _from_address(),
+                "to": [to_email],
+                "subject": subject,
+                "text": body_text,
+                "html": render_drip_html(
+                    subject=subject, body_text=body_text, cta_url=project_url
+                ),
+            },
+            timeout=_HTTP_TIMEOUT_SECONDS,
+        )
+        if resp.status_code >= 400:
+            logger.warning(
+                "Resend project-added send failed for %s: %s %s",
+                to_email, resp.status_code, resp.text[:200],
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks the add
+        logger.warning("Resend project-added send raised for %s: %s", to_email, exc)
         return False
 
 
