@@ -37,6 +37,7 @@ import {
 } from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../shared/chat-shell/conversation/useAssignCompletion"
 import { askAgain } from "../../shared/chat-shell/conversation/askAgain"
+import { runClarifiedGeneration as runSharedClarifiedGeneration } from "../../shared/chat-shell/conversation/clarifiedGeneration"
 import {
   SlackShareMessage,
   type SlackShareResolution,
@@ -2671,79 +2672,79 @@ export function ChatScreen() {
     sourceDocs: { name: string; content: string }[] | undefined,
     userMessage: string,
   ) => {
-    // The combined task (original command + the user's clarify answers, which
-    // echo each question's prompt for legibility) can outgrow the backend's
-    // 4000-char `task` cap — a 422 AFTER the "Generating a PRD…" ack is on
-    // screen. Trim the tail to fit: losing the last answer's tail beats losing
-    // the whole generation.
-    const TASK_MAX = 4000
-    const task = rawTask.length > TASK_MAX ? `${rawTask.slice(0, TASK_MAX - 1)}…` : rawTask
-    const id =
-      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    const ack: AskResponse = {
-      answer:
-        // This ack lands on a LATER turn of an existing command tab, so the PRD
-        // card sits further up the thread (it anchors to thread[0]) — neither
-        // "above" nor "below" is reliably true here, so point at the chat.
-        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    setTabs((prev) => prev.map((t) => t.id === targetTabId
-      ? {
-          ...t,
-          pendingClarify: undefined,
-          prdGenerating: true,
-          thread: [...t.thread, { id, query: userMessage, reply: ack }],
-        }
-      : t))
-    if (targetTabId === activeTabIdRef.current) {
-      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+    // Shared clarified-generation flow (trim + ack + synchronous seed + async
+    // generate→bind→resume→dispatch). This surface injects its tab-scoped seams;
+    // the sequence itself lives in `clarifiedGeneration` so it can't drift from
+    // the project surface. The comments on each seam mark what USED to be inline.
+    runSharedClarifiedGeneration(rawTask, sourceDocs, userMessage, {
+      newId: () =>
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`,
+      // Seed the ack turn onto THIS command tab, clear the parked clarify, flip
+      // prdGenerating — one setTabs so the card→record flip and the ack land
+      // together. The ack lands on a LATER turn of an existing command tab, so
+      // the PRD card sits further up the thread (it anchors to thread[0]) —
+      // neither "above" nor "below" is reliably true here, so it points at the chat.
+      seedAckTurn: (id, message, ack) =>
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? {
+              ...t,
+              pendingClarify: undefined,
+              prdGenerating: true,
+              thread: [...t.thread, { id, query: message, reply: ack }],
+            }
+          : t)),
       // The rail was deliberately NOT opened while the questions were pending
       // (see `clarifyFirst` in openPrdInTab), so answering them is what opens
-      // it — otherwise the generation would run with no panel to land in.
-      setPrdPanelPending("prd")
-    }
-    pushPendingConversation(id, userMessage, targetTabId)
-    finalizeConversationTurn(id, { reply: ack }, targetTabId)
-    void (async () => {
-      const onPartial = (html: string) => {
+      // it — otherwise the generation would run with no panel to land in. Only
+      // when this is the active tab (background tabs don't touch the panel).
+      openPanel: () => {
+        if (targetTabId === activeTabIdRef.current) {
+          setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+          setPrdPanelPending("prd")
+        }
+      },
+      pushPendingConversation: (id, message) => pushPendingConversation(id, message, targetTabId),
+      finalizeAck: (id, ack) => finalizeConversationTurn(id, { reply: ack }, targetTabId),
+      onPartial: (html) => {
         if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
-      }
-      try {
-        // Same durable binding as the command flows, and free here: the tab has
-        // been chatting (the clarifying questions landed in it), so its
-        // conversation already exists and the id is a synchronous read — no
-        // round-trip in front of the user's generation.
-        const knownConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
-        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+      },
+      // Same durable binding as the command flows, and free here: the tab has
+      // been chatting (the clarifying questions landed in it), so its
+      // conversation already exists and the id is a synchronous read — no
+      // round-trip in front of the user's generation.
+      resolveKnownConvId: () => tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null,
+      generateFromTask: (task, docs, knownConvId) =>
+        prdApi.generateFromTask(task, false, docs, knownConvId),
+      onStarted: (start, knownConvId) => {
         if (knownConvId == null) void bindConvToPrd(targetTabId, start.prd_id)
         setTabs((prev) => prev.map((t) => t.id === targetTabId
           ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
           : t))
-        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
-        if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === targetTabId
-            ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
-            : t))
-          if (activeTabIdRef.current === targetTabId) {
-            setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
-          }
-          // Always a fresh generation here (the clarify gate only parks NEW
-          // tasks) — post the chat summary of what got built.
-          postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
-          // Same main-chat PRD fork continuity as the typed/Generate-button paths.
-          bindActiveProject(start.project_id ?? null)
-        } else {
-          setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
-          if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-          showToast("PRD unavailable", result.message.slice(0, 200))
+      },
+      onSuccess: (start, result) => {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
+          : t))
+        if (activeTabIdRef.current === targetTabId) {
+          setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
         }
-      } catch (e) {
+        // Always a fresh generation here (the clarify gate only parks NEW
+        // tasks) — post the chat summary of what got built.
+        postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
+        // Same main-chat PRD fork continuity as the typed/Generate-button paths.
+        bindActiveProject(start.project_id ?? null)
+      },
+      onFailure: (message) => {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+        if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD unavailable", message.slice(0, 200))
+      },
+      onError: (e) => {
         setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
         if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-      }
-    })()
+      },
+    })
   }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd, bindActiveProject])
 
   /** Freeze the questions turn into its settled, read-only form. Both answering

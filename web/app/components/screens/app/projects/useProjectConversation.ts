@@ -47,7 +47,7 @@ import {
 } from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../../shared/chat-shell/conversation/useAssignCompletion"
 import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
-import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
+import { runClarifiedGeneration } from "../../../shared/chat-shell/conversation/clarifiedGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
@@ -531,40 +531,45 @@ export function useProjectConversation(
   }, [hydrating, activeCompany, convKey, finalizeConversationTurn])
 
   // ── Generate-PRD + the clarify/sufficiency wizard (thin single-conv opener) ─
+  // The trim + ack + synchronous-seed + async generate→bind→resume→dispatch
+  // sequence lives in the shared `clarifiedGeneration` unit so it can't drift
+  // from the tab-scoped surface (ChatScreen). This surface injects its
+  // single-conversation seams (setMeta/setThread instead of setTabs, no toast /
+  // summary / active-tab guard).
   const runProjectClarifiedGeneration = useCallback((rawTask: string, sourceDocs: { name: string; content: string }[] | undefined, userMessage: string) => {
-    const task = rawTask.length > 4000 ? `${rawTask.slice(0, 3999)}…` : rawTask
-    const id = newId()
-    const ack: AskResponse = {
-      answer: "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse
-    setPendingClarify(null)
-    setMeta((prev) => ({ ...prev, prdGenerating: true, pendingClarify: undefined }))
-    setThread((prev) => [...prev, { id, query: userMessage, reply: ack }])
-    setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
-    openContentPanel("prd")
-    pushPendingConversation(id, userMessage, convKey)
-    void finalizeConversationTurn(id, { reply: ack }, convKey)
-    void (async () => {
-      const onPartial = (html: string) => setContent({ prdPartialHtml: html })
-      try {
-        const knownConvId = dbConvIdRef.current
-        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+    runClarifiedGeneration(rawTask, sourceDocs, userMessage, {
+      newId,
+      seedAckTurn: (id, message, ack) => {
+        setPendingClarify(null)
+        setMeta((prev) => ({ ...prev, prdGenerating: true, pendingClarify: undefined }))
+        setThread((prev) => [...prev, { id, query: message, reply: ack }])
+      },
+      openPanel: () => {
+        setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+        openContentPanel("prd")
+      },
+      pushPendingConversation: (id, message) => pushPendingConversation(id, message, convKey),
+      finalizeAck: (id, ack) => { void finalizeConversationTurn(id, { reply: ack }, convKey) },
+      onPartial: (html) => setContent({ prdPartialHtml: html }),
+      resolveKnownConvId: () => dbConvIdRef.current,
+      generateFromTask: (task, docs, knownConvId) => prdApi.generateFromTask(task, false, docs, knownConvId),
+      onStarted: (start, knownConvId) => {
         if (knownConvId != null) void conversationsApi.update(knownConvId, { prd_id: start.prd_id })
         setMeta((prev) => ({ ...prev, prdId: start.prd_id }))
-        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
-        if (result.ok) {
-          setMeta((prev) => ({ ...prev, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }))
-          setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
-        } else {
-          setMeta((prev) => ({ ...prev, prdGenerating: false }))
-          setContent({ prdGenerating: false, prdPartialHtml: null })
-        }
-      } catch {
+      },
+      onSuccess: (_start, result) => {
+        setMeta((prev) => ({ ...prev, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }))
+        setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
+      },
+      onFailure: () => {
         setMeta((prev) => ({ ...prev, prdGenerating: false }))
         setContent({ prdGenerating: false, prdPartialHtml: null })
-      }
-    })()
+      },
+      onError: () => {
+        setMeta((prev) => ({ ...prev, prdGenerating: false }))
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+      },
+    })
   }, [convKey, setContent, openContentPanel, pushPendingConversation, finalizeConversationTurn])
 
   // "Generate a PRD for X": run the sufficiency gate first. Not sufficient →
