@@ -585,6 +585,18 @@ export function ProjectDetailScreen({
     load()
   }, [load])
 
+  // Leaving the project must not leave the (non-blocking) artifacts drawer /
+  // task modal lingering open. This screen is reused across `?id` changes
+  // (`ProjectsRoute` mounts it without a `key`), so switching projects swaps
+  // `projectId` WITHOUT unmounting — local `railModal` state would otherwise
+  // persist and the drawer would stay open over the newly-entered project.
+  // Reset it whenever the active project id changes so re-entering (or
+  // switching to) a project always starts with the drawer closed. In-project
+  // open/close/Escape still works normally via `setRailModal`.
+  useEffect(() => {
+    setRailModal(null)
+  }, [projectId])
+
   // Live individual-unread signal (AD-P25 S2): the caller's OWN, member+
   // owner-gated per-user channel (`project:{id}:user:{uid}`) flips the badge
   // the instant a `brief.delivered` broadcast lands — no poll wait. `onReconcile`

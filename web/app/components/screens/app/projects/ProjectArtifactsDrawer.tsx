@@ -559,11 +559,32 @@ export function ProjectArtifactsDrawer({
 
   // On entering the add view, move focus to its first control (the search
   // input) — the region's a11y contract (spec AC9). Done from the host without
-  // modifying the reused panel.
+  // modifying the reused panel. `AddArtifactPanel` renders a "Loading…"
+  // placeholder first (the search input is NOT in the DOM yet), so focusing
+  // synchronously on the `view` flip races the panel's own fetch and usually
+  // misses. Focus eagerly if the input is already present, otherwise watch the
+  // host subtree and focus once the panel reaches its ready state (the input
+  // mounts), then stop observing.
   useEffect(() => {
     if (view !== "add") return
-    const input = addHostRef.current?.querySelector<HTMLInputElement>("input")
-    input?.focus()
+    const host = addHostRef.current
+    if (!host) return
+    const focusSearch = () => {
+      const input = host.querySelector<HTMLInputElement>(
+        "input[data-testid='add-artifact-search']",
+      )
+      if (input) {
+        input.focus()
+        return true
+      }
+      return false
+    }
+    if (focusSearch()) return
+    const observer = new MutationObserver(() => {
+      if (focusSearch()) observer.disconnect()
+    })
+    observer.observe(host, { childList: true, subtree: true })
+    return () => observer.disconnect()
   }, [view])
 
   const artifacts = state.status === "ready" ? state.artifacts : []
