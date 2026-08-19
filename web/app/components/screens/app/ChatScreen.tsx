@@ -42,8 +42,7 @@ import { IconFolder } from "@tabler/icons-react"
 // The strip's reopen button is icon-only, so the Evidence case needs an icon of
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
-import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
-import { spliceSkill } from "../../shared/chatComposerController"
+import { DRAFT_MAX_CHARS } from "../../shared/ChatComposer"
 import {
   type ChatIntentEnvelope,
   artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
@@ -955,6 +954,10 @@ export function ChatScreen() {
   // into the shared unit. The skill/slash-filter wiring, the submit/input/keydown
   // handlers, and the composer effects at other positions stay in the host below
   // and read this hook's state through the destructure.
+  // The whole composer is captured as one object so it can be handed to the
+  // engine (which drives the send handlers off it); the tab orchestrator still
+  // reads its state through this destructure.
+  const composer = useComposer({ showToast })
   const {
     draft, setDraft,
     quoteJustInsertedRef,
@@ -981,7 +984,7 @@ export function ChatScreen() {
     skills, setSkills,
     filteredSkills, slashOpen,
     skillForQuery,
-  } = useComposer({ showToast })
+  } = composer
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
@@ -3672,6 +3675,7 @@ export function ChatScreen() {
   // clarify fold in next.
   const {
     runConversationAsk, handleStopAsk, runActionTurnInTab, submitAsk,
+    handleComposerSubmit, handleComposerKeyDown,
     listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
     openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
   } = useConversation({
@@ -3701,10 +3705,9 @@ export function ChatScreen() {
       setContent,
       openContentPanel,
       content,
-      attachments,
-      setAttachments,
-      setDraft,
-      setPendingSend,
+      composer,
+      busy,
+      viewerAttachmentOpen: Boolean(viewerAttachment),
       setActiveTabId,
       resolveSendTarget,
       interceptBeforeIntent,
@@ -4304,112 +4307,6 @@ export function ChatScreen() {
     }
   }, [activeCompany, finalizeConversationTurn])
 
-  const handleComposerSubmit = () => {
-    const q = draft.trim()
-    // Backend rejects questions under 3 chars — match BriefChat's guard (the
-    // send buttons are also disabled below 3, this covers Enter-to-send).
-    if (q.length < DRAFT_MIN_CHARS) {
-      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
-      return
-    }
-    // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
-    //
-    // This used to be a bare `return` — the single worst micro-interaction on
-    // the surface. Enter while an ask was in flight did nothing at all: no
-    // send, no message, the draft just sat there and the keystroke vanished.
-    // The guard stays (one ask per tab); the silence does not.
-    if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
-      showComposerHint("busy")
-      return
-    }
-    // A send is already mid-dispatch (its intent decision is still in flight).
-    // The busy/asking markers aren't set until the ask itself starts, so without
-    // this a second Enter during that window would double-send.
-    if (pendingSend) return
-    // A pinned skill is re-attached to the query as its slash trigger, so the
-    // backend's deterministic fast-path sees exactly what typing it by hand
-    // would have produced — the chip is a composer affordance, not a new
-    // protocol. The trigger stays visible on the sent turn, which is what makes
-    // the wait's skill chip verifiable from the thread itself.
-    const sent = spliceSkill(pinnedSkill, q)
-    // Sending ends the dictation that produced the question — and CANCELS it
-    // rather than stopping it. A graceful stop still delivers the phrase the
-    // engine was finalising, and the hook's transcript is cumulative, so that
-    // trailing result would write the whole sent question back into the draft
-    // this send is about to clear.
-    if (voice.listening) voice.cancel()
-    voiceBaseRef.current = ""
-    setDraft("")
-    setPinnedSkill(null)
-    setPlusMenuOpen(false)
-    void submitAsk(sent)
-    const ta = composerRef.current
-    if (ta) {
-      // Clear the inline height so the textarea snaps back to its CSS resting
-      // size (min-height + padding). A hardcoded value here is shorter than the
-      // vertical padding and clips the placeholder after sending.
-      ta.style.height = ""
-    }
-  }
-
-  // Keep the highlight in range as the filtered list shrinks/grows.
-  useEffect(() => {
-    setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
-  }, [filteredSkills.length])
-
-  const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "/") {
-      e.preventDefault()
-      openSkillPalette()
-      return
-    }
-    // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
-    // dismisses it — the composer's own Enter-to-send yields to the picker.
-    if (slashOpen) {
-      if (e.key === "ArrowDown") {
-        e.preventDefault()
-        setSlashActive((i) => (i + 1) % filteredSkills.length)
-        return
-      }
-      if (e.key === "ArrowUp") {
-        e.preventDefault()
-        setSlashActive((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
-        return
-      }
-      if (e.key === "Enter" || e.key === "Tab") {
-        e.preventDefault()
-        handleSlashSelect(filteredSkills[slashActive] ?? filteredSkills[0])
-        return
-      }
-      if (e.key === "Escape") {
-        e.preventDefault()
-        setShowSlash(false)
-        setSlashFromMenu(false)
-        return
-      }
-    }
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault()
-      handleComposerSubmit()
-    }
-  }
-
-  // Esc stops the answer. The Stop button already sits in the composer and now
-  // beside the wait itself, but the fastest way out of a run you regret is the
-  // key everybody already presses to cancel things.
-  //
-  // It yields to anything that owns Esc more locally: the attachment viewer, the
-  // slash palette and the `+` menu each close on Esc first.
-  useEffect(() => {
-    if (!busy) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return
-      if (viewerAttachment || slashOpen || plusMenuOpen) return
-      handleStopAsk()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [busy, viewerAttachment, slashOpen, plusMenuOpen, handleStopAsk])
 
   /** The composer's one status line. A dictation problem outranks the busy hint:
    *  the busy hint answers a key you just pressed and expires on its own, while

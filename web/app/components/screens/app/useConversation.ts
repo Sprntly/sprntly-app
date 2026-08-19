@@ -26,8 +26,8 @@
  * still consume from the wrapper). submitAsk / composer / clarify fold in next.
  */
 
-import { useCallback } from "react"
-import type { Dispatch, RefObject, SetStateAction } from "react"
+import { useCallback, useEffect } from "react"
+import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, RefObject, SetStateAction } from "react"
 import { addToSet, removeFromSet } from "../../../lib/chatAskState"
 import { getPendingAsk } from "../../../lib/runAskGeneration"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
@@ -41,13 +41,15 @@ import {
 } from "../../../lib/api"
 import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
-import { resolveAttachmentRefs } from "../../shared/chatComposerController"
+import { resolveAttachmentRefs, spliceSkill } from "../../shared/chatComposerController"
+import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../shared/chat-shell/conversation/actions"
 import { providerNoticeFromEnvelope, providerNoticeTitle } from "../../../lib/providerLimitNotice"
 import { useMainConversation, type MainConversation } from "./useMainConversation"
 import { useConversationGeneration } from "./useConversationGeneration"
+import type { useComposer } from "./useComposer"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
 import type { ChatTab, ThreadTurn } from "./ChatScreen"
@@ -116,13 +118,15 @@ export interface MainConversationAdapter {
   openContentPanel: (tab: ContentPanelTab) => void
   content: AppContentState
 
-  // ── Composer state (still wrapper-owned until the composer folds in) ────────
-  attachments: { name: string; content: string; file?: File }[]
-  setAttachments: Dispatch<SetStateAction<{ name: string; content: string; file?: File }[]>>
-  setDraft: Dispatch<SetStateAction<string>>
-  setPendingSend: Dispatch<
-    SetStateAction<{ tabId: string | null; query: string; attachments: { name: string }[]; startedAt: number } | null>
-  >
+  // ── Composer (the whole useComposer return; wrapper-owned so the tab
+  //    orchestrator's many composer consumers keep it, engine drives the send
+  //    handlers off it). ───────────────────────────────────────────────────────
+  composer: ReturnType<typeof useComposer>
+  /** Composer-blocking in-flight state for the active tab (isComposerBusy) — the
+   *  Esc-to-stop effect gates on it. */
+  busy: boolean
+  /** The attachment viewer is open — Esc yields to it (closes it first). */
+  viewerAttachmentOpen: boolean
 
   // ── Submit leaf seams (tab-flavored; wrapper) ──────────────────────────────
   setActiveTabId: Dispatch<SetStateAction<string | null>>
@@ -166,6 +170,10 @@ export type Conversation = MainConversation &
     /** Submit a raw composer draft: optimistic render → clarify/command
      *  interception → grounded ask, over the resolved (possibly spawned) tab. */
     submitAsk: (rawQuery: string) => Promise<void>
+    /** Enter-to-send (min-char + busy-hint + double-send guards, skill splice). */
+    handleComposerSubmit: () => void
+    /** Composer keydown: ⌘/ palette, arrow/enter/tab/esc palette nav, Enter-send. */
+    handleComposerKeyDown: (e: ReactKeyboardEvent<HTMLTextAreaElement>) => void
   }
 
 export function useConversation(adapter: MainConversationAdapter): Conversation {
@@ -196,10 +204,9 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     setContent,
     openContentPanel,
     content,
-    attachments,
-    setAttachments,
-    setDraft,
-    setPendingSend,
+    composer,
+    busy,
+    viewerAttachmentOpen,
     setActiveTabId,
     resolveSendTarget,
     interceptBeforeIntent,
@@ -210,6 +217,15 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     nextPrompts,
     showToast,
   } = adapter
+  // The composer fields the send handlers + submit read. Kept as the same local
+  // names so the extracted bodies stay verbatim.
+  const {
+    draft, setDraft, pendingSend, setPendingSend, attachments, setAttachments,
+    pinnedSkill, setPinnedSkill, setPlusMenuOpen, plusMenuOpen,
+    voice, voiceBaseRef, composerRef, showComposerHint,
+    slashOpen, filteredSkills, slashActive, setSlashActive, handleSlashSelect,
+    setShowSlash, setSlashFromMenu, openSkillPalette,
+  } = composer
 
   // `makeTabHandle` mints a `ConversationHandle` onto ONE tab, wrapping the tab
   // multiplexer accessors (turn patch, busy, stop/asking flags, pending-ask
@@ -337,7 +353,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postSummary,
   })
 
-  const { runConversationAsk, runActionTurnInTab } = engine
+  const { runConversationAsk, runActionTurnInTab, handleStopAsk } = engine
   const {
     ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,
     prdChangeTemplateFlow, ticketsChangeTemplateFlow,
@@ -662,5 +678,105 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     ],
   )
 
-  return { ...engine, ...generation, makeHandle, submitAsk }
+  // ── Composer send handlers (Enter-to-send, palette keys, Esc-to-stop) ──────
+  // Extracted verbatim from ChatScreen. They drive the send off the composer +
+  // the engine's own `submitAsk` / `handleStopAsk`.
+  const handleComposerSubmit = useCallback(() => {
+    const q = draft.trim()
+    // Backend rejects questions under 3 chars — match BriefChat's guard.
+    if (q.length < DRAFT_MIN_CHARS) {
+      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
+      return
+    }
+    // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
+    // Enter while an ask is in flight shows the busy hint rather than eating the
+    // keystroke silently.
+    if (activeTabId != null && askingTabsRef.current?.has(activeTabId)) {
+      showComposerHint("busy")
+      return
+    }
+    // A send is already mid-dispatch (intent decision in flight); the busy/asking
+    // markers aren't set yet, so without this a second Enter would double-send.
+    if (pendingSend) return
+    // A pinned skill is re-attached as its slash trigger so the backend fast-path
+    // sees exactly what typing it by hand would produce.
+    const sent = spliceSkill(pinnedSkill, q)
+    // Sending CANCELS the dictation that produced the question (a graceful stop
+    // would write the trailing phrase back into the draft this send clears).
+    if (voice.listening) voice.cancel()
+    voiceBaseRef.current = ""
+    setDraft("")
+    setPinnedSkill(null)
+    setPlusMenuOpen(false)
+    void submitAsk(sent)
+    const ta = composerRef.current
+    if (ta) {
+      // Clear the inline height so the textarea snaps back to its CSS resting size.
+      ta.style.height = ""
+    }
+  }, [
+    draft, activeTabId, askingTabsRef, showComposerHint, pendingSend, pinnedSkill,
+    voice, voiceBaseRef, setDraft, setPinnedSkill, setPlusMenuOpen, submitAsk, composerRef, showToast,
+  ])
+
+  // Keep the palette highlight in range as the filtered list shrinks/grows.
+  useEffect(() => {
+    setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredSkills.length])
+
+  const handleComposerKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "/") {
+      e.preventDefault()
+      openSkillPalette()
+      return
+    }
+    // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
+    // dismisses it — the composer's own Enter-to-send yields to the picker.
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashActive((i) => (i + 1) % filteredSkills.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashActive((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
+        return
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault()
+        handleSlashSelect(filteredSkills[slashActive] ?? filteredSkills[0])
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setShowSlash(false)
+        setSlashFromMenu(false)
+        return
+      }
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault()
+      handleComposerSubmit()
+    }
+  }, [
+    openSkillPalette, slashOpen, filteredSkills, slashActive, handleSlashSelect,
+    setSlashActive, setShowSlash, setSlashFromMenu, handleComposerSubmit,
+  ])
+
+  // Esc stops the active tab's answer, yielding to anything that owns Esc more
+  // locally: the attachment viewer, the slash palette, and the `+` menu.
+  useEffect(() => {
+    if (!busy) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      if (viewerAttachmentOpen || slashOpen || plusMenuOpen) return
+      handleStopAsk()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [busy, viewerAttachmentOpen, slashOpen, plusMenuOpen, handleStopAsk])
+
+  return { ...engine, ...generation, makeHandle, submitAsk, handleComposerSubmit, handleComposerKeyDown }
 }
