@@ -402,6 +402,7 @@ export function ProjectDetailView({
               // asserted flat-route premise hold rather than patching a live bug.
               key={project.id}
               projectId={project.id}
+              projectName={project.name}
               activeChat={activeChat}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}

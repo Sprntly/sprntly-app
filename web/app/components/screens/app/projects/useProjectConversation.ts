@@ -117,6 +117,7 @@ export function useProjectConversation(
   projectId: number | string,
   surface: ProjectChatSurface,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
+  projectName?: string,
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
   const { activeCompany } = useCompany()
@@ -1261,6 +1262,15 @@ export function useProjectConversation(
     handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,
     handleToggleVoice: composer.handleToggleVoice,
+    // Per-surface empty-state greeting. GROUP: a project-themed, collaborative
+    // copy that names the project and cues the @Sprntly tag. INDIVIDUAL: unset,
+    // so ConversationView renders its default (main/private) copy unchanged.
+    landingTitle: isGroup
+      ? (projectName ? `Welcome to the ${projectName} team chat` : "Welcome to the team chat")
+      : undefined,
+    landingSubtitle: isGroup
+      ? "Collaborate with your team here — tag @Sprntly anytime to bring the agent in."
+      : undefined,
     showChipRow: !showThreadView, displayChips: PROJECT_LANDING_CHIPS, handleHomeCard: () => {},
     handleStarterChip: (text) => { void submitAsk(text) }, showEmptyStarters: false,
     activeTab,

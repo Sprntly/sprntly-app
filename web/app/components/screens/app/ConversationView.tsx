@@ -99,6 +99,11 @@ export interface ConversationViewHostProps {
   handleToggleVoice: () => void
 
   // ── Landing ────────────────────────────────────────────────────────────────
+  /** Per-surface empty-state greeting. UNSET → the default main/private copy
+   *  (byte-identical to before, so the shared golden holds). A surface (the
+   *  project GROUP chat) passes its own nodes to override the title/subtitle. */
+  landingTitle?: ReactNode
+  landingSubtitle?: ReactNode
   showChipRow: boolean
   displayChips: HomeChipItem[]
   handleHomeCard: (card: ChatHomeCard) => void
@@ -212,6 +217,9 @@ export function ConversationView(props: ConversationViewProps) {
     setQuestionDockEl,
     nextPrompts,
     submitAsk,
+    // landing greeting (per-surface; unset → default main/private copy)
+    landingTitle,
+    landingSubtitle,
     // shell frame
     showThreadView,
     threadScrollRef,
@@ -286,10 +294,14 @@ export function ConversationView(props: ConversationViewProps) {
         <div className="od-center-inner od-center-inner--home">
           <div className="chat-greeting">
             <h1 className="chat-greeting-title">
-              Welcome back, <em>{name}</em>.
+              {landingTitle ?? (
+                <>
+                  Welcome back, <em>{name}</em>.
+                </>
+              )}
             </h1>
             <p className="chat-greeting-sub">
-              Welcome to Sprntly — what would you like to work on?
+              {landingSubtitle ?? "Welcome to Sprntly — what would you like to work on?"}
             </p>
           </div>
 

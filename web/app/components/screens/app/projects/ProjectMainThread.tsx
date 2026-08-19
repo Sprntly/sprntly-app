@@ -27,17 +27,19 @@ function ProjectChatSurface({
   projectId,
   surface,
   onOpenArtifact,
+  projectName,
 }: {
   projectId: number | string
   surface: ProjectChatSurface
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
+  projectName?: string
 }) {
   // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
   // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
   // surface root — mirroring how ChatScreen mounts the same component beside its
   // own conversation view. Everything else is the exact `ConversationViewProps`.
   const { viewerAttachment, setViewerAttachment, ...viewProps } =
-    useProjectConversation(projectId, surface, onOpenArtifact)
+    useProjectConversation(projectId, surface, onOpenArtifact, projectName)
   return (
     <>
       <ConversationView {...viewProps} />
@@ -53,6 +55,10 @@ export type ActiveChat = "group" | "individual"
 export type ProjectMainThreadProps = {
   projectId: number | string
   activeChat: ActiveChat
+  /** The project's display name — threaded into the GROUP chat's empty-state
+   *  greeting ("Welcome to the {name} team chat"). Optional: absent falls back
+   *  to a name-less greeting. The individual chat ignores it (keeps default). */
+  projectName?: string
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   /** DEFERRED (dropped with the old chats): the cross-chat insight banner. Kept
    *  in the prop type so callers are unchanged; unused until the rebuilt chat
@@ -77,11 +83,11 @@ export type ProjectMainThreadProps = {
  *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
  *  resets the whole store and re-resolves the conversation, exactly like a page
  *  load — which was already showing the correct thread. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName }: ProjectMainThreadProps) {
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
-        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} />
+        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} />
       </div>
     )
   }
