@@ -62,6 +62,7 @@ import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/Clarif
 import { useComposer } from "../useComposer"
 import { personAvatarStyle } from "./avatarColor"
 import { MentionBubble } from "./MentionBubble"
+import { mentionsAgent } from "./mentions"
 import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { useThreadScroll } from "../useThreadScroll"
@@ -125,6 +126,7 @@ export function useProjectConversation(
   surface: ProjectChatSurface,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
   projectName?: string,
+  humanMemberCount?: number,
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
   const { activeCompany } = useCompany()
@@ -138,6 +140,11 @@ export function useProjectConversation(
   // attribution. A turn authored by THIS id renders through the default path
   // (the viewer's own head); any OTHER author is a peer and carries `author`.
   const selfUserId = (profile as { id?: string | null } | null)?.id ?? null
+  // 2-mode response gate input: a SOLO project (≤1 human member) has Sprntly
+  // reply to every message; a MULTI-human project replies ONLY to a turn that
+  // @Sprntly-mentions it. Unknown count → default to solo/reply (today's
+  // behavior; the server backstop still enforces the multi-human rule).
+  const isSolo = (humanMemberCount ?? 1) <= 1
 
   // ── The single-conversation store ─────────────────────────────────────────
   const [thread, setThread] = useState<ThreadTurn[]>([])
@@ -804,6 +811,39 @@ export function useProjectConversation(
       return
     }
 
+    // ── 2-mode response gate (project GROUP only) ─────────────────────────────
+    // Multi-human project + the turn does NOT @Sprntly-mention it → the human
+    // turn just posts to the group thread (author-stamped + broadcast to peers)
+    // with NO agent reply: no intent dispatch, no ask fired. Decided
+    // synchronously HERE, before any trigger — at most one reply per post, no
+    // scheduler, no classifier. Solo (≤1 human) never takes this branch, so the
+    // solo path is byte-identical to before. The server (Choice A) re-checks the
+    // same rule as the authoritative backstop.
+    if (isGroup && !isSolo && !mentionsAgent(trimmed)) {
+      const id = newId()
+      const cmid = newId()
+      cmidByTurnIdRef.current.set(id, cmid)
+      mySentCmidsRef.current.add(cmid)
+      const hasAttachments = composer.attachments.length > 0
+      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
+      if (hasAttachments) {
+        try {
+          const extracted = await resolveAttachmentRefs(composer.attachments)
+          persistedAttachments = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
+        } catch { persistedAttachments = undefined }
+      }
+      setThread((prev) => [...prev, {
+        id, query: trimmed,
+        ...(persistedAttachments ? { attachments: persistedAttachments }
+          : hasAttachments ? { attachments: composer.attachments.map((a) => ({ name: a.name })) } : {}),
+      }])
+      // Persist the user turn (postGroupTurn → author + broadcast + cmid); NO ask.
+      pushPendingConversation(id, trimmed, convKey, persistedAttachments)
+      composer.setAttachments([])
+      settlePendingSend()
+      return
+    }
+
     // Attachment early-extraction (so the planner + the ask see the same text).
     let earlyExtracted: (string | null)[] | null = null
     if (composer.attachments.length > 0) {
@@ -1018,7 +1058,7 @@ export function useProjectConversation(
       }
     }
     await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
-  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany, isGroup])
+  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany, isGroup, isSolo])
 
   const handleComposerSubmit = useCallback(() => {
     const q = composer.draft.trim()

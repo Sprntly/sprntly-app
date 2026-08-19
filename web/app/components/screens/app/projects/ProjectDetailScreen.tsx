@@ -376,9 +376,15 @@ export function ProjectDetailView({
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
             {activeChat === "group" ? (
-              <>
-                Open to all members. Sprntly <b>replies to every message</b> here.
-              </>
+              humans.length > 1 ? (
+                <>
+                  Open to all members. Tag <b>@Sprntly</b> to bring the agent in.
+                </>
+              ) : (
+                <>
+                  Open to all members. Sprntly <b>replies to every message</b> here.
+                </>
+              )
             ) : (
               <>
                 Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
@@ -403,6 +409,7 @@ export function ProjectDetailView({
               key={project.id}
               projectId={project.id}
               projectName={project.name}
+              humanMemberCount={humans.length}
               activeChat={activeChat}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}

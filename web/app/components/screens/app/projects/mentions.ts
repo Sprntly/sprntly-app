@@ -31,6 +31,16 @@ export function isEmailNeedle(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim())
 }
 
+/** True when `content` @-mentions the AGENT (`@Sprntly`, case-insensitive, at a
+ *  word boundary). The single source of truth for "does this turn address
+ *  Sprntly" — reused by the 2-mode response gate (a multi-human group turn
+ *  gets an agent reply ONLY when this is true) and it mirrors the backend
+ *  `_MENTION_RE`. Distinct from the people-mention parse (an `@Ada` never
+ *  matches; `foo@sprintly` doesn't either — the word boundary guards it). */
+export function mentionsAgent(content: string): boolean {
+  return new RegExp(`@${AGENT_MENTION}\\b`, "i").test(content)
+}
+
 /**
  * The active `@…` token being typed at `caret`, or `null`.
  *

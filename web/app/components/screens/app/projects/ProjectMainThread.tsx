@@ -30,18 +30,20 @@ function ProjectChatSurface({
   surface,
   onOpenArtifact,
   projectName,
+  humanMemberCount,
 }: {
   projectId: number | string
   surface: ProjectChatSurface
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   projectName?: string
+  humanMemberCount?: number
 }) {
   // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
   // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
   // surface root — mirroring how ChatScreen mounts the same component beside its
   // own conversation view. Everything else is the exact `ConversationViewProps`.
   const { viewerAttachment, setViewerAttachment, mentionPickerNode, mentionPickerOpen, ...viewProps } =
-    useProjectConversation(projectId, surface, onOpenArtifact, projectName)
+    useProjectConversation(projectId, surface, onOpenArtifact, projectName, humanMemberCount)
   return (
     <>
       <ConversationView {...viewProps} />
@@ -62,6 +64,11 @@ export type ProjectMainThreadProps = {
    *  greeting ("Welcome to the {name} team chat"). Optional: absent falls back
    *  to a name-less greeting. The individual chat ignores it (keeps default). */
   projectName?: string
+  /** The project's HUMAN member count — drives the group chat's 2-mode response
+   *  gate (≤1 → Sprntly replies to every message; ≥2 → only on @Sprntly).
+   *  Absent → the client defaults to reply (the server backstop still enforces
+   *  the multi-human rule). The individual chat ignores it. */
+  humanMemberCount?: number
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   /** DEFERRED (dropped with the old chats): the cross-chat insight banner. Kept
    *  in the prop type so callers are unchanged; unused until the rebuilt chat
@@ -86,7 +93,7 @@ export type ProjectMainThreadProps = {
  *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
  *  resets the whole store and re-resolves the conversation, exactly like a page
  *  load — which was already showing the correct thread. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName, humanMemberCount }: ProjectMainThreadProps) {
   // Recipient side of @-mention tagging — mounted HERE (above the keyed surface)
   // so it survives the group⇆individual swap and notifies wherever the viewer
   // is in the project.
@@ -106,7 +113,7 @@ export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, proje
     return (
       <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
         {unreadPill}
-        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} />
+        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} humanMemberCount={humanMemberCount} />
       </div>
     )
   }
