@@ -1,0 +1,34 @@
+/* MentionBubble — presentational chips for a group-chat human turn body.
+   Tokens only (Sprntly design system); no new palette. */
+
+.mentionText {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* A people-mention chip — filled accent-soft, the same treatment the picker's
+   member rows read as. */
+.mentionChip {
+  display: inline;
+  padding: 0.02em 0.32em;
+  margin: 0 0.02em;
+  border-radius: 0.4em;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The @Sprntly agent chip — DISTINCT from a person: outlined rather than
+   filled, so the agent token reads differently at a glance. */
+.agentChip {
+  display: inline;
+  padding: 0.02em 0.32em;
+  margin: 0 0.02em;
+  border-radius: 0.4em;
+  background: transparent;
+  color: var(--accent-ink);
+  border: 1px solid var(--accent-muted);
+  font-weight: 600;
+  white-space: nowrap;
+}

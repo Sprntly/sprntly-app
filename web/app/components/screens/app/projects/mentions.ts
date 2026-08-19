@@ -16,11 +16,13 @@ const AGENT_MENTION = "sprntly"
  *  into the source text (`@` at `start`, caret at `end`). */
 export type MentionQuery = { query: string; start: number; end: number }
 
-/** A rendered-message segment: plain text (rendered as-is / through markdown)
- *  or a people-mention chip. */
+/** A rendered-message segment: plain text (rendered as-is / through markdown),
+ *  a people-mention chip, or the agent (`@Sprntly`) mention — a DISTINCT,
+ *  recognized token rendered as an agent chip (never a person). */
 export type MentionSegment =
   | { type: "text"; value: string }
   | { type: "mention"; label: string }
+  | { type: "agent"; label: string }
 
 /** True when `s` looks like a bare email — drives the "Invite <email> by
  *  email" affordance. Intentionally permissive (`local@domain.tld`); the
@@ -82,12 +84,14 @@ export function insertMentionChip(
 }
 
 /**
- * Split rendered message `content` into text / people-mention segments so an
- * `@name` reads as a chip. `@sprntly` (case-insensitive) is left as plain text
- * — it is the agent token, never a people chip (AC-8). A mention is `@` +
- * `[A-Za-z0-9]` followed by `[A-Za-z0-9._-]*` (a single name token; a
- * multi-word display name chips only its first word, which is acceptable
- * presentational fidelity in v1). Always returns at least one segment.
+ * Split rendered message `content` into text / people-mention / agent-mention
+ * segments so an `@name` reads as a chip. `@sprntly` (case-insensitive) is the
+ * AGENT token — emitted as a distinct `agent` segment (rendered as an agent
+ * chip, never a people chip). A mention is `@` + `[A-Za-z0-9]` followed by
+ * `[A-Za-z0-9._-]*` (a single name token; a multi-word display name chips only
+ * its first word, acceptable presentational fidelity in v1). Handles multiple
+ * mentions and `@Sprntly` + `@user` in one message. Always returns at least
+ * one segment.
  */
 export function parseMentionChips(content: string): MentionSegment[] {
   const segments: MentionSegment[] = []
@@ -96,9 +100,12 @@ export function parseMentionChips(content: string): MentionSegment[] {
   let m: RegExpExecArray | null
   while ((m = re.exec(content)) != null) {
     const label = m[1]
-    if (label.toLowerCase() === AGENT_MENTION) continue // agent token — plain text
     if (m.index > last) segments.push({ type: "text", value: content.slice(last, m.index) })
-    segments.push({ type: "mention", label })
+    segments.push(
+      label.toLowerCase() === AGENT_MENTION
+        ? { type: "agent", label }   // agent token — a distinct agent chip
+        : { type: "mention", label },
+    )
     last = m.index + m[0].length
   }
   if (last < content.length || segments.length === 0) {
