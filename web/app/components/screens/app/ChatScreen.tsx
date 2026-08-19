@@ -35,6 +35,7 @@ import {
   useSlackShareCardHandlers,
   type PendingShareState,
 } from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
+import { useAssignCompletion } from "../../shared/chat-shell/conversation/useAssignCompletion"
 import {
   SlackShareMessage,
   type SlackShareResolution,
@@ -49,7 +50,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { spliceSkill, resolveAttachmentRefs } from "../../shared/chatComposerController"
 import {
   type ChatIntentEnvelope,
-  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, ticketDataApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -3036,89 +3037,44 @@ export function ChatScreen() {
     })
 
   /** The one place anything is actually posted to Slack. */
-  /** The assign batch's ONE landing: the popup collected every pick (owner
-   *  directive — finish all the questions before anything is sent), and only
-   *  now do the writes happen, each through the ordinary fields endpoint. The
-   *  summary posts as its own agent turn on the flow's conversation entry. */
-  const completeAssign = useCallback(async (
-    tabId: string, answers: PopupAnswer[],
-  ) => {
-    const tab = tabsRef.current.find((t) => t.id === tabId)
-    const pa = tab?.pendingAssign
-    if (!pa) return
-    // Close the batch first — the popup is spent; the writes ride the tab's
-    // busy state, not a half-open stepper.
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
-    setBusyTabs((prev) => addToSet(prev, tabId))
-    const applied = [...pa.applied]
-    const failed: string[] = []
-    let skipped = 0
-    try {
-      for (let i = 0; i < pa.questions.length; i++) {
-        const q = pa.questions[i]
-        const a = answers[i]
-        // A multi-pick answer carries EVERY tick on `picks` — one option (and
-        // one write) per pick. A single-pick answer resolves to exactly one
-        // option, same lookup as always: by stable value first, label second.
-        const chosen: TicketAssignQuestion["options"] = []
-        if (a && !a.skipped && a.answer) {
-          if (q.multi && a.picks?.length) {
-            for (const p of a.picks) {
-              const opt =
-                (p.value != null ? q.options.find((o) => o.value === p.value) : undefined) ??
-                q.options.find((o) => o.label === p.label)
-              if (opt) chosen.push(opt)
-            }
-          } else {
-            const opt =
-              (a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
-              q.options.find((o) => o.label === a.answer)
-            if (opt) chosen.push(opt)
-          }
-        }
-        if (!chosen.length) { skipped += 1; continue }
-        for (const opt of chosen) {
-          const pair = q.fixed.kind === "ticket"
-            ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
-            : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
-          if (!pair.assignee) { skipped += 1; continue }
-          try {
-            await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
-            applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
-          } catch {
-            failed.push(pair.title)
-          }
-        }
-      }
-      const lines: string[] = []
-      if (applied.length) lines.push(`All set — assigned:\n${applied.map((l) => `- ${l}`).join("\n")}`)
-      if (skipped) lines.push(`${skipped === 1 ? "One ticket was" : `${skipped} tickets were`} left as they are.`)
-      if (failed.length) lines.push(`I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`)
-      // Nothing landed and nothing broke → everything was skipped; say that
-      // plainly instead of a bare skip count with no verdict.
-      const summary = !applied.length && !failed.length
-        ? "No assignments made — everything was skipped, so the tickets keep their current owners."
-        : lines.join("\n\n")
-      const reply = {
-        answer: summary, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse
-      const noteId =
-        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      setTabs((prev) => prev.map((t) => t.id === tabId
-        ? { ...t, thread: [...t.thread, { id: noteId, query: "", reply }] }
-        : t))
-      finalizeConversationTurn(pa.turnId, { reply }, tabId)
-    } finally {
-      setBusyTabs((prev) => removeFromSet(prev, tabId))
-    }
-  }, [finalizeConversationTurn])
-
-  /** The assign popup's × — close the stepper. Nothing has been written from
-   *  it (the batch only submits on completion), so there is nothing to report:
-   *  the explicit pairs the plan applied are already in the flow's reply. */
-  const cancelAssign = useCallback((tabId: string) => {
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, pendingAssign: undefined } : t))
+  // The assign batch's ONE landing (the popup collected every pick, then these
+  // writes happen through the ordinary fields endpoint, summary as its own agent
+  // turn) comes from the shared `useAssignCompletion` — the project host calls
+  // the SAME unit. Main injects seams bound to the ACTIVE tab, the only tab an
+  // assign popup is ever open on: read/clear its `pendingAssign`, toggle its
+  // busy set, append the summary turn (main's crypto-id), finalize it.
+  const assignGetPending = useCallback(
+    () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.pendingAssign,
+    [],
+  )
+  const assignClearPending = useCallback(
+    () => setTabs((prev) => prev.map((t) =>
+      t.id === activeTabIdRef.current ? { ...t, pendingAssign: undefined } : t)),
+    [],
+  )
+  const assignSetBusy = useCallback((busy: boolean) => {
+    const tabId = activeTabIdRef.current ?? ""
+    setBusyTabs((prev) => busy ? addToSet(prev, tabId) : removeFromSet(prev, tabId))
   }, [])
+  const assignAppendReplyTurn = useCallback((reply: AskResponse) => {
+    const noteId =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) => t.id === activeTabIdRef.current
+      ? { ...t, thread: [...t.thread, { id: noteId, query: "", reply }] }
+      : t))
+  }, [])
+  const assignFinalizeTurn = useCallback(
+    (turnId: string, reply: AskResponse) =>
+      finalizeConversationTurn(turnId, { reply }, activeTabIdRef.current ?? ""),
+    [finalizeConversationTurn],
+  )
+  const { completeAssign, cancelAssign } = useAssignCompletion({
+    getPendingAssign: assignGetPending,
+    clearPendingAssign: assignClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
 
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays

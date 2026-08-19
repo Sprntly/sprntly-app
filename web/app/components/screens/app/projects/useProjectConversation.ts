@@ -37,7 +37,6 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  ticketDataApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
   type ChatArtifactItem, type SlackShareTargetRef,
 } from "../../../../lib/api"
@@ -46,6 +45,7 @@ import {
   useSlackShareCardHandlers,
   type PendingShareState,
 } from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
+import { useAssignCompletion } from "../../../shared/chat-shell/conversation/useAssignCompletion"
 import { resumePrdGeneration } from "../../../../lib/runPrdGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
@@ -940,71 +940,28 @@ export function useProjectConversation(
   }, [patchSlackShare])
 
   // ── Assign: apply the dock popup's ambiguous picks (main-parity) ───────────
-  // The batch's ONE landing: the popup collected every pick (finish all
-  // questions before anything is sent), and only now do the writes happen, each
-  // through the ordinary fields endpoint. Mirrors main's `completeAssign` over
-  // the single-conversation thread (no shared extraction exists — main keeps it
-  // inline too, `runAssignTicketsAction` only covers the up-front unambiguous
-  // apply + raising this question).
-  const completeAssign = useCallback(async (_tabId: string, answers: PopupAnswer[]) => {
-    const pa = pendingAssignRef.current
-    if (!pa) return
-    setPendingAssign(undefined)
-    setBusy(true)
-    const applied = [...pa.applied]
-    const failed: string[] = []
-    let skipped = 0
-    try {
-      for (let i = 0; i < pa.questions.length; i++) {
-        const q = pa.questions[i]
-        const a = answers[i]
-        const chosen: TicketAssignQuestion["options"] = []
-        if (a && !a.skipped && a.answer) {
-          if (q.multi && a.picks?.length) {
-            for (const p of a.picks) {
-              const opt =
-                (p.value != null ? q.options.find((o) => o.value === p.value) : undefined) ??
-                q.options.find((o) => o.label === p.label)
-              if (opt) chosen.push(opt)
-            }
-          } else {
-            const opt =
-              (a.value != null ? q.options.find((o) => o.value === a.value) : undefined) ??
-              q.options.find((o) => o.label === a.answer)
-            if (opt) chosen.push(opt)
-          }
-        }
-        if (!chosen.length) { skipped += 1; continue }
-        for (const opt of chosen) {
-          const pair = q.fixed.kind === "ticket"
-            ? { key: q.fixed.ticket_key, title: q.fixed.ticket_title, assignee: opt.assignee }
-            : { key: opt.value, title: opt.label, assignee: q.fixed.assignee }
-          if (!pair.assignee) { skipped += 1; continue }
-          try {
-            await ticketDataApi.saveFields(pair.key, { assignee: pair.assignee })
-            applied.push(`“${pair.title}” → ${pair.assignee.display_name || pair.assignee.email || "them"}`)
-          } catch {
-            failed.push(pair.title)
-          }
-        }
-      }
-      const lines: string[] = []
-      if (applied.length) lines.push(`All set — assigned:\n${applied.map((l) => `- ${l}`).join("\n")}`)
-      if (skipped) lines.push(`${skipped === 1 ? "One ticket was" : `${skipped} tickets were`} left as they are.`)
-      if (failed.length) lines.push(`I couldn't save ${failed.map((t) => `“${t}”`).join(", ")} — try those from the ticket itself.`)
-      const summary = !applied.length && !failed.length
-        ? "No assignments made — everything was skipped, so the tickets keep their current owners."
-        : lines.join("\n\n")
-      const reply = {
-        answer: summary, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-      } as AskResponse
-      const noteId = newId()
-      setThread((prev) => [...prev, { id: noteId, query: "", reply }])
-      void finalizeConversationTurn(pa.turnId, { reply }, convKey)
-    } finally {
-      setBusy(false)
-    }
+  // The batch's ONE landing (finish all questions, then the writes happen through
+  // the ordinary fields endpoint, summary as its own agent turn) comes from the
+  // shared `useAssignCompletion` — main's ChatScreen calls the SAME unit. This
+  // surface injects seams over its ONE conversation: read/clear its
+  // `pendingAssign`, toggle busy, append the summary turn (`newId`), finalize it.
+  const assignGetPending = useCallback(() => pendingAssignRef.current, [])
+  const assignClearPending = useCallback(() => setPendingAssign(undefined), [])
+  const assignSetBusy = useCallback((b: boolean) => setBusy(b), [])
+  const assignAppendReplyTurn = useCallback((reply: AskResponse) => {
+    const noteId = newId()
+    setThread((prev) => [...prev, { id: noteId, query: "", reply }])
+  }, [])
+  const assignFinalizeTurn = useCallback((turnId: string, reply: AskResponse) => {
+    void finalizeConversationTurn(turnId, { reply }, convKey)
   }, [convKey, finalizeConversationTurn])
+  const { completeAssign, cancelAssign } = useAssignCompletion({
+    getPendingAssign: assignGetPending,
+    clearPendingAssign: assignClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
 
   // ── Host-bag assembly ──────────────────────────────────────────────────────
   const activeTab = useMemo(() => ({
@@ -1098,7 +1055,7 @@ export function useProjectConversation(
     pendingAssignState: pendingAssign,
     activeTabId: convKey,
     completeAssign,
-    cancelAssign: () => { setPendingAssign(undefined) },
+    cancelAssign,
     sharePopupOpen: !!pendingShare,
     pendingShareState: pendingShare,
     completeShareQuestion,
