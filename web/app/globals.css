@@ -10305,11 +10305,34 @@
     margin: 0.25em 0;
   }
 
+  /* Markdown tables. Three things have to hold together here, and the reason
+     they are all on this one selector is that a report table ("Decision
+     Register", a status matrix) is the shape that broke: a "Status" header
+     rendered stacked one letter per line as "St/at/us" while the neighbouring
+     prose column ran the full width of the chat column.
+
+     The cause is inheritance, not the table rules. This prose sits inside
+     `.bc-agent-body`, which sets `overflow-wrap: anywhere` so a pasted URL
+     can't blow the chat column open. Inherited into a table that property is
+     poison: unlike `break-word`, `anywhere` introduces soft-wrap
+     opportunities that COUNT toward a cell's min-content width. Every column
+     therefore reports a min-content of roughly one character, the auto table
+     layout concludes it may shrink any of them to nothing, and it hands the
+     width to whichever column carries the most text. So the fix is to re-set
+     the wrapping on the cells rather than to hand-tune column widths. */
   .ai-bar-reply-answer table {
+    /* `display: block` + `width: max-content` capped at the column makes the
+       table its own horizontal scroller: a narrow table renders at its
+       natural width instead of being stretched thin, a normal one fills the
+       column and wraps, and one that genuinely cannot fit scrolls instead of
+       overflowing the message. */
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow-x: auto;
     border-collapse: collapse;
     margin: 0.7em 0;
     font-size: 12px;
-    width: 100%;
   }
 
   .ai-bar-reply-answer th,
@@ -10318,12 +10341,30 @@
     padding: 6px 10px;
     text-align: left;
     vertical-align: top;
+    /* `break-word`, NOT `anywhere` — both break a word too long for its
+       column, but only `break-word` is excluded from min-content sizing. A
+       long URL still breaks instead of overflowing; "Status" keeps a whole
+       word's worth of min width, so the column can never collapse below it. */
+    overflow-wrap: break-word;
+    word-break: normal;
+    /* A floor under every column. Without it the auto layout parks a short
+       column at exactly its min-content and gives the surplus to the prose
+       column, which is how an id like "D-001" ends up split over two lines at
+       a hyphen while the note beside it runs three times as wide. 4.5em is
+       deliberately modest — enough for an id, a status word, or a small
+       number, not enough to starve the prose column on a seven-column table. */
+    min-width: 4.5em;
   }
 
   .ai-bar-reply-answer th {
     background: var(--surface);
     font-weight: 600;
     color: var(--ink);
+    /* Headers are labels, so keep them on one line — the column is then sized
+       by the widest of (header, content) rather than by content alone, which
+       is what balances a short-value column against a prose one. Safe because
+       the table above scrolls rather than overflowing. */
+    white-space: nowrap;
   }
 
   .ai-bar-reply-answer a {
