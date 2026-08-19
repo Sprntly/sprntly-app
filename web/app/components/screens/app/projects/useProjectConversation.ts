@@ -250,11 +250,35 @@ export function useProjectConversation(
   const mergeGroupTurns = useCallback((incoming: GroupTurn[]) => {
     const fresh = incoming.filter((gt) => !seenGroupTurnIdsRef.current.has(gt.id))
     if (fresh.length === 0) return
+    // Defensive reply echo-dedup (poster only): an ASSISTANT turn whose text
+    // this poster is ALREADY showing inline on a turn IT originated is its own
+    // reply's realtime echo — the sender rendered the answer on its user turn
+    // from the ask poll, so the broadcast of the same reply must not render a
+    // SECOND, standalone copy. The primary guard is the `client_message_id`
+    // echo-dedup (`isOwnEcho`, applied before this in `groupOnEvent`/reconcile);
+    // this is the content-level backstop for the sender, so a cmid-correlation
+    // miss can never double-render the poster's own reply. A peer (which never
+    // originated the send, so has no matching inline answer) is unaffected and
+    // still sees the reply exactly once.
+    const originatedTurnIds = new Set(cmidByTurnIdRef.current.keys())
+    const myInlineAnswers = new Set(
+      threadRef.current
+        .filter((t) => originatedTurnIds.has(t.id) && t.reply?.answer)
+        .map((t) => (t.reply!.answer || "").trim())
+        .filter((a) => a.length > 0),
+    )
+    const toAdd: GroupTurn[] = []
     fresh.forEach((gt) => {
       seenGroupTurnIdsRef.current.add(gt.id)
       if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
+      if (gt.role === "assistant") {
+        const ans = ((gt.reply?.answer ?? gt.content) || "").trim()
+        if (ans.length > 0 && myInlineAnswers.has(ans)) return
+      }
+      toAdd.push(gt)
     })
-    const mapped = fresh.map(mapGroupTurn)
+    if (toAdd.length === 0) return
+    const mapped = toAdd.map(mapGroupTurn)
     setThread((prev) => [...prev, ...mapped])
   }, [mapGroupTurn])
 
