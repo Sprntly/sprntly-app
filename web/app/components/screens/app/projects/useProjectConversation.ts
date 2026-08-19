@@ -138,6 +138,11 @@ export function useProjectConversation(
   metaRef.current = meta
   const dbConvIdRef = useRef<number | null>(null)
   dbConvIdRef.current = dbConvId
+  // Late-bound handle to `ensureProjectConv` (defined below) so the persistence
+  // memo can delegate its create path to the durable project conversation
+  // without depending on the callback's identity. Assigned during render, read
+  // only inside async persistence calls, so it is always set by call time.
+  const ensureProjectConvRef = useRef<(() => Promise<number | null>) | null>(null)
   // Fresh reads for the dock-question async handlers (main reads these off its
   // tabsRef; the single-conversation store keeps them on refs the same way).
   const pendingShareRef = useRef(pendingShare)
@@ -213,13 +218,28 @@ export function useProjectConversation(
   }, [dbConvId, setContent])
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
-  const persistence = useMemo(() => createChatPersistence({
-    getApi: () => import("../../../../lib/api").then((m) => m.conversationsApi),
-    getTabConvId: () => dbConvIdRef.current,
-    getTabPrdId: () => metaRef.current.prdId ?? null,
-    setTabConvId: (_key, convId) => { setDbConvId(convId) },
-    onConversationCreated: () => { /* no rail entry on a project surface */ },
-  }), [])
+  const persistence = useMemo(() => {
+    const base = createChatPersistence({
+      getApi: () => import("../../../../lib/api").then((m) => m.conversationsApi),
+      getTabConvId: () => dbConvIdRef.current,
+      getTabPrdId: () => metaRef.current.prdId ?? null,
+      setTabConvId: (_key, convId) => { setDbConvId(convId) },
+      onConversationCreated: () => { /* no rail entry on a project surface */ },
+    })
+    // Route the create path to the DURABLE project conversation. The shared gen
+    // flows (create-artifact/import-PRD/ticket-set) call `ensureConversation`
+    // when a tab has no bound row; the generic path mints a THROWAWAY
+    // `conversationsApi.create` row, which the reload-time hydrate — reading the
+    // project row — can't see, so a chat-written document orphans from its
+    // thread (the same fork the top-of-file note calls out for sends). Delegate
+    // to `ensureProjectConv` (get-or-create per project+surface) so every such
+    // artifact attaches to the one row hydrate reads back.
+    return {
+      ...base,
+      ensureConversation: () =>
+        (ensureProjectConvRef.current ? ensureProjectConvRef.current() : Promise.resolve(null)),
+    }
+  }, [])
 
   // ── The single-conversation handle ────────────────────────────────────────
   const makeHandle = useCallback((_key: string): ConversationHandle => ({
@@ -273,6 +293,8 @@ export function useProjectConversation(
       return null
     }
   }, [projectId, surface])
+  // Publish for the persistence create-path override (declared above the memo).
+  ensureProjectConvRef.current = ensureProjectConv
 
   // conversation_id, NO project_id (main chat on a project-bound row).
   const resolveAskParams = useCallback(async (
@@ -576,11 +598,19 @@ export function useProjectConversation(
         ? composer.attachments.map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`).join("\n\n").slice(0, 100000)
         : null
       const intentMessage = attachedForIntent ? `${trimmed}\n\n[Attached files]\n${attachedForIntent}` : trimmed
+      // The PRD open beside this chat — main sends its tab's PRD as the planner
+      // hint (`tabPrdId`), which the route turns into "Active tab: PRD #X ‹title›
+      // is open" so "open/share/edit the PRD" resolves to it. This surface's
+      // equivalent is the shared panel's open PRD (`content.prd`); without it a
+      // PRD opened via the panel/artifact-list is invisible to the planner
+      // (meta.prdId is only set on in-conversation generate/edit), so the same
+      // commands fell through to a grounded ask. Workspace-scoped, same as main.
+      const openPanelPrdId = content.prd?.prd_id ?? null
       const envelope: ChatIntentEnvelope | null = await chatIntentApi
-        .resolve(intentMessage, { conversationId: dbConvIdRef.current, prdId: metaRef.current.prdId ?? null, hasAttachments: composer.attachments.length > 0 })
+        .resolve(intentMessage, { conversationId: dbConvIdRef.current, prdId: metaRef.current.prdId ?? openPanelPrdId, hasAttachments: composer.attachments.length > 0 })
         .catch(() => null)
       if (envelope) {
-        const targetPrdId = !docFile ? (envelope.prd_id ?? metaRef.current.prdId ?? null) : null
+        const targetPrdId = !docFile ? (envelope.prd_id ?? metaRef.current.prdId ?? openPanelPrdId) : null
         const ticketsTarget = !docFile
           ? (metaRef.current.ticketSetId != null ? { ticketSetId: metaRef.current.ticketSetId } as const
             : targetPrdId != null ? { prdId: targetPrdId } as const : null)
@@ -657,13 +687,25 @@ export function useProjectConversation(
                 // A REAL `SlackShareTargetRef` (the shipped shape used `{ kind,
                 // prdId }`, force-cast — keys the share/preview endpoint ignores,
                 // so even the PRD open in the panel never reached a valid target).
-                // Point it at the PRD open beside this chat the way main's
-                // `shareRefFor` uses the tab's PRD: the envelope's resolved id,
-                // else this conversation's own PRD, else the shared panel's open
-                // PRD (`content.prd`).
-                resolveShareRef: (e): SlackShareTargetRef => ({
-                  prd_id: e.prd_id ?? metaRef.current.prdId ?? content.prd?.prd_id ?? null,
-                }),
+                // Mirrors main's `shareRefFor` over this surface's PRD context:
+                // the envelope's resolved id, else this conversation's own PRD,
+                // else the shared panel's open PRD (`content.prd`). A NAMED subject
+                // with no id in context — "share the checkout PRD" — falls through
+                // to a title reference the preview resolves workspace-wide,
+                // server-side, exactly like main (project-only artifacts stay
+                // unresolvable-by-name = the deferred project-context behaviour).
+                resolveShareRef: (e): SlackShareTargetRef => {
+                  const prdId = e.prd_id ?? metaRef.current.prdId ?? content.prd?.prd_id ?? null
+                  const named = (e.artifact_type || "").toLowerCase()
+                  if (named === "prd" && prdId) return { prd_id: prdId }
+                  // "share this" with a PRD in front → that PRD.
+                  if (!e.artifact_query && prdId) return { prd_id: prdId }
+                  // A named subject → resolve by title server-side (main parity).
+                  if (e.artifact_type || e.artifact_query) {
+                    return { artifact_type: e.artifact_type ?? null, artifact_query: e.artifact_query ?? null }
+                  }
+                  return { prd_id: prdId }
+                },
                 canAskInDock: true,
                 onDockQuestion: (turnId, question) => {
                   if (question.kind !== "slack_channel") return
