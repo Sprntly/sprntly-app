@@ -26,7 +26,10 @@
  * AttachmentViewer + report-by-title opens have no project-surface sink yet.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
+// Single source of truth for the busy-send hint copy — main defines it beside
+// its own composer. Reused (not duplicated) so the two surfaces stay verbatim.
+import { BUSY_ENTER_HINT_LEAD, BUSY_ENTER_HINT_TAIL } from "../ChatScreen"
 import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
@@ -801,10 +804,18 @@ export function useProjectConversation(
   const handleComposerSubmit = useCallback(() => {
     const q = composer.draft.trim()
     if (q.length < 1 && composer.attachments.length === 0) return
+    // Enter while this conversation's answer is still streaming: show the busy
+    // hint and DON'T drop the message — mirrors main's `handleComposerSubmit`
+    // busy branch. This must run BEFORE the draft is cleared below; otherwise
+    // the submitAsk-internal asking-guard fires after `setDraft("")` and
+    // settlePendingSend, so the text and the optimistic bubble vanish with zero
+    // feedback (the network guard alone prevents the duplicate ask but says
+    // nothing to the user).
+    if (askingRef.current.has(convKey)) { composer.showComposerHint("busy"); return }
     if (composer.voice.listening) composer.voice.cancel()
     composer.setDraft(""); composer.setPinnedSkill(null); composer.setPlusMenuOpen(false)
     void submitAsk(q)
-  }, [composer, submitAsk])
+  }, [composer, submitAsk, convKey])
   const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (composer.slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); composer.setSlashActive((i) => (i + 1) % composer.filteredSkills.length); return }
@@ -1057,7 +1068,15 @@ export function useProjectConversation(
     prdGenerating: !!meta.prdGenerating,
   }), [convKey, hydrating, thread.length, meta.prdGenerating])
   const lastLiveTurnIdx = thread.length - 1
-  const composerHintNode = composer.voice.error ? composer.voice.error : null
+  // The composer's one status line, same precedence main uses: a dictation
+  // error outranks the busy hint (it's a stuck state, not a transient reply to
+  // a keystroke), and the busy hint reuses main's exact copy. Built with
+  // createElement because this host is a `.ts` file (no JSX).
+  const composerHintNode = composer.voice.error
+    ? composer.voice.error
+    : composer.composerHint === "busy"
+      ? createElement(Fragment, null, BUSY_ENTER_HINT_LEAD, createElement("b", null, "Stop"), BUSY_ENTER_HINT_TAIL)
+      : null
 
   // The clarify card's open turn (carries `.clarify` + `.id`), if any.
   const pendingClarifyTurn = useMemo(() => {
