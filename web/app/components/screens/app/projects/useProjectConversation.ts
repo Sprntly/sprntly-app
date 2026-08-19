@@ -34,7 +34,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  slackShareApi, ticketDataApi,
+  slackShareApi, ticketDataApi, customArtifactsApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
   type ChatArtifactItem, type SlackShareTarget, type SlackShareTargetRef,
 } from "../../../../lib/api"
@@ -110,7 +110,7 @@ export function useProjectConversation(
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
   const { content, setContent } = useContent()
-  const { openContentPanel, showToast } = useNavigation()
+  const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   const name = profileDisplayName(profile) || "You"
   const userInitials = name.slice(0, 2).toUpperCase()
 
@@ -216,6 +216,47 @@ export function useProjectConversation(
     setContent({ conversationId: dbConvId })
     return () => { setContent({ conversationId: null }) }
   }, [dbConvId, setContent])
+
+  // ── A thread that produced a DOCUMENT reopens on it (main parity) ───────────
+  // Mirror of ChatScreen's document-reopen probe ("A thread that produced a
+  // DOCUMENT opens on it") for this surface's ONE conversation. `useThreadDocumentSync`
+  // (AppShell) re-attaches `content.documentId` after a reload, but nothing opens
+  // the panel and a document turn has no reply-footer button, so a chat-written
+  // document was reachable only from the Artifacts library once the page reloaded.
+  // This probe closes that: on load, once per conversation, surface the newest
+  // non-failed document into the shared panel — with the SAME precedence main
+  // keeps (a PRD or ticket set that owns the panel wins, a failed doc never auto-
+  // opens, an already-open panel is never fought, and a fresh in-flight generate —
+  // `content.documentId` already set — is never overwritten by this older list read).
+  const documentProbedRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    if (hydrating || dbConvId == null) return
+    const convId = dbConvId
+    if (documentProbedRef.current.has(convId)) return
+    const m = metaRef.current
+    if (m.prd || m.prdGenerating || m.prdId != null) return
+    if (m.ticketSetId != null) return
+    documentProbedRef.current.add(convId)
+    void (async () => {
+      try {
+        const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
+        if (!docs.length) return
+        const newest = docs[0]
+        // The user may have swapped surfaces during the round trip.
+        if (dbConvIdRef.current !== convId) return
+        if (newest.status === "failed") return
+        // Never fight a panel that is already open, and never overwrite the
+        // document a live generate just wrote (the stale-read guard).
+        if (contentPanelTab) return
+        if (content.documentId != null) return
+        setContent({ documentId: newest.id, documentGenerating: newest.status === "generating" })
+        openContentPanel("document")
+      } catch {
+        // A resume probe must never throw — its only job is to surface an
+        // artifact that may not exist.
+      }
+    })()
+  }, [hydrating, dbConvId, contentPanelTab, content.documentId, setContent, openContentPanel])
 
   // ── Persistence via conversation_turns (server-only writes) ────────────────
   const persistence = useMemo(() => {
