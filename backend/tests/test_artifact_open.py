@@ -211,15 +211,44 @@ def test_evidence_resolves_with_its_insight_coordinates(monkeypatch):
     assert out["artifact"]["insight_index"] == 3
 
 
-def test_empty_query_or_dataset_short_circuits_without_a_lookup(monkeypatch):
+def test_no_dataset_short_circuits_without_a_lookup(monkeypatch):
     seen = _patch_index(monkeypatch, [_prd(1, "Dark Mode")])
-    assert ao.resolve_open_artifact(
-        artifact_type="prd", query="   ", dataset="acme",
-    )["status"] == "not_found"
     assert ao.resolve_open_artifact(
         artifact_type="prd", query="dark mode", dataset="",
     )["status"] == "not_found"
-    assert not seen, "no query / no dataset must not hit the index"
+    assert not seen, "no dataset must not hit the index"
+
+
+def test_empty_query_resolves_the_sole_artifact(monkeypatch):
+    """A bare "open the PRD" (no title) arrives here as an EMPTY query. It no
+    longer short-circuits to not_found — it resolves to the sole openable
+    artifact of the kind (the project-chat single-PRD case), which is what keeps
+    the client off the answer engine's "that's a UI action" refusal."""
+    _patch_index(monkeypatch, [_prd(1, "Only PRD")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="   ", dataset="acme",
+    )
+    assert out["status"] == "resolved"
+    assert out["artifact"]["prd_id"] == 1
+
+
+def test_empty_query_with_several_artifacts_is_ambiguous(monkeypatch):
+    """Several openable artifacts and no title → ask which, with real chips —
+    never a silent pick, never not_found."""
+    _patch_index(monkeypatch, [_prd(1, "Alpha"), _prd(2, "Beta")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="", dataset="acme",
+    )
+    assert out["status"] == "ambiguous"
+    assert {c["prd_id"] for c in out["candidates"]} == {1, 2}
+
+
+def test_empty_query_with_no_artifacts_is_not_found(monkeypatch):
+    _patch_index(monkeypatch, [])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="", dataset="acme",
+    )
+    assert out["status"] == "not_found"
 
 
 def test_lookup_failure_degrades_to_not_found(monkeypatch):

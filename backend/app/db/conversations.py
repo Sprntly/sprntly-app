@@ -219,6 +219,54 @@ def get_conversation_prd_id(
         return None
 
 
+def get_conversation_project_id(
+    conversation_id: int,
+    company_id: str,
+) -> int | None:
+    """The project a chat conversation belongs to, or None.
+
+    A project-bound conversation is a `conversations` row with a non-null
+    `project_id`; `kind` is `individual` (the private per-user project chat) or
+    `group` (the one shared project chat). A MAIN-CHAT row shares `kind`'s
+    `individual` default but carries `project_id = NULL`, so it returns None and
+    stays workspace-scoped — `project_id` is the real discriminator, and the
+    `kind` guard only fences off any future non-project kind. Company-scoped
+    only — no per-user gate, because a `kind='group'` row is owned by its
+    creator, not the member currently classifying a message; the caller already
+    reached this conversation_id through an ownership/membership-checked surface,
+    and the value only NARROWS the read-only artifact listing to that project's
+    own documents (never widens it, never mutates), so the company scope is the
+    boundary that matters. Best-effort: any error → None.
+
+    Used by the chat-intent route to resolve a project chat's `open_artifact` /
+    `list_artifacts` legs against THE PROJECT's own artifacts even when the
+    client did not send a `context_source` — closing the class where a project
+    chat silently answers workspace-wide.
+    """
+    try:
+        c = require_client()
+        rows: Any = (
+            c.table("conversations")
+            .select("project_id, kind")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+            .execute()
+        )
+        if not rows.data:
+            return None
+        row = rows.data[0]
+        if row.get("kind") not in ("individual", "group"):
+            return None
+        return row.get("project_id")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to read project binding for conversation %s", conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
 # ── Evidence half of the binding (mirrors the PRD pair above exactly) ───────
 #
 # Extends the SAME mechanism to Evidence rather than inventing a parallel one

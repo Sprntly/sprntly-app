@@ -218,9 +218,16 @@
 
 /* AD-HOC (live-rig): artifact drawer open — [ chat | drawer ] side-by-side.
    The drawer takes a wide right region so the artifact is readable, the
-   chat keeps a workable min width to its left, both scroll independently. */
+   chat keeps a workable min width to its left, both scroll independently.
+   `--proj-drawer-w` is the user's dragged width (set on :root by the drawer's
+   own resize handle, persisted); with none it falls back to the default band.
+   The chat column stays `minmax(360px, 1fr)`, so widening the drawer NARROWS
+   the chat rather than covering it (same push-not-overlay posture as the
+   content panel). The narrow-viewport rules below drop the var entirely. */
 .bodyDrawerOpen {
-  grid-template-columns: minmax(360px, 1fr) minmax(420px, 600px);
+  grid-template-columns:
+    minmax(360px, 1fr)
+    var(--proj-drawer-w, clamp(420px, 42vw, 600px));
 }
 
 @media (max-width: 1080px) {
