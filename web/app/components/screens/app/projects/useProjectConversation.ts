@@ -26,7 +26,7 @@
  * AttachmentViewer + report-by-title opens have no project-surface sink yet.
  */
 
-import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 // Single source of truth for the busy-send hint copy — main defines it beside
 // its own composer. Reused (not duplicated) so the two surfaces stay verbatim.
 import { BUSY_ENTER_HINT_LEAD, BUSY_ENTER_HINT_TAIL } from "../ChatScreen"
@@ -61,6 +61,8 @@ import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
 import { personAvatarStyle } from "./avatarColor"
+import { MentionBubble } from "./MentionBubble"
+import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
@@ -84,6 +86,11 @@ export type ViewerAttachment = { name: string; content: string; key?: string | n
 export type ProjectConversationProps = ConversationViewProps & {
   viewerAttachment: ViewerAttachment | null
   setViewerAttachment: (a: ViewerAttachment | null) => void
+  /** The group @-mention picker dropdown (null when no `@…` token is active or
+   *  on the individual surface). The host renders it in a project-local overlay
+   *  anchored to the composer — no shared-composer touch. */
+  mentionPickerNode: ReactNode
+  mentionPickerOpen: boolean
 }
 
 type PendingClarify = { task: string; sourceDocs?: { name: string; content: string }[]; turnId: string }
@@ -513,6 +520,34 @@ export function useProjectConversation(
 
   // ── The shared unit ────────────────────────────────────────────────────────
   const composer = useComposer({ showToast })
+
+  // ── Group @-mention picker (project-local; touches NO shared composer) ──────
+  // A ComposerDraftApi built over the shared composer's textarea ref + setDraft:
+  // reads the LIVE DOM value/caret (most current, pre-React-sync) and re-seats
+  // the caret after the controlled update. The picker itself is inert on the
+  // individual surface (no input is fed to it there).
+  const mentionDraftApi = useMemo<ComposerDraftApi>(() => ({
+    getValue: () => composer.composerRef.current?.value ?? "",
+    getCaret: () => composer.composerRef.current?.selectionStart ?? (composer.composerRef.current?.value.length ?? 0),
+    setValue: (text, caret) => {
+      composer.setDraft(text)
+      requestAnimationFrame(() => {
+        const ta = composer.composerRef.current
+        if (!ta) return
+        ta.focus()
+        if (caret != null) ta.setSelectionRange(caret, caret)
+      })
+    },
+    // composerRef/setDraft are stable across renders; the methods read .current
+    // lazily at call time, so this object never needs to be rebuilt.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [])
+  const mentionPicker = useMentionPicker({
+    projectId,
+    draftApi: mentionDraftApi,
+    onAffordance: (a) => showToast(a.text, ""),
+  })
+
   const scroll = useThreadScroll({ thread, activeTabId: convKey, pendingSend: composer.pendingSend })
   const engine = useMainConversation({
     makeHandle, activeKey: convKey, activeCompany, askingRef,
@@ -1001,6 +1036,9 @@ export function useProjectConversation(
     void submitAsk(q)
   }, [composer, submitAsk, convKey])
   const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Group: the @-mention picker gets first refusal of arrow/Enter/Escape while
+    // a token is active, so nav/select/close don't submit or stop the chat.
+    if (isGroup && mentionPicker.handleKeys(e)) return
     if (composer.slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); composer.setSlashActive((i) => (i + 1) % composer.filteredSkills.length); return }
       if (e.key === "ArrowUp") { e.preventDefault(); composer.setSlashActive((i) => (i - 1 + composer.filteredSkills.length) % composer.filteredSkills.length); return }
@@ -1008,7 +1046,16 @@ export function useProjectConversation(
       if (e.key === "Escape") { e.preventDefault(); composer.setShowSlash(false); composer.setSlashFromMenu(false); return }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleComposerSubmit() }
-  }, [composer, handleComposerSubmit])
+  }, [composer, handleComposerSubmit, isGroup, mentionPicker])
+
+  // Caret-aware input interception (group): feed the picker the REAL
+  // selectionStart before the composer's own draft update, so a mid-string `@`
+  // opens/updates the picker on the token the caret is actually in. On the
+  // individual surface this is a pass-through.
+  const handleComposerInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    if (isGroup) mentionPicker.handleComposerInput(e.target.value, e.target.selectionStart ?? e.target.value.length)
+    composer.handleComposerInput(e)
+  }, [isGroup, mentionPicker, composer])
 
   // ── Retry a failed/errored ask ─────────────────────────────────────────────
   // The per-turn "Ask again" affordance (mapMainTurns' `onAskAgain`). Same
@@ -1243,7 +1290,10 @@ export function useProjectConversation(
     handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd,
     handleViewPrototype: () => {}, handlePrototypeSettled: () => {},
     onSendSlackShare: sendSlackShare, onCancelSlackShare: cancelSlackShareCard, onPickSlackShareTarget: repreviewSlackShare,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare])
+    // Group: route the user body through the mention-chip renderer (@user chips
+    // + @Sprntly agent chip). Individual/main leave it undefined → plain query.
+    renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query }) : undefined,
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
@@ -1251,13 +1301,16 @@ export function useProjectConversation(
     thread, mapDeps,
     // The attachment overlay's state, for the host to render the shared viewer.
     viewerAttachment, setViewerAttachment,
+    // The group @-mention picker, for the host's project-local overlay.
+    mentionPickerNode: isGroup ? mentionPicker.pickerNode : null,
+    mentionPickerOpen: isGroup && mentionPicker.open,
     draft: composer.draft, pinnedSkill: composer.pinnedSkill, attachments: composer.attachments,
     composerHintNode,
     plusMenuOpen: composer.plusMenuOpen, plusMenuActive: composer.plusMenuActive,
     slashOpen: composer.slashOpen, filteredSkills: composer.filteredSkills, slashActive: composer.slashActive,
     composerRef: composer.composerRef, fileInputRef: composer.fileInputRef, voice: composer.voice,
     handleSlashSelect: composer.handleSlashSelect, setSlashActive: composer.setSlashActive,
-    handleComposerInput: composer.handleComposerInput, handleComposerKeyDown, handleComposerSubmit,
+    handleComposerInput, handleComposerKeyDown, handleComposerSubmit,
     setPlusMenuActive: composer.setPlusMenuActive, setPlusMenuOpen: composer.setPlusMenuOpen,
     handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,

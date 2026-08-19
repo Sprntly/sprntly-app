@@ -18,6 +18,8 @@ import type { OpenArtifactCandidate } from "../../../../lib/api"
 import { ConversationView } from "../ConversationView"
 import { AttachmentViewer } from "../../../shared/AttachmentViewer"
 import { useProjectConversation, type ProjectChatSurface } from "./useProjectConversation"
+import { MentionPickerOverlay } from "./MentionPickerOverlay"
+import { useMentionNotifications } from "./useMentionNotifications"
 import styles from "./ProjectMainThread.module.css"
 
 /** One project chat surface = main's chat, configured for that surface's single
@@ -38,7 +40,7 @@ function ProjectChatSurface({
   // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
   // surface root — mirroring how ChatScreen mounts the same component beside its
   // own conversation view. Everything else is the exact `ConversationViewProps`.
-  const { viewerAttachment, setViewerAttachment, ...viewProps } =
+  const { viewerAttachment, setViewerAttachment, mentionPickerNode, mentionPickerOpen, ...viewProps } =
     useProjectConversation(projectId, surface, onOpenArtifact, projectName)
   return (
     <>
@@ -46,6 +48,7 @@ function ProjectChatSurface({
       {viewerAttachment ? (
         <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
       ) : null}
+      <MentionPickerOverlay open={mentionPickerOpen} node={mentionPickerNode} anchorRef={viewProps.composerRef} />
     </>
   )
 }
@@ -84,15 +87,32 @@ export type ProjectMainThreadProps = {
  *  resets the whole store and re-resolves the conversation, exactly like a page
  *  load — which was already showing the correct thread. */
 export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName }: ProjectMainThreadProps) {
+  // Recipient side of @-mention tagging — mounted HERE (above the keyed surface)
+  // so it survives the group⇆individual swap and notifies wherever the viewer
+  // is in the project.
+  const mentions = useMentionNotifications(projectId)
+  const unreadPill = mentions.unreadCount > 0 ? (
+    <button
+      type="button"
+      className={styles.mentionUnread}
+      data-testid="gc-mention-unread"
+      onClick={mentions.clear}
+    >
+      {mentions.unreadCount} new mention{mentions.unreadCount > 1 ? "s" : ""}
+    </button>
+  ) : null
+
   if (activeChat === "group") {
     return (
       <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
+        {unreadPill}
         <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} />
       </div>
     )
   }
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
+      {unreadPill}
       <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" onOpenArtifact={onOpenArtifact} />
     </div>
   )
