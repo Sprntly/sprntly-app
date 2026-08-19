@@ -191,23 +191,85 @@ describe("failure", () => {
 })
 
 describe("polling", () => {
+  // These two used to wait 120ms against a 3000ms interval, so they passed
+  // identically with TERMINAL = new Set() — they proved the clock had not
+  // ticked, not that polling had stopped. Fake timers make them mean it.
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
+  afterEach(() => vi.useRealTimers())
+
   it("stops polling once the run is terminal", async () => {
     get.mockResolvedValue(RUN)
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-ready")
     const calls = get.mock.calls.length
-    await new Promise((r) => setTimeout(r, 120))
+    await vi.advanceTimersByTimeAsync(12_000)
     expect(get.mock.calls.length).toBe(calls)
   })
 
-  it("stops polling while waiting on the human, too", async () => {
-    // awaiting_confirmation can last minutes. Polling through it is load for
-    // a state that only a click can change.
+  it("keeps polling while the run is still working", async () => {
+    // The control the old pair was missing entirely: a test that fails if
+    // polling stops when it should not.
+    get.mockResolvedValue({ ...RUN, status: "running" })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9_500)
+    expect(get.mock.calls.length).toBeGreaterThan(calls)
+  })
+
+  it("stops polling while waiting on the human", async () => {
     get.mockResolvedValue({ ...RUN, status: "awaiting_confirmation", prioritisation: { ask: "?" } })
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-confirm")
     const calls = get.mock.calls.length
-    await new Promise((r) => setTimeout(r, 120))
+    await vi.advanceTimersByTimeAsync(12_000)
     expect(get.mock.calls.length).toBe(calls)
+  })
+
+  it("RESTARTS polling after the user confirms", async () => {
+    // THE ONE THAT MATTERS. `awaiting_confirmation` is terminal, so the loop
+    // had already stopped; `load` is keyed on runId, which never changes, so
+    // nothing re-armed it. Every user confirmed and then watched
+    // "Reading 0 claims…" forever while the run finished on the server.
+    get.mockResolvedValue({
+      ...RUN, status: "awaiting_confirmation",
+      prioritisation: { ask: "?", proposed_definition: "net revenue" },
+    })
+    confirm.mockResolvedValue({ ...RUN, status: "running" })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-confirm")
+
+    get.mockResolvedValue({ ...RUN, status: "running" })
+    fireEvent.click(screen.getByText("Confirm and analyse"))
+    await waitFor(() => expect(confirm).toHaveBeenCalled())
+
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9_500)
+    expect(get.mock.calls.length).toBeGreaterThan(calls)
+  })
+})
+
+describe("transient failure", () => {
+  beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }))
+  afterEach(() => vi.useRealTimers())
+
+  it("one failed poll does not brick the panel", async () => {
+    // A multi-minute run spans deploys. A single 502 used to set a sticky
+    // error that short-circuited the whole panel with no way back.
+    get.mockResolvedValueOnce({ ...RUN, status: "running" })
+       .mockRejectedValueOnce(new Error("502"))
+       .mockResolvedValue(RUN)
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    await vi.advanceTimersByTimeAsync(9_500)
+    await waitFor(() => expect(screen.getByTestId("goal-ready")).toBeTruthy())
+  })
+
+  it("gives up after repeated failures rather than hammering", async () => {
+    get.mockRejectedValue(new Error("down"))
+    render(<GoalAnalysisTab runId={7} />)
+    await vi.advanceTimersByTimeAsync(15_000)
+    await waitFor(() =>
+      expect(screen.getByText(/Lost contact/)).toBeTruthy())
   })
 })

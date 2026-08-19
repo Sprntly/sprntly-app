@@ -526,7 +526,11 @@ export function chatIntentEnvelopeOn(
 export function crucibleOn(
   flags: Partial<FeatureFlags> | Record<string, boolean> | null | undefined,
 ): boolean {
-  return flags?.crucible === true
+  // `!!` rather than `=== true`, matching backend `bool(flags.get("crucible",
+  // False))`. Narrowing it to a strict identity check would disagree with the
+  // server on any truthy non-boolean a hand-edited row might hold — which is
+  // exactly the frontend/backend drift this shared predicate exists to stop.
+  return !!flags?.crucible
 }
 
 export function parseCompanyIcp(raw: unknown): CompanyIcp {

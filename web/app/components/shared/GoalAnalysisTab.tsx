@@ -31,6 +31,15 @@ import {
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
 const POLL_MS = 3000
 
+/** Consecutive failed polls before the panel stops trying. Three, because a
+ *  deploy restart drops one or two ticks and the run itself survives it. */
+const MAX_CONSECUTIVE_FAILURES = 3
+
+/** Statuses that will never change on their own. `awaiting_confirmation` is
+ *  here because only a click moves it — but the click has to RE-ARM the poll,
+ *  which is what `pollKey` below is for. Getting that wrong meant every user
+ *  confirmed and then watched "Reading 0 claims…" forever while the run
+ *  finished on the server. */
 const TERMINAL = new Set(["ready", "failed", "cancelled", "awaiting_confirmation"])
 
 /** Error codes the backend may return, in the user's language. Anything not
@@ -100,6 +109,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [error, setError] = useState<string | null>(null)
   const [definition, setDefinition] = useState("")
   const [confirming, setConfirming] = useState(false)
+  // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
+  // has not changed, so without this the effect never re-runs and the panel
+  // stays on the last status it saw.
+  const [pollKey, setPollKey] = useState(0)
+  // How many consecutive polls failed. One 502 on one tick of a multi-minute
+  // run must not brick the panel — a transient error is a retry, not a state.
+  const failures = useRef(0)
   // The user's edit must survive a poll landing underneath it. Without this
   // the textarea is reset every three seconds and a long definition is
   // impossible to type.
@@ -108,14 +124,22 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   const load = useCallback(async () => {
     try {
       const detail = await goalAnalysisApi.get(runId)
+      failures.current = 0
+      setError(null)              // a recovered poll clears the warning
       setRun(detail)
       if (!touched.current) {
         setDefinition(detail.prioritisation?.proposed_definition ?? "")
       }
       return detail.status
     } catch {
-      setError("Could not load this analysis.")
-      return "failed"
+      failures.current += 1
+      if (failures.current >= MAX_CONSECUTIVE_FAILURES) {
+        setError("Lost contact with this analysis. It may still be running.")
+        return "failed"           // stop polling; the run row survives
+      }
+      // Keep polling. Returning a non-terminal status is the point: a single
+      // blip during a run that takes minutes is not a reason to give up on it.
+      return "running"
     }
   }, [runId])
 
@@ -132,7 +156,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       live = false
       if (timer) clearTimeout(timer)
     }
-  }, [load])
+  }, [load, pollKey])
 
   const confirm = async () => {
     if (!definition.trim() || confirming) return
@@ -140,7 +164,10 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     try {
       await goalAnalysisApi.confirm(runId, definition.trim())
       touched.current = false
-      await load()
+      failures.current = 0
+      // Re-arm. The run has just left `awaiting_confirmation`, and nothing
+      // else would ever ask it again.
+      setPollKey((k) => k + 1)
     } catch {
       setError("Could not confirm that definition.")
     } finally {
@@ -148,7 +175,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     }
   }
 
-  if (error) return <p className="ga-error">{error}</p>
+  if (error && !run) return <p className="ga-error">{error}</p>
   if (!run) return <p className="ga-loading">Loading…</p>
 
   // ── The I9 gate. Not a loading state — a question. ───────────────────────

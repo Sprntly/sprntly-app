@@ -2452,6 +2452,11 @@ export function ChatScreen() {
           // rendering the PREVIOUS thread's document.
           documentId: null,
           documentGenerating: false,
+          // Same rule, same reason. A run belongs to the thread that started
+          // it, and leaving it set showed thread A's analysis — with a LIVE
+          // Confirm button — on thread B, where confirming would lock a goal
+          // definition against a conversation the reader was not looking at.
+          goalRunId: null,
         }
       : { conversationId: activeConvId })
     // `activeTabId` is a REAL dependency, not a lint appeasement: without it
@@ -6462,6 +6467,34 @@ export function ChatScreen() {
   // The `+` menu: Attach a file / Browse skills. The slash palette used to be
   // reachable ONLY by typing "/" or already knowing ⌘/, so 78 skills were
   // invisible to anyone who never read the footer hint.
+  // Restore this thread's analysis after a reload.
+  //
+  // `goalRunId` lives in the shared content slot, which is memory only, so
+  // without this a refresh made the run UNREACHABLE — it kept going on the
+  // server, finished, and had no way back onto the screen. That is #1187
+  // repeated, and it is the failure that makes a long-running feature feel
+  // broken rather than slow.
+  //
+  // Gated on the flag, so an unenrolled company never pays a request (or
+  // collects a 403) on every thread switch.
+  useEffect(() => {
+    if (!goalAnalysisOn || activeConvId == null) return
+    let live = true
+    void (async () => {
+      try {
+        const { runs } = await goalAnalysisApi.list()
+        if (!live) return
+        // Newest first from the server; take this thread's most recent.
+        const mine = runs.find((r) => r.conversation_id === activeConvId)
+        if (mine) setContent({ goalRunId: mine.id })
+      } catch {
+        // A failed restore is a missing panel, not a broken chat. The run row
+        // survives and the listing will be tried again on the next switch.
+      }
+    })()
+    return () => { live = false }
+  }, [goalAnalysisOn, activeConvId, setContent])
+
   // Start a Goal Analysis run and put its panel on screen.
   //
   // The panel opens on the run id RATHER THAN on a result, because the first
