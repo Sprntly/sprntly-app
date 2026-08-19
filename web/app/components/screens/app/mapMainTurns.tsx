@@ -73,6 +73,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onPickSlackShareTarget,
     handlePrototypeSettled,
     renderUserBody,
+    renderAgentBody,
   } = deps
 
   return thread.map((turn, idx): ChatTranscriptTurn => {
@@ -196,6 +197,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     const canRetryTurn = !!onRetryTurn && canReAskTurn
     const isEditing = canEditTurn && editingTurnId === turn.id
 
+    // Per-surface AGENT-body override (the project chats' on-join greeting
+    // `MORE_MARKER` lead/Show-more split). Returns a node ONLY for the turns it
+    // owns (a greeting carrying the marker); every other turn — and every main
+    // turn, which never passes `renderAgentBody` — returns null and stays on the
+    // default reply ladder, so the mapped output is byte-identical there.
+    const surfaceAgentBody = renderAgentBody ? renderAgentBody(turn) : null
+
     return {
       turnId: turn.id,
       onCopyUserTurn: canCopyTurn ? () => onCopyTurn!(turn) : undefined,
@@ -284,6 +292,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       onSubmitClarify: (answers) => submitClarifyAnswers(answers),
       onSkipClarify: () => submitClarifyAnswers([]),
       reply: turn.reply,
+      // The greeting's lead/Show-more body REPLACES the reply ladder (via
+      // ChatBubble's `agentBodyNode` escape hatch). Spread only when the
+      // surface owns this turn, so a normal turn never grows the field.
+      ...(surfaceAgentBody ? { agentBodyNode: surfaceAgentBody } : {}),
       // A report answer is an ARTIFACT: it reads in the panel's Reports tab.
       onOpenReport: openReportByTitle,
       openCandidates: turn.openCandidates,

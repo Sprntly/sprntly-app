@@ -62,6 +62,7 @@ import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/Clarif
 import { useComposer } from "../useComposer"
 import { personAvatarStyle } from "./avatarColor"
 import { MentionBubble } from "./MentionBubble"
+import { GreetingTurnBody } from "./GreetingTurnBody"
 import { mentionsAgent, stripAgentMention } from "./mentions"
 import { AGENT_NAME } from "../../../../lib/agent"
 import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
@@ -73,6 +74,7 @@ import type { ConversationHandle, AskGrounding } from "../conversationCore"
 import type { ThreadTurn, ChatTab } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
 import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
+import { MORE_MARKER } from "../../../shared/chat-shell/types"
 
 export type ProjectChatSurface = "individual" | "group"
 
@@ -1392,6 +1394,14 @@ export function useProjectConversation(
     // Group: route the user body through the mention-chip renderer (@user chips
     // + @Sprntly agent chip). Individual/main leave it undefined → plain query.
     renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query, knownNames: mentionKnownNames }) : undefined,
+    // The on-join greeting's lead/Show-more split. Only a greeting turn carries
+    // the `MORE_MARKER`; every other turn returns null and stays on the default
+    // reply ladder. Both project surfaces get it (either can host a greeting);
+    // main never passes it, so main rendering is unchanged.
+    renderAgentBody: (turn: { reply?: { answer: string } | null }) =>
+      turn.reply?.answer?.includes(MORE_MARKER)
+        ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
+        : null,
   }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)

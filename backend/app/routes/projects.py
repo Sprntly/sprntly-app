@@ -52,6 +52,7 @@ from app.db.companies import get_seat_limit
 from app.db.prds import save_prd_version, update_prd_content
 from app.team_email import send_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
+from app import drip_email
 from app import project_delegation
 from app import project_join_greeting
 from app import project_task_execution
@@ -309,6 +310,33 @@ def set_instructions_route(
     return {"instructions": projects_db.get_instructions(project_id)}
 
 
+def _notify_added_to_project(
+    *, email: str | None, recipient_name: str | None, project_id: int, project_name: str | None
+) -> None:
+    """Best-effort "you've been added to project X" email for a NET-NEW
+    existing-user add (POST /members, /tag t_workspace). Brand-new email
+    invitees already get the branded invite; this closes the gap for an
+    existing in-tenant user, who previously got nothing. Fully swallowed
+    (AD-P22): a missing key no-ops inside the sender, and any failure here
+    never breaks or delays the add. Sends the project NAME + a deep link to
+    it, never project content (AD-TNM2)."""
+    if not email:
+        return
+    try:
+        from app import config as config_mod
+
+        base = (getattr(config_mod.settings, "frontend_url", "") or "https://app.sprntly.ai").rstrip("/")
+        project_url = f"{base}/projects?id={project_id}"
+        drip_email.send_project_added_email(
+            to_email=email,
+            project_name=project_name or "",
+            project_url=project_url,
+            recipient_name=recipient_name or "",
+        )
+    except Exception:  # noqa: BLE001 — best-effort, never blocks the add
+        logger.warning("project_added_email_failed project_id=%s", project_id)
+
+
 @router.post("/{project_id}/members")
 def add_member(
     project_id: int,
@@ -331,7 +359,7 @@ def add_member(
     Inviting a not-yet-existing user by email is the tag endpoint's job
     (`POST .../tag`, which creates a project-carrying invite) — this route
     only grows the roster with an account that already exists in-tenant."""
-    _require_project_member(project_id, ctx)
+    project = _require_project_member(project_id, ctx)
     res = projects_db.resolve_candidate(project_id, payload.email)
     tier = res["tier"]
     if tier == projects_db.TIER_MEMBER:
@@ -339,12 +367,24 @@ def add_member(
     if tier in (projects_db.TIER_WORKSPACE, projects_db.TIER_COMPANY):
         member = projects_db.add_member(project_id, res["user_id"])
         logger.info("project_member_added project_id=%s user_id=%s", project_id, res["user_id"])
+        # Best-effort live landing on the added person's OWN per-user channel
+        # (AD-TNM5) — mirrors the /tag route's TIER_WORKSPACE branch so BOTH add
+        # paths emit `member.added` and an already-logged-in existing user lands
+        # live in the project. Swallows every failure, never changes this
+        # response or rolls back the add (AD-TNM2/AD-P22).
+        project_delegation._publish_member_added(project_id, res["user_id"], project["name"])
         # NEW-membership only (the TIER_MEMBER re-add branch returned above):
         # drop a grounding greeting into this member's private project chat so
         # they land with context, not a blank thread. Best-effort/non-blocking
         # (AD-P7) — a greeting failure never breaks or delays the add.
         project_join_greeting.post_join_greeting(
             project_id, res["user_id"], dataset=_dataset_for(ctx), company_id=ctx.company_id
+        )
+        # NET-NEW existing-user add → the "added to project X" email (best-effort;
+        # a re-add returned at the TIER_MEMBER branch above, so it never fires).
+        _notify_added_to_project(
+            email=res.get("email"), recipient_name=res.get("name"),
+            project_id=project_id, project_name=project["name"],
         )
         return member
     # t_newuser / t_refuse (foreign company, or no in-tenant account) — no add,
@@ -490,6 +530,13 @@ def tag_candidate_route(
         # the add.
         project_join_greeting.post_join_greeting(
             project_id, uid, dataset=_dataset_for(ctx), company_id=ctx.company_id
+        )
+        # NET-NEW existing-user add → the "added to project X" email (best-effort).
+        # The t_company / t_newuser tiers below already send an invite email, so
+        # only this direct-add branch needs it.
+        _notify_added_to_project(
+            email=res.get("email"), recipient_name=res.get("name"),
+            project_id=project_id, project_name=project["name"],
         )
         return {"tier": tier, "added": member}
 
