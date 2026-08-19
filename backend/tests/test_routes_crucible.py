@@ -348,3 +348,116 @@ def _prioritisation(run_id: int) -> dict:
 
     raw = [r for r in _table("crucible_runs") if r["id"] == run_id][0]["prioritisation"]
     return json.loads(raw) if isinstance(raw, str) else raw
+
+
+# ─── The two the reviewer caught: both invisible under pytest ────────────────
+
+def test_confirm_is_async_so_it_does_not_die_on_the_worker_thread(ctx):
+    """A sync `def` handler runs on FastAPI's anyio worker thread, where
+    `get_event_loop()` raises — every confirm would 500 in PRODUCTION while
+    passing here, and the row would already be flipped to `running`, bricked
+    behind its own 409. Asserted on the function, because the pytest branch is
+    exactly what hides the difference at runtime."""
+    import inspect
+
+    import app.routes.crucible as mod
+
+    assert inspect.iscoroutinefunction(mod.confirm), (
+        "confirm must be `async def`: a sync handler has no running loop"
+    )
+    assert inspect.iscoroutinefunction(mod.start)
+
+
+def test_the_orphan_sweep_is_actually_wired_to_the_scheduler(ctx):
+    """A sweep nobody calls heals nothing. `custom_artifacts` shipped exactly
+    this and had to be fixed later — the row spun until the next deploy, which
+    on prod is days."""
+    import inspect
+
+    import app.scheduler as scheduler
+
+    body = inspect.getsource(scheduler._run_orphan_ask_job_sweep)
+    assert "crucible_runs import sweep_orphans" in body
+
+
+def test_a_double_confirm_cannot_start_two_analyses(ctx):
+    """Read-then-write let both requests see `awaiting_confirmation` and both
+    proceed — two locked definitions and two sets of findings on one row, which
+    is invisible afterwards because each half looks correct. A double-click is
+    the ordinary way to produce it."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    first = runs_db.claim_for_confirmation(run_id, ctx.company_id)
+    second = runs_db.claim_for_confirmation(run_id, ctx.company_id)
+    assert first is not None
+    assert second is None
+
+
+def test_the_client_can_see_what_stage_0_is_asking_for(ctx, monkeypatch):
+    """A run that reports `awaiting_confirmation` without saying what it is
+    waiting FOR leaves the panel a blank box. The proposal was written to the
+    row and returned by nothing."""
+    from app.kpi_tree import KpiTree, NorthStar
+
+    tree = KpiTree(
+        north_star=NorthStar(metric="Net Revenue Retention (NRR)",
+                             description="expansion minus churn"),
+        primary_metrics=[], secondary_signals=[],
+    )
+    monkeypatch.setattr("app.kpi_tree.load_kpi_tree", lambda cid: tree)
+    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
+
+    body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert "expansion minus churn" in body["prioritisation"]["proposed_definition"]
+    assert body["prioritisation"]["ask"] or body["prioritisation"]["resolution"]
+
+
+def test_the_signal_read_is_ordered_because_it_is_paged(ctx):
+    """Postgres may return an unordered query in any order, so `range()` without
+    `order()` can repeat one row across pages and drop another — the corpus
+    would differ run to run and reproducibility is the whole claim."""
+    import inspect
+
+    import app.routes.crucible as mod
+
+    src = inspect.getsource(mod._load_signals)
+    assert '.order(' in src, "a paged read must be ordered"
+
+
+def test_an_unsized_finding_comes_back_LAST_not_first(ctx):
+    """`load_findings` orders impact DESC NULLS LAST. SQLite's own default
+    under DESC puts NULLs at the TOP, so without the explicit clause every
+    finding we could not size would be presented as the biggest one in the run
+    — the exact inversion I3 exists to prevent, and it would look like a
+    ranking rather than a bug."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.save_findings(run_id, ctx.company_id, [
+        {"statement": "unsized", "claim_ids": ["u"], "impact_value": None,
+         "currency": "accounts", "confidence_band": "low"},
+        {"statement": "small", "claim_ids": ["s"], "impact_value": 1.0,
+         "currency": "accounts", "confidence_band": "low"},
+        {"statement": "big", "claim_ids": ["b"], "impact_value": 9.0,
+         "currency": "accounts", "confidence_band": "low"},
+    ], [])
+
+    findings = ctx.client.get(f"/v1/crucible/{run_id}").json()["findings"]
+    assert [f["statement"] for f in findings] == ["big", "small", "unsized"]
+
+
+def test_the_ledger_comes_back_with_its_claim_ids(ctx):
+    """A rejection you cannot reopen is a dismissal. The considered list is
+    what makes the ranking credible, so the ids have to survive the round
+    trip."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.save_findings(run_id, ctx.company_id, [], [
+        {"label": "onboarding", "reason": "one conversation echoing",
+         "stopped_at_stage": "verification", "claim_ids": ["c1", "c2"]},
+    ])
+    considered = ctx.client.get(f"/v1/crucible/{run_id}").json()["considered"]
+    assert considered[0]["claim_ids"] == ["c1", "c2"]
+    assert considered[0]["stopped_at_stage"] == "verification"

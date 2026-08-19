@@ -70,6 +70,12 @@ def _public(row: dict) -> dict:
         "coverage_notes": row.get("coverage_notes") or [],
         "claim_count": row.get("claim_count") or 0,
         "conversation_id": row.get("conversation_id"),
+        # Stage 0's question and its prefilled proposal. Without this the panel
+        # can render that a run is WAITING but not what it is waiting for, so
+        # the confirmation step — the one thing the user has to do — is a blank
+        # box. `prioritisation` holds no raw error text; it is the run's own
+        # framing, which is exactly what the reader needs.
+        "prioritisation": row.get("prioritisation") or {},
         "created_at": row.get("created_at"),
         "finished_at": row.get("finished_at"),
     }
@@ -86,7 +92,7 @@ async def start(
         company.company_id,
         goal_text=body.goal_text,
         conversation_id=body.conversation_id,
-        created_by=getattr(company, "user_id", None),
+        created_by=company.user_id,
     )
 
     kwargs = dict(run_id=row["id"], company_id=company.company_id,
@@ -125,7 +131,7 @@ def get_run(run_id: int, company: WorkspaceContext = Depends(require_crucible_mo
 
 
 @router.post("/{run_id}/confirm")
-def confirm(
+async def confirm(
     run_id: int,
     body: ConfirmGoal,
     company: WorkspaceContext = Depends(require_crucible_module),
@@ -135,36 +141,45 @@ def confirm(
     Nothing here infers a definition and no LLM output can reach this state —
     a user typed or approved these words, and `confirm_goal` records who and
     when because `GoalDefinition` refuses to be locked without both.
+
+    ASYNC, not a sync `def`. A sync handler runs on FastAPI's anyio worker
+    thread, where `get_event_loop()` RAISES — so every confirm would 500 in
+    production while passing under pytest, and line 1 of the failure would
+    already have flipped the row to `running`, bricking it behind the 409.
+    `routes/custom_artifacts.py` documents this exact mistake as one already
+    made here: the fix for "a sync handler has no loop" is not to keep the sync
+    handler.
     """
-    row = runs_db.get(run_id, company.company_id)
-    if not row:
-        raise HTTPException(404, "Run not found")
-    if row.get("status") != "awaiting_confirmation":
+    claimed = await asyncio.to_thread(
+        runs_db.claim_for_confirmation, run_id, company.company_id
+    )
+    if claimed is None:
+        # Indistinguishable on purpose: a foreign id and an id that was never
+        # issued must look the same, since a 403 is itself a disclosure.
+        row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+        if not row:
+            raise HTTPException(404, "Run not found")
         raise HTTPException(
             409,
             f"This run is {row.get('status')}, so there is no definition "
             f"waiting to be confirmed.",
         )
 
-    runs_db.update(
-        run_id, company.company_id,
-        status="running",
-        goal_text=row.get("goal_text") or "",
-    )
     kwargs = dict(run_id=run_id, company_id=company.company_id,
-                  goal_text=row.get("goal_text") or "",
+                  goal_text=claimed.get("goal_text") or "",
                   definition_text=body.definition_text,
-                  confirmed_by=getattr(company, "user_id", None))
+                  confirmed_by=company.user_id)
     if "pytest" in sys.modules:
-        execute_run(**kwargs)
+        await asyncio.to_thread(execute_run, **kwargs)
     else:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task = asyncio.ensure_future(
             loop.run_in_executor(_POOL, partial(execute_run, **kwargs))
         )
         _inflight.add(task)
         task.add_done_callback(_inflight.discard)
-    return _public(runs_db.get(run_id, company.company_id) or row)
+    row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+    return _public(row or claimed)
 
 
 def execute_run(
@@ -376,6 +391,12 @@ def _load_signals(company_id: str) -> list[dict]:
             client.table("kg_signal")
             .select("id,kind,source_type,content,properties,valid_at,source_id")
             .eq("enterprise_id", company_id)
+            # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
+            # unordered query's rows in any order, so paging without one can
+            # repeat a row on page 2 and never return another — a run would
+            # read a slightly different corpus each time and stop being
+            # reproducible, which is the whole claim this engine makes.
+            .order("id")
             .range(page * 1000, page * 1000 + 999)
             .execute()
         ).data or []

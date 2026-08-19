@@ -88,6 +88,27 @@ def update(run_id: int, company_id: str, **fields: Any) -> Optional[dict]:
     return (res.data or [None])[0]
 
 
+def claim_for_confirmation(run_id: int, company_id: str) -> Optional[dict]:
+    """Atomically move a run out of `awaiting_confirmation`. None if it wasn't.
+
+    ONE statement, with the expected status IN THE WHERE CLAUSE. Read-then-write
+    would let two confirms both see `awaiting_confirmation` and both proceed —
+    two locked goal definitions and two sets of findings on one row, which is
+    not a race you can see afterwards because both halves look correct. A
+    double-click is the ordinary way to produce it.
+    """
+    res = (
+        require_client().table(TABLE)
+        .update({"status": "running",
+                 "started_at": datetime.now(timezone.utc).isoformat(),
+                 "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", run_id).eq("company_id", company_id)
+        .eq("status", "awaiting_confirmation")     # the claim
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
 def heartbeat(run_id: int, company_id: str) -> None:
     """Say the worker is still alive.
 

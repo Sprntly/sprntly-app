@@ -121,15 +121,30 @@ def _refute(claims: Sequence[Claim], accounts: Sequence[str]) -> Optional[str]:
     Modelled on what actually killed the spike's first framing: evidence that
     looks like a pattern because there is a lot of it, when all of it lands in
     one window and says one thing once.
+
+    MONOTONIC IN THE EVIDENCE, which the first version was not. Both rules were
+    gated on `len(claims) >= 4`, so three same-day claims from one account
+    shipped as a finding and a fourth killed it — more evidence for the same
+    thing made the verdict stricter, which is backwards, and it let through the
+    exact shape the spike was fooled by at the sizes where it is most likely.
+    A cluster is two or more claims by construction, so the gates are gone.
+
+    `accounts` here is the RAW set, before the goal's population filter. The
+    single-account rule is about how diverse the EVIDENCE is; narrowing to the
+    accounts a goal cares about is a different question, asked later, and
+    conflating them would refute every finding against a one-account goal.
     """
     dates = sorted(c.observed_at for c in claims)
-    if len(claims) >= 4 and (dates[-1] - dates[0]) < ECHO_WINDOW:
+    span = dates[-1] - dates[0]
+    if span < ECHO_WINDOW:
         return (
             f"all {len(claims)} supporting claims land within "
-            f"{(dates[-1] - dates[0]).days} days — this is one conversation "
+            f"{span.days} days — this is one conversation "
             f"echoing through the corpus, not a pattern over time"
         )
-    if len(accounts) <= 1 and len(claims) >= 4:
+    # Exactly one, not "at most one": ZERO named accounts is unsizeable, which
+    # is a finding we keep and mark (I3), not one we drop.
+    if len(accounts) == 1:
         return (
             "every supporting claim comes from a single account, so this is "
             "that account's situation rather than a pattern across the book"
@@ -176,13 +191,15 @@ def build_findings(
                      f"finding", "clustering", ids))
             continue
 
-        accounts = _accounts(group)
+        raw_accounts = _accounts(group)
+        accounts = raw_accounts
         if goal_accounts is not None:
             # THE POPULATION INTERSECTION DOES REAL WORK. Against a retention
             # goal, a finding about prospects scores zero however loud it is.
-            accounts = tuple(a for a in accounts if a in goal_accounts)
+            accounts = tuple(a for a in raw_accounts if a in goal_accounts)
 
-        refutation = _refute(group, accounts)
+        # Refute on the RAW set — see `_refute`. Size on the scoped one.
+        refutation = _refute(group, raw_accounts)
         if refutation:
             rejected.append(Rejection(key, refutation, "verification", ids))
             continue
