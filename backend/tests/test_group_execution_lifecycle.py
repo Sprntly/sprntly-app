@@ -1,40 +1,33 @@
-"""Group chat routed through the SHARED `run_execution_job` lifecycle.
+"""Group-turn run-status surfacing + idempotent send (deterministic).
 
-Deterministic (FakeSupabaseClient, no real LLM) proofs that the group send
-*inherits* the execution lifecycle by using the same primitive main/private
-use — not a status-column wrapper:
+SCOPE NOTE (post-rewrite): the group answer path was collapsed into the shared
+`qa_agent` + `/v1/ask` + `ask_job_runner` lifecycle. `post_group_turn_route` is
+now "mount-not-scheduler" — it persists + broadcasts the human turn and does NOT
+schedule a reply or own a retry route. The reply is produced by the shared
+`/v1/ask` execution job (the SAME primitive main/private use), so the primitive's
+own behaviour (generating row, error_class, capture/report/promote/ingest
+inheritance, `active_project_id` isolation, retry idempotency) is covered by the
+primitive's tests, not by group-specific duplicates. The group assistant-reply
+BROADCAST is covered by `test_realtime_publish.py`; the group no-fabrication
+guard by `test_group_trigger_and_no_fabrication.py`.
 
-  * a `generating` ask_jobs row is inserted SYNCHRONOUSLY before the reply is
-    backgrounded (AC5);
-  * the reply runs through the primitive — success posts a turn + flips the
-    row `ready`; a forced failure writes `status='error'` + `error_class` and
-    fabricates NO turn (the old log-only `except` is gone) (AC6);
-  * report/promote/ingest inheritance via `on_committed` (AC7);
-  * a group run leaves `active_project_id()` unset (AC8);
-  * idempotent retry: 409 while live, 422 on recorded side effects, 202 +
-    new run_id/attempt when clean, no duplicate side effects (AC12–AC14);
-  * run-status on the load/poll read + DTO keys + payload plumbing
-    (AC15–AC17);
-  * the retry-claim partial-unique enforces one live attempt (AC12/AC18).
+What remains here is the group-SPECIFIC surfacing that is still live:
+  * `list_group_turns` attaches the source turn's latest ask_jobs run status +
+    error_class onto the group-turn DTO (AC15);
+  * the group-turn DTO whitelist carries `run_status` / `error_class` (AC16);
+  * the partial-unique `ask_jobs_active_attempt_uidx` enforces one live attempt
+    per source turn (AC12/AC18);
+  * a duplicate `client_message_id` send replays the original turn idempotently
+    (DEFECT-2: no 500, no second human turn).
 
-The real-DB migration proof and the real-LLM behaviour arm live in
-`test_ask_jobs_active_attempt_migration.py` and
-`test_group_execution_lifecycle_live.py`.
+The real-DB migration proof is in `test_ask_jobs_active_attempt_migration.py`.
 """
 from __future__ import annotations
 
-import inspect
-import sys as _real_sys
-import types
-from types import SimpleNamespace
-
 import pytest
 
-import app.ask_runner as ask_runner
 import app.routes.projects as projects_route
 from app.db import conversations as conversations_db
-from app.db import project_delegations as project_delegations_db
-from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace
 
 
@@ -47,295 +40,13 @@ def _seed_project(t, *, name="Group lifecycle") -> int:
     )["id"]
 
 
-def _ctx(t) -> SimpleNamespace:
-    return SimpleNamespace(
-        company_id=t.company_id, workspace_id=ensure_default_workspace(t.company_id)["id"],
-        user_id=t.user_id, user_email=None,
-    )
-
-
-def _group_runs(conversation_id: int) -> list[dict]:
-    return (
-        require_client()
-        .table("ask_jobs")
-        .select("*")
-        .eq("conversation_id", conversation_id)
-        .eq("kind", "project_group")
-        .execute()
-        .data
-        or []
-    )
-
-
-def _stub_answer(monkeypatch, reply="Sure, here's the answer."):
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    monkeypatch.setattr(
-        projects_route.qa_agent, "answer",
-        lambda **kw: {"answer": reply, "citations": []},
-    )
-
-
-# ─────────────────────────── AC5 — sync insert ─────────────────────────────
-
-def test_group_send_inserts_generating_row_before_background(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-
-    # The reply is a no-op, so the row can only exist because the insert ran
-    # SYNCHRONOUSLY in `_schedule_group_reply` BEFORE the background reply.
-    async def _noop_reply(*a, **kw):
-        return None
-
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _noop_reply)
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly hello", "client_message_id": "cm-1"},
-    )
-    assert r.status_code == 200, r.text
-    turn_id = r.json()["id"]
-
-    conv = conversations_db.get_group_chat(project_id)
-    runs = _group_runs(conv["id"])
-    assert len(runs) == 1
-    row = runs[0]
-    assert row["status"] == "generating"  # reply no-op'd, so never completed
-    assert row["project_id"] == project_id
-    assert row["source_turn_id"] == turn_id
-    assert row["run_id"]
-    assert row["client_message_id"] == "cm-1"
-
-
-# ─────────────────────── AC6 — through the primitive ───────────────────────
-
-def test_group_reply_runs_through_primitive_success(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    _stub_answer(monkeypatch, reply="Reply text")
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"},
-    )
-    assert r.status_code == 200, r.text
-    conv = conversations_db.get_group_chat(project_id)
-    turns = conversations_db.list_group_turns(conv["id"])
-    assistant = [x for x in turns if x["role"] == "assistant"]
-    assert len(assistant) == 1 and assistant[0]["content"] == "Reply text"
-    runs = _group_runs(conv["id"])
-    assert len(runs) == 1 and runs[0]["status"] == "ready"
-
-
-def test_group_reply_failure_writes_error_and_error_class(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """MUTATION (AC6): a forced failure now PERSISTS `status='error'` +
-    `error_class` and fabricates NO assistant turn — the old
-    `except`-that-only-logs no longer swallows. Reinstating a swallow would
-    leave the row absent/generating (RED)."""
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-
-    def _boom(**kw):
-        raise RuntimeError("model exploded: secret detail")
-
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _boom)
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"},
-    )
-    assert r.status_code == 200, r.text  # the human turn still persisted
-    conv = conversations_db.get_group_chat(project_id)
-    turns = conversations_db.list_group_turns(conv["id"])
-    assert [x for x in turns if x["role"] == "assistant"] == [], "no fabricated turn on failure"
-    runs = _group_runs(conv["id"])
-    assert len(runs) == 1
-    assert runs[0]["status"] == "error"
-    assert runs[0]["error_class"] == "app"
-    # The raw exception text is NOT exposed on the read DTO.
-    src_turn = next(x for x in turns if x["id"] == runs[0]["source_turn_id"])
-    assert "secret detail" not in str(src_turn)
-
-
-def test_group_inherits_capture_report_promote_ingest(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
-    fired: list[str] = []
-    monkeypatch.setattr(projects_route, "capture_report", lambda *a, **kw: fired.append("capture"))
-    monkeypatch.setattr(projects_route, "maybe_promote_turn", lambda *a, **kw: fired.append("promote"))
-    monkeypatch.setattr(projects_route, "maybe_ingest_status", lambda *a, **kw: fired.append("ingest"))
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"},
-    )
-    assert r.status_code == 200, r.text
-    assert fired == ["capture", "promote", "ingest"]
-
-
-def test_group_run_leaves_active_project_id_unset(
-    tenant_client, isolated_settings, monkeypatch
-):
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    seen: list = []
-
-    def _answer(**kw):
-        seen.append(ask_runner.active_project_id())
-        return {"answer": "ok", "citations": []}
-
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _answer)
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"},
-    )
-    assert r.status_code == 200, r.text
-    assert seen == [None], "a group run must never set active_project_id"
-
-
-# ─────────────────────────────── retry ─────────────────────────────────────
-
 def _seed_group_turn(t, project_id) -> tuple[int, int]:
     conv = conversations_db.create_group_chat(project_id, t.user_id)
     turn = conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly do it")
     return conv["id"], turn["id"]
 
 
-def test_retry_refuses_while_attempt_live(tenant_client, isolated_settings, monkeypatch):
-    from app.db.asks import start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    # A live (generating) attempt for this turn.
-    start_ask_job(
-        company_id=t.company_id, dataset="acme", question="",
-        conversation_id=conv_id, kind="project_group", project_id=project_id,
-        source_turn_id=turn_id, run_id="live-run",
-    )
-    r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert r.status_code == 409, r.text
-
-
-def test_retry_blocked_when_side_effects_recorded(
-    tenant_client, isolated_settings, monkeypatch
-):
-    from app.db.asks import fail_ask_job, start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    job = start_ask_job(
-        company_id=t.company_id, dataset="acme", question="",
-        conversation_id=conv_id, kind="project_group", project_id=project_id,
-        source_turn_id=turn_id, run_id="r0",
-    )
-    fail_ask_job(job, "TypeError: boom", "app")
-    # A delegation recorded for this turn ⇒ NOT auto-retryable.
-    project_delegations_db.record_delegation(
-        project_id=project_id, assigner_user_id=t.user_id, assignee_user_id=t.user_id,
-        task_summary="ship it", source_conversation_id=conv_id, source_turn_id=turn_id,
-        delivered_conversation_id=conv_id, delivered_turn_id=turn_id,
-    )
-    r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"] == {"error": "resend_as_new_turn"}
-
-
-def test_retry_side_effect_seeded_flips_to_422_is_red(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """MUTATION (AC13): with NO side effect the retry is granted (202); seeding
-    a delegation for the turn flips the SAME retry to 422."""
-    from app.db.asks import fail_ask_job, start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    job = start_ask_job(
-        company_id=t.company_id, dataset="acme", question="",
-        conversation_id=conv_id, kind="project_group", project_id=project_id,
-        source_turn_id=turn_id, run_id="r0",
-    )
-    fail_ask_job(job, "TypeError: boom", "app")
-
-    # Clean ⇒ granted.
-    granted = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert granted.status_code == 202, granted.text
-
-    # Fail that new attempt, seed a delegation, retry again ⇒ 422.
-    runs = _group_runs(conv_id)
-    live = [x for x in runs if x["status"] == "generating"]
-    for x in live:
-        fail_ask_job(x["id"], "TypeError: boom", "app")
-    project_delegations_db.record_delegation(
-        project_id=project_id, assigner_user_id=t.user_id, assignee_user_id=t.user_id,
-        task_summary="ship it", source_conversation_id=conv_id, source_turn_id=turn_id,
-        delivered_conversation_id=conv_id, delivered_turn_id=turn_id,
-    )
-    blocked = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert blocked.status_code == 422, blocked.text
-
-
-def test_retry_grants_new_run_id_and_attempt_when_clean(
-    tenant_client, isolated_settings, monkeypatch
-):
-    from app.db.asks import fail_ask_job, start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    job = start_ask_job(
-        company_id=t.company_id, dataset="acme", question="",
-        conversation_id=conv_id, kind="project_group", project_id=project_id,
-        source_turn_id=turn_id, run_id="r0", attempt=1,
-    )
-    fail_ask_job(job, "TypeError: boom", "app")
-    r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert r.status_code == 202, r.text
-    body = r.json()
-    assert body["run_id"] != "r0"
-    assert body["attempt"] == 2
-
-
-def test_two_retries_no_duplicate_side_effects(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """AC14: two sequential granted retries of a clean (no-delegation) failed
-    run don't manufacture delegations — the plain-answer body creates none."""
-    from app.db.asks import fail_ask_job, start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    job = start_ask_job(
-        company_id=t.company_id, dataset="acme", question="",
-        conversation_id=conv_id, kind="project_group", project_id=project_id,
-        source_turn_id=turn_id, run_id="r0",
-    )
-    fail_ask_job(job, "TypeError: boom", "app")
-
-    for _ in range(2):
-        r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-        assert r.status_code == 202, r.text
-        for x in _group_runs(conv_id):
-            if x["status"] == "generating":
-                fail_ask_job(x["id"], "TypeError: boom", "app")
-
-    assert project_delegations_db.has_delegation_for_source_turn(turn_id) is False
-
-
-# ────────────────────── status on read + payload ───────────────────────────
+# ────────────────────── status on read + DTO shape ─────────────────────────
 
 def test_list_group_turns_attaches_run_status_on_failure(
     tenant_client, isolated_settings, monkeypatch
@@ -392,9 +103,15 @@ def test_group_dto_keys_include_run_status_error_class():
 def test_post_group_turn_request_accepts_new_fields(
     tenant_client, isolated_settings, monkeypatch
 ):
+    """The group POST accepts the execution-identity / SendCommand plumbing
+    fields (`client_message_id`, `pinned_skill`, `attachments`) without error,
+    and the returned DTO carries the send-identity key back to the poster.
+
+    Retargeted from the pre-rewrite assertion on a scheduled `ask_jobs` run:
+    the POST no longer mints a run (mount-not-scheduler), so the identity key
+    now rides the persisted turn's DTO instead."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
     r = t.client.post(
         f"/v1/projects/{project_id}/group/turns",
         json={
@@ -403,9 +120,7 @@ def test_post_group_turn_request_accepts_new_fields(
         },
     )
     assert r.status_code == 200, r.text
-    conv = conversations_db.get_group_chat(project_id)
-    runs = _group_runs(conv["id"])
-    assert runs[0]["client_message_id"] == "cm-42"
+    assert r.json()["client_message_id"] == "cm-42"
 
 
 def test_active_attempt_index_enforces_one_live_attempt(
@@ -431,68 +146,18 @@ def test_active_attempt_index_enforces_one_live_attempt(
         )
 
 
-# ─────────────── real async route path (masks that pytest-inline hid) ───────
-
-def _disable_pytest_inline(monkeypatch):
-    """Force `_schedule_group_reply` OFF the `"pytest" in sys.modules` inline
-    shortcut and ONTO the real `asyncio.create_task` background path — so a
-    sync-vs-async route mismatch (a sync route has no running loop for
-    create_task) surfaces exactly as it does over real HTTP."""
-    fake_sys = types.SimpleNamespace(
-        modules={k: v for k, v in _real_sys.modules.items() if k != "pytest"}
-    )
-    monkeypatch.setattr(projects_route, "sys", fake_sys)
-
-    async def _noop_reply(*a, **kw):
-        return None
-
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _noop_reply)
-
-
-def test_retry_route_is_async():
-    """DEFECT-1 structural guard: the retry route MUST be a coroutine function.
-    A sync `def` runs on a threadpool with no event loop, where
-    `_schedule_group_reply`'s `asyncio.create_task` raises → HTTP 500."""
-    assert inspect.iscoroutinefunction(projects_route.retry_group_turn_route)
-
-
-def test_retry_route_202_over_real_async_path_no_orphan(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """DEFECT-1 symptom test: drive the retry route through the ASGI app with
-    the pytest-inline shortcut DISABLED, so it hits the real
-    `asyncio.create_task` path. A sync route would 500 here (no running loop);
-    the async route returns 202. Exactly ONE new generating attempt is claimed
-    (no orphan)."""
-    from app.db.asks import fail_ask_job, start_ask_job
-
-    t = tenant_client.make(slug="acme")
-    project_id = _seed_project(t)
-    conv_id, turn_id = _seed_group_turn(t, project_id)
-    job = start_ask_job(
-        company_id=t.company_id, dataset="acme", question="", conversation_id=conv_id,
-        kind="project_group", project_id=project_id, source_turn_id=turn_id,
-        run_id="r0", attempt=1,
-    )
-    fail_ask_job(job, "TypeError: boom", "app")
-
-    _disable_pytest_inline(monkeypatch)
-    r = t.client.post(f"/v1/projects/{project_id}/group/turns/{turn_id}/retry")
-    assert r.status_code == 202, r.text  # would be 500 if the route were sync
-    assert r.json()["attempt"] == 2
-    live = [x for x in _group_runs(conv_id) if x["status"] == "generating"]
-    assert len(live) == 1, "exactly one new attempt claimed, no orphan"
-
-
 def test_duplicate_client_message_id_is_idempotent_on_send(
     tenant_client, isolated_settings, monkeypatch
 ):
     """DEFECT-2 symptom test: submitting the SAME client_message_id twice must
-    NOT 500 and must NOT post a second human turn or mint a second run — the
-    duplicate replays the original turn idempotently."""
+    NOT 500 and must NOT post a second human turn — the duplicate replays the
+    original turn idempotently.
+
+    Retargeted: the pre-rewrite version also asserted "no 2nd run" — the POST no
+    longer mints a run at all (mount-not-scheduler), so that clause is dropped;
+    the turn-level idempotency this guard exists for is unchanged."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t)
-    _stub_answer(monkeypatch)
     body = {"content": "@Sprntly hi", "client_message_id": "dup-1"}
 
     r1 = t.client.post(f"/v1/projects/{project_id}/group/turns", json=body)
@@ -505,5 +170,3 @@ def test_duplicate_client_message_id_is_idempotent_on_send(
     turns = conversations_db.list_group_turns(conv["id"])
     human = [x for x in turns if x["role"] == "user"]
     assert len(human) == 1, "a duplicate client_message_id must not post a 2nd human turn"
-    runs = [x for x in _group_runs(conv["id"]) if x["client_message_id"] == "dup-1"]
-    assert len(runs) == 1, "a duplicate client_message_id must not mint a 2nd run"

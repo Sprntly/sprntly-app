@@ -186,10 +186,13 @@ def test_group_publish_payload_is_shaped_dto(isolated_settings, monkeypatch, fak
     # raw-row-only column leaks. run_status is None here (broadcast happens
     # before any run is scheduled for this human turn). `reply` rides the
     # whitelist for assistant turns (the full structured reply); on a human
-    # turn it is simply None.
+    # turn it is simply None. `client_message_id` is a deliberately-whitelisted
+    # DTO field (the send-identity key the poster uses to dedup its own realtime
+    # echo) — None on turns written before the key existed.
     assert set(payload.keys()) == {
         "id", "role", "content", "author_user_id", "author_name",
-        "author_job_role", "created_at", "reply", "run_status", "error_class",
+        "author_job_role", "created_at", "client_message_id", "reply",
+        "run_status", "error_class",
     }
     assert payload["reply"] is None
     assert payload["run_status"] is None
@@ -498,28 +501,44 @@ def test_post_group_turn_publishes_turn_created(isolated_settings, monkeypatch, 
     assert msg["payload"]["role"] == "user"
 
 
-def test_agent_reply_publishes_assistant_turn(isolated_settings, monkeypatch, fake_group_llm):
+def test_group_assistant_reply_persists_and_broadcasts(isolated_settings, monkeypatch):
+    """The group agent reply is PERSISTED as an assistant turn and BROADCAST on
+    the group topic.
+
+    Retargeted from the pre-rewrite `test_agent_reply_publishes_assistant_turn`:
+    the group POST no longer schedules the reply in-band (mount-not-scheduler).
+    The reply is now produced by the shared `/v1/ask` execution job and
+    persisted+broadcast by `ask_job_runner._persist_group_reply` — this drives
+    that seam directly (the only home for "the group reply is broadcast")."""
+    from app import ask_job_runner
+    from app.db import conversations as conversations_db
+
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+
     calls = _spy_publish(monkeypatch)
-
-    r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns",
-        json={"content": "@Sprntly please delegate this to Fortune"},
+    payload = {"answer": "On it — taking a look.", "citations": []}
+    # ask_id has no ask_jobs row here → client_message_id resolves to None,
+    # exercising the broadcast/persist without a scheduled run.
+    ask_job_runner._persist_group_reply(
+        ask_id=999_999, project_id=project["id"], conversation_id=conv["id"], payload=payload,
     )
-    assert r.status_code == 200
-    assert len(fake_group_llm["calls"]) == 1
 
-    # One publish for the human turn, one for the assistant reply.
-    assert len(calls) == 2
-    topics = [c["json"]["messages"][0]["topic"] for c in calls]
-    events = [c["json"]["messages"][0]["event"] for c in calls]
-    assert topics == [f"project:{project['id']}"] * 2
-    assert events == ["turn.created", "turn.created"]
+    # Persisted as a null-author assistant turn carrying the structured reply.
+    turns = conversations_db.list_group_turns(conv["id"])
+    assistant = [t for t in turns if t["role"] == "assistant"]
+    assert len(assistant) == 1
+    assert assistant[0]["author_user_id"] is None
+    assert assistant[0]["content"] == "On it — taking a look."
 
-    assistant_payload = calls[1]["json"]["messages"][0]["payload"]
-    assert assistant_payload["role"] == "assistant"
-    assert assistant_payload["author_user_id"] is None
+    # Broadcast exactly once, on the group topic, as a turn.created assistant DTO.
+    assert len(calls) == 1
+    msg = calls[0]["json"]["messages"][0]
+    assert msg["topic"] == f"project:{project['id']}"
+    assert msg["event"] == "turn.created"
+    assert msg["payload"]["role"] == "assistant"
+    assert msg["payload"]["author_user_id"] is None
 
 
 def test_delivered_brief_publishes_on_per_user_topic(isolated_settings, monkeypatch):

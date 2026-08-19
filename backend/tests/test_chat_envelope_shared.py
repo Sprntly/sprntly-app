@@ -192,51 +192,41 @@ def test_main_envelope_byte_identical_after_extraction(
     assert json.dumps(resp2.json()) == json.dumps(expected2)
 
 
-# ─── private project classify: same cards, same data ─────────────────────────
+# ─── project classify enrichment: same cards, same data ──────────────────────
+# Retargeted from the DELETED `POST /v1/projects/{id}/chat/intent` route (and its
+# deleted `resolve_project_chat_intent` / `_classify_group_envelope` helpers) to
+# the shared `enrich_chat_envelope(..., project_id=…)` seam — the SAME single
+# enrichment step the main `/v1/chat/intent` (`routes/chat.py`) now runs for a
+# project-scoped ask (`enrich_chat_envelope(envelope, company, project_id=…)`).
+# The invariants (project-scoped cards/counts, IDOR, nested `open["candidates"]`)
+# are unchanged; they live on this function now.
 
 
-def test_project_envelope_carries_artifact_list(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """A private-project list ask now carries `artifact_list` rows produced
-    by the SHARED enrichment — the same clickable rows main chat renders,
-    not an empty card."""
+def test_project_envelope_carries_artifact_list(tenant_client, isolated_settings):
+    """A project-scoped list envelope carries `artifact_list` rows produced by
+    the SHARED enrichment — the same clickable rows main chat renders."""
+    from app.chat_envelope import enrich_chat_envelope
+
     t = tenant_client.make(slug="acme")
     prd_id = _seed_prd(isolated_settings["db"])
     project_id = _seed_project(t, with_prd_id=prd_id)
 
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: {
-            "intent": "list_artifacts", "confidence": 0.9, "task": None,
-            "instruction": None, "artifact_type": None, "artifact_query": None,
-            "reason": "listing", "source": "llm",
-            "list_kind": "prd", "list_mode": "items",
-        },
+    envelope = enrich_chat_envelope(
+        _list_envelope(list_mode="items"), _Ctx(t.company_id), project_id=project_id
     )
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "what are my PRDs?"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["intent"] == "list_artifacts"
-    rows = body["artifact_list"]
+    rows = envelope["artifact_list"]
     assert rows, "the shared enrichment must attach real rows"
     assert {r["type"] for r in rows} == {"prd"}
     assert prd_id in {r["id"] for r in rows}
 
 
-# ─── group classify: open lookup stamped in place, nested ────────────────────
+def test_group_envelope_carries_open_candidates(tenant_client, isolated_settings):
+    """An open-artifact envelope gains the NESTED `open["candidates"]` (stamped
+    in place by the shared enrichment) — never a top-level `open_candidates`
+    key. Retargeted from the deleted `_classify_group_envelope` to the shared
+    `enrich_chat_envelope`, the seam that stamp now lives on."""
+    from app.chat_envelope import enrich_chat_envelope
 
-
-def test_group_envelope_carries_open_candidates(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """The group classify path runs the SAME enrichment: an open-artifact
-    envelope gains the NESTED `open["candidates"]` (stamped in place on the
-    dict `resolve_project_chat_intent` returned) — never a top-level
-    `open_candidates` key."""
     t = tenant_client.make(slug="acme")
     prd_id = _seed_prd(isolated_settings["db"], title="Checkout PRD")
     project_id = _seed_project(t, with_prd_id=prd_id)
@@ -246,23 +236,12 @@ def test_group_envelope_carries_open_candidates(
         "instruction": None, "artifact_type": "prd",
         "artifact_query": "checkout", "reason": "open", "source": "llm",
     }
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent",
-        lambda *a, **kw: held,
-    )
-
-    # `_classify_group_envelope` classifies for CARD ENRICHMENT only (the edit
-    # is now an in-band tool); it enriches the envelope in place and returns it.
-    envelope = projects_route._classify_group_envelope(
-        project_id, _ctx(t), "open the checkout PRD", [], "acme",
-    )
-    assert envelope is held
-    # The classify envelope was enriched IN PLACE with the lookup.
+    envelope = enrich_chat_envelope(held, _Ctx(t.company_id), project_id=project_id)
+    assert envelope is held  # enriched in place
     assert held["open"]["status"] in {"resolved", "ambiguous"}
     candidates = held["open"]["candidates"]
     assert candidates and candidates[0]["prd_id"] == prd_id
-    # The stamp the enrichment adds to PRD candidates (null-safe when the
-    # PRD has no surviving thread — the client's fallback signal).
+    # The stamp the enrichment adds to PRD candidates (null-safe client signal).
     assert "conversation_id" in candidates[0]
     # Nested is the contract; a top-level key would be a different (wrong) API.
     assert "open_candidates" not in held
@@ -282,14 +261,12 @@ def _list_envelope(list_kind: str = "prd", list_mode: str = "count") -> dict:
     }
 
 
-def test_project_envelope_artifact_list_is_project_scoped(
-    tenant_client, isolated_settings, monkeypatch
-):
+def test_project_envelope_artifact_list_is_project_scoped(tenant_client, isolated_settings):
     """The regression: a workspace with N PRDs, a project holding M<N — the
-    PROJECT chat envelope's cards must be the project's M rows (and its
-    count M), never the workspace-wide N the main surface lists. Before the
-    fix the project surface showed workspace-wide cards next to
-    project-scoped prose, and the two disagreed."""
+    PROJECT-scoped enrichment's cards must be the project's M rows (and its
+    count M), never the workspace-wide N the main (no-project_id) path lists."""
+    from app.chat_envelope import enrich_chat_envelope
+
     t = tenant_client.make(slug="acme")
     db = isolated_settings["db"]
     in_project = {_seed_prd(db, title="Checkout PRD"), _seed_prd(db, title="Search PRD")}
@@ -300,53 +277,36 @@ def test_project_envelope_artifact_list_is_project_scoped(
     for pid in in_project:
         projects_db.add_artifact(project_id, "prd", pid)
 
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
-    )
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "what PRDs do we have?"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert {r["id"] for r in body["artifact_list"]} == in_project
-    assert not outside & {r["id"] for r in body["artifact_list"]}
-    # The HOW-MANY leg is scoped the same way — prose-count == card-count
-    # needs both, and the workspace holds 4.
-    assert body["artifact_counts"]["total"] == len(in_project) == 2
+    envelope = enrich_chat_envelope(_list_envelope(), _Ctx(t.company_id), project_id=project_id)
+    assert {r["id"] for r in envelope["artifact_list"]} == in_project
+    assert not outside & {r["id"] for r in envelope["artifact_list"]}
+    # The HOW-MANY leg is scoped the same way — the workspace holds 4.
+    assert envelope["artifact_counts"]["total"] == len(in_project) == 2
 
 
-def test_project_zero_artifacts_empty_no_leak(
-    tenant_client, isolated_settings, monkeypatch
-):
+def test_project_zero_artifacts_empty_no_leak(tenant_client, isolated_settings):
     """A project holding NOTHING renders nothing: empty cards, zero count —
     never the workspace's artifacts leaking in from other projects."""
+    from app.chat_envelope import enrich_chat_envelope
+
     t = tenant_client.make(slug="acme")
     db = isolated_settings["db"]
     _seed_prd(db, title="Checkout PRD")
     _seed_prd(db, title="Billing PRD")
     project_id = _seed_project(t)  # no artifacts pinned
 
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
-    )
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/chat/intent",
-        json={"message": "what PRDs do we have?"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["artifact_list"] == []
-    assert body["artifact_counts"]["total"] == 0
+    envelope = enrich_chat_envelope(_list_envelope(), _Ctx(t.company_id), project_id=project_id)
+    assert envelope["artifact_list"] == []
+    assert envelope["artifact_counts"]["total"] == 0
 
 
-def test_project_envelope_idor_no_foreign_project_or_tenant(
-    tenant_client, isolated_settings, monkeypatch
-):
+def test_project_envelope_idor_no_foreign_project_or_tenant(tenant_client, isolated_settings):
     """Project A's envelope never carries project B's artifact (same tenant)
     nor a foreign-tenant artifact — even one whose ref was written onto
     project A directly, bypassing the route's write-time gate: the listing
     keeps only rows that are ALSO in the caller's own tenant fan-out."""
+    from app.chat_envelope import enrich_chat_envelope
+
     t = tenant_client.make(slug="acme")
     db = isolated_settings["db"]
     prd_a = _seed_prd(db, title="Checkout PRD")
@@ -366,19 +326,11 @@ def test_project_envelope_idor_no_foreign_project_or_tenant(
     # pinned straight onto project A at the db layer.
     projects_db.add_artifact(project_a, "prd", foreign_prd)
 
-    monkeypatch.setattr(
-        projects_route, "resolve_chat_intent", lambda *a, **kw: _list_envelope()
-    )
-    resp = t.client.post(
-        f"/v1/projects/{project_a}/chat/intent",
-        json={"message": "what PRDs do we have?"},
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    ids = {r["id"] for r in body["artifact_list"]}
+    envelope = enrich_chat_envelope(_list_envelope(), _Ctx(t.company_id), project_id=project_a)
+    ids = {r["id"] for r in envelope["artifact_list"]}
     assert ids == {prd_a}
     assert prd_b not in ids and foreign_prd not in ids
-    assert body["artifact_counts"]["total"] == 1
+    assert envelope["artifact_counts"]["total"] == 1
 
 
 def test_main_envelope_artifact_list_unchanged(
@@ -444,15 +396,24 @@ def test_enrich_default_project_id_is_none_workspace_wide(
 # ─── source-scan guard: enrichment attached WITHOUT a new resolver call ──────
 
 
-def test_enrichment_adds_no_resolve_intent_call():
-    """Both project chat surfaces run the shared `enrich_chat_envelope`: the
-    private route (via `resolve_project_chat_intent`) and the group
-    card-classify (`_classify_group_envelope`). The group no longer uses
-    `resolve_project_chat_intent`, so that helper is now def + 1 call
-    site (private), while `enrich_chat_envelope` still fires on both paths."""
+def test_enrichment_is_single_sourced_on_the_main_intent_route():
+    """Post-collapse: the per-project `/v1/projects/{id}/chat/intent` route (and
+    its `resolve_project_chat_intent` / `_classify_group_envelope` helpers) was
+    DELETED — the project classify now rides the ONE main `/v1/chat/intent`
+    route, which forwards `context_source.params.project_id` into the SAME shared
+    `enrich_chat_envelope` (project-scoped when a project id is present,
+    workspace-wide otherwise). So the enrichment is single-sourced in chat.py and
+    the removed helpers appear nowhere in projects.py."""
     src = (REPO_ROOT / "backend" / "app" / "routes" / "projects.py").read_text()
-    assert src.count("resolve_project_chat_intent(") == 2  # def + 1 call site (private)
-    assert src.count("enrich_chat_envelope(") == 2  # private route + group card-classify
+    assert src.count("resolve_project_chat_intent(") == 0  # route + helper removed
+    assert src.count("_classify_group_envelope(") == 0     # group card-classify removed
 
     chat_src = (REPO_ROOT / "backend" / "app" / "routes" / "chat.py").read_text()
-    assert chat_src.count("enrich_chat_envelope(") == 1  # main consumes it too
+    # The shared enrichment fires on the one main intent route (call sites only,
+    # excluding the import line and any explanatory comment).
+    call_sites = [
+        ln for ln in chat_src.splitlines()
+        if "enrich_chat_envelope(" in ln
+        and not ln.lstrip().startswith(("#", "from ", "import "))
+    ]
+    assert len(call_sites) == 1

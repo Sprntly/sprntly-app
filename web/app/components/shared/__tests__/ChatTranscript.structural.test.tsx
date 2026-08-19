@@ -1,9 +1,16 @@
 // @vitest-environment node
 //
-// Structural guard on the turn-render extraction: the three chat shells no
-// longer hand-roll the turn wrapper's own DOM — that lives in `ChatBubble`
-// alone. A working-tree check only (no historical git comparison — CI's
-// checkout shape is not guaranteed to carry the ref a diff would need).
+// Structural guard on the turn-render extraction: the chat shells no longer
+// hand-roll the turn wrapper's own DOM — that lives in `ChatBubble` alone. A
+// working-tree check only (no historical git comparison — CI's checkout shape
+// is not guaranteed to carry the ref a diff would need).
+//
+// Retargeted post-rewrite: the two per-surface project shells
+// (`ProjectPrivateChat` / `ProjectGroupChat`) were DELETED and folded into a
+// single project shell (`ProjectMainThread`) that mounts main's shared
+// renderer (`ConversationView`). The invariant is unchanged — a shell that
+// wrote a turn-wrapper class itself would be a second, undeclared copy of the
+// leaf — so the scan now covers the surviving main + project shells.
 import { readFileSync } from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -14,8 +21,7 @@ const webRoot = path.resolve(here, "../../../..")
 
 const SHELLS = [
   path.join(webRoot, "app/components/screens/app/ChatScreen.tsx"),
-  path.join(webRoot, "app/components/screens/app/projects/ProjectPrivateChat.tsx"),
-  path.join(webRoot, "app/components/screens/app/projects/ProjectGroupChat.tsx"),
+  path.join(webRoot, "app/components/screens/app/projects/ProjectMainThread.tsx"),
 ]
 
 // The turn-wrapper class names ChatBubble alone now owns. A shell that still

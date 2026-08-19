@@ -224,38 +224,15 @@ def test_human_turn_no_llm_call(isolated_settings, monkeypatch, fake_group_llm):
     assert [t["role"] for t in turns] == ["user"]
 
 
-def test_mention_triggers_single_assistant_turn(
-    isolated_settings, monkeypatch, fake_group_llm, caplog
-):
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
-        r = ctx.client.post(
-            f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "@Sprntly please delegate this to Fortune"},
-        )
-    assert r.status_code == 200
-    assert len(fake_group_llm["calls"]) == 1
-
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_group_chat(project["id"])
-    turns = conversations_db.list_group_turns(conv["id"])
-    assert [t["role"] for t in turns] == ["user", "assistant"]
-    assert turns[1]["author_user_id"] is None
-    assert turns[1]["content"] == fake_group_llm["reply"]
-
-    cost_lines = [
-        rec.getMessage()
-        for rec in caplog.records
-        if "mention_reply" in rec.getMessage()
-    ]
-    assert len(cost_lines) == 1
-    assert "est_cost_usd=" in cost_lines[0]
-    assert "mode=group" in cost_lines[0]
-    assert f"project_id={project['id']}" in cost_lines[0]
-    assert f"conversation_id={conv['id']}" in cost_lines[0]
+# NOTE: the former `test_mention_triggers_single_assistant_turn` and
+# `test_mention_case_insensitive` were DELETED. They asserted that POSTING an
+# @Sprntly turn produces an in-band assistant reply — a DELETED architecture.
+# `post_group_turn_route` is now "mount-not-scheduler": it never runs the gate
+# or schedules a reply; the @Sprntly reply comes from the frontend driving the
+# shared `/v1/ask` mount (`ask_job_runner`). The replacement coverage lives on
+# that surface: `test_ask_lifecycle_authz.py::test_multi_human_tagged_admitted`
+# (a mention → admitted → generation runs) and `::test_mentions_agent_word_
+# boundary` (the case-insensitive @Sprntly detection, incl. @SPRNTLY).
 
 
 def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_group_llm):
@@ -275,19 +252,6 @@ def test_mention_llm_failure_best_effort(isolated_settings, monkeypatch, fake_gr
     turns = conversations_db.list_group_turns(conv["id"])
     assert [t["role"] for t in turns] == ["user"]
     assert turns[0]["content"] == "@Sprntly please delegate this to Fortune"
-
-
-@pytest.mark.parametrize("mention", ["@Sprntly", "@sprntly", "@SPRNTLY"])
-def test_mention_case_insensitive(isolated_settings, monkeypatch, fake_group_llm, mention):
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    r = ctx.client.post(
-        f"/v1/projects/{project['id']}/group/turns",
-        json={"content": f"{mention} assign this to Fortune"},
-    )
-    assert r.status_code == 200
-    assert len(fake_group_llm["calls"]) == 1
 
 
 # ── Error handling / isolation (mutation-proofed — R4) ──────────────────
@@ -493,7 +457,7 @@ def test_group_chat_logs_carry_only_identifiers(isolated_settings, monkeypatch, 
 
     lines = [rec.getMessage() for rec in caplog.records]
     assert any(
-        f"group_chat_created project_id={project['id']} conversation_id={conv_id}" == line
+        f"group_project_chat_created project_id={project['id']} conversation_id={conv_id}" == line
         for line in lines
     )
     assert any(
