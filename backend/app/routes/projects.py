@@ -1018,6 +1018,61 @@ class PostGroupTurnRequest(BaseModel):
     attachments: list | None = None
 
 
+# A people-mention token in message content: `@` + a name/word run. Mirrors the
+# frontend `mentions.ts` parse (`parseMentionChips`), including EXCLUDING the
+# agent token `@sprntly` (case-insensitive) — that is the agent path, never a
+# people-notify. A message can carry several tokens (multiple mentions).
+_MENTION_TOKEN_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9._-]*)")
+_AGENT_MENTION_WORD = "sprntly"
+
+
+def _parse_mention_tokens(content: str) -> list[str]:
+    """The distinct people-mention tokens in `content`, agent token excluded,
+    lowercased. Empty when the message tags no one (the common case)."""
+    seen: list[str] = []
+    for m in _MENTION_TOKEN_RE.finditer(content or ""):
+        tok = m.group(1).lower()
+        if tok == _AGENT_MENTION_WORD or tok in seen:
+            continue
+        seen.append(tok)
+    return seen
+
+
+def _notify_content_mentions(
+    project_id: int, project_name: str | None, content: str, actor_user_id: str
+) -> None:
+    """Server-authoritative mention notify: for every `@member` token in the
+    sent `content`, publish a private `mention.received` signal to that
+    member's own per-user channel (reusing `_publish_mention_signal`). A token
+    resolves to a member when it casefold-matches ANY whitespace word of that
+    member's display name (so `@Ada` reaches "Ada Lovelace"; the chip renders
+    only the first word, but either word notifies). The actor never notifies
+    themselves. Best-effort throughout (AD-P22): the turn has already
+    persisted, so a resolve/publish hiccup can never fail the send — an
+    unresolved token is simply plain text with no signal."""
+    tokens = _parse_mention_tokens(content)
+    if not tokens:
+        return
+    try:
+        members = projects_db.list_members(project_id)
+    except Exception:  # noqa: BLE001 — best-effort; a directory hiccup drops the notify only
+        logger.warning("mention_notify_member_read_failed project_id=%s", project_id)
+        return
+    actor_name = _tag_actor_name(actor_user_id)
+    notified: set[str] = set()
+    token_set = set(tokens)
+    for member in members:
+        uid = member.get("user_id")
+        if not uid or uid == actor_user_id or uid in notified:
+            continue
+        name_words = {w.lower() for w in (member.get("name") or "").split() if w}
+        if token_set & name_words:
+            notified.add(uid)
+            project_delegation._publish_mention_signal(
+                project_id, uid, actor_name, project_name
+            )
+
+
 @router.get("/{project_id}/group/turns")
 def list_group_turns_route(
     project_id: int,
@@ -1052,7 +1107,7 @@ def post_group_turn_route(
     schedule an agent reply. The @Sprntly reply comes from the shared `/v1/ask`
     mount the surface already drives; its answer is persisted + broadcast at
     ask completion (`ask_job_runner`), keyed on the same `context_source`."""
-    _require_project_member(project_id, ctx)
+    project = _require_project_member(project_id, ctx)
     conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
     # `client_message_id` makes this idempotent (inside `post_group_turn`): a
     # double-submit with the same key replays the original turn rather than
@@ -1070,6 +1125,10 @@ def post_group_turn_route(
         project_id, conversation["id"], turn.get("id") if turn else None,
     )
     publish_group_turn_created(project_id, conversation["id"], turn)
+    # Server-authoritative people-mention notify: any `@member` in the content
+    # privately signals that member. Best-effort, after the turn already
+    # persisted + broadcast — never blocks or fails the send. @Sprntly excluded.
+    _notify_content_mentions(project_id, project.get("name"), payload.content, ctx.user_id)
     # Return the author-enriched DTO (not the raw row) so the poster can
     # reconcile its optimistic turn to the durable server id/attribution.
     if turn:
