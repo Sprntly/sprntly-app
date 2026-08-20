@@ -25003,3 +25003,84 @@
 .ga-sources { margin: 6px 0 0; font-size: 12px; opacity: 0.72; }
 .ga-sources-label { text-transform: uppercase; letter-spacing: 0.04em;
   font-size: 10px; opacity: 0.75; }
+
+/* ── The report, and the plan that precedes it ────────────────────────────
+   Both read as a DOCUMENT, not a dashboard: one column, generous leading,
+   headings that carry the argument. The panel is narrow, so the measure is
+   already about right — what has to be bought back is vertical air and a type
+   scale with more than one step in it, because a wall of 13px chips is what
+   made the old list scan as a control surface instead of a report. */
+.ga-doc, .ga-plan {
+  display: flex; flex-direction: column; gap: 26px;
+  font-size: 13.5px; line-height: 1.62; letter-spacing: 0.002em;
+}
+.ga-doc-header { display: flex; flex-direction: column; gap: 6px; }
+.ga-doc-eyebrow {
+  margin: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase; opacity: 0.55;
+}
+.ga-doc-title {
+  margin: 0; font-size: 21px; line-height: 1.28; font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.ga-doc-section, .ga-plan-section {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.ga-doc-section + .ga-doc-section { border-top: 1px solid var(--border, #ececec);
+  padding-top: 22px; }
+.ga-doc-h2 {
+  margin: 0; font-size: 15px; font-weight: 640; letter-spacing: -0.005em;
+}
+.ga-doc-h3 {
+  margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; opacity: 0.6;
+}
+.ga-doc-lede { margin: 0; }
+.ga-doc-note { margin: 0; font-size: 12.5px; opacity: 0.72; }
+/* The confirmed definition, quoted verbatim. It is the one sentence the whole
+   report is measured against, so it is set apart rather than paraphrased. */
+.ga-doc-quote {
+  margin: 0; padding: 10px 14px; border-left: 2px solid var(--accent, #111);
+  background: var(--surface-2, #f7f7f6); border-radius: 0 8px 8px 0;
+  font-size: 13.5px;
+}
+/* The headline finding, in the one place the report raises its voice. */
+.ga-doc-headline { margin: 0; font-size: 16.5px; line-height: 1.45; font-weight: 560; }
+.ga-doc-sources, .ga-doc-list, .ga-doc-ruled-out, .ga-doc-gaps {
+  margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 8px; font-size: 13px;
+}
+.ga-doc-list, .ga-doc-ruled-out { padding-left: 16px; list-style: disc; }
+.ga-doc-source-count {
+  font-variant-numeric: tabular-nums; font-weight: 650;
+}
+.ga-doc-findings {
+  margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 22px;
+}
+.ga-doc-finding { display: flex; flex-direction: column; gap: 2px; }
+.ga-doc-finding-head { display: flex; gap: 10px; align-items: baseline; }
+.ga-doc-rank {
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12px;
+  opacity: 0.4; min-width: 14px;
+}
+.ga-doc-claims { opacity: 0.6; }
+/* The closing section. Tinted, because "what this cannot tell you" is the
+   part a reader skips, and it is the part that keeps the rest honest. */
+.ga-doc-limits {
+  background: var(--surface-2, #f7f7f6); border-radius: 10px; padding: 18px;
+}
+.ga-doc-section + .ga-doc-limits { border-top: none; }
+.ga-doc-gaps { gap: 14px; }
+.ga-doc-gap-q { margin: 0; font-weight: 620; }
+.ga-doc-gap-why, .ga-doc-gap-fix { margin: 2px 0 0; font-size: 12.5px; opacity: 0.75; }
+
+/* The plan step. Same document voice, plus the controls that make it a
+   decision rather than a notice. */
+.ga-plan-sources { margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 12px; }
+.ga-plan-source {
+  display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+}
+.ga-plan-source input { margin-top: 3px; }
+.ga-plan-witness { font-size: 12px; opacity: 0.68; }

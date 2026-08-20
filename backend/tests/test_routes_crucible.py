@@ -699,6 +699,46 @@ def test_the_user_can_drop_a_source_and_the_run_honours_it(ctx):
     assert body["status"] == "failed" and body["error_code"] == "no_evidence"
 
 
+def test_the_approved_plan_records_what_the_user_decided(ctx):
+    """THE REPORT READS THIS. `build_plan` runs BEFORE the user sees it, so the
+    stored plan still describes the run they were OFFERED. Left alone, the
+    finished report lists a source the user dropped among the ones it read, and
+    loses the hypotheses they typed entirely — a document that misstates its own
+    inputs is worse than one that shows fewer of them."""
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    # A second source type, so excluding one still leaves the run something to
+    # read and the assertion is about the RECORD, not about failing empty.
+    require_client().table("kg_signal").insert({
+        "id": "sig-9001", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "project_mgmt", "content": "tracker signal",
+        "properties": {"customer": "Vandelay Industries"},
+        "provenance": {"doc": "NW-2140"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"excluded_sources": ["project_mgmt"],
+              "hypotheses": ["pricing is the blocker"]},
+    )
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["excluded_sources"] == ["project_mgmt"]
+    assert plan["hypotheses"] == ["pricing is the blocker"]
+    kept = [s["source_type"] for s in plan["sources"]]
+    assert "project_mgmt" not in kept, (
+        "the report would list a dropped source among the ones it read"
+    )
+    assert plan["total_signals"] == sum(s["signal_count"] for s in plan["sources"])
+
+
 def test_the_plan_does_not_promise_a_number_the_engine_cannot_produce(ctx):
     """The plan step exists to stop a user discovering a limit at the bottom of
     finished output. A plan that itself overpromises reintroduces the problem —

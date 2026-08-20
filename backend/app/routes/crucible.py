@@ -363,6 +363,29 @@ def execute_run(
                            prioritisation=meta)
             return
 
+        # THE USER'S ANSWER TO THE PLAN IS PART OF THE RECORD. `build_plan`
+        # ran before they saw it, so the stored plan still describes the run
+        # they were OFFERED, not the one they approved. Left alone, the
+        # finished report lists a source the user dropped among the ones it
+        # read, and loses the hypotheses they typed entirely — a report that
+        # misstates its own inputs is worse than one that shows fewer.
+        if excluded_sources or hypotheses:
+            meta = dict(_meta_of(run_id, company_id))
+            plan_json = dict(meta.get("plan") or {})
+            if plan_json:
+                kept = [
+                    src for src in (plan_json.get("sources") or [])
+                    if src.get("source_type") not in excluded_sources
+                ]
+                plan_json["sources"] = kept
+                plan_json["total_signals"] = sum(
+                    src.get("signal_count") or 0 for src in kept
+                )
+                plan_json["excluded_sources"] = list(excluded_sources)
+                plan_json["hypotheses"] = list(hypotheses)
+                meta["plan"] = plan_json
+                runs_db.update(run_id, company_id, prioritisation=meta)
+
         runs_db.update(run_id, company_id, status="running",
                        started_at=now.isoformat())
         runs_db.heartbeat(run_id, company_id)
