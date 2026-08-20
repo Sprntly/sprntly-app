@@ -758,8 +758,13 @@ def test_execute_task_post_turn_fires(_offline_db, monkeypatch):
     monkeypatch.setattr("app.project_task_execution.handle_execute_task", _fake_execute)
 
     private_posts = []
+    # The private scope's `post_turn` is built inside
+    # `ProjectContextAssembler.assemble` and closes over the
+    # `app.db.conversations.post_individual_turn` it imports there — patch THAT
+    # seam (not `ask_job_runner`'s re-export), and BEFORE the scope is built
+    # below, so the closure captures the spy.
     monkeypatch.setattr(
-        ajr, "post_individual_turn",
+        "app.db.conversations.post_individual_turn",
         lambda conv_id, role, content: private_posts.append((conv_id, role, content)),
     )
     private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
