@@ -20,7 +20,12 @@ from __future__ import annotations
 
 import app.ask_job_runner as ajr
 import app.ask_planner as ap
-import app.routes.projects as projects_route
+# `_GROUP_SCOPE_SYSTEM` moved from `routes/projects.py` to
+# `ask_job_runner.py`, alongside `_PRIVATE_SCOPE_SYSTEM` — the two scope
+# prompts are a pair and now live together. This test read the old
+# location and failed with AttributeError, which reports a MOVED symbol
+# as a broken prompt.
+import app.ask_job_runner as projects_route
 
 
 # ── Root cause #1: a person is not a Slack destination ───────────────────

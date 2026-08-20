@@ -75,10 +75,21 @@ def _clear_flags(monkeypatch):
     monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
 
 
-def test_list_route_404_when_both_flags_off(company_client, monkeypatch):
+def test_list_route_is_served_now_that_project_prd_edit_is_always_on(
+    company_client, monkeypatch
+):
+    """Same unreachable state as the accept-route test below — see its docstring.
+
+    `_clear_flags` cannot switch the feature off any more, because the gate is
+    `_feature_enabled() or project_prd_edit_enabled()` and the second is an
+    always-true shim since its rollout finished.
+    """
     _clear_flags(monkeypatch)
+    from app.project_prd_patch_tool import project_prd_edit_enabled
+
+    assert project_prd_edit_enabled() is True
     resp = company_client.get("/v1/design-agent/prd-patches", params={"prd_id": 1})
-    assert resp.status_code == 404
+    assert resp.status_code != 404
 
 
 def test_list_route_200_design_agent_only_unchanged(company_client, monkeypatch):
@@ -115,8 +126,28 @@ def test_reject_route_widened_by_project_flag(company_client, monkeypatch):
     assert resp.json()["status"] == "rejected"
 
 
-def test_accept_route_404_when_both_flags_off(company_client, monkeypatch):
+def test_accept_route_is_served_now_that_project_prd_edit_is_always_on(
+    company_client, monkeypatch
+):
+    """The "both flags off" state is UNREACHABLE — so this asserts what is now
+    true instead of a 404 that can no longer happen.
+
+    The gate is `_feature_enabled() or project_prd_edit_enabled()`, and the
+    second was reduced to an always-true shim when its rollout finished. Clearing
+    the environment therefore leaves the route served, and the test that expected
+    a 404 had been failing ever since — reporting a retired flag as a broken
+    route.
+
+    The real boundary was never this flag: it is membership plus the
+    cross-project / cross-tenant checks the handler applies. A 404 here would
+    have meant "feature off", not "not yours".
+    """
     _clear_flags(monkeypatch)
+    from app.project_prd_patch_tool import project_prd_edit_enabled
+
+    assert project_prd_edit_enabled() is True, (
+        "if this flag can be switched off again, restore the 404 test above it"
+    )
     pid = _seed_patch(status="pending")
     resp = company_client.post(f"/v1/design-agent/prd-patches/{pid}/accept")
-    assert resp.status_code == 404
+    assert resp.status_code != 404

@@ -87,16 +87,32 @@ def test_resolve_prd_id_is_retired(tool_env):
 
 
 # ── flag reader default-off ───────────────────────────────────────────
-def test_project_prd_edit_enabled_defaults_off(tool_env, monkeypatch):
+def test_project_prd_edit_is_always_on_and_ignores_the_retired_flag(
+    tool_env, monkeypatch
+):
+    """The rollout flag is RETIRED — project PRD-edit is unconditionally on.
+
+    This test used to assert the flag defaulted OFF and responded to
+    `PROJECT_PRD_EDIT_ENABLED`. The rollout finished, the helper was reduced to
+    an always-true shim (kept because `routes/design_agent.py` still calls it to
+    serve the pending-patch routes), and the test was left asserting a gate that
+    no longer exists.
+
+    Rewritten rather than deleted, because "this is always on now, and setting
+    the old env var does nothing" is worth pinning: the next person to find that
+    variable in a deploy config should learn from a test that it is inert, not
+    re-add a gate around it. The REAL boundary is membership plus the
+    cross-project/cross-tenant checks in `project_chat_edit.py`.
+    """
     tool_mod, _ = tool_env
     monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
-    assert tool_mod.project_prd_edit_enabled() is False
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "0")
-    assert tool_mod.project_prd_edit_enabled() is False
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
     assert tool_mod.project_prd_edit_enabled() is True
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "true")
-    assert tool_mod.project_prd_edit_enabled() is True
+
+    # The retired variable is inert in BOTH directions — including the value
+    # that used to switch it off.
+    for value in ("0", "false", "", "1", "true"):
+        monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", value)
+        assert tool_mod.project_prd_edit_enabled() is True, value
 
 
 # ── §B — nullable prototype persistence (AC10/AC11) ──────────────────────────

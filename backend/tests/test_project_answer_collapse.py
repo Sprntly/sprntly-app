@@ -52,6 +52,66 @@ def _ctx(company_id="c1", workspace_id="w1", user_id="u1"):
 # ── Private collapse (AC4) ─────────────────────────────────────────────────
 
 
+
+@pytest.fixture
+def _offline_db(monkeypatch):
+    """A working fake Supabase WITHOUT reloading app modules.
+
+    Six tests in this file reach a path that needs a DB client. On ambient env
+    they fail closed locally and make a REAL Anthropic call in CI, where a key
+    IS configured — which is how they failed with a 401 rather than an
+    assertion, and why `test-backend` was red on main for days.
+
+    `isolated_settings` is the obvious fixture and it cannot be used here: it
+    RELOADS app modules, and this file holds module-level references (`ajr`,
+    `qa`) that ~30 sibling tests monkeypatch. Reloading rebinds those and the
+    siblings start patching a module the code no longer uses.
+
+    So this does the three things `isolated_settings` does that these tests
+    need — env, a fresh fake schema, and the patched client factory — and
+    deliberately skips the fourth.
+    """
+    from tests import _fake_supabase
+    from tests.conftest import _FAKE_SCHEMA, reset_fake_db
+
+    # The SETTINGS OBJECT, not the environment. `app.config.settings` is built
+    # once at import, so `monkeypatch.setenv` after that changes nothing — which
+    # is exactly why `isolated_settings` reloads `app.config` rather than just
+    # setting variables. Patching the live object gets the same effect without
+    # the reload.
+    import app.config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "anthropic_api_key",
+                        "test-key-not-used", raising=False)
+    monkeypatch.setattr(config_mod.settings, "supabase_url",
+                        "https://fake.supabase.co", raising=False)
+    monkeypatch.setattr(config_mod.settings, "supabase_service_role_key",
+                        "fake-service-role-key", raising=False)
+
+    # NO REAL LLM CALL. The path under test runs `qa.answer -> ask_runner ->
+    # call_json`, and these tests only patch `run_tool_loop` — which that path
+    # stopped going through. So the call escaped to the real API: locally it
+    # failed closed on a missing key, and in CI, where a key IS configured, it
+    # reached Anthropic and came back 401. Patched at `call_json` in both
+    # modules that hold a reference, which is what `fake_llm` does.
+    def _no_network_call_json(system: str = "", user: str = "", **kwargs):
+        return {"answer": "", "citations": [], "_schema_version": 1}
+
+    import app.ask_runner as ask_runner_mod
+    import app.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "call_json", _no_network_call_json, raising=False)
+    monkeypatch.setattr(ask_runner_mod, "call_json", _no_network_call_json,
+                        raising=False)
+
+    reset_fake_db(_FAKE_SCHEMA)
+    fake = _fake_supabase.FakeSupabaseClient()
+    import app.db.client as db_client_mod
+
+    monkeypatch.setattr(db_client_mod, "supabase_client", lambda: fake)
+    db_client_mod._reset_supabase_client_for_tests()
+    yield fake
+
 def test_private_ask_routes_through_single_shot(monkeypatch):
     captured = {}
 
@@ -168,7 +228,7 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
     assert out["answer"] == "sent"
 
 
-def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
+def test_private_bare_send_to_member_fires_gate_no_stream(_offline_db, monkeypatch):
     """A bare "send to <roster member>" — NO pronoun object — must reach the
     sixth branch too. `is_project_tool_request` alone declines this shape
     (`_PROJECT_TOOL_DELEGATE_VERB` requires an object: "send THIS to X");
@@ -476,7 +536,7 @@ def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
     assert out_green["answer"] == "here is the PRD summary"
 
 
-def test_private_context_block_reaches_engine(monkeypatch):
+def test_private_context_block_reaches_engine(_offline_db, monkeypatch):
     """The private breadth block is folded into `history` by `routes/ask.py`
     BEFORE `run_ask_job` runs (unchanged by this ticket) — `_run_sync`
     forwards that same `history` into `qa_agent.answer` unmodified, and
@@ -672,7 +732,7 @@ def test_delegate_identity_blanked_is_red(monkeypatch):
     assert captured["assigner_user_id"] == "u-assigner"  # GREEN
 
 
-def test_execute_task_post_turn_fires(monkeypatch):
+def test_execute_task_post_turn_fires(_offline_db, monkeypatch):
     monkeypatch.setattr(
         "app.llm.run_tool_loop",
         lambda *, dispatch, **kw: dispatch("execute_task", {"task_type": "prd", "task_summary": "Z"}),
