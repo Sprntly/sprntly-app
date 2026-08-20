@@ -2600,6 +2600,52 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
         # connector_lookup.answer binds it under an alias.
         if mod is not None and hasattr(mod, "_default_run_loop"):
             monkeypatch.setattr(mod, "_default_run_loop", _fake_run_tool_loop, raising=False)
+
+    # The single-call gateway (`graph.gateway.llm_call`) is the THIRD Anthropic
+    # entry point on the answer flow — the qa-router classifier
+    # (`qa_agent._route_question`, qa_agent.py:~798, degrade logged at :885) and
+    # the ask planner (`ask_planner.plan`, ask_planner.py:~1989/2559, degrade
+    # logged at :2561) both route through it. The gateway binds its OWN
+    # `call_json`/`call_md` at import time (graph/gateway.py:27), so NEITHER the
+    # `call_json` nor the `run_tool_loop` patch above reaches it — an un-guarded
+    # `fake_llm` test fires a real Anthropic request and dies on a 401.
+    #
+    # Return a benign empty `LLMResult(output={})`: the classifier reads it as a
+    # no-decision (`skill_id`/`company_skill_id` absent -> "none", `in_scope` is
+    # not `False`) and the planner as no actionable plan — EXACTLY the
+    # graceful-degrade both already take when the live call fails (both wrap it
+    # in `except Exception` and answer directly/unplanned). So behaviour is
+    # unchanged, same rationale as `_no_referent_adjudication` returning None:
+    # the guard cannot invent a decision, only reproduce the no-decision fallback.
+    #
+    # Patch the SOURCE (reaches call-time importers like `call_digest`/
+    # `call_index` that `from ... import llm_call` inside a function) AND every
+    # already-imported module that bound the name at import time — identity-
+    # checked against the real gateway function so nothing else is swapped. Tests
+    # that stub `llm_call` themselves (e.g. `test_qa_agent` patches `qa.llm_call`)
+    # run after this fixture and win for their test.
+    import app.graph.gateway as _gateway_mod
+
+    _orig_llm_call = _gateway_mod.llm_call
+
+    def _fake_llm_call(**kwargs):  # noqa: ARG001
+        return _gateway_mod.LLMResult(
+            output={},
+            model=kwargs.get("model") or "",
+            prompt_version=kwargs.get("prompt_version", ""),
+            input_tokens=0,
+            output_tokens=0,
+            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            cost_usd=0.0,
+            latency_ms=0,
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setattr(_gateway_mod, "llm_call", _fake_llm_call, raising=False)
+    for _mod in list(sys.modules.values()):
+        if _mod is not None and getattr(_mod, "llm_call", None) is _orig_llm_call:
+            monkeypatch.setattr(_mod, "llm_call", _fake_llm_call, raising=False)
     return state
 
 
