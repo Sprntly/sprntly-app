@@ -1,0 +1,33 @@
+{
+  "colors": [
+    "#15201b",
+    "#5b7fff",
+    "#6fcf97",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "clipPath": 2,
+    "defs": 1,
+    "g": 54,
+    "line": 16,
+    "path": 34,
+    "svg": 1,
+    "text": 13
+  },
+  "texts": [
+    "0",
+    "100",
+    "20",
+    "40",
+    "60",
+    "80",
+    "Feb",
+    "Group",
+    "Jan",
+    "New",
+    "Returning",
+    "Sessions by cohort",
+    "Value"
+  ]
+}

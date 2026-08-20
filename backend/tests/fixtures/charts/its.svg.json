@@ -1,0 +1,48 @@
+{
+  "colors": [
+    "#15201b",
+    "#4a554f",
+    "#5b7fff",
+    "#6fcf97",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "g": 55,
+    "line": 49,
+    "path": 32,
+    "svg": 1,
+    "text": 29
+  },
+  "texts": [
+    "0",
+    "100",
+    "120",
+    "140",
+    "20",
+    "40",
+    "60",
+    "80",
+    "Intervention",
+    "Jan 01",
+    "Jan 03",
+    "Jan 05",
+    "Jan 07",
+    "Jan 09",
+    "Jan 11",
+    "Jan 13",
+    "Jan 15",
+    "Jan 17",
+    "Jan 19",
+    "Jan 21",
+    "Jan 23",
+    "Jan 25",
+    "Jan 27",
+    "Jan 29",
+    "Period",
+    "Value",
+    "Weekly signups around the change",
+    "post",
+    "pre"
+  ]
+}
