@@ -6,11 +6,17 @@ reject routes to surface + resolve its pending patches. Without the widen, a
 deployment running project PRD-edit with `DESIGN_AGENT_ENABLED=0` would 404 on
 those routes and strand every project patch in `pending`. This proves:
 
-  - both flags OFF → 404 (feature invisible — a Design-Agent-only deployment
-    with the feature off is byte-for-byte unchanged);
   - DESIGN_AGENT_ENABLED=1 alone → 200 (Design-Agent-only deployment UNCHANGED,
     non-breakage);
   - PROJECT_PRD_EDIT_ENABLED=1 alone (DESIGN_AGENT_ENABLED=0) → 200 (the widen).
+
+UPDATE (GA): `project_prd_edit_enabled()` is now an always-true survivor — the
+`PROJECT_PRD_EDIT_ENABLED` rollout flag was retired and project PRD-edit is GA.
+The gate `_feature_enabled() or project_prd_edit_enabled()` is therefore always
+open, so the old "both flags OFF → 404, feature invisible" case can no longer
+occur: with env cleared the routes are STILL reachable (200). Those two tests
+now assert that GA reality instead of a 404 that the retired flag can no longer
+produce.
 
 The gate reads env at REQUEST time, so toggling env per request suffices — no
 app rebuild. Runs against the base-harness `prd_patches` table.
@@ -75,10 +81,13 @@ def _clear_flags(monkeypatch):
     monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
 
 
-def test_list_route_404_when_both_flags_off(company_client, monkeypatch):
+def test_list_route_ga_reachable_with_env_cleared(company_client, monkeypatch):
+    # GA: project PRD-edit is always-on, so `project_prd_edit_enabled()` holds
+    # the gate open even with both env flags cleared — the old "feature
+    # invisible → 404" state can no longer be produced.
     _clear_flags(monkeypatch)
     resp = company_client.get("/v1/design-agent/prd-patches", params={"prd_id": 1})
-    assert resp.status_code == 404
+    assert resp.status_code == 200
 
 
 def test_list_route_200_design_agent_only_unchanged(company_client, monkeypatch):
@@ -115,8 +124,11 @@ def test_reject_route_widened_by_project_flag(company_client, monkeypatch):
     assert resp.json()["status"] == "rejected"
 
 
-def test_accept_route_404_when_both_flags_off(company_client, monkeypatch):
+def test_accept_route_ga_reachable_with_env_cleared(company_client, monkeypatch):
+    # GA counterpart of the list route above: the accept route is likewise
+    # always reachable now (project PRD-edit GA), even with env flags cleared.
     _clear_flags(monkeypatch)
     pid = _seed_patch(status="pending")
     resp = company_client.post(f"/v1/design-agent/prd-patches/{pid}/accept")
-    assert resp.status_code == 404
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "applied"

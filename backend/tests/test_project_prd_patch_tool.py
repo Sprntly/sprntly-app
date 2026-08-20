@@ -87,16 +87,19 @@ def test_resolve_prd_id_is_retired(tool_env):
 
 
 # ── flag reader default-off ───────────────────────────────────────────
-def test_project_prd_edit_enabled_defaults_off(tool_env, monkeypatch):
+def test_project_prd_edit_enabled_is_ga_always_on(tool_env, monkeypatch):
+    """The `PROJECT_PRD_EDIT_ENABLED` rollout flag was RETIRED — project PRD-edit
+    is GA. `project_prd_edit_enabled()` is now an always-true, env-independent
+    survivor (kept only so `routes/design_agent.py` keeps its pending-patch
+    routes served). Was `..._defaults_off` back when the env gated it; the real
+    boundary is now membership + the IDOR gates in `apply_chat_edit_scoped`."""
     tool_mod, _ = tool_env
-    monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
-    assert tool_mod.project_prd_edit_enabled() is False
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "0")
-    assert tool_mod.project_prd_edit_enabled() is False
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
-    assert tool_mod.project_prd_edit_enabled() is True
-    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "true")
-    assert tool_mod.project_prd_edit_enabled() is True
+    for env in (None, "0", "1", "true", "false"):
+        if env is None:
+            monkeypatch.delenv("PROJECT_PRD_EDIT_ENABLED", raising=False)
+        else:
+            monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", env)
+        assert tool_mod.project_prd_edit_enabled() is True
 
 
 # ── §B — nullable prototype persistence (AC10/AC11) ──────────────────────────
