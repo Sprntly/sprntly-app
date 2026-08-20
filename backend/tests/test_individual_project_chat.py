@@ -204,7 +204,10 @@ def test_individual_chat_conversation_binds_and_promotes_via_real_ask_route(
             ),
             "dataset": "acme",
             "conversation_id": conv_id,
-            "project_id": project["id"],
+            # Project chats carry their project on context_source now, not the
+            # removed top-level project_id field — mirrors the real client
+            # (web useProjectConversation.ts). Promotion re-keys off this.
+            "context_source": {"kind": "project", "params": {"project_id": project["id"], "surface": "private"}},
         },
     )
     assert r.status_code == 200, r.text

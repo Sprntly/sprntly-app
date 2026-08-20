@@ -89,6 +89,10 @@ def test_project_id_threads_through_run_ask_job(isolated_settings, monkeypatch):
     monkeypatch.setattr(ajr.qa_agent, "answer", lambda **kw: _payload("hi"))
     monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
     monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    # The promotion hook reads `context_source` DIRECTLY; scope resolution is
+    # orthogonal here (and would 404 on this synthetic, unseeded project_id).
+    # Stub it out so this unit test exercises only the hook's keying.
+    monkeypatch.setattr(ajr, "resolve_context_scope", lambda *a, **k: None)
 
     import app.project_memory as pm
 
@@ -106,15 +110,16 @@ def test_project_id_threads_through_run_ask_job(isolated_settings, monkeypatch):
     )
     assert calls == [], "default project_id=None must fire nothing"
 
-    # The hook's own gate requires project_id, conversation_id, AND user_id
-    # (the same identity the caller's `_on_committed` closure also attributes
-    # the persisted assistant turn to) — every production caller in
-    # `routes/ask.py` passes all three together, so `user_id` is supplied
-    # here too.
+    # The promotion hook is driven off `context_source` now (the project a chat
+    # targets moved onto `context_source.params.project_id`; the top-level
+    # `project_id` kwarg still exists — asserted above — but no longer keys the
+    # hook). The gate still requires conversation_id AND user_id alongside it, so
+    # all three are supplied, matching how the real caller assembles the ask.
     asyncio.run(
         ajr.run_ask_job(
             ask_id=2, enterprise_id="c1", question="q", dataset="d",
-            conversation_id=5, project_id=9, user_id="u1",
+            conversation_id=5, user_id="u1",
+            context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
         )
     )
     assert len(calls) == 1
@@ -316,7 +321,9 @@ def test_individual_promoted_entry_editable(tenant_client, isolated_settings, mo
             "question": _DURABLE_QUESTION,
             "dataset": t.slug,
             "conversation_id": conv_id,
-            "project_id": project["id"],
+            # Project chats carry their project on context_source now (mirrors
+            # the real client); the promotion hook re-keys off it.
+            "context_source": {"kind": "project", "params": {"project_id": project["id"], "surface": "private"}},
         },
     )
     assert r.status_code == 200, r.text
