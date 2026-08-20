@@ -626,6 +626,11 @@ export type GoalFinding = {
   impact_value: number | null
   currency: string | null
   confidence_band: string | null
+  /** The source DOCUMENTS this finding rests on, most-cited first, e.g.
+   *  `["slack/#demos (14)", "fireflies-sync-batch-3 (4)", "+3 more documents"]`.
+   *  Rendered beside the finding: without it "8 claims concern X" cannot be
+   *  checked against anything. */
+  surfaced_by: string[]
   assumed_params: { name: string; basis: string }[]
   impact: { value: number | null; affected_population: number | null }
   confidence: {
