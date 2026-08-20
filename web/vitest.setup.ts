@@ -80,8 +80,8 @@ afterEach(() => {
 //
 // Registered globally rather than in the 16 files, because the next component
 // with a timer will have the same problem and nobody will remember this.
+// `afterEach` is already imported above for the sessionStorage reset.
 import { cleanup } from "@testing-library/react"
-import { afterEach } from "vitest"
 
 afterEach(() => {
   cleanup()
