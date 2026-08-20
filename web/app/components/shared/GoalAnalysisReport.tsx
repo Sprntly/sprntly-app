@@ -41,6 +41,15 @@ import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
  *  closing section under them. */
 const RULED_OUT_OPEN_MAX = 12
 
+/** An excluded source is only a KEY by the time the report runs — its label
+ *  went with the entry the run dropped. Rather than keep a second copy of the
+ *  backend's source prose here, where it would drift, the key is softened into
+ *  something readable: `project_mgmt` reads as "project mgmt", not as a column
+ *  name the reader has to decode. */
+function humanSource(sourceType: string): string {
+  return sourceType.replace(/_/g, " ")
+}
+
 /** Reach, in words. NULL is "could not be sized" and is never rendered as a
  *  number — a 0 and an unknown look alike and mean opposites (I3). */
 function reach(f: GoalFinding): string {
@@ -199,8 +208,8 @@ export function GoalAnalysisReport({ run }: { run: GoalRunDetail }) {
             </ul>
             {excluded.length ? (
               <p className="ga-doc-note" data-testid="goal-excluded">
-                You excluded {excluded.join(", ")} before this ran, so nothing
-                below rests on it.
+                You excluded {excluded.map(humanSource).join(", ")} before
+                this ran, so nothing below rests on it.
               </p>
             ) : null}
           </>

@@ -251,7 +251,12 @@ describe("what was read", () => {
         }}
       />,
     )
+    // Readable, not a column name: the label went with the entry the run
+    // dropped, so the key is softened rather than printed raw.
     expect(screen.getByTestId("goal-excluded").textContent).toContain(
+      "project mgmt",
+    )
+    expect(screen.getByTestId("goal-excluded").textContent).not.toContain(
       "project_mgmt",
     )
   })
