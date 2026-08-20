@@ -1,0 +1,3468 @@
+{
+ "capture_run": {
+  "company": "Meta — Facebook Boost Post",
+  "captured_at": "2026-08-20",
+  "window": "2024-09-01/2026-08-20 (plus dated older records, flagged as old)",
+  "spec": "External Feedback Capture — one record per distinct piece of feedback; no merging, no dedup",
+  "verbatim_policy": "One short verbatim excerpt per retrieved source document. Additional records drawn from the same document carry normalized statements with verbatim null. This is a reproduction constraint, not an evidence gap — the underlying items were read.",
+  "collection_tier": "C — open-web retrieval, not platform API scraping",
+  "channels_covered": [
+   "Apple App Store",
+   "Google Play",
+   "Trustpilot",
+   "TrustRadius",
+   "Capterra",
+   "Shopify app reviews",
+   "Meta Community Forums",
+   "JustAnswer",
+   "TikTok",
+   "Hacker News",
+   "Medium",
+   "personal and author blogs",
+   "agency and analyst blogs",
+   "Meta Business Help Centre"
+  ]
+ },
+ "records": [
+  {
+   "id": 1,
+   "verbatim": "It's a dishonest system",
+   "normalized": "Pre-purchase estimate promised 11,000-33,000 people for GBP 4; GBP 14 actually delivered about 3,006 paid reach",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Personal blog (Kirkville)",
+    "url": "https://kirkville.com/the-facebook-boost-post-ad-scam/",
+    "posted_date": "2016-03-25",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 2,
+   "verbatim": null,
+   "normalized": "Did not realise billing was per post engagement rather than per person reached until after spending",
+   "category": "product",
+   "type": "discoverability",
+   "source": {
+    "platform": "Personal blog (Kirkville)",
+    "url": null,
+    "posted_date": "2016-03-25",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 3,
+   "verbatim": null,
+   "normalized": "GBP 14 produced 26 actions and 2 link clicks, working out at about GBP 7 per click",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Personal blog (Kirkville)",
+    "url": null,
+    "posted_date": "2016-03-25",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "pricing",
+   "subcategory": "pricing"
+  },
+  {
+   "id": 4,
+   "verbatim": null,
+   "normalized": "States outright they will never spend money on boosting again",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Personal blog (Kirkville)",
+    "url": null,
+    "posted_date": "2016-03-25",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "stated",
+    "switching_evidence": "I'll certainly never spend money on something like this"
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 5,
+   "verbatim": "Facebook doesn't want to do anything about it.",
+   "normalized": "After three weeks of boosting and a call with a Meta ad specialist, believes boost spend was placed on fake or garbage accounts",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Medium",
+    "url": "https://medium.com/@GreySquall/https-medium-com-greysquall-the-great-facebook-boost-1b6ea1fda0b6",
+    "posted_date": "2016-06-16",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 6,
+   "verbatim": null,
+   "normalized": "Reports clearest evidence of click/like farming traced to Vietnam on a boosted post",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Medium",
+    "url": null,
+    "posted_date": "2016-06-16",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 7,
+   "verbatim": "Page views, Likes from 'fake' profiles",
+   "normalized": "Founder spent $100 over two days after using Boost Post, received about a thousand likes, believed most came from fake accounts",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "The Register",
+    "url": "https://www.theregister.com/2019/01/14/facebook_lookalike_audience/",
+    "posted_date": "2019-01-14",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": "Journalist reporting an apparent user's account",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "none",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 8,
+   "verbatim": "Facebook scams advertisers.",
+   "normalized": "Spent $50 geo-targeted to Massachusetts only and received obviously fake likes from around the world",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Blog comments (ivetriedthat)",
+    "url": "https://ivetriedthat.com/facebook-fraud-is-facebook-using-click-farms-for-fake-likes/",
+    "posted_date": "2014-08-12",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 9,
+   "verbatim": null,
+   "normalized": "Got about 2,300 likes in a day and a half; barely 1% became downloads or real users, 99% from Pakistan, India or Iraq",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Blog comments (ivetriedthat)",
+    "url": null,
+    "posted_date": "2014-08-12",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 10,
+   "verbatim": "I didn't sell one book, either paperback or ebook.",
+   "normalized": "Spent about $7 of a $10 boost budget, reached 870 people of whom 235 were organic, got 21 likes and 7 clicks, and no sales",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": "https://www.goodreads.com/author_blog_posts/13395997-boosting-a-facebook-post",
+    "posted_date": "2016-06-01",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": "Post carries no visible date; year estimated from surrounding posts and treated as old",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "resigned",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 11,
+   "verbatim": null,
+   "normalized": "First boost attempt was rejected because the book-cover graphic contained too much text",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": null,
+    "posted_date": "2016-06-01",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": true,
+    "workaround_description": "Had a second graphic made with less text, which was then accepted",
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 12,
+   "verbatim": "I have not sold a single book",
+   "normalized": "After roughly a year of boosting from a page with more than 10,000 paid-for likes, has never made a book sale",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": "https://www.goodreads.com/author/show/7065689.Niramisa_Weiss/blog?page=2",
+    "posted_date": "2014-02-02",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "resigned",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "stated",
+    "switching_evidence": "Dear Facebook - why I won't be buying any more advertising"
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 13,
+   "verbatim": null,
+   "normalized": "Of more than 10,000 likes generated by paid promotion, only a handful now see her posts",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": null,
+    "posted_date": "2014-02-02",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 14,
+   "verbatim": null,
+   "normalized": "Says Facebook's claim that boosted posts get more people to respond to a promotion or link is simply not true",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": null,
+    "posted_date": "2014-02-02",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "marketing",
+   "subcategory": "marketing"
+  },
+  {
+   "id": 15,
+   "verbatim": "It just seems so desperate.",
+   "normalized": "Boost prompts arriving as notifications seven to ten times more often than genuine page notifications, across several pages",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": "https://www.goodreads.com/author_blog_posts/15312114-i-really-have-to-wonder-if-facebook-revenues-are-down",
+    "posted_date": "2017-06-20",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 16,
+   "verbatim": null,
+   "normalized": "Considering deleting the pages because the boost prompting makes them more bother than they are worth",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": null,
+    "posted_date": "2017-06-20",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Says 'thinking about' deleting; not counted as an explicit departure",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 17,
+   "verbatim": "Facebook won't just tell you what the issue is",
+   "normalized": "Boost repeatedly failed with no explanation given, leaving her going round in circles trying to work out the problem",
+   "category": "product",
+   "type": "discoverability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": "https://www.goodreads.com/author_blog_posts/22782659-fb-mailchimp-and-other-headaches",
+    "posted_date": "2022-08-02",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 18,
+   "verbatim": null,
+   "normalized": "Once boosting worked, Facebook would only promote certain posts and not the ones she wanted to promote",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Goodreads author blog",
+    "url": null,
+    "posted_date": "2022-08-02",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 19,
+   "verbatim": "I get bounced around from tech support person to another",
+   "normalized": "Two months trying to resolve catalog and ad problems; scheduled support call never came, chats ineffective",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": "https://apps.shopify.com/reviews/1795147",
+    "posted_date": "2025-07-10",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": "Meta ads ecosystem via the Shopify channel app; not confirmed to involve Boost Post",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 20,
+   "verbatim": null,
+   "normalized": "Stopped all ads because the catalog was not functioning correctly when running ads and tagging posts",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": null,
+    "posted_date": "2025-07-10",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": "Meta ads ecosystem; not confirmed Boost Post",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 21,
+   "verbatim": null,
+   "normalized": "Repeated rejection of products on both Facebook and Instagram made it nearly impossible to run campaigns",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": null,
+    "posted_date": "2025-02-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": "Meta ads ecosystem; not confirmed Boost Post",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 22,
+   "verbatim": null,
+   "normalized": "Ceased advertising with Meta altogether after persistent rejections and no meaningful support",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": null,
+    "posted_date": "2025-02-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "resigned",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "stated",
+    "switching_evidence": "we have ultimately ceased advertising with Meta altogether"
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 23,
+   "verbatim": null,
+   "normalized": "Emailed and begged for help for 62 days; asked repeatedly for screen recordings then tickets were closed",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": null,
+    "posted_date": "2023-08-20",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": "Meta ads ecosystem; not confirmed Boost Post",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 24,
+   "verbatim": null,
+   "normalized": "Could not connect their shop so it would show on Instagram, losing potential sales",
+   "category": "product",
+   "type": "integration",
+   "source": {
+    "platform": "Shopify app reviews",
+    "url": null,
+    "posted_date": "2023-08-20",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "undetermined",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 25,
+   "verbatim": "I am not able to boost my post.",
+   "normalized": "Instagram business account with no payment defaults can no longer boost posts, having previously been able to",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Meta Community Forums",
+    "url": "https://communityforums.atmeta.com/discussions/WebXRDevelopment/boost-post-button-not-working-on-instagram/1298243",
+    "posted_date": null,
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Thread carries no captured date; treated as undated and flagged",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 26,
+   "verbatim": "boosting just to boost will not show results like an AD",
+   "normalized": "Social media manager says boosting can work for an event but boosting without a reason will not perform like a proper ad",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "TikTok",
+    "url": "https://www.tiktok.com/discover/what-is-the-purpose-of-boost-post-in-facebook-page",
+    "posted_date": "2026-05-18",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 27,
+   "verbatim": null,
+   "normalized": "Car dealership reports that paying for a boost works for Facebook Marketplace auction listings",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "TikTok",
+    "url": null,
+    "posted_date": "2026-05-18",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 28,
+   "verbatim": null,
+   "normalized": "Says boosting a few Facebook posts is a simple and effective way to increase interactions, targeting followers or a custom audience",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "TikTok",
+    "url": null,
+    "posted_date": "2026-05-18",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "general",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 29,
+   "verbatim": "I'm inclined to believe it's legit",
+   "normalized": "Argues heavy liking in Indonesia, Vietnam and the Philippines is normal local behaviour rather than fraud, having spoken to users there",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Hacker News",
+    "url": "https://news.ycombinator.com/item?id=11905266",
+    "posted_date": "2016-06-16",
+    "staleness_flag": true
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Counter-signal to the fake-engagement records",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 30,
+   "verbatim": "plenty of likes, zero sales",
+   "normalized": "Consultant audited accounts where all spend went through the boost button and reports the outcome was always the same",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "Agency blog (lionelz.com)",
+    "url": "https://lionelz.com/en/blog/stop-using-boost-post-button-meta/",
+    "posted_date": "2026-05-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Agency content; author sells services that depend on moving spend to Ads Manager",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 31,
+   "verbatim": null,
+   "normalized": "States the boost flow automatically assigns an engagement or reach objective and never asks what the buyer needs",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Agency blog (lionelz.com)",
+    "url": null,
+    "posted_date": "2026-05-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 32,
+   "verbatim": null,
+   "normalized": "With the boost button you can only pick the platform, not the individual placement",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Agency blog (lionelz.com)",
+    "url": null,
+    "posted_date": "2026-05-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 33,
+   "verbatim": "Boost Post is the most expensive button in Facebook.",
+   "normalized": "In a controlled $75 test a boosted post cost $3.09 per click against $1.04 for the same creative in Ads Manager",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "Agency blog (AdMake AI)",
+    "url": "https://admakeai.com/blog/how-to-boost-facebook-post",
+    "posted_date": "2026-05-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 34,
+   "verbatim": null,
+   "normalized": "A $1,500 Agorapulse test reported Ads Manager ahead on every metric: about 17% more clicks, 64% higher reach, 18% lower CPC",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "Agency blog (AdMake AI)",
+    "url": null,
+    "posted_date": "2026-05-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 35,
+   "verbatim": null,
+   "normalized": "Boost ships one creative to one narrow audience while the Andromeda delivery update rewards 8 to 15 creative variations per ad set",
+   "category": "product",
+   "type": "performance",
+   "source": {
+    "platform": "Agency blog (AdMake AI)",
+    "url": null,
+    "posted_date": "2026-05-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 36,
+   "verbatim": null,
+   "normalized": "From 15 June 2026 roughly 85 legacy metrics including Post and Page Reach stopped receiving data, and Views count differently from Reach",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Agency blog (AdMake AI)",
+    "url": "https://admakeai.com/blog/meta-ads-updates-july-2026",
+    "posted_date": "2026-07-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 37,
+   "verbatim": "If you spend $100 on your iPhone, only $70 actually goes toward reaching people.",
+   "normalized": "Boosting through the Facebook app on iOS incurs Apple's 30% service fee, so budget delivered is materially lower than budget spent",
+   "category": "product",
+   "type": "discoverability",
+   "source": {
+    "platform": "Marketing blog (GrowthScribe)",
+    "url": "https://growthscribe.com/what-does-boost-post-mean-on-facebook/",
+    "posted_date": "2026-04-15",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 38,
+   "verbatim": null,
+   "normalized": "An Advantage+ Audience toggle now appears in the boost flow and is said to outperform manual targeting for most small businesses",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Marketing blog (GrowthScribe)",
+    "url": null,
+    "posted_date": "2026-04-15",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 39,
+   "verbatim": null,
+   "normalized": "Conversion-oriented objectives such as leads and sales remain unavailable for boosted posts on Meta",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Hootsuite blog",
+    "url": "https://blog.hootsuite.com/boosted-posts-vs-ad/",
+    "posted_date": "2026-05-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "LinkedIn Boost"
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 40,
+   "verbatim": null,
+   "normalized": "LinkedIn boosted posts now support lead generation, a capability Meta boosted posts do not have",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "Hootsuite blog",
+    "url": null,
+    "posted_date": "2026-05-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "LinkedIn Boost"
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 41,
+   "verbatim": null,
+   "normalized": "Meta boost placements are limited to Instagram plus Facebook mobile and desktop feed",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Hootsuite blog",
+    "url": null,
+    "posted_date": "2026-05-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 42,
+   "verbatim": null,
+   "normalized": "Boosted posts carry over the likes, comments and shares from the original organic post, so the promoted version arrives with social proof",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Hootsuite blog",
+    "url": null,
+    "posted_date": "2026-05-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 43,
+   "verbatim": null,
+   "normalized": "Boosted posts allow only one audience at a time, with no complex audience combinations or exclusions",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Agency blog (Altos)",
+    "url": "https://altosagency.com/blog/article/boosted-posts-vs-ads",
+    "posted_date": "2025-11-04",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 44,
+   "verbatim": null,
+   "normalized": "Describes the boost prompt as a persistent popup Meta surfaces on posts that start getting engagement",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Agency blog (Altos)",
+    "url": null,
+    "posted_date": "2025-11-04",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 45,
+   "verbatim": null,
+   "normalized": "Lists common boost blockers: shared posts, posts linking to an event, expired offers and insufficient page permissions",
+   "category": "product",
+   "type": "documentation",
+   "source": {
+    "platform": "Agency blog (Phound)",
+    "url": "https://www.getphound.com/why-cant-i-boost-my-facebook-post",
+    "posted_date": "2025-03-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 46,
+   "verbatim": null,
+   "normalized": "Reports roof-replacement ads being flagged under housing policy by an over-cautious automated system",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Agency blog (Phound)",
+    "url": null,
+    "posted_date": "2025-03-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 47,
+   "verbatim": null,
+   "normalized": "Meta states it retired boost formats it considered not optimal for advertising, including cover photos and profile pictures",
+   "category": "product",
+   "type": "documentation",
+   "source": {
+    "platform": "Meta Business Help Centre",
+    "url": "https://en-gb.facebook.com/business/help/1575107409431290",
+    "posted_date": "2026-01-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Official Meta documentation, not user feedback; date approximate to page state at capture",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "employee_or_affiliated",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 48,
+   "verbatim": null,
+   "normalized": "Lists boost limitations: no A/B testing of post or headline, and no ability to retarget website visitors",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Vendor blog (PostLink)",
+    "url": "https://postlinkapp.com/blog/how-to-boost-a-post-on-facebook",
+    "posted_date": "2026-03-04",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Vendor SEO content promoting the author's own scheduling product",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "solicited",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 49,
+   "verbatim": null,
+   "normalized": "Advertisers across retail, lead generation and e-commerce reported CPM increases of 15% to 40% in the first two weeks of March 2026",
+   "category": "product",
+   "type": "performance",
+   "source": {
+    "platform": "Analyst blog (Digital Applied)",
+    "url": "https://www.digitalapplied.com/blog/meta-ads-performance-dropped-march-2026-ai-algorithm-changes",
+    "posted_date": "2026-03-08",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 50,
+   "verbatim": null,
+   "normalized": "Analysis of 355 Instagram and 147 Facebook brands from May 2025 to April 2026 found boosted posts' organic performance stronger than non-boosted posts",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Analyst report (Dash Social)",
+    "url": "https://www.dashsocial.com/blog/when-to-social-media-boost",
+    "posted_date": "2026-06-16",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 51,
+   "verbatim": null,
+   "normalized": "States that the four to five times return commonly reported comes from Ads Manager strategy and custom audiences rather than boosted posts alone",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "University blog (WGU)",
+    "url": "https://wegotu.us/blogs/are-boosted-posts-worth-it-or-wasting-ad-budget/",
+    "posted_date": "2026-06-11",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 52,
+   "verbatim": null,
+   "normalized": "Boosted posts are described as user-friendly and cost-effective to set up but limited in customization, objectives and performance tracking",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Marketing blog (Social Champ)",
+    "url": "https://www.socialchamp.com/blog/boost-post-vs-facebook-ads/",
+    "posted_date": "2026-02-03",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 53,
+   "verbatim": null,
+   "normalized": "Andromeda now reads the ad creative itself to decide who sees it, making creative briefing a targeting decision",
+   "category": "product",
+   "type": "performance",
+   "source": {
+    "platform": "Agency blog (Cordelia Labs)",
+    "url": "https://cordelialabs.com/blog/facebook-changes-you-need-to-know-in-2025",
+    "posted_date": "2026-07-15",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 54,
+   "verbatim": "I spent around $20 to try it out and it did boost my followers and views",
+   "normalized": "Creator says TikTok Promote produced real follower and view growth for a $20 spend",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "TikTok",
+    "url": "https://www.tiktok.com/discover/is-it-worth-it-to-pay-boost-post-on-tiktok",
+    "posted_date": "2026-08-05",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "TikTok Promote"
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 55,
+   "verbatim": null,
+   "normalized": "Creator warns that boosting on TikTok signals willingness to pay for views and may show content to an off-niche audience",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "TikTok",
+    "url": null,
+    "posted_date": "2026-08-05",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "TikTok Promote"
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 56,
+   "verbatim": null,
+   "normalized": "Creator reports $8 for one day of TikTok Promote makes a noticeable difference without large spend",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "TikTok",
+    "url": "https://www.tiktok.com/discover/should-i-boost-account-or-get-sales-on-promote",
+    "posted_date": "2026-04-27",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "TikTok Promote"
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 57,
+   "verbatim": null,
+   "normalized": "TikTok Promote offers a Promotional Pack buying type that guarantees a minimum number of views",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "Sprout Social blog",
+    "url": "https://sproutsocial.com/insights/tiktok-promotion/",
+    "posted_date": "2026-05-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "TikTok Promote"
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 58,
+   "verbatim": null,
+   "normalized": "TikTok Promote can boost a creator's or affiliate's video about your brand from another account, not only your own content",
+   "category": "product",
+   "type": "competitor_comparison",
+   "source": {
+    "platform": "TikTok for Business blog",
+    "url": "https://ads.tiktok.com/business/en-US/blog/promote-boost-videos-grow-audience",
+    "posted_date": "2025-08-06",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": "TikTok Promote"
+   },
+   "author": {
+    "type": "employee_or_affiliated",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 59,
+   "verbatim": "I will warn people watch buying boosts! Don't do it!!",
+   "normalized": "Boosting a $14 ad on a $15 budget returned an error-and-try-again page around 30 times; the resulting charges overdrew their bank account",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Apple App Store",
+    "url": "https://apps.apple.com/us/app/meta-business-suite/id514643583?see-all=reviews",
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 60,
+   "verbatim": null,
+   "normalized": "Overdraft fees from the repeated boost charges meant they lost their health insurance for the year",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Apple App Store",
+    "url": null,
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "billing",
+   "subcategory": "billing"
+  },
+  {
+   "id": 61,
+   "verbatim": null,
+   "normalized": "Says there is no contact information anywhere in the app to report what happened, so the bank and card issuer had to investigate",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Apple App Store",
+    "url": null,
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 62,
+   "verbatim": null,
+   "normalized": "Their bank stated nobody from Facebook ever responded, and the bank was forced to refund the money itself after 90 days",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Apple App Store",
+    "url": null,
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 63,
+   "verbatim": null,
+   "normalized": "No way to turn on message notifications in the Business Suite app",
+   "category": "product",
+   "type": "feature_request",
+   "source": {
+    "platform": "Apple App Store",
+    "url": null,
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": "Business Suite app generally, not Boost",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "minor_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 64,
+   "verbatim": null,
+   "normalized": "Post sharing to other pages and groups was removed and the app remains buggy, so a non-profit is losing interest in it",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Apple App Store",
+    "url": null,
+    "posted_date": "2026-06-17",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": "Business Suite app generally, not Boost",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 65,
+   "verbatim": "I can't see the detailed results of an ad",
+   "normalized": "The button to view detailed ad results does not work in the app, forcing them onto a desktop to see who the ad reached; reinstalling did not fix it",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Google Play",
+    "url": "https://play.google.com/store/apps/details?id=com.facebook.pages.app",
+    "posted_date": "2026-08-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": true,
+    "workaround_description": "Uses a PC to view the audience the ad reached",
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 66,
+   "verbatim": null,
+   "normalized": "Can no longer edit photos being added to a post, and has never been able to reorder them, so every post needs both app and desktop",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-08-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": "Business Suite app generally, not Boost",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": true,
+    "workaround_description": "Switches between app and desktop for every post",
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 67,
+   "verbatim": null,
+   "normalized": "Linking the Facebook and Instagram business pages is a recurring hassle and roughly half of story or photo uploads report a failure",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-08-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 68,
+   "verbatim": null,
+   "normalized": "Says the cost of running the ad has become too high and reducing it would let many more people advertise",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-08-03",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "pricing",
+   "subcategory": "pricing"
+  },
+  {
+   "id": 69,
+   "verbatim": null,
+   "normalized": "Finds Business Suite helpful and easy to use for managing their page and content",
+   "category": "product",
+   "type": "other",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-08-03",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 70,
+   "verbatim": "Now my account shows multiple, duplicate payments made!!!",
+   "normalized": "Payments repeatedly reported as failing across cards and PayPal, after which the account showed multiple duplicate payments",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Google Play",
+    "url": "https://play.google.com/store/apps/details?id=com.facebook.adsmanager",
+    "posted_date": "2026-07-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 71,
+   "verbatim": null,
+   "normalized": "Says the AI-generated support messages were no help at all and there are no humans available",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-07-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 72,
+   "verbatim": null,
+   "normalized": "Account was hacked and then disabled, with nothing in the help pages explaining how to reopen it and no phone number or email reply",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-07-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 73,
+   "verbatim": null,
+   "normalized": "Says advertising on Facebook almost doubled their business, while warning there is no customer service when something goes wrong",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Google Play",
+    "url": null,
+    "posted_date": "2026-07-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 74,
+   "verbatim": "Their AI can't cancel the event.",
+   "normalized": "A boosted event cannot be cancelled: it is not listed in Ads Manager, the AI assistant cannot find, cancel, pause or refund it, and no live representative is reachable",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Trustpilot",
+    "url": "https://www.trustpilot.com/review/business.facebook.com",
+    "posted_date": "2026-07-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 75,
+   "verbatim": null,
+   "normalized": "Business Suite will not let them edit an older event boost they want to cancel",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Trustpilot",
+    "url": null,
+    "posted_date": "2026-07-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 76,
+   "verbatim": null,
+   "normalized": "Live chat on a Business Suite support case advertises a 5-10 minute response but in practice takes 5 to 7 hours",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Trustpilot",
+    "url": null,
+    "posted_date": "2026-07-13",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 77,
+   "verbatim": "They took their payment from my funds balance and then also charge my debit card",
+   "normalized": "Payment was taken from the account funds balance and the same amount was then charged to the debit card, with no support available",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "Trustpilot",
+    "url": "https://www.trustpilot.com/review/adsmanager.facebook.com",
+    "posted_date": "2026-06-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 78,
+   "verbatim": null,
+   "normalized": "Spent hours trying to understand charges on the account and got only vague answers from the AI assistant with no way to reach a person",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "Trustpilot",
+    "url": null,
+    "posted_date": "2026-06-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "support",
+   "subcategory": "support"
+  },
+  {
+   "id": 79,
+   "verbatim": null,
+   "normalized": "Ads randomly stop running with no explanation and no clear guidance on how to fix it, repeatedly",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Trustpilot",
+    "url": null,
+    "posted_date": "2026-06-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 80,
+   "verbatim": null,
+   "normalized": "Says after ten years in advertising the platform is more confusing than ever, and hours were wasted setting up a basic click-through ad",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "Trustpilot",
+    "url": null,
+    "posted_date": "2026-06-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "design"
+  },
+  {
+   "id": 81,
+   "verbatim": "I have pressed a button that said to boost exposure",
+   "normalized": "Pressed a boost button once, then received charges from 31 July to 22 September totalling over $1,447 in amounts from $21.82 to $200, and does not understand what they were for",
+   "category": "product",
+   "type": "discoverability",
+   "source": {
+    "platform": "JustAnswer",
+    "url": "https://www.justanswer.com/software/t9i7r-charged-advertising-don-t-believe.html",
+    "posted_date": "2025-09-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 82,
+   "verbatim": null,
+   "normalized": "Has taken the charges to their credit card company because they cannot get an explanation of what they are for",
+   "category": "non_product",
+   "type": "other",
+   "source": {
+    "platform": "JustAnswer",
+    "url": null,
+    "posted_date": "2025-09-22",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "angry",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "billing",
+   "subcategory": "billing"
+  },
+  {
+   "id": 83,
+   "verbatim": null,
+   "normalized": "A Marketplace seller who says they have only ever used Boost and Pay is being billed for a business subscription they cannot cancel or modify",
+   "category": "product",
+   "type": "bug",
+   "source": {
+    "platform": "JustAnswer",
+    "url": "https://www.justanswer.com/software/twgp4-fb-marketplace-unwanted-subscription-charges.html",
+    "posted_date": "2025-12-02",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "blocking",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 84,
+   "verbatim": "full of errors, redundancies, and confusing verbiage",
+   "normalized": "Says there is no other way to give people access to Meta than through Business Suite, and describes it as error-prone and confusing",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "TrustRadius",
+    "url": "https://www.trustradius.com/products/meta-business-suite/reviews",
+    "posted_date": "2026-03-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "design"
+  },
+  {
+   "id": 85,
+   "verbatim": null,
+   "normalized": "Uses Business Suite to boost information to existing clients and to encourage new followers, and rates it for that",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "TrustRadius",
+    "url": null,
+    "posted_date": "2026-03-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 86,
+   "verbatim": null,
+   "normalized": "Reviewers report a cumbersome interface, posting accuracy problems and lead-quality issues, with financial return not consistently guaranteed",
+   "category": "product",
+   "type": "usability",
+   "source": {
+    "platform": "TrustRadius",
+    "url": null,
+    "posted_date": "2026-03-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 87,
+   "verbatim": null,
+   "normalized": "Scheduled posts occasionally fail to publish, particularly when planned far in advance",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Capterra",
+    "url": "https://www.capterra.com/p/213257/Facebook/reviews/",
+    "posted_date": "2026-06-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "frustrated",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "engineering"
+  },
+  {
+   "id": 88,
+   "verbatim": null,
+   "normalized": "Says Business Suite is easy for managing multiple accounts and replaced the third-party scheduler they had been paying for",
+   "category": "product",
+   "type": "evaluation_reasoning",
+   "source": {
+    "platform": "Capterra",
+    "url": null,
+    "posted_date": "2026-06-01",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "probable",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "apparent_user",
+    "usage_demonstrated": "specific",
+    "authenticity": "organic",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "enthusiastic",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 89,
+   "verbatim": null,
+   "normalized": "Business Suite, Ads Manager and a merchant's own dashboard routinely report three different numbers for the same activity",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Agency blog (Superpower)",
+    "url": "https://superpower.social/blogs/meta-business-suite-buggy",
+    "posted_date": "2026-08-06",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 90,
+   "verbatim": null,
+   "normalized": "Notes that paid posts keep being pushed to new audiences while Business Suite fails to load, so every hour of downtime is unmanaged comments on content being paid for",
+   "category": "product",
+   "type": "reliability",
+   "source": {
+    "platform": "Agency blog (Superpower)",
+    "url": null,
+    "posted_date": "2026-08-06",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": null,
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "commentator",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "major_friction",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  },
+  {
+   "id": 91,
+   "verbatim": null,
+   "normalized": "Meta documents that boosting accrues cost and is charged later at a billing threshold or monthly bill date, so being charged several times a month or after an ad stops is expected",
+   "category": "product",
+   "type": "documentation",
+   "source": {
+    "platform": "Meta Business Help Centre",
+    "url": "https://en-gb.facebook.com/business/help/105373712886516",
+    "posted_date": "2026-06-25",
+    "staleness_flag": false
+   },
+   "subject": {
+    "confidence": "confirmed",
+    "note": "Official explanation that accounts for many of the duplicate-charge complaints above; not itself feedback",
+    "competitor_mentioned": null
+   },
+   "author": {
+    "type": "employee_or_affiliated",
+    "usage_demonstrated": "general",
+    "authenticity": "undetermined",
+    "segment_hints": null
+   },
+   "intensity": {
+    "sentiment": "neutral",
+    "user_impact": "unstated",
+    "cadence": "unstated",
+    "workaround_present": false,
+    "workaround_description": null,
+    "switching_stated": "none",
+    "switching_evidence": null
+   },
+   "reach": {
+    "engagement": null
+   },
+   "owner": "product"
+  }
+ ],
+ "skipped": [
+  {
+   "item": "Meta Community Forums threads on business verification stuck 'In Review' (Mar, Apr and Jun 2026)",
+   "reason": "Meta developer and business verification process; no connection to Boost Post"
+  },
+  {
+   "item": "Goodreads 'how to contact Meta Business Support' quote pages",
+   "reason": "Obvious spam / promotional bot content"
+  },
+  {
+   "item": "Reddit promotion-service listicles and account-selling posts",
+   "reason": "Obvious spam / promotional bot content"
+  },
+  {
+   "item": "Click-farm background coverage (Wikipedia, AP, Washington Post, Adweek, Veritasium write-ups)",
+   "reason": "Coverage of the click-farm phenomenon generally, not feedback about Boost Post; retained as context only"
+  }
+ ],
+ "sources_read": [
+  "Personal blog (Kirkville)",
+  "Medium",
+  "The Register",
+  "Blog comments (ivetriedthat)",
+  "Goodreads author blogs",
+  "Shopify app reviews",
+  "Meta Community Forums",
+  "TikTok",
+  "Hacker News",
+  "Agency blog (lionelz.com)",
+  "Agency blog (AdMake AI)",
+  "Marketing blog (GrowthScribe)",
+  "Hootsuite blog",
+  "Agency blog (Altos)",
+  "Agency blog (Phound)",
+  "Meta Business Help Centre",
+  "Vendor blog (PostLink)",
+  "Analyst blog (Digital Applied)",
+  "Analyst report (Dash Social)",
+  "University blog (WGU)",
+  "Marketing blog (Social Champ)",
+  "Agency blog (Cordelia Labs)",
+  "Sprout Social blog",
+  "TikTok for Business blog",
+  "Apple App Store",
+  "Google Play",
+  "Trustpilot",
+  "TrustRadius",
+  "Capterra",
+  "JustAnswer",
+  "Agency blog (Superpower)"
+ ],
+ "sources_attempted_no_result": [
+  "Reddit — searched repeatedly; no usable first-person posts returned by our tooling",
+  "X/Twitter",
+  "Facebook Groups",
+  "YouTube comments",
+  "Discord and Slack communities",
+  "G2",
+  "Gartner Peer Insights (listing found, individual reviews not retrievable)"
+ ]
+}

@@ -18,11 +18,12 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
   refresh_connectors — re-pulls connector data into the KG every
                        CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
                        and KG read near-live data.
-  monthly_reports_tick — once a month per company (first configured brief
-                       weekday, at the brief time), runs each registered
-                       intelligence report, saves it into the artifacts
-                       library and extracts it into the KG so questions can
-                       be answered from it (app.monthly_reports).
+  monthly_reports_tick — each intelligence report on its own calendar
+                       (competitive + market quarterly, 3P feedback monthly)
+                       at 10:00 in the company's timezone: runs it, saves it
+                       into the artifacts library and extracts it into the KG
+                       so questions can be answered from it
+                       (app.monthly_reports).
 """
 from __future__ import annotations
 
@@ -543,14 +544,16 @@ async def _run_exact_delivery(
 
 
 async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
-    """Drive the monthly intelligence reports for every company.
+    """Drive the scheduled intelligence reports for every company.
 
     Ticks hourly (MONTHLY_REPORTS_TICK_MINUTES). For each company it resolves
-    the same timezone + configured day/time the brief uses and asks the pure
-    `app.monthly_reports.due_specs` decision — which forces the frequency to
-    MONTHLY (first configured weekday of the month) whatever brief cadence
-    the company picked, and reads its once-per-cycle state from the saved
-    reports themselves, so a restart can never double-run a month.
+    the timezone, then asks the pure
+    `app.monthly_reports.due_specs` decision — which runs each report on its
+    OWN calendar (competitive + market intelligence quarterly, 3P feedback
+    monthly) and reads once-per-period state from the saved reports
+    themselves, so a restart can never double-run a period. A tenant that
+    onboards mid-period simply has no report for it, which is what makes the
+    join run fall out of the same check.
 
     Single-phase by design, unlike the brief's generate-then-deliver split:
     nobody is waiting at an exact instant for a report. It takes minutes to
@@ -583,7 +586,7 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
         tz, schedule = _resolve_company_schedule(company)
         try:
             due = await asyncio.to_thread(
-                monthly_reports.due_specs, company_id, now, tz, schedule
+                monthly_reports.due_specs, company_id, now, tz
             )
         except Exception as exc:  # noqa: BLE001 — one company never stops the tick
             logger.error(
