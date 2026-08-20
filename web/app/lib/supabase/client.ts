@@ -116,11 +116,23 @@ export function getPriorSessionSnapshot(): PriorSessionSnapshot | null {
  *
  * The link's one-time token is spent the instant it's clicked — reopening it
  * only ever shows "invalid or expired". So rather than discard the (already
- * minted) invitee session and force the user back to a dead link, we hold it in
- * memory: /invite-conflict can then offer switching INTO it without re-visiting
- * the link. Memory only (never the URL) and one-shot — lost on a full page
- * reload, at which point /invite-conflict falls back to "ask for a fresh
- * invite".
+ * minted) invitee session and force the user back to a dead link, we hold it
+ * so /invite-conflict can offer switching INTO it without re-visiting the link.
+ *
+ * HELD IN sessionStorage, NOT JUST MEMORY. It used to be a module variable
+ * only, which meant one reload of /invite-conflict destroyed the sole route
+ * into the invited account while the invite link itself was already spent —
+ * a dead end whose most natural exit is signing up again, which is how a
+ * company ends up with a duplicate workspace (2026-08-19 incident). The
+ * module variable stays as the fast path and as the sole store when storage
+ * is unavailable (private mode, storage disabled).
+ *
+ * sessionStorage rather than localStorage on purpose: it is scoped to the tab
+ * and dies with it, so a held invitee session cannot linger on a shared
+ * machine. These are the same tokens the Supabase client already persists via
+ * `persistSession: true`, so nothing new in kind is being written to storage —
+ * only something shorter-lived. Cleared on both exits from /invite-conflict
+ * (adopt or stay), so it never outlives the decision.
  */
 export type PendingInviteSession = {
   email: string | null
@@ -128,18 +140,88 @@ export type PendingInviteSession = {
   refreshToken: string
 }
 
+const PENDING_INVITE_STORAGE_KEY = "sprntly.pendingInviteSession"
+
 let pendingInviteSession: PendingInviteSession | null = null
+
+/** Shape-check a parsed value before trusting it as a session. Storage is
+ *  attacker-writable in principle, and handing a malformed object to
+ *  `setSession` produces a confusing failure rather than a clean "no held
+ *  session" fallback. */
+function isPendingInviteSession(value: unknown): value is PendingInviteSession {
+  if (!value || typeof value !== "object") return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.accessToken === "string" &&
+    v.accessToken.length > 0 &&
+    typeof v.refreshToken === "string" &&
+    v.refreshToken.length > 0 &&
+    (v.email === null || typeof v.email === "string")
+  )
+}
 
 export function setPendingInviteSession(session: PendingInviteSession | null): void {
   pendingInviteSession = session
+  if (typeof window === "undefined") return
+  try {
+    if (session) {
+      window.sessionStorage.setItem(
+        PENDING_INVITE_STORAGE_KEY,
+        JSON.stringify(session),
+      )
+    } else {
+      window.sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY)
+    }
+  } catch {
+    /* storage disabled/unavailable — the module variable still serves this
+       page view, which is exactly the old behaviour. */
+  }
+}
+
+/** Drop an unusable stored value. Separately guarded: the caller may be here
+ *  precisely because storage is misbehaving, and the eviction must not become
+ *  a second failure. */
+function evictStoredInviteSession(): void {
+  try {
+    window.sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY)
+  } catch {
+    /* nothing further to do — the value is unreadable either way */
+  }
 }
 
 export function getPendingInviteSession(): PendingInviteSession | null {
-  return pendingInviteSession
+  if (pendingInviteSession) return pendingInviteSession
+  if (typeof window === "undefined") return null
+
+  let raw: string | null
+  try {
+    raw = window.sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY)
+  } catch {
+    // Storage unavailable entirely — there is nothing stored to evict.
+    return null
+  }
+  if (!raw) return null
+
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Malformed JSON falls through to the shape check below, which evicts it.
+    parsed = null
+  }
+  if (!isPendingInviteSession(parsed)) {
+    // Junk in storage is a dead end of its own — drop it rather than repeating
+    // the same failed restore on every read.
+    evictStoredInviteSession()
+    return null
+  }
+
+  pendingInviteSession = parsed
+  return parsed
 }
 
 export function clearPendingInviteSession(): void {
-  pendingInviteSession = null
+  setPendingInviteSession(null)
 }
 
 export function getSupabase(): SupabaseClient {

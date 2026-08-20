@@ -4,8 +4,10 @@
 // while already signed in as someone else, the page offers a real choice.
 //  - Held invitee session present → "Stay" (keep current account → "/") and
 //    "Switch" (adopt invitee via setSession → /set-password) buttons.
-//  - Held session gone (page reloaded) → the one-time-link explanation, no
-//    switch button.
+//  - Held session genuinely absent (storage disabled, or a different tab —
+//    NOT a mere reload, which it now survives; see
+//    lib/supabase/__tests__/pendingInviteSession.test.ts) → the one-time-link
+//    explanation, no switch button.
 // The default (no ?kept) one-user-one-company copy is unchanged.
 import * as React from "react"
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
