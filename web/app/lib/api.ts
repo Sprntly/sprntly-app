@@ -632,10 +632,6 @@ export type GoalFinding = {
    *  checked against anything. */
   surfaced_by: string[]
   assumed_params: { name: string; basis: string }[]
-  /** The source documents this finding rests on. A finding a reader cannot
-   *  trace back to anything is a claim they have to take on faith, so this is
-   *  rendered beside every finding that carries it. */
-  surfaced_by?: string[]
   /** `deep` for the leading few, `shallow` for the rest — the engine examines
    *  the top of the ranking in depth and says so, rather than presenting every
    *  row as equally analysed. */
