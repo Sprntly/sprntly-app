@@ -281,7 +281,19 @@ def test_ingest_timeline_sets_expected_and_next(isolated_settings, monkeypatch):
     assignee_id = _seed_assignee(project["id"])
     _install_fake_assignee_view(monkeypatch)
     deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
-    stated = "2026-08-21T09:00:00+00:00"
+    # A stated timeline sets next_check_in = that instant, but only when it is
+    # beyond the MIN_INTERVAL (24h) re-ping floor — `respect_stated_timeline`
+    # clamps anything sooner up to the floor. Compute the stated instant well
+    # past that floor RELATIVE to today so the test doesn't rot as real time
+    # approaches a hardcoded date (the original fixed "2026-08-21T09:00" fell
+    # inside the 24h floor once the clock reached 2026-08-20).
+    from datetime import datetime, timedelta, timezone
+
+    stated_dt = (datetime.now(timezone.utc) + timedelta(days=30)).replace(
+        hour=9, minute=0, second=0, microsecond=0
+    )
+    stated = stated_dt.isoformat()
+    _prefix = stated_dt.strftime("%Y-%m-%dT09:00:00")
     _stub_classify_llm(
         monkeypatch, delegation_id=deleg_id, intent="timeline", stated_completion=stated,
     )
@@ -290,8 +302,8 @@ def test_ingest_timeline_sets_expected_and_next(isolated_settings, monkeypatch):
 
     assert delegation_events_db.list_events(deleg_id) == []
     followup = delegation_followups_db.get_followup(deleg_id)
-    assert followup["expected_completion"].startswith("2026-08-21T09:00:00")
-    assert followup["next_check_in"].startswith("2026-08-21T09:00:00")
+    assert followup["expected_completion"].startswith(_prefix)
+    assert followup["next_check_in"].startswith(_prefix)
     assert followup["pending_done_since"] is None
 
 
@@ -515,6 +527,10 @@ def test_hook_skips_for_non_project_ask(isolated_settings, monkeypatch):
     monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
     monkeypatch.setattr(ajr.qa_agent, "answer", lambda **kw: _payload("hi"))
     monkeypatch.setattr(ingest, "maybe_ingest_status", lambda *a, **kw: ingest_calls.append(a) or None)
+    # Both hooks re-key off context_source.params.project_id now (not the legacy
+    # top-level project_id). Scope resolution is orthogonal to the hook keying
+    # here, and would 404 on this synthetic project — stub it out.
+    monkeypatch.setattr(ajr, "resolve_context_scope", lambda *a, **k: None)
 
     import asyncio
 
@@ -529,7 +545,8 @@ def test_hook_skips_for_non_project_ask(isolated_settings, monkeypatch):
     asyncio.run(
         ajr.run_ask_job(
             ask_id=2, enterprise_id="c1", question="q", dataset="d",
-            conversation_id=5, project_id=9, user_id="replier-1",
+            conversation_id=5, user_id="replier-1",
+            context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
         )
     )
     assert len(promote_calls) == 1
