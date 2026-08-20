@@ -24951,7 +24951,12 @@
 /* ── Goal Analysis panel (engine name Crucible; never shown) ─────────────── */
 .ga { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .ga-goal { font-weight: 600; font-size: 14px; margin: 0; }
-.ga-ask { margin: 0; line-height: 1.5; }
+/* `white-space: pre-line` because the ask is composed with real newlines and
+   bullet characters — an ambiguous-metric question lists each candidate on its
+   own line. Collapsed by default, it rendered as one unreadable run-on:
+   "…do not mean the same thing: • Monthly Active Users — … • Weekly Active
+   Users — …". */
+.ga-ask { margin: 0; line-height: 1.5; white-space: pre-line; }
 .ga-provenance { margin: 0; opacity: 0.65; font-size: 12px; }
 .ga-definition {
   width: 100%; padding: 8px 10px; border: 1px solid var(--border, #e5e5e5);

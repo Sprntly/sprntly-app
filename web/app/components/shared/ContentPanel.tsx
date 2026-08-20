@@ -687,6 +687,13 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                 // the wrong document's name over the right one's body.
                 : activeTab === "document"
                   ? "Document"
+                // And again, for the same reason the two lines above exist. A
+                // Goal Analysis run is not a PRD; falling through put "PRD"
+                // over the run's body on staging, with the tab beside it
+                // correctly reading "Goal Analysis". Three tabs have now made
+                // this mistake — the ladder is the thing to extend.
+                : activeTab === "goal"
+                  ? "Goal Analysis"
                 // A standalone set has no PRD to name, and naming one anyway
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
