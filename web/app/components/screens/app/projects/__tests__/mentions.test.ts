@@ -74,11 +74,20 @@ describe("parseMentionChips — segments content, never chips @sprntly", () => {
     expect(parseMentionChips("just some text")).toEqual([{ type: "text", value: "just some text" }])
   })
 
-  it("@sprntly is NOT chipped as a person", () => {
+  it("@sprntly is NEVER chipped as a person — it is a distinct AGENT segment", () => {
+    // The rewrite gave the agent token its own recognized `agent` segment
+    // (rendered as an agent chip, never a people chip). The load-bearing
+    // exclusion — @Sprntly is never a PERSON mention — still holds; it is now
+    // additionally surfaced as an `agent` segment rather than left as prose.
     const segs = parseMentionChips("@Sprntly please help")
+    // Person-chipping exclusion preserved: no people-mention segment.
     expect(segs.some((s) => s.type === "mention")).toBe(false)
-    // the @sprntly text survives as plain text
-    expect(segs.map((s) => (s.type === "text" ? s.value : "")).join("")).toContain("@Sprntly")
+    // The agent token is recognized as its own agent segment (the engine seam).
+    const agent = segs.find((s) => s.type === "agent")
+    expect(agent).toBeTruthy()
+    expect(agent && agent.type === "agent" ? agent.label.toLowerCase() : null).toBe("sprntly")
+    // The rest of the message survives as trailing text.
+    expect(segs.map((s) => (s.type === "text" ? s.value : "")).join("")).toContain("please help")
   })
 
   it("empty content yields a single empty text segment", () => {

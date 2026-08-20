@@ -39,7 +39,8 @@ import { Spinner } from "../../../auth/icons"
 import { EmptyPane } from "../../../shared/EmptyPane"
 import { ConfirmDialog } from "../../../shared/ConfirmDialog"
 import { useAuth } from "../../../../lib/auth"
-import { PROJECTS_PATH } from "../../../../lib/routes"
+import { PROJECTS_PATH, projectPath } from "../../../../lib/routes"
+import { memberAddedLandingTarget } from "./memberAddedLanding"
 import {
   ApiError,
   projectsApi,
@@ -62,6 +63,7 @@ import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
 import { loadPrdById } from "../../../../lib/runPrdGeneration"
+import { loadTicketSet } from "../../../../lib/runTicketSetGeneration"
 import { TaskModal } from "./TaskModal"
 import { useRealtimeChannel } from "./useRealtimeChannel"
 import { personAvatarStyle } from "./avatarColor"
@@ -82,6 +84,24 @@ type HumanMember = Extract<ProjectMember, { kind: "human" }>
 function initials(name: string | null | undefined): string {
   if (!name) return "?"
   return name.split(" ").filter(Boolean).map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+}
+
+/** The hover-tooltip label for a member avatar: the member's name, falling
+ *  back to their email when there's no name (an email-only invitee whose
+ *  profile hasn't captured a name yet), and to a generic "Member" when
+ *  neither is present. Feeds the native `title` attribute — the same
+ *  hover-tooltip primitive the surrounding top-bar controls already use
+ *  (e.g. the "+" invite button's `title="Invite members"`); no new tooltip
+ *  component or dependency is introduced. */
+export function memberAvatarLabel(
+  name: string | null | undefined,
+  email: string | null | undefined,
+): string {
+  const n = (name ?? "").trim()
+  if (n) return n
+  const e = (email ?? "").trim()
+  if (e) return e
+  return "Member"
 }
 
 // ── Small icons ──
@@ -305,7 +325,7 @@ export function ProjectDetailView({
               <span
                 key={m.user_id}
                 className={styles.topAv}
-                title={m.name ?? "Member"}
+                title={memberAvatarLabel(m.name, m.email)}
                 aria-hidden="true"
                 style={personAvatarStyle(m.user_id, m.name)}
               >
@@ -644,10 +664,22 @@ export function ProjectDetailScreen({
   // the unread badge) and `delegation.event` (the ledger status change): the
   // latter refetches the rail counts and bumps `ledgerVersion` so an open
   // modal re-reads. Any other event is ignored — one subscription, one topic.
+  // "Added to a project" live landing: the SAME per-user channel also carries
+  // `member.added` (both add paths — POST /members and POST /tag — publish it).
+  // Bring the just-added user straight into the project's private chat (the
+  // invite-modal promise: "they land straight in its chats"), unless they're
+  // mid-task or already sitting in it. Held on a ref so the stable
+  // `handleUnreadEvent` subscription reads the freshest activeChat/nav closures
+  // without re-subscribing (channel identity keys on topic only).
+  const landOnMemberAddedRef = useRef<(payload: unknown) => void>(() => {})
   const handleUnreadEvent = useCallback(
-    (event: string) => {
+    (event: string, payload: unknown) => {
       if (event === "brief.delivered") {
         setIndividualUnread(true)
+        return
+      }
+      if (event === "member.added") {
+        landOnMemberAddedRef.current(payload)
         return
       }
       if (event === "delegation.event") {
@@ -763,6 +795,29 @@ export function ProjectDetailScreen({
     },
     [projectId, router, searchParams],
   )
+
+  // The freshest `member.added` landing closure (see `handleUnreadEvent`).
+  // Reassigned every render so it reads the current `activeChat` and the
+  // current nav callbacks; the stable subscription reaches it via the ref.
+  landOnMemberAddedRef.current = (payload: unknown) => {
+    // A focused composer/search field means the user is mid-task — never yank.
+    const el = typeof document !== "undefined" ? document.activeElement : null
+    const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
+    const target = memberAddedLandingTarget(payload, {
+      currentProjectId: projectId,
+      alreadyInPrivateChat: activeChat === "individual",
+      busy,
+    })
+    if (target == null) return
+    // Same project → switch its tab to the private chat in place (also persists
+    // the tab + clears the unread badge). A different project → route to it,
+    // opening on its private chat.
+    if (String(target) === String(projectId)) {
+      onSelectChat("individual")
+    } else {
+      router.push(projectPath(target, { chat: "individual" }))
+    }
+  }
 
   // Re-fetches ONLY the project row (members + count) after a roster
   // mutation — deliberately not `load()`: that flashes the whole shell back
@@ -932,9 +987,10 @@ export function ProjectDetailScreen({
   }, [state.status, openPrdInPanelById])
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
-  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD
-  // and evidence both open like main; the STANDALONE-browse open (ArtifactsModal,
-  // by-id) stays deferred.
+  // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
+  // evidence, report and ticket_set all open like main's STANDALONE branch (no
+  // chat-resume: the drawer is a library view, not a thread turn); prototype and
+  // custom_artifact are routed by the drawer itself (own full-page surfaces).
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
     if (artifact.type === "prd") {
@@ -953,6 +1009,24 @@ export function ProjectDetailScreen({
         prdPartialHtml: null,
       })
       openContentPanel("evidence")
+    } else if (artifact.type === "report") {
+      // Main's `openChatArtifactItem` report STANDALONE branch (the no-surviving-
+      // chat fallback), verbatim: focus the Reports tab on this report id, no
+      // conversation scope. The tab self-loads the report body by id.
+      setContent({
+        conversationId: null,
+        reportFocusId: artifact.open.report_id,
+        reportFocusStandalone: true,
+      })
+      openContentPanel("reports")
+    } else if (artifact.type === "ticket_set") {
+      // Main's `openChatArtifactItem` ticket_set STANDALONE branch, verbatim:
+      // mark the set standalone, open the Tickets tab, and load the set by id
+      // through the SHARED `loadTicketSet` (which clears sibling PRD/evidence
+      // slots so the tab shows only this set).
+      setContent({ ticketSetStandalone: true })
+      openContentPanel("tickets")
+      void loadTicketSet(artifact.open.ticket_set_id, setContent)
     }
   }, [setContent, openContentPanel, openPrdInPanelById])
 

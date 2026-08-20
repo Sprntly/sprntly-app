@@ -38,12 +38,14 @@ export type ChatSurfaceKind = "main" | "project_private" | "project_group"
 
 /** The on-join greeting's short/expandable-body split marker — mirrors
  *  `backend/app/project_join_greeting.py`'s `MORE_MARKER` exactly (an inert
- *  HTML comment). It rides persisted greeting `content`; the shell's
- *  single-party mapper strips it when wrapping history content into a reply so
- *  it never renders as literal text (`AskReplyBody` runs react-markdown WITHOUT
- *  rehype-raw, so a raw comment would leak). Lives here — the shared contract
- *  module both the private engine and the shell already depend on — so exactly
- *  ONE copy of the string exists on the front end. */
+ *  HTML comment). It rides persisted greeting `content`. The project surface's
+ *  `renderAgentBody` override (see `GreetingTurnBody`) splits the turn on it —
+ *  the pre-marker text as the visible lead plus a Show more/less toggle over the
+ *  rest — and the marker itself never renders (`AskReplyBody` runs react-markdown
+ *  WITHOUT rehype-raw, so a raw comment left in place would otherwise leak).
+ *  Lives here — the shared contract module both the project surface and the shell
+ *  already depend on — so exactly ONE copy of the string exists on the front
+ *  end. */
 export const MORE_MARKER = "<!--more-->"
 
 /** The agent run-status vocabulary. Contract-only in the current wave — the
@@ -421,6 +423,14 @@ export interface MapMainTurnsDeps {
    *  plain-query rendering, byte-identical. Structural turn type keeps this
    *  module decoupled from the main screen's ThreadTurn. */
   renderUserBody?: (turn: { query: string }) => ReactNode
+  /** Optional per-surface AGENT-body override (the project chats supply the
+   *  on-join greeting's `MORE_MARKER` lead/Show-more split — the shell's default
+   *  reply ladder would otherwise render the raw marker inline). Returns a node
+   *  to REPLACE the reply ladder (routed through ChatBubble's `agentBodyNode`
+   *  escape hatch) or `null`/`undefined` to leave the turn on the default reply
+   *  render. Unset on main → byte-identical to before. Structural turn type
+   *  keeps this module decoupled from the main screen's ThreadTurn. */
+  renderAgentBody?: (turn: { reply?: { answer: string } | null }) => ReactNode
 
   // footer / afterNode inputs
   ticketSetActionState: "running" | "ready" | "failed" | null

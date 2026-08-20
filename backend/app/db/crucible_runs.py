@@ -109,6 +109,25 @@ def claim_for_confirmation(run_id: int, company_id: str) -> Optional[dict]:
     return (res.data or [None])[0]
 
 
+def claim_for_approval(run_id: int, company_id: str) -> Optional[dict]:
+    """Atomically move a run out of `awaiting_approval`. None if it wasn't.
+
+    Same shape and same reason as `claim_for_confirmation`: the expected status
+    is IN the WHERE clause, so two approvals cannot both proceed and produce two
+    analyses on one row. A double-click is the ordinary way to try.
+    """
+    res = (
+        require_client().table(TABLE)
+        .update({"status": "running",
+                 "started_at": datetime.now(timezone.utc).isoformat(),
+                 "updated_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", run_id).eq("company_id", company_id)
+        .eq("status", "awaiting_approval")
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
 def heartbeat(run_id: int, company_id: str) -> None:
     """Say the worker is still alive.
 

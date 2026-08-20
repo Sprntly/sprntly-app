@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { fetchWorkspaceForUser } from "../onboarding/store"
 import { slugForStep, ONBOARDING_STEP_SLUGS } from "../onboarding/types"
+import { projectPath } from "../routes"
 
 let browserClient: SupabaseClient | null = null
 
@@ -115,11 +116,23 @@ export function getPriorSessionSnapshot(): PriorSessionSnapshot | null {
  *
  * The link's one-time token is spent the instant it's clicked — reopening it
  * only ever shows "invalid or expired". So rather than discard the (already
- * minted) invitee session and force the user back to a dead link, we hold it in
- * memory: /invite-conflict can then offer switching INTO it without re-visiting
- * the link. Memory only (never the URL) and one-shot — lost on a full page
- * reload, at which point /invite-conflict falls back to "ask for a fresh
- * invite".
+ * minted) invitee session and force the user back to a dead link, we hold it
+ * so /invite-conflict can offer switching INTO it without re-visiting the link.
+ *
+ * HELD IN sessionStorage, NOT JUST MEMORY. It used to be a module variable
+ * only, which meant one reload of /invite-conflict destroyed the sole route
+ * into the invited account while the invite link itself was already spent —
+ * a dead end whose most natural exit is signing up again, which is how a
+ * company ends up with a duplicate workspace (2026-08-19 incident). The
+ * module variable stays as the fast path and as the sole store when storage
+ * is unavailable (private mode, storage disabled).
+ *
+ * sessionStorage rather than localStorage on purpose: it is scoped to the tab
+ * and dies with it, so a held invitee session cannot linger on a shared
+ * machine. These are the same tokens the Supabase client already persists via
+ * `persistSession: true`, so nothing new in kind is being written to storage —
+ * only something shorter-lived. Cleared on both exits from /invite-conflict
+ * (adopt or stay), so it never outlives the decision.
  */
 export type PendingInviteSession = {
   email: string | null
@@ -127,18 +140,88 @@ export type PendingInviteSession = {
   refreshToken: string
 }
 
+const PENDING_INVITE_STORAGE_KEY = "sprntly.pendingInviteSession"
+
 let pendingInviteSession: PendingInviteSession | null = null
+
+/** Shape-check a parsed value before trusting it as a session. Storage is
+ *  attacker-writable in principle, and handing a malformed object to
+ *  `setSession` produces a confusing failure rather than a clean "no held
+ *  session" fallback. */
+function isPendingInviteSession(value: unknown): value is PendingInviteSession {
+  if (!value || typeof value !== "object") return false
+  const v = value as Record<string, unknown>
+  return (
+    typeof v.accessToken === "string" &&
+    v.accessToken.length > 0 &&
+    typeof v.refreshToken === "string" &&
+    v.refreshToken.length > 0 &&
+    (v.email === null || typeof v.email === "string")
+  )
+}
 
 export function setPendingInviteSession(session: PendingInviteSession | null): void {
   pendingInviteSession = session
+  if (typeof window === "undefined") return
+  try {
+    if (session) {
+      window.sessionStorage.setItem(
+        PENDING_INVITE_STORAGE_KEY,
+        JSON.stringify(session),
+      )
+    } else {
+      window.sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY)
+    }
+  } catch {
+    /* storage disabled/unavailable — the module variable still serves this
+       page view, which is exactly the old behaviour. */
+  }
+}
+
+/** Drop an unusable stored value. Separately guarded: the caller may be here
+ *  precisely because storage is misbehaving, and the eviction must not become
+ *  a second failure. */
+function evictStoredInviteSession(): void {
+  try {
+    window.sessionStorage.removeItem(PENDING_INVITE_STORAGE_KEY)
+  } catch {
+    /* nothing further to do — the value is unreadable either way */
+  }
 }
 
 export function getPendingInviteSession(): PendingInviteSession | null {
-  return pendingInviteSession
+  if (pendingInviteSession) return pendingInviteSession
+  if (typeof window === "undefined") return null
+
+  let raw: string | null
+  try {
+    raw = window.sessionStorage.getItem(PENDING_INVITE_STORAGE_KEY)
+  } catch {
+    // Storage unavailable entirely — there is nothing stored to evict.
+    return null
+  }
+  if (!raw) return null
+
+  let parsed: unknown = null
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    // Malformed JSON falls through to the shape check below, which evicts it.
+    parsed = null
+  }
+  if (!isPendingInviteSession(parsed)) {
+    // Junk in storage is a dead end of its own — drop it rather than repeating
+    // the same failed restore on every read.
+    evictStoredInviteSession()
+    return null
+  }
+
+  pendingInviteSession = parsed
+  return parsed
 }
 
 export function clearPendingInviteSession(): void {
-  pendingInviteSession = null
+  setPendingInviteSession(null)
 }
 
 export function getSupabase(): SupabaseClient {
@@ -199,11 +282,20 @@ export async function postLoginPath(): Promise<string> {
   // any failure (404 = no invite, network glitch) falls through to
   // onboarding without surfacing an error here.
   if (!workspace) {
-    const accepted = (await tryAcceptInvite()) === "accepted"
-    if (accepted) {
+    const accept = await tryAcceptInvite()
+    if (accept.outcome === "accepted") {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
-        if (fresh.onboarding_completed_at) return "/"
+        if (fresh.onboarding_completed_at) {
+          // Project invite (AD-TNM3): the accept already landed them in the
+          // project's `project_members` — send them straight to its private
+          // chat rather than the dashboard. A plain workspace/org invite
+          // carries no project_id and keeps the existing "/" landing.
+          if (accept.projectId != null) {
+            return projectPath(accept.projectId, { chat: "individual" })
+          }
+          return "/"
+        }
         // slugForStep clamps the (possibly stale 7-step) index into range and
         // maps it to its semantic slug.
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
@@ -309,9 +401,18 @@ export async function postLoginPath(): Promise<string> {
   //    can never accept it, and silently ignoring the invite leaves both
   //    sides confused — route to the explanatory blocked-invite page instead.
   //  - no invite (404) / transient error → normal flow.
-  if ((await tryAcceptInvite()) === "conflict") return "/invite-conflict"
+  const accept = await tryAcceptInvite()
+  if (accept.outcome === "conflict") return "/invite-conflict"
 
-  if (workspace.onboarding_completed_at) return "/"
+  if (workspace.onboarding_completed_at) {
+    // Project invite (AD-TNM3): an existing-company member accepting a
+    // project-carrying invite lands directly in that project's private chat.
+    // Plain workspace/org invites (no project_id) keep the "/" landing.
+    if (accept.outcome === "accepted" && accept.projectId != null) {
+      return projectPath(accept.projectId, { chat: "individual" })
+    }
+    return "/"
+  }
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }
 
@@ -409,19 +510,31 @@ export async function notAuthorizedContinuePath(): Promise<string> {
  *  - error    — network/other failure; treated as best-effort no-op */
 type InviteAcceptOutcome = "accepted" | "none" | "conflict" | "error"
 
-async function tryAcceptInvite(): Promise<InviteAcceptOutcome> {
+/** The accept outcome plus, on "accepted", the project the invite carried
+ *  (AD-TNM3) — null for a plain workspace/org invite. postLoginPath uses a
+ *  non-null projectId to land the accepter in that project's private chat. */
+type InviteAcceptResult = {
+  outcome: InviteAcceptOutcome
+  projectId: number | null
+}
+
+async function tryAcceptInvite(): Promise<InviteAcceptResult> {
   try {
     // Lazy import keeps the api module out of the cold-start path of
     // postLoginPath (teamApi now lives in lib/teamApi, not TeamSettings).
     const { teamApi } = await import("../teamApi")
-    await teamApi.acceptInvite()
-    return "accepted"
+    const res = await teamApi.acceptInvite()
+    const pid = res?.project_id
+    return {
+      outcome: "accepted",
+      projectId: typeof pid === "number" && Number.isFinite(pid) ? pid : null,
+    }
   } catch (err) {
     const { ApiError } = await import("../api")
     if (err instanceof ApiError) {
-      if (err.status === 409) return "conflict"
-      if (err.status === 404) return "none"
+      if (err.status === 409) return { outcome: "conflict", projectId: null }
+      if (err.status === 404) return { outcome: "none", projectId: null }
     }
-    return "error"
+    return { outcome: "error", projectId: null }
   }
 }

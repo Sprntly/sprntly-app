@@ -219,6 +219,54 @@ def get_conversation_prd_id(
         return None
 
 
+def get_conversation_project_id(
+    conversation_id: int,
+    company_id: str,
+) -> int | None:
+    """The project a chat conversation belongs to, or None.
+
+    A project-bound conversation is a `conversations` row with a non-null
+    `project_id`; `kind` is `individual` (the private per-user project chat) or
+    `group` (the one shared project chat). A MAIN-CHAT row shares `kind`'s
+    `individual` default but carries `project_id = NULL`, so it returns None and
+    stays workspace-scoped — `project_id` is the real discriminator, and the
+    `kind` guard only fences off any future non-project kind. Company-scoped
+    only — no per-user gate, because a `kind='group'` row is owned by its
+    creator, not the member currently classifying a message; the caller already
+    reached this conversation_id through an ownership/membership-checked surface,
+    and the value only NARROWS the read-only artifact listing to that project's
+    own documents (never widens it, never mutates), so the company scope is the
+    boundary that matters. Best-effort: any error → None.
+
+    Used by the chat-intent route to resolve a project chat's `open_artifact` /
+    `list_artifacts` legs against THE PROJECT's own artifacts even when the
+    client did not send a `context_source` — closing the class where a project
+    chat silently answers workspace-wide.
+    """
+    try:
+        c = require_client()
+        rows: Any = (
+            c.table("conversations")
+            .select("project_id, kind")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+            .execute()
+        )
+        if not rows.data:
+            return None
+        row = rows.data[0]
+        if row.get("kind") not in ("individual", "group"):
+            return None
+        return row.get("project_id")
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to read project binding for conversation %s", conversation_id,
+            exc_info=True,
+        )
+        return None
+
+
 # ── Evidence half of the binding (mirrors the PRD pair above exactly) ───────
 #
 # Extends the SAME mechanism to Evidence rather than inventing a parallel one
@@ -439,7 +487,9 @@ def _author_display(
     return name, prof.get("role")
 
 
-def list_group_turns(conversation_id: int, since: int | None = None) -> list[dict[str, Any]]:
+def list_group_turns(
+    conversation_id: int, since: int | None = None, project_id: int | None = None
+) -> list[dict[str, Any]]:
     """Turns in a group chat, ascending, after the `since` cursor (a turn
     id — AD-P4 poll read, mirrors the `prototype_comments` refetch
     posture). Each turn carries `author_name`/`author_job_role` (joined
@@ -449,17 +499,25 @@ def list_group_turns(conversation_id: int, since: int | None = None) -> list[dic
     Refuses (returns []) when `conversation_id` does not resolve to a
     `kind='group'` row — the group path can never read an individual
     chat's turns, even if a caller forgets to resolve the id via
-    `get_group_chat` first (isolation regression, R4/§9)."""
+    `get_group_chat` first (isolation regression, R4/§9).
+
+    Optional `project_id` — when passed, the `conversation_id` must ALSO
+    belong to that project, else `[]`. Belt-and-suspenders cross-project /
+    cross-tenant scoping for callers that accept a CLIENT-supplied
+    conversation_id (e.g. `routes.ask._load_group_history`): even if the
+    caller's own conversation↔project binding is ever bypassed, a foreign
+    project's turns can never be read through this path. Default `None`
+    preserves the exact behavior every pre-existing caller relies on."""
     client = require_client()
-    conv = (
+    conv_q = (
         client.table("conversations")
         .select("id")
         .eq("id", conversation_id)
         .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
     )
+    if project_id is not None:
+        conv_q = conv_q.eq("project_id", project_id)
+    conv = conv_q.limit(1).execute().data
     if not conv:
         return []
 

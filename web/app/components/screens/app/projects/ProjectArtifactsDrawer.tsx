@@ -38,6 +38,7 @@ import {
   type ProjectArtifactType,
 } from "../../../../lib/api"
 import { documentPath } from "../../../../(app)/artifacts/doc/DocumentRoute"
+import { prototypePath } from "../../../../lib/routes"
 import { useEscapeToClose } from "./useEscapeToClose"
 import { AddArtifactPanel } from "./AddArtifactModal"
 import styles from "./ProjectArtifactsDrawer.module.css"
@@ -208,6 +209,32 @@ function artifactHref(a: ArtifactItem): string | null {
   }
 }
 
+/** Whether a row is CLICKABLE-TO-OPEN on the project surface. Every artifact
+ *  type has an open destination here — PRD/evidence/report/ticket_set into the
+ *  shared side panel (`onOpenInPlace`), prototype into a new browser tab, and a
+ *  custom document onto its own page — so the only thing that makes a row inert
+ *  is a missing target id (a half-written row that can't resolve to anything).
+ *  This replaces the earlier `artifactHref(a) != null` gate, which left report
+ *  and ticket_set permanently non-interactive. */
+function isOpenable(a: ArtifactItem): boolean {
+  switch (a.type) {
+    case "prd":
+      return a.open.prd_id != null
+    case "evidence":
+      return a.open.evidence_id != null
+    case "prototype":
+      return a.open.prd_id != null
+    case "report":
+      return a.open.report_id != null
+    case "ticket_set":
+      return a.open.ticket_set_id != null
+    case "custom_artifact":
+      return a.open.custom_artifact_id != null
+    default:
+      return false
+  }
+}
+
 // ── Icons ──
 
 function IconPlusSmall() {
@@ -292,6 +319,9 @@ export type ProjectArtifactsDrawerViewProps = {
   onShowAdd: () => void
   onBackToList: () => void
   addPanel: React.ReactNode
+  /** Pointer-down on the left-edge drag handle → begins a resize gesture (the
+   *  container owns the width state + persistence). */
+  onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void
 }
 
 export function ProjectArtifactsDrawerView({
@@ -306,6 +336,7 @@ export function ProjectArtifactsDrawerView({
   onShowAdd,
   onBackToList,
   addPanel,
+  onResizeStart,
 }: ProjectArtifactsDrawerViewProps) {
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
   for (const a of artifacts) {
@@ -338,6 +369,14 @@ export function ProjectArtifactsDrawerView({
   if (view === "add") {
     return (
       <aside className={styles.drawer} role="region" aria-label="Add artifacts to project" data-testid="artifacts-drawer">
+        <div
+          className={styles.resizeHandle}
+          onPointerDown={onResizeStart}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize artifacts panel"
+          data-testid="artifacts-drawer-resize"
+        />
         <div className={styles.head}>
           <button
             type="button"
@@ -367,6 +406,14 @@ export function ProjectArtifactsDrawerView({
   // ── LIST (primary) view ──
   return (
     <aside className={styles.drawer} role="region" aria-label="Project artifacts" data-testid="artifacts-drawer">
+      <div
+        className={styles.resizeHandle}
+        onPointerDown={onResizeStart}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize artifacts panel"
+        data-testid="artifacts-drawer-resize"
+      />
       <div className={styles.head}>
         <div className={styles.titlewrap}>
           <div className={styles.title}>
@@ -442,7 +489,7 @@ export function ProjectArtifactsDrawerView({
           <div className={styles.list} data-testid="artifacts-drawer-list">
             {filtered.map((a) => {
               const cfg = badgeFor(a.type)
-              const openable = artifactHref(a) != null
+              const openable = isOpenable(a)
               const common = (
                 <>
                   <ArtifactTypeIcon type={a.type} />
@@ -493,6 +540,26 @@ export function ProjectArtifactsDrawerView({
   )
 }
 
+// ── Drawer resize (drag-to-widen) ──
+// The drawer is a grid COLUMN (ProjectDetailScreen.module.css's `.bodyDrawerOpen`),
+// its width driven by `--proj-drawer-w` on :root — set here, persisted, so a
+// wider drawer narrows the chat column rather than overlaying it. Mirrors the
+// content panel's own drag handle; the list has no iframes, so this is the
+// simpler pointer-capture + rAF form without the frame-swallowing guards.
+const DRAWER_WIDTH_KEY = "sprntly-proj-artifacts-drawer-width"
+const DRAWER_WIDTH_MIN = 360
+const DRAWER_WIDTH_MAX_VW = 0.6
+const DRAWER_VAR = "--proj-drawer-w"
+// Below this the layout drops to a full-width drawer (no chat column to trade
+// against), matching ProjectDetailScreen.module.css's <=960px rule.
+const DRAWER_RESIZE_MIN_VIEWPORT = 960
+
+function clampDrawerWidth(px: number): number {
+  const max = Math.round(window.innerWidth * DRAWER_WIDTH_MAX_VW)
+  const min = Math.min(DRAWER_WIDTH_MIN, max)
+  return Math.min(max, Math.max(min, Math.round(px)))
+}
+
 // ── Container: fetch on open + list ⇆ add state ──
 
 type LoadState =
@@ -535,6 +602,74 @@ export function ProjectArtifactsDrawer({
   // surrounding app stays reachable). Same reliable document-level listener the
   // sibling modals use.
   useEscapeToClose(open, onClose)
+
+  // ── Drag-to-resize: live width + persistence ──
+  // widthRef holds the current px width (null = the CSS default band). On open
+  // it restores the saved width, applies it to :root, and re-clamps on window
+  // resize; on close it clears the var so a re-open starts from the default.
+  const widthRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const root = document.documentElement
+    const saved = Number(window.localStorage.getItem(DRAWER_WIDTH_KEY))
+    widthRef.current = Number.isFinite(saved) && saved >= DRAWER_WIDTH_MIN ? saved : null
+    const apply = () => {
+      if (window.innerWidth <= DRAWER_RESIZE_MIN_VIEWPORT || widthRef.current == null) {
+        root.style.removeProperty(DRAWER_VAR)
+        return
+      }
+      const next = clampDrawerWidth(widthRef.current)
+      widthRef.current = next
+      root.style.setProperty(DRAWER_VAR, `${next}px`)
+    }
+    apply()
+    window.addEventListener("resize", apply)
+    return () => {
+      window.removeEventListener("resize", apply)
+      root.style.removeProperty(DRAWER_VAR)
+    }
+  }, [open])
+
+  const handleResizeStart = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || window.innerWidth <= DRAWER_RESIZE_MIN_VIEWPORT) return
+    e.preventDefault()
+    const handle = e.currentTarget
+    const drawerEl = handle.closest<HTMLElement>("[data-testid='artifacts-drawer']")
+    const root = document.documentElement
+    const { pointerId } = e
+    let latestX = e.clientX
+    let frame = 0
+    const flush = () => {
+      frame = 0
+      // The drawer is anchored to the viewport's RIGHT edge, so its width is the
+      // gap between the pointer and that edge — dragging LEFT widens it.
+      const next = clampDrawerWidth(window.innerWidth - latestX)
+      widthRef.current = next
+      root.style.setProperty(DRAWER_VAR, `${next}px`)
+    }
+    drawerEl?.setAttribute("data-resizing", "true")
+    try { handle.setPointerCapture(pointerId) } catch { /* jsdom / unsupported */ }
+    const onMove = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      latestX = ev.clientX
+      if (!frame) frame = window.requestAnimationFrame(flush)
+    }
+    const end = () => {
+      if (frame) { window.cancelAnimationFrame(frame); flush() }
+      if (widthRef.current != null) {
+        window.localStorage.setItem(DRAWER_WIDTH_KEY, String(widthRef.current))
+      }
+      drawerEl?.removeAttribute("data-resizing")
+      try { handle.releasePointerCapture(pointerId) } catch { /* already gone */ }
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", onUp)
+    }
+    const onUp = (ev: PointerEvent) => { if (ev.pointerId === pointerId) end() }
+    window.addEventListener("pointermove", onMove)
+    window.addEventListener("pointerup", onUp)
+    window.addEventListener("pointercancel", onUp)
+  }, [])
 
   const reload = useCallback(() => {
     setState({ status: "loading" })
@@ -594,23 +729,35 @@ export function ProjectArtifactsDrawer({
 
   const handleOpenRow = useCallback(
     (a: ArtifactItem) => {
-      // PRD and evidence are IN-PANEL artifacts: they open in the SAME shared
-      // side-panel main uses, beside the project chat, via the project surface's
-      // in-place seam — which also closes this drawer (it clears the project's
-      // rail-modal state). This is a HARD invariant: a PRD/evidence row must NEVER
-      // reach the `/?prd=`/`/?evidence=` deep-link, because those land on the MAIN
-      // workspace chat (`/`) and open a NEW main chat tab, yanking the user out of
-      // the project (the reported defect). So we short-circuit unconditionally —
-      // if the in-place seam is somehow absent we no-op rather than fall back to
-      // that main deep-link.
-      if (a.type === "prd" || a.type === "evidence") {
+      // PRD, evidence, report and ticket_set are IN-PANEL artifacts: they open
+      // in the SAME shared side-panel main uses, beside the project chat, via the
+      // project surface's in-place seam — which also closes this drawer (it clears
+      // the project's rail-modal state). This is a HARD invariant: these rows must
+      // NEVER reach the `/?prd=`/`/?evidence=` deep-link, because those land on the
+      // MAIN workspace chat (`/`) and yank the user out of the project (the
+      // reported defect). So we short-circuit unconditionally — if the in-place
+      // seam is somehow absent we no-op rather than fall back to a main deep-link.
+      if (
+        a.type === "prd" ||
+        a.type === "evidence" ||
+        a.type === "report" ||
+        a.type === "ticket_set"
+      ) {
         onOpenInPlace?.(a)
         return
       }
-      // prototype (`/prototype?prd=`) and custom_artifact (`documentPath`) have
-      // their OWN standalone routes — not the beside-chat panel — so those keep
-      // the deep-link open. Types with no url-param entry (report/ticket_set)
-      // aren't rendered as openable rows at all.
+      // A prototype has its OWN standalone canvas route (`/prototype?prd=`), which
+      // is a full-page surface — routing to it in-place would navigate the user
+      // out of the project. Open it in a NEW browser tab so the project chat stays
+      // put behind it. `noopener` keeps the opened tab from reaching back into
+      // this window.
+      if (a.type === "prototype") {
+        if (a.open.prd_id == null) return
+        window.open(prototypePath(a.open.prd_id), "_blank", "noopener")
+        return
+      }
+      // A custom document opens onto its OWN page (it is written, not read beside
+      // a chat) — main's `openChatArtifactItem` routes it the same way.
       const href = artifactHref(a)
       if (!href) return
       router.push(href)
@@ -638,6 +785,7 @@ export function ProjectArtifactsDrawer({
         view={view}
         onShowAdd={() => setView("add")}
         onBackToList={() => setView("list")}
+        onResizeStart={handleResizeStart}
         addPanel={
           <AddArtifactPanel
             projectId={projectId}

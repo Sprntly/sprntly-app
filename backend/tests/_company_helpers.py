@@ -129,7 +129,14 @@ def company_client(monkeypatch) -> SimpleNamespace:
     setup_supabase_auth(monkeypatch)
     import app.main as main_mod
 
-    importlib.reload(sys.modules["app.main"])
+    # Rebuild the whole HTTP layer, not just `app.main`. The route modules used
+    # to be reloaded eagerly for EVERY test by `isolated_settings`; now they are
+    # reloaded here, where a TestClient is actually being built. Reloading
+    # `app.main` alone would leave the routers holding the previous test's
+    # module-level state.
+    from tests.conftest import reload_app_layer
+
+    reload_app_layer()
 
     user_id = "test-user-" + uuid.uuid4().hex[:8]
     company_id = seed_company(user_id=user_id)

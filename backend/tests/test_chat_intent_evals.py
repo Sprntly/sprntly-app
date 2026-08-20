@@ -493,20 +493,25 @@ def test_open_artifact_accepts_evidence(monkeypatch):
     assert env["artifact_type"] == "evidence"
 
 
-def test_open_artifact_without_a_subject_downgrades_to_answer_not_generate(
+def test_open_artifact_without_a_subject_is_a_deterministic_open_never_generate(
     monkeypatch,
 ):
-    """THE guard. An open request that names nothing has to fall back to the
-    harmless action. Falling back to generate_prd would answer "open a PRD"
-    with a brand-new document — the single failure this action exists to
-    prevent."""
+    """THE guard. A bare "open a PRD" names nothing, but it must never come
+    back as generate_prd — answering "open a PRD" with a brand-new document is
+    the single failure this action exists to prevent. `detect_open_intent` now
+    settles a bare open (opening verb + artifact noun, no title) deterministically
+    as open_artifact with a NULL query — a legal value the resolver turns into
+    the sole PRD of that kind — ahead of the model, so even a model that misreads
+    it as authoring can never generate."""
     _patch_llm(monkeypatch, {
-        "intent": "open_artifact", "confidence": 0.95, "artifact_type": "prd",
-        "artifact_query": "   ", "reason": "open",
+        "intent": "generate_prd", "confidence": 0.97,
+        "task": "a brand-new document", "reason": "misread as authoring",
     })
     env = ci.resolve_chat_intent("ent-1", "open a PRD", [])
-    assert env["intent"] == "answer"
-    assert env["source"] == "no_artifact_query"
+    assert env["intent"] == "open_artifact"
+    assert env["source"] == "open_intent"
+    assert env["artifact_query"] is None
+    assert env["task"] is None
 
 
 def test_a_named_but_unopenable_kind_is_kept_never_coerced_to_prd(monkeypatch):
@@ -676,15 +681,18 @@ def test_the_pre_gate_is_off_when_a_prd_is_open_or_a_file_is_attached(monkeypatc
 def test_a_generate_verdict_on_an_open_shaped_message_is_vetoed(monkeypatch):
     """THE regression gate for the headline safety property.
 
-    If the model ever answers "open the PRD for X" with generate_prd, the user
-    must not get a new document written. The veto lands on open_artifact, whose
-    worst case is "I couldn't find that" — which opens nothing."""
+    If the model ever answers an open-shaped message with generate_prd, the user
+    must not get a new document written. The message here names its artifact with
+    a noun the deterministic detector does NOT recognise ("doc"), so it flows to
+    the model and the veto — not `detect_open_intent` — is what catches it. The
+    veto lands on open_artifact, whose worst case is "I couldn't find that",
+    which opens nothing."""
     _patch_llm(monkeypatch, {
         "intent": "generate_prd", "confidence": 0.97,
         "task": "compliance reporting", "reason": "misread as authoring",
     })
     env = ci.resolve_chat_intent(
-        "ent-1", "open the PRD for compliance reporting", []
+        "ent-1", "open the compliance reporting doc", []
     )
     assert env["intent"] == "open_artifact"
     assert env["source"] == "open_verb_veto"
@@ -695,7 +703,9 @@ def test_a_generate_verdict_on_an_open_shaped_message_is_vetoed(monkeypatch):
 
 def test_the_veto_reduces_a_generation_brief_to_a_searchable_subject(monkeypatch):
     """A vetoed `generate_prd` carries a multi-sentence brief, which matches no
-    title and would land a paragraph inside "I couldn't find a PRD for …"."""
+    title and would land a paragraph inside "I couldn't find a PRD for …". The
+    message uses "doc" — a noun `detect_open_intent` does not recognise — so it
+    reaches the model and the veto reduces the brief via `_subject_of`."""
     _patch_llm(monkeypatch, {
         "intent": "generate_prd", "confidence": 0.95,
         "task": (
@@ -706,7 +716,7 @@ def test_the_veto_reduces_a_generation_brief_to_a_searchable_subject(monkeypatch
         "reason": "misread as authoring",
     })
     env = ci.resolve_chat_intent(
-        "ent-1", "open the PRD for compliance reporting", []
+        "ent-1", "open the compliance reporting doc", []
     )
     assert env["artifact_query"] == "Compliance reporting for enterprise admins"
 

@@ -62,3 +62,27 @@ afterEach(() => {
     }
   }
 })
+
+// UNMOUNT EVERY RENDERED COMPONENT AFTER EVERY TEST.
+//
+// Testing Library's `cleanup` is auto-registered only when its globals are on;
+// this suite calls `render` directly, so 16 of the GenerateModal test files
+// simply never unmounted. That component arms a 5-SECOND timer on open and
+// clears it on unmount — correctly — but a file that finishes in under five
+// seconds without unmounting leaves the timer live. It then fires into a torn-
+// down environment and React throws `ReferenceError: window is not defined`,
+// which vitest counts as an unhandled error and fails the whole job.
+//
+// The result was a `test-web` lane that failed on main 5 runs out of 6 while
+// every one of its 489 test files passed — a race, so it went green
+// occasionally, which is the worst kind of red board: it trains people to
+// re-run rather than to look.
+//
+// Registered globally rather than in the 16 files, because the next component
+// with a timer will have the same problem and nobody will remember this.
+// `afterEach` is already imported above for the sessionStorage reset.
+import { cleanup } from "@testing-library/react"
+
+afterEach(() => {
+  cleanup()
+})

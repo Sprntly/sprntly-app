@@ -21,6 +21,26 @@ from app.db.workspaces import ensure_default_workspace
 from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE, Surface, SurfaceScope
 
 
+def _build_private_scope_via_assembler(*, project_id, conversation_id, user_id):
+    """Retarget shim for the deleted `ask_job_runner._build_private_scope`: the
+    private-scope construction relocated into `ProjectContextAssembler.assemble`
+    in the answer-path collapse. Membership gate stubbed (these are pure-unit
+    scope/routing tests — no real project; the best-effort breadth/roster/
+    instructions reads degrade to empty without a DB)."""
+    from unittest.mock import patch
+
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+
+    with patch("app.db.projects.project_belongs_to_company", return_value=True), \
+         patch("app.db.projects.is_project_member", return_value=True):
+        return ProjectContextAssembler().assemble(AssembleRequest(
+            user_id=user_id, company_id="c1", dataset="acme",
+            conversation_id=conversation_id, question="q", workspace_id="w1",
+            params={"project_id": project_id, "surface": "private"},
+        ))
+
+
 def _route_out():
     return SimpleNamespace(output={"skill_id": None, "confidence": 0.0, "action": None})
 
@@ -31,6 +51,66 @@ def _ctx(company_id="c1", workspace_id="w1", user_id="u1"):
 
 # ── Private collapse (AC4) ─────────────────────────────────────────────────
 
+
+
+@pytest.fixture
+def _offline_db(monkeypatch):
+    """A working fake Supabase WITHOUT reloading app modules.
+
+    Six tests in this file reach a path that needs a DB client. On ambient env
+    they fail closed locally and make a REAL Anthropic call in CI, where a key
+    IS configured — which is how they failed with a 401 rather than an
+    assertion, and why `test-backend` was red on main for days.
+
+    `isolated_settings` is the obvious fixture and it cannot be used here: it
+    RELOADS app modules, and this file holds module-level references (`ajr`,
+    `qa`) that ~30 sibling tests monkeypatch. Reloading rebinds those and the
+    siblings start patching a module the code no longer uses.
+
+    So this does the three things `isolated_settings` does that these tests
+    need — env, a fresh fake schema, and the patched client factory — and
+    deliberately skips the fourth.
+    """
+    from tests import _fake_supabase
+    from tests.conftest import _FAKE_SCHEMA, reset_fake_db
+
+    # The SETTINGS OBJECT, not the environment. `app.config.settings` is built
+    # once at import, so `monkeypatch.setenv` after that changes nothing — which
+    # is exactly why `isolated_settings` reloads `app.config` rather than just
+    # setting variables. Patching the live object gets the same effect without
+    # the reload.
+    import app.config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "anthropic_api_key",
+                        "test-key-not-used", raising=False)
+    monkeypatch.setattr(config_mod.settings, "supabase_url",
+                        "https://fake.supabase.co", raising=False)
+    monkeypatch.setattr(config_mod.settings, "supabase_service_role_key",
+                        "fake-service-role-key", raising=False)
+
+    # NO REAL LLM CALL. The path under test runs `qa.answer -> ask_runner ->
+    # call_json`, and these tests only patch `run_tool_loop` — which that path
+    # stopped going through. So the call escaped to the real API: locally it
+    # failed closed on a missing key, and in CI, where a key IS configured, it
+    # reached Anthropic and came back 401. Patched at `call_json` in both
+    # modules that hold a reference, which is what `fake_llm` does.
+    def _no_network_call_json(system: str = "", user: str = "", **kwargs):
+        return {"answer": "", "citations": [], "_schema_version": 1}
+
+    import app.ask_runner as ask_runner_mod
+    import app.llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "call_json", _no_network_call_json, raising=False)
+    monkeypatch.setattr(ask_runner_mod, "call_json", _no_network_call_json,
+                        raising=False)
+
+    reset_fake_db(_FAKE_SCHEMA)
+    fake = _fake_supabase.FakeSupabaseClient()
+    import app.db.client as db_client_mod
+
+    monkeypatch.setattr(db_client_mod, "supabase_client", lambda: fake)
+    db_client_mod._reset_supabase_client_for_tests()
+    yield fake
 
 def test_private_ask_routes_through_single_shot(monkeypatch):
     captured = {}
@@ -45,10 +125,17 @@ def test_private_ask_routes_through_single_shot(monkeypatch):
     import app.project_memory as pm
 
     monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
+    # A project ask now carries its project on `context_source` (not the legacy
+    # top-level `project_id`); scope is built by the assembler, whose membership
+    # gate we stub (no DB in this pure-unit routing test — breadth reads degrade
+    # to empty), same as `_build_private_scope_via_assembler` above.
+    monkeypatch.setattr("app.db.projects.project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr("app.db.projects.is_project_member", lambda *a, **k: True)
 
     asyncio.run(ajr.run_ask_job(
         ask_id=1, enterprise_id="c1", question="q", dataset="d",
-        project_id=9, conversation_id=5, user_id="u1",
+        conversation_id=5, user_id="u1",
+        context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
     ))
     assert captured["scope"] is not None
     assert captured["scope"].surface == Surface.project_private
@@ -100,7 +187,7 @@ def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
         return "loop ran — must not happen for a declined turn"
 
     monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     assert len(scope.extra_tools) == 6  # real, declarative, unconditional — not hand-emptied
     out = qa.answer(
         enterprise_id="c1", question="what's blocking the launch?", dataset="d",
@@ -114,7 +201,7 @@ def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
 def test_private_realscope_plainqa_is_cancelled_aborts(monkeypatch):
     """AC5: same real-scope decline path — `is_cancelled` aborts generation
     before the composer's expensive call, exactly like main chat."""
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     with pytest.raises(qa.AskCancelled):
         qa.answer(
             enterprise_id="c1", question="what's blocking the launch?", dataset="d",
@@ -138,17 +225,20 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
         "app.project_delegation.handle_delegate_task", lambda **kw: "Sent the brief to Fortune's chat.",
     )
     deltas = []
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="please delegate the export review to Fortune", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Fortune's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task is TERMINAL: the handler's confirmation OVERRIDES the loop's
+    # free text (anti-fabrication — the reply only claims what actually
+    # happened), so the answer is the narration, not the loop's raw return.
+    assert out["answer"] == "Sent the brief to Fortune's chat."
 
 
-def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
+def test_private_bare_send_to_member_fires_gate_no_stream(_offline_db, monkeypatch):
     """A bare "send to <roster member>" — NO pronoun object — must reach the
     sixth branch too. `is_project_tool_request` alone declines this shape
     (`_PROJECT_TOOL_DELEGATE_VERB` requires an object: "send THIS to X");
@@ -171,14 +261,15 @@ def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
         "app.project_delegation.handle_delegate_task", lambda **kw: "Sent the brief to Jay's chat.",
     )
     deltas = []
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="send to Jay to prioritize the roadmap", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Jay's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task terminal-override (see test above): answer is the narration.
+    assert out["answer"] == "Sent the brief to Jay's chat."
 
 
 def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
@@ -207,7 +298,7 @@ def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
         return "loop ran — must not happen for a non-member destination"
 
     monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="send the report to accounting", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
@@ -235,7 +326,7 @@ def test_gate_removed_plainqa_routes_to_loop_is_red(monkeypatch):
     caught) makes a PLAIN-Q&A private turn route to the tool loop and never
     stream — the composer-streams assertion goes RED. Restoring the real
     gate on the identical question makes it GREEN again."""
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     plain_question = "what's blocking the launch?"
     deltas = []
 
@@ -293,7 +384,7 @@ def test_private_read_tools_registered_and_dispatched(monkeypatch):
         "app.project_group_context.dispatch_read_tool",
         lambda name, ti, **kw: "ledger text" if name == "get_task_ledger" else None,
     )
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="please draft a PRD for the ledger work", dataset="d", scope=scope,
     )
@@ -333,7 +424,7 @@ def test_project_read_question_routes_to_loop_and_dispatches_read_tool(monkeypat
         lambda name, ti, **kw: "prd content" if name == "get_project_memory" else None,
     )
     deltas = []
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="summarize the PRD", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
@@ -404,7 +495,7 @@ def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
     dispatches a read tool and instead falls through to the composer and
     streams — RED proof that the OR is load-bearing. Restoring it goes
     GREEN."""
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     question = "summarize the PRD"
 
     # RED: simulate the disjunct removed.
@@ -456,32 +547,12 @@ def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
     assert out_green["answer"] == "here is the PRD summary"
 
 
-def test_private_context_block_reaches_engine(monkeypatch):
-    """The private breadth block is folded into `history` by `routes/ask.py`
-    BEFORE `run_ask_job` runs (unchanged by this ticket) — `_run_sync`
-    forwards that same `history` into `qa_agent.answer` unmodified, and
-    `SurfaceScope.context_payload` is intentionally left empty for private
-    (never duplicated)."""
-    captured = {}
-
-    def _fake_answer(**kw):
-        captured.update(kw)
-        return {"answer": "ok", "citations": []}
-
-    monkeypatch.setattr(ajr.qa_agent, "answer", _fake_answer)
-    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
-    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
-    import app.project_memory as pm
-
-    monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
-
-    history_with_block = [{"role": "user", "content": "[PROJECT CONTEXT]\nRoster: ...\n"}]
-    asyncio.run(ajr.run_ask_job(
-        ask_id=1, enterprise_id="c1", question="q", dataset="d",
-        project_id=9, conversation_id=5, user_id="u1", history=history_with_block,
-    ))
-    assert captured["history"] == history_with_block
-    assert captured["scope"].context_payload == ""
+# RETIRED (2026-08-20): test_private_context_block_reaches_engine asserted that
+# `run_ask_job` builds a project-private `SurfaceScope` from the top-level
+# `project_id` (agentic private chat, wired into the ask path). The Slice-1
+# rework (PROJECTS-REBUILD-SLICE1-PLAN.md, 2026-08-18) DEFERS project actions on
+# the private surface — private now behaves like main (client-driven, streamed,
+# scope=None). Re-add with the slice that reintroduces the private tool-scope.
 
 
 # ── Invariant 2 — task-awareness + delegation survival ─────────────────────
@@ -505,7 +576,7 @@ def test_delegate_execute_callable_both_surfaces(monkeypatch):
         lambda **kw: execute_calls.append(kw) or "drafted",
     )
 
-    private_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u1")
+    private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
     group_scope = SurfaceScope(
         surface=Surface.project_group, project_id=9,
         extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_task_execution.EXECUTE_TASK_TOOL),
@@ -531,7 +602,7 @@ def test_private_delegate_identity_threaded(monkeypatch):
         "app.project_delegation.handle_delegate_task",
         lambda **kw: captured.update(kw) or "sent",
     )
-    scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
     qa.answer(
         enterprise_id="c1", question="please delegate the export review to Fortune",
         dataset="d", scope=scope,
@@ -578,7 +649,7 @@ def test_private_delegate_source_content_threaded(monkeypatch):
         "app.project_delegation.handle_delegate_task",
         lambda **kw: captured.update(kw) or "sent",
     )
-    scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
     qa.answer(
         enterprise_id="c1",
         question="Here's the feedback: users want dark mode. Send this to Fortune to prioritize.",
@@ -644,7 +715,7 @@ def test_delegate_identity_blanked_is_red(monkeypatch):
         assert captured["assigner_user_id"] == "u-assigner"  # RED
 
     captured.clear()
-    restored_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    restored_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
     qa.answer(
         enterprise_id="c1", question="please delegate the export review to Fortune",
         dataset="d", scope=restored_scope,
@@ -652,7 +723,7 @@ def test_delegate_identity_blanked_is_red(monkeypatch):
     assert captured["assigner_user_id"] == "u-assigner"  # GREEN
 
 
-def test_execute_task_post_turn_fires(monkeypatch):
+def test_execute_task_post_turn_fires(_offline_db, monkeypatch):
     monkeypatch.setattr(
         "app.llm.run_tool_loop",
         lambda *, dispatch, **kw: dispatch("execute_task", {"task_type": "prd", "task_summary": "Z"}),
@@ -667,11 +738,16 @@ def test_execute_task_post_turn_fires(monkeypatch):
     monkeypatch.setattr("app.project_task_execution.handle_execute_task", _fake_execute)
 
     private_posts = []
+    # The private scope's `post_turn` is built inside
+    # `ProjectContextAssembler.assemble` and closes over the
+    # `app.db.conversations.post_individual_turn` it imports there — patch THAT
+    # seam (not `ask_job_runner`'s re-export), and BEFORE the scope is built
+    # below, so the closure captures the spy.
     monkeypatch.setattr(
-        ajr, "post_individual_turn",
+        "app.db.conversations.post_individual_turn",
         lambda conv_id, role, content: private_posts.append((conv_id, role, content)),
     )
-    private_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u1")
+    private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
     qa.answer(
         enterprise_id="c1", question="please draft a PRD for the onboarding flow",
         dataset="d", scope=private_scope,
@@ -709,7 +785,7 @@ def test_delegate_writes_delegations_row(monkeypatch):
         lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "Assignee", "task_summary": "Draft it"}),
     )
 
-    scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
     qa.answer(
         enterprise_id="c1", question="please delegate this to Assignee",
         dataset="d", scope=scope,
@@ -734,7 +810,7 @@ def test_delegate_unregistered_is_red(monkeypatch):
     monkeypatch.setattr(pd, "create_individual_project_chat", lambda pid, uid: {"id": 77})
     monkeypatch.setattr(pd, "post_individual_turn", lambda conv_id, role, content: {"id": 1})
 
-    base = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u-assigner")
+    base = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
 
     # RED: delegate_task removed from extra_tools; the fake loop can only
     # ever be asked to call tools it was offered, so it calls nothing.
@@ -763,223 +839,7 @@ def test_delegate_unregistered_is_red(monkeypatch):
 # ── Invariant 3 — group when-to-respond gate ────────────────────────────────
 
 
-def test_group_gate_runs_before_scheduling(tenant_client, isolated_settings, monkeypatch):
-    from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Gate before scheduling"}).json()
-    project_id = project["id"]
-    projects_db.add_member(project_id, "second-human")
-    monkeypatch.setattr(projects_route, "should_respond", lambda *a, **kw: False)
-    scheduled = []
-    monkeypatch.setattr(projects_route, "_schedule_group_reply", lambda *a, **kw: scheduled.append(a))
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "just chatting here"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert scheduled == []  # gate said no -> nothing scheduled at all
-    conv = conversations_db.get_group_chat(project_id)
-    turns = conversations_db.list_group_turns(conv["id"])
-    assert len(turns) == 1 and turns[0]["role"] == "user"
-
-
-def test_group_gate_forced_false_no_turn(tenant_client, isolated_settings, monkeypatch):
-    from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Gate forced false"}).json()
-    project_id = project["id"]
-    projects_db.add_member(project_id, "second-human")
-    monkeypatch.setattr(projects_route, "should_respond", lambda *a, **kw: False)
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "just chatting, no agent needed here"},
-    )
-    assert resp.status_code == 200, resp.text
-    conv = conversations_db.get_group_chat(project_id)
-    turns = conversations_db.list_group_turns(conv["id"])
-    assert [row for row in turns if row["role"] == "assistant"] == []
-
-
-def test_group_gate_forced_true_one_turn(tenant_client, isolated_settings, monkeypatch):
-    from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Gate forced true"}).json()
-    project_id = project["id"]
-    projects_db.add_member(project_id, "second-human")
-    monkeypatch.setattr(projects_route, "should_respond", lambda *a, **kw: True)
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "Here to help.", "citations": []})
-
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "is anyone able to help with this today?"},
-    )
-    assert resp.status_code == 200, resp.text
-    conv = conversations_db.get_group_chat(project_id)
-    turns = conversations_db.list_group_turns(conv["id"])
-    assistant_turns = [row for row in turns if row["role"] == "assistant"]
-    assert len(assistant_turns) == 1
-
-
 # ── Invariant 4 — group multi-party context ─────────────────────────────────
-
-
-def test_group_transcript_not_reflattened(tenant_client, isolated_settings, monkeypatch):
-    """RETARGETED — authorized invariant change. The old contract asserted
-    `history is None` unconditionally ("never re-flattened"). That was WRONG
-    for the connector-thread case: the group surface must now hand the prior
-    turns to `answer()` as `history` (recent-minus-trigger) so the router /
-    connector interceptors can keep a source thread alive — exactly what the
-    private surface already does. The prerendered transcript is STILL the
-    speaker-tagged full thread (Invariant 4 unchanged); history is a SEPARATE
-    signal channel, not a re-flattening of the transcript into the composer.
-
-    New contract (mirrors AC2): `history == recent-minus-trigger` when a human
-    trigger exists, and `history is None` on the trigger-less degenerate path
-    (so a transcript-as-question is not ALSO rendered as history)."""
-    from app.db import conversations as conversations_db
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-
-    # ── Trigger PRESENT: a prior assistant turn + a human mention. ──────────
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Transcript preserved"}).json()
-    project_id = project["id"]
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
-    conversations_db.post_group_turn(
-        conv["id"], None, "The Q3 launch slipped a week.", role="assistant",
-    )
-    conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly what did they say?")
-
-    captured = {}
-
-    def _fake_answer(**kw):
-        captured.update(kw)
-        return {"answer": "ok", "citations": []}
-
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer)
-    ctx = _ctx(t.company_id, ensure_default_workspace(t.company_id)["id"], t.user_id)
-    # `_respond_as_group_agent` now runs THROUGH `run_execution_job` (async):
-    # drive it to completion with a claimed run identity.
-    asyncio.run(
-        projects_route._respond_as_group_agent(
-            project_id, conv["id"], ctx, "mention", job_id=1, run_id="r",
-        )
-    )
-
-    # history = recent EXCLUDING the trigger turn — the prior assistant turn only.
-    assert captured.get("history") == [
-        {"role": "assistant", "content": "The Q3 launch slipped a week."}
-    ]
-    transcript = captured["scope"].prerendered_transcript
-    assert transcript is not None
-    assert "@Sprntly what did they say?" in transcript
-    # `render_group_transcript`'s speaker-tagged shape ("Name: message" /
-    # "Name (job role): message"), never the private surface's flattened
-    # "User: .../Sprntly: ..." rendering.
-    assert not transcript.startswith("User:")
-
-    # ── Trigger-LESS degenerate path: an assistant-only thread (no human turn
-    # with an author) → history stays [] → `history or None` → None, so the
-    # transcript-as-question is not double-rendered as history. ─────────────
-    t2 = tenant_client.make(slug="beta")
-    project2 = t2.client.post("/v1/projects", json={"name": "Triggerless"}).json()
-    project2_id = project2["id"]
-    conv2 = conversations_db.create_group_chat(project2_id, t2.user_id)
-    conversations_db.post_group_turn(
-        conv2["id"], None, "System note: standup at 10.", role="assistant",
-    )
-    captured2 = {}
-
-    def _fake_answer2(**kw):
-        captured2.update(kw)
-        return {"answer": "ok", "citations": []}
-
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer2)
-    ctx2 = _ctx(t2.company_id, ensure_default_workspace(t2.company_id)["id"], t2.user_id)
-    asyncio.run(
-        projects_route._respond_as_group_agent(
-            project2_id, conv2["id"], ctx2, "mention", job_id=2, run_id="r2",
-        )
-    )
-    assert captured2.get("history") is None  # trigger-less → None (no double-render)
-
-
-def test_group_join_greeting_and_classify_still_fire(tenant_client, isolated_settings, monkeypatch):
-    from app import project_join_greeting
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Greeting + classify"}).json()
-    project_id = project["id"]
-
-    # The join greeting lives entirely OUTSIDE the collapsed loops — this
-    # ticket never touches it; a direct call proves it is still wired and
-    # unaffected.
-    from app.db import conversations as conversations_db
-
-    project_join_greeting.post_join_greeting(
-        project_id, "greeted-user", dataset=t.slug, company_id=t.company_id
-    )
-    conv = conversations_db.get_individual_project_chat(project_id, "greeted-user")
-    assert conv is not None
-    turns = conversations_db.list_individual_turns(conv["id"], "greeted-user")
-    assert len(turns) == 1 and turns[0]["role"] == "assistant"
-
-    # `_classify_group_envelope` (card enrichment only — the edit is now an
-    # in-band tool, proven end-to-end in test_group_chat_prd_edit.py) runs
-    # before the reply on every trigger kind — here: structural wiring only.
-    classify_calls = []
-    monkeypatch.setattr(
-        projects_route, "_classify_group_envelope",
-        lambda *a, **kw: classify_calls.append(1) or {"intent": "answer"},
-    )
-    monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "ok", "citations": []})
-    resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})
-    assert resp.status_code == 200, resp.text
-    assert classify_calls == [1]
-
-
-def test_group_question_is_latest_turn_transcript_rides_scope(
-    tenant_client, isolated_settings, monkeypatch
-):
-    """The LT-8 input-shape switch (`_GROUP_TRANSCRIPT_AS_QUESTION`) is retired
-    — group collapses to the single live form: `question` is the latest
-    triggering message, while the full attributed transcript always rides on
-    `scope.prerendered_transcript` so the model still sees the whole thread."""
-    from app.db import conversations as conversations_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "LT8 switch"}).json()
-    project_id = project["id"]
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
-    conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly what's up?")
-
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    captured = {}
-    monkeypatch.setattr(
-        projects_route.qa_agent, "answer",
-        lambda **kw: captured.update(kw) or {"answer": "ok", "citations": []},
-    )
-    ctx = _ctx(t.company_id, ensure_default_workspace(t.company_id)["id"], t.user_id)
-
-    # The retired flag no longer exists.
-    assert not hasattr(projects_route, "_GROUP_TRANSCRIPT_AS_QUESTION")
-    asyncio.run(
-        projects_route._respond_as_group_agent(
-            project_id, conv["id"], ctx, "mention", job_id=1, run_id="r",
-        )
-    )
-    assert captured["question"] == "@Sprntly what's up?"
-    # The full transcript still rides on the scope, always.
-    assert captured["scope"].prerendered_transcript is not None
-    assert "@Sprntly what's up?" in captured["scope"].prerendered_transcript
 
 
 # ── Gated routing — group context-fold + accept-with-nudge (AC5b/AC5c) ─────
@@ -1143,7 +1003,7 @@ def test_nudge_on_missed_delegation(monkeypatch):
         return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     # A phrasing implying a hand-off with none of the gate's matched verbs —
     # a genuine false negative, not a veto hit.
     missed = "it'd be great if Fortune could take point on the export section"
@@ -1156,153 +1016,18 @@ def test_nudge_on_missed_delegation(monkeypatch):
     assert history and "phrase it explicitly" in history[0]["content"]
 
 
-# ── Backgrounded group reply ─────────────────────────────────────────────
-
-
-def test_group_post_returns_before_reply(tenant_client, isolated_settings, monkeypatch):
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Post before reply"}).json()
-    project_id = project["id"]
-    scheduled = []
-    monkeypatch.setattr(projects_route, "_schedule_group_reply", lambda *a, **kw: scheduled.append(a))
-
-    resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hello"})
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["role"] == "user"  # the returned turn is the HUMAN turn, not a reply
-    assert len(scheduled) == 1  # the reply was SCHEDULED, never awaited inline in the route body
-
-
-def test_group_reply_broadcasts_on_completion(tenant_client, isolated_settings, monkeypatch):
-    from app.db import conversations as conversations_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Broadcast on completion"}).json()
-    project_id = project["id"]
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "Reply text", "citations": []})
-    broadcasts = []
-    monkeypatch.setattr(
-        projects_route, "publish_broadcast",
-        lambda topic, event, payload: broadcasts.append((topic, event, payload)),
-    )
-
-    resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})
-    assert resp.status_code == 200, resp.text
-    assert any(b[1] == "turn.created" and b[2]["role"] == "assistant" for b in broadcasts)
-    conv = conversations_db.get_group_chat(project_id)
-    assistant_turns = [row for row in conversations_db.list_group_turns(conv["id"]) if row["role"] == "assistant"]
-    assert len(assistant_turns) == 1
-    assert assistant_turns[0]["content"] == "Reply text"
-
-
-def test_group_task_strong_ref_and_pytest_inline(monkeypatch):
-    """Under `"pytest" in sys.modules` (true for this test process itself),
-    `_schedule_group_reply` runs the reply INLINE (to completion via a
-    worker-thread loop) — never touching the strong-ref set or a live
-    `asyncio.create_task`. A pre-claimed `job_id`/`run_id` is passed so no
-    `ask_jobs` row is inserted here."""
-    calls = []
-
-    async def _fake_reply(*a, **kw):
-        calls.append((a, kw))
-
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _fake_reply)
-    before = set(projects_route._group_reply_tasks)
-    ctx = _ctx()
-    projects_route._schedule_group_reply(
-        1, 2, ctx, "mention", source_turn_id=5, job_id=99, run_id="r",
-    )
-    # The resolved `pinned_skill` is threaded through (None here — no explicit
-    # pick and the source turn carries no routable slash trigger).
-    assert calls == [(
-        (1, 2, ctx, "mention"),
-        {"job_id": 99, "run_id": "r", "pinned_skill": None, "edit_target_prd_id": None},
-    )]
-    assert projects_route._group_reply_tasks == before  # no task was ever scheduled
-
-
-def test_group_route_async_no_running_loop_error(monkeypatch):
-    """A request through `post_group_turn_route` on the NON-pytest-inline
-    path schedules `asyncio.to_thread(_respond_as_group_agent, ...)` and
-    does NOT raise `RuntimeError: no running event loop` — the route is
-    `async def` and `_respond_as_group_agent` is never awaited directly as
-    if it were a coroutine."""
-    import sys as real_sys
-    import types
-
-    fake_sys = types.SimpleNamespace(
-        modules={k: v for k, v in real_sys.modules.items() if k != "pytest"}
-    )
-    monkeypatch.setattr(projects_route, "sys", fake_sys)
-
-    async def _noop_reply(*a, **kw):
-        return None
-
-    monkeypatch.setattr(projects_route, "_respond_as_group_agent", _noop_reply)
-
-    async def _drive():
-        ctx = _ctx()
-        projects_route._schedule_group_reply(
-            1, 2, ctx, "mention", source_turn_id=5, job_id=99, run_id="r",
-        )
-        # Scheduled via asyncio.create_task — held by the strong-ref set
-        # immediately; no RuntimeError means a loop WAS running.
-        assert len(projects_route._group_reply_tasks) == 1
-        for _ in range(50):
-            await asyncio.sleep(0.01)
-            if not projects_route._group_reply_tasks:
-                break
-        assert projects_route._group_reply_tasks == set()  # done-callback discarded it
-
-    asyncio.run(_drive())
+# RETIRED (2026-08-20): test_group_reply_broadcasts_on_completion asserted the
+# `POST /group/turns` route GENERATES + persists + broadcasts the @Sprntly reply
+# inline (the "backgrounded group reply" / post-and-receive design). The Slice-1
+# rework (PROJECTS-REBUILD-SLICE1-PLAN.md, 2026-08-18) REMOVES that path: group
+# now behaves like main/private — client-driven and streamed through `/v1/ask` —
+# and the plan explicitly requires that a group post NOT trigger the backend
+# group-agent (`_respond_as_group_agent`) or it double-generates. `/group/turns`
+# is now mount-not-scheduler (persists+broadcasts the HUMAN turn only). Re-add
+# with the slice that reintroduces post-and-receive group mode.
 
 
 # ── Queue-ready must-not-preclude seams ─────────────────────────────────────
-
-
-def test_when_to_respond_callable_per_message(monkeypatch):
-    from app import project_group_gate as pgg
-
-    monkeypatch.setattr(pgg, "call_json", lambda **kw: {"respond": True})
-    result = pgg.should_respond(
-        1, 2,
-        [{"author_name": "A", "author_job_role": None, "content": "hi"}],
-        "is anyone able to help with this?",
-    )
-    assert isinstance(result, bool)
-    assert result is True
-
-
-def test_background_input_is_extensible_structure():
-    sig = inspect.signature(projects_route._schedule_group_reply)
-    assert list(sig.parameters) == [
-        "project_id", "conversation_id", "ctx", "trigger_kind",
-        # execution identity — NOT the message itself. `pinned_skill` is a
-        # deterministic routing input (the FE's skill pick, or the source
-        # turn's own trigger on a retry), also not the message.
-        "source_turn_id", "client_message_id", "job_id", "run_id", "pinned_skill",
-        # `edit_target_prd_id` joined them when project chat learned to edit a
-        # PRD in place: also a routing input (WHICH document a confirmed edit
-        # applies to), never the message itself. Extending this list is the
-        # point of the test's name; what it forbids is message CONTENT.
-        "edit_target_prd_id",
-    ]
-    # None of these IS "the message" itself — the reply re-derives the live
-    # transcript from the DB inside `_respond_as_group_agent`, so a future
-    # queue could pass more triggers through this same shape without the
-    # reply ever depending on a captured closure over one message object.
-    body_src = inspect.getsource(projects_route._respond_as_group_agent)
-    assert "conversations_db.list_group_turns(conversation_id)" in body_src
-
-
-def test_is_for_agent_decision_is_named_seam():
-    from app.project_group_gate import should_respond
-
-    assert inspect.isfunction(should_respond)
-    # Referenced as a named call site inside the route (not inlined) — a
-    # future queue could collect yes-verdicts from this exact call shape.
-    src = inspect.getsource(projects_route.post_group_turn_route)
-    assert "should_respond(" in src
 
 
 # ── Sixth-branch gate yields to a NAMED live source (connector parity) ──────
@@ -1328,7 +1053,7 @@ def test_sixth_branch_declines_named_source_project_surface(monkeypatch):
     gate's `and _skip_project_connectors(...)` clause makes it fall through to
     the connector interceptor path. Mutation (clause removed → predicate forced
     True) → the sixth branch STEALS the named-source turn (the bug) = RED."""
-    scope = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     named_source_q = "what did slack say about the launch?"
 
     calls = {"scoped": 0}
@@ -1368,7 +1093,7 @@ def test_sixth_branch_still_claims_unnamed_project_noun(monkeypatch):
     on this project?") on BOTH group and private still satisfies the gate
     (`_skip_project_connectors` → True, no source named) → the project tool
     loop claims it → project-ledger facts, NOT a connector deflection."""
-    private = ajr._build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    private = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
     group = dataclasses.replace(private, surface=Surface.project_group)
 
     def _spy_scoped(**kw):
@@ -1550,7 +1275,7 @@ def test_private_scope_unaffected_by_edit_prd_grounding(monkeypatch):
         "app.llm.run_tool_loop",
         lambda **kw: "Done — I've updated the PRD summary in my notes.",
     )
-    private_scope = ajr._build_private_scope(project_id=9, conversation_id=5, user_id="u1")
+    private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
     out = qa.answer(
         enterprise_id="c1", question="what's the PRD status", dataset="d",
         scope=private_scope,

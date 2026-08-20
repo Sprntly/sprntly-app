@@ -86,6 +86,25 @@ DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 # `project_mgmt` is the execution source (§4.5): authoritative about what THIS
 # ORGANISATION did, never about users. A Jira ticket saying "users churn
 # because export is slow" is one engineer's framing typed into a text field.
+#: What each source is a legitimate WITNESS to. SPEC §4.5.
+#:
+#: I tried to widen this after measuring that 661 `project_mgmt -> preference`
+#: claims were being rejected on a real tenant, and I was wrong to. A tracker
+#: ticket reading "customers want bulk export" is a PM's PARAPHRASE; the
+#: authoritative witness for what a customer wants is the customer, and
+#: `customer_voice` is where that lives. Letting the tracker vote on preference
+#: would let one engineer's framing of a user's motive enter the substrate
+#: carrying the weight of a structured field.
+#:
+#: The rejections were real but the diagnosis was wrong. They were concentrated
+#: in clusters that held ONLY tracker claims — an artefact of grouping, which
+#: was splitting the corpus into single-source buckets. Grouping by the graph's
+#: own themes mixes sources within a theme, so a theme carrying both a customer
+#: call and the tickets about it now has an authoritative member. See
+#: app/crucible/kg_themes.py.
+#:
+#: Authority is not weight: `DEFAULT_STRENGTH` separately caps a self-reporting
+#: source at `reported`.
 AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
     "customer_voice":   frozenset({"preference", "mechanism"}),
     "communication":    frozenset({"attempt", "existence", "constraint"}),
@@ -104,6 +123,8 @@ AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
     "verbal_claim":     frozenset(),
     "agent_inferred":   frozenset(),
 }
+
+
 
 # ── source_type → the strongest thing it can support ─────────────────────────
 # A CEILING, not an assignment. `measured` here means the source records what

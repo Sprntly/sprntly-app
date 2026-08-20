@@ -500,6 +500,27 @@ def cancel_ask_job(ask_id: int) -> str | None:
     return row.get("status") if row else None
 
 
+def suppress_ask_job(ask_id: int) -> None:
+    """Terminally suppress a group ask the 2-mode gate silenced BEFORE any
+    generation ran (multi-human thread, no `@Sprntly` mention).
+
+    Flips `generating` → `cancelled` with an EMPTY `response`, so GET
+    /v1/ask/{id} returns a no-answer terminal state the client renders as
+    nothing (it already treats `cancelled` as a silent, no-reply stop). No LLM
+    work ran and no group turn is persisted/broadcast for a suppressed ask, so
+    the sender reads NOTHING — which is the whole point of the gate. `cancelled`
+    is reused rather than a new status so no CHECK-constraint migration is
+    needed; the observable outcome (empty, silent, terminal) is identical.
+
+    Guarded on `status == 'generating'` like the other terminal writes."""
+    c = require_client()
+    c.table("ask_jobs").update({
+        "status": "cancelled",
+        "response": {},
+        "updated_at": _now(),
+    }).eq("id", ask_id).eq("status", "generating").execute()
+
+
 def is_ask_cancelled(ask_id: int) -> bool:
     """True if the Ask job has been cancelled — the worker's cooperative
     cancellation checkpoint reads this between LLM steps to abort before the

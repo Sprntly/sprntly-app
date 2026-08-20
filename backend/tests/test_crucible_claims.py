@@ -358,3 +358,28 @@ def test_a_companys_own_good_outcome_is_authoritative_about_what_it_wants():
     ])
     assert claims[0].type == "preference"
     assert claims[0].authoritative is True
+
+
+# ─── Why the authority table was NOT widened ────────────────────────────────
+
+def test_the_tracker_still_cannot_speak_for_a_customers_motive():
+    """I measured 661 rejected `project_mgmt -> preference` claims and tried to
+    widen the table. The existing test cited spec §4.5 and was right: a ticket
+    reading "customers want bulk export" is a PM's paraphrase, and letting it
+    vote would carry one engineer's framing of a user's motive into the
+    substrate with the weight of a structured field.
+
+    The rejections were real; the diagnosis was wrong. They came from grouping
+    that split the corpus into single-source buckets — fixed in kg_themes.
+    """
+    from app.crucible.claims import AUTHORITATIVE_FOR
+
+    assert "preference" not in AUTHORITATIVE_FOR["project_mgmt"]
+    assert "preference" in AUTHORITATIVE_FOR["customer_voice"]
+
+
+def test_the_engine_still_refuses_to_corroborate_itself():
+    from app.crucible.claims import AUTHORITATIVE_FOR
+
+    assert AUTHORITATIVE_FOR["agent_inferred"] == frozenset()
+    assert AUTHORITATIVE_FOR["verbal_claim"] == frozenset()

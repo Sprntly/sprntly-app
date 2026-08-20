@@ -336,17 +336,37 @@ def test_put_logs_id_only(isolated_settings, monkeypatch, caplog):
 # ── Context fold — AC7/AC8/AC9/AC11 ────────────────────────────────────────
 
 
-def test_private_scope_includes_instructions_after_roster(monkeypatch):
+# Retargeted from the deleted `ask_job_runner._build_private_scope`: the
+# project scope-building (roster + INSTRUCTIONS fold, both surfaces) relocated
+# into `ProjectContextAssembler.assemble` (`context_assembler_project.py`). The
+# invariant is unchanged — the assembled `SurfaceScope.system_addendum` carries
+# the roster block, then the PROJECT INSTRUCTIONS block — so the tests now drive
+# the real assembler over a real (membership-gated) project.
+def _assemble_scope(ctx, project_id: int, *, surface: str, dataset: str = ""):
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+    from app.db.workspaces import ensure_default_workspace
+
+    ws_id = ensure_default_workspace(ctx.company_id)["id"]
+    req = AssembleRequest(
+        user_id=ctx.user_id, company_id=ctx.company_id, dataset=dataset,
+        conversation_id=None, question="status?", workspace_id=ws_id,
+        params={"project_id": project_id, "surface": surface},
+    )
+    return ProjectContextAssembler().assemble(req)
+
+
+def test_private_scope_includes_instructions_after_roster(isolated_settings, monkeypatch):
+    from app.ask_job_runner import _private_roster_block
     from app.db import projects as projects_db
-    from app.ask_job_runner import _build_private_scope, _private_roster_block
 
-    roster = [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}]
-    monkeypatch.setattr(projects_db, "list_members", lambda pid: roster)
-    monkeypatch.setattr(projects_db, "get_instructions", lambda pid: "Always cite sources.")
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Instr private"}).json()
+    projects_db.set_instructions(project["id"], "Always cite sources.")
 
-    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _assemble_scope(ctx, project["id"], surface="private")
 
-    roster_block = _private_roster_block(roster)
+    roster_block = _private_roster_block(projects_db.list_members(project["id"]))
     assert roster_block in scope.system_addendum
     assert "PROJECT INSTRUCTIONS" in scope.system_addendum
     assert "Always cite sources." in scope.system_addendum
@@ -355,29 +375,26 @@ def test_private_scope_includes_instructions_after_roster(monkeypatch):
     )
 
 
-def test_private_scope_no_block_when_empty(monkeypatch):
-    from app.db import projects as projects_db
-    from app.ask_job_runner import _build_private_scope
+def test_private_scope_no_block_when_empty(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "No instr private"}).json()
 
-    monkeypatch.setattr(projects_db, "list_members", lambda pid: [])
-    monkeypatch.setattr(projects_db, "get_instructions", lambda pid: None)
-
-    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _assemble_scope(ctx, project["id"], surface="private")
     assert "PROJECT INSTRUCTIONS" not in scope.system_addendum
 
 
-def test_scope_build_survives_instructions_read_failure(monkeypatch):
+def test_scope_build_survives_instructions_read_failure(isolated_settings, monkeypatch):
     from app.db import projects as projects_db
-    from app.ask_job_runner import _build_private_scope
 
-    monkeypatch.setattr(projects_db, "list_members", lambda pid: [])
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Instr fail private"}).json()
 
     def _boom(pid):
         raise RuntimeError("read failed")
 
     monkeypatch.setattr(projects_db, "get_instructions", _boom)
 
-    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _assemble_scope(ctx, project["id"], surface="private")
     assert "PROJECT INSTRUCTIONS" not in scope.system_addendum
     assert scope.system_addendum  # the rest of the addendum still built
 
@@ -391,66 +408,29 @@ def test_instructions_truncated_at_cap(monkeypatch):
     assert len(block) <= _INSTRUCTIONS_CHARS + len("PROJECT INSTRUCTIONS (set by the team — follow these):\n") + 1
 
 
-def _seed_group_project(t, isolated_settings, *, name: str = "Instructions group project") -> int:
-    from app.db import projects as projects_db
-    from app.db.workspaces import ensure_default_workspace
-
-    ws_id = ensure_default_workspace(t.company_id)["id"]
-    return projects_db.create_project(
-        company_id=t.company_id, workspace_id=ws_id, name=name, created_by=t.user_id,
-    )["id"]
-
-
-def _fake_answer_capturing(systems: list[str], *, reply: str = "unused"):
-    """Mirrors `test_group_trigger_and_no_fabrication.py::_fake_loop_
-    capturing` — patches `qa_agent.answer` and captures the assembled
-    system text exactly the way `_respond_as_group_agent` builds it and
-    the sixth ladder branch reassembles it."""
-
-    def _fake_answer(*, enterprise_id, question, dataset, scope=None, **kw):  # noqa: ARG001
-        system = "\n\n".join(
-            p for p in ((scope.system_addendum if scope else ""), (scope.context_payload if scope else "")) if p
-        )
-        systems.append(system)
-        return {"answer": reply, "citations": []}
-
-    return _fake_answer
-
-
-def test_group_scope_includes_instructions(tenant_client, isolated_settings, monkeypatch):
+# Retargeted from the deleted in-band group-reply path (the group POST no longer
+# calls `qa_agent.answer`; the reply runs on the `/v1/ask` mount). The invariant
+# — the GROUP surface's assembled scope folds in the PROJECT INSTRUCTIONS block —
+# is tested directly on the relocated assembler, the single seam qa_agent then
+# consumes as `scope.system_addendum`.
+def test_group_scope_includes_instructions(isolated_settings, monkeypatch):
     from app.db import projects as projects_db
 
-    t = tenant_client.make(slug="acme-instructions")
-    project_id = _seed_group_project(t, isolated_settings)
-    projects_db.set_instructions(project_id, "Always answer in bullet points.")
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Instr group"}).json()
+    projects_db.set_instructions(project["id"], "Always answer in bullet points.")
 
-    systems: list[str] = []
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer_capturing(systems))
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly status update please"},
-    )
-    assert r.status_code == 200, r.text
-    assert len(systems) == 1
-    assert "PROJECT INSTRUCTIONS" in systems[0]
-    assert "Always answer in bullet points." in systems[0]
+    scope = _assemble_scope(ctx, project["id"], surface="group")
+    assert "PROJECT INSTRUCTIONS" in scope.system_addendum
+    assert "Always answer in bullet points." in scope.system_addendum
 
 
-def test_group_scope_no_block_when_empty(tenant_client, isolated_settings, monkeypatch):
-    t = tenant_client.make(slug="acme-instructions-empty")
-    project_id = _seed_group_project(t, isolated_settings)
+def test_group_scope_no_block_when_empty(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "No instr group"}).json()
 
-    systems: list[str] = []
-    monkeypatch.setattr(projects_route.qa_agent, "answer", _fake_answer_capturing(systems))
-
-    r = t.client.post(
-        f"/v1/projects/{project_id}/group/turns",
-        json={"content": "@Sprntly status update please"},
-    )
-    assert r.status_code == 200, r.text
-    assert len(systems) == 1
-    assert "PROJECT INSTRUCTIONS" not in systems[0]
+    scope = _assemble_scope(ctx, project["id"], surface="group")
+    assert "PROJECT INSTRUCTIONS" not in scope.system_addendum
 
 
 # ── Main-chat isolation (mutation-proofed) — AC10 ──────────────────────────

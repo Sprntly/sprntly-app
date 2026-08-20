@@ -15,6 +15,7 @@
 /* Right-side layout COLUMN (not an overlay): fills its `.body` grid cell in
  * ProjectDetailScreen, so the chat to its left stays lit + interactive. */
 .drawer {
+  position: relative;
   height: 100%;
   min-height: 0;
   display: flex;
@@ -22,6 +23,45 @@
   background: var(--surface);
   border-left: 1px solid var(--line-strong);
   animation: projectDrawerSlide 0.18s ease-out;
+}
+
+/* Drag-to-resize handle on the drawer's LEFT edge — the same affordance the
+ * content panel carries, so the user can widen the drawer (narrowing the chat)
+ * to read a long artifact list. Sits over the border seam; the drag logic lives
+ * in the component (sets --proj-drawer-w on :root, persisted). Hidden on the
+ * narrow-viewport full-width layout, where there is no chat column to trade
+ * against (mirrors ProjectDetailScreen.module.css's <=960px rule). */
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 7px;
+  cursor: col-resize;
+  z-index: 2;
+  touch-action: none;
+}
+
+.resizeHandle::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 1px;
+  background: transparent;
+  transition: background 0.12s;
+}
+
+.resizeHandle:hover::after,
+.drawer[data-resizing="true"] .resizeHandle::after {
+  background: var(--accent);
+}
+
+@media (max-width: 960px) {
+  .resizeHandle {
+    display: none;
+  }
 }
 
 @keyframes projectDrawerSlide {
@@ -230,7 +270,10 @@
 /* ── List-view row (existing project artifact — openable) ── */
 .arow {
   display: flex;
-  align-items: center;
+  /* Top-align so the type glyph sits beside the FIRST line of a title that now
+   * wraps to several lines, rather than floating to the vertical centre of a
+   * tall row. */
+  align-items: flex-start;
   gap: 13px;
   width: 100%;
   text-align: left;
@@ -284,9 +327,12 @@
   font-weight: 600;
   color: var(--ink);
   margin-bottom: 4px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  /* Wrap the full name across lines rather than clamping it to one with an
+   * ellipsis — a long artifact title ("Build an intent-aware chat routing
+   * layer…") was getting chopped mid-word. `overflow-wrap: anywhere` also
+   * breaks a single very-long unspaced token so it can never overflow the row. */
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .rowMeta {

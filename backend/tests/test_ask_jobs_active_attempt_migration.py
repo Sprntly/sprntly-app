@@ -98,8 +98,11 @@ def test_modified_files_references_intact():
     assert "run_ask_job(" in routes_ask_src
     assert "def run_ask_job(" in ask_runner_src
     assert "def run_execution_job(" in ask_runner_src
-    assert "def _schedule_group_reply(" in projects_src
-    assert "def _respond_as_group_agent(" in projects_src
+    # The group reply is now produced on the shared `/v1/ask` mount and
+    # persisted+broadcast by `_persist_group_reply` (the "mount-not-scheduler"
+    # Choice-A seam that replaced the deleted `_schedule_group_reply` /
+    # `_respond_as_group_agent` in-band group-reply path).
+    assert "def _persist_group_reply(" in ask_runner_src
     assert "def list_group_turns(" in conversations_src
     assert "def start_ask_job(" in (_APP_DIR / "db" / "asks.py").read_text()
 

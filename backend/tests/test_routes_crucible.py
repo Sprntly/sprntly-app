@@ -265,6 +265,9 @@ def test_a_run_with_no_signals_fails_visibly_rather_than_vanishing(ctx):
     ANSWER. A run that disappears is why a feature looks broken."""
     run_id = _start(ctx).json()["id"]
     ctx.client.post(f"/v1/crucible/{run_id}/confirm", json={"definition_text": "d"})
+    # Confirming settles the DEFINITION; approving the plan is what spends a
+    # run. Both gates, then the failure.
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     row = ctx.client.get(f"/v1/crucible/{run_id}").json()
     assert row["status"] == "failed"
     assert row["error_code"] == "no_evidence"
@@ -283,6 +286,7 @@ def test_raw_error_text_is_never_returned_to_the_client(ctx, monkeypatch):
     )
     run_id = _start(ctx).json()["id"]
     ctx.client.post(f"/v1/crucible/{run_id}/confirm", json={"definition_text": "d"})
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     body = ctx.client.get(f"/v1/crucible/{run_id}").json()
     assert body["error_code"] == "internal"
     assert "error" not in body
@@ -600,3 +604,178 @@ def test_the_ledger_does_not_get_one_row_per_ungroupable_signal(ctx):
                     json={"definition_text": "renewal revenue"})
     considered = ctx.client.get(f"/v1/crucible/{run_id}").json()["considered"]
     assert len(considered) <= 2, [c["reason"][:60] for c in considered]
+
+
+# ─── Stage 1: the plan gate ──────────────────────────────────────────────────
+
+def _confirm(ctx, run_id, text="renewal-cohort revenue net of churn"):
+    return ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                           json={"definition_text": text})
+
+
+def test_confirming_a_goal_produces_a_plan_and_stops(ctx):
+    """A run reads the whole corpus and takes minutes. Confirming what the goal
+    MEANS is not the same decision as approving HOW it will be answered, and
+    collapsing the two is how a user ends up having agreed to something they
+    never saw."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+
+    body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert body["status"] == "awaiting_approval"
+    assert body["findings"] == [], "nothing may be analysed before approval"
+    plan = body["prioritisation"]["plan"]
+    assert plan["goal_text"] and plan["definition_text"]
+
+
+def test_the_plan_says_where_it_will_look_and_how_much_is_there(ctx):
+    for i in range(5):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["total_signals"] == 5
+    assert plan["sources"], "a plan with no inventory tells the user nothing"
+    assert all(s["witnesses"] for s in plan["sources"])
+
+
+def test_the_plan_names_what_it_CANNOT_answer_and_how_to_fix_it(ctx):
+    """THE POINT OF THE STEP. These facts used to surface as coverage notes at
+    the bottom of finished output — after the wait, phrased as an apology.
+    Beforehand they are a decision, and Sprntly can ingest every one of these,
+    so a gap must carry its remedy rather than being a shrug."""
+    for i in range(3):
+        _signal(ctx.company_id, i)          # customer_voice only: no numbers
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    gaps = plan["cannot_answer"]
+    assert gaps, "a prose-only corpus cannot state a point estimate"
+    assert any("points" in g["question"] or "move" in g["question"] for g in gaps)
+    for g in gaps:
+        assert g["remedy"], f"gap with no way to close it: {g['question']}"
+
+
+def test_approving_the_plan_is_what_starts_the_analysis(ctx):
+    for i in range(4):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    assert ctx.client.post(f"/v1/crucible/{run_id}/approve", json={}).status_code == 200
+    assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] in ("ready", "failed")
+
+
+def test_a_double_approval_cannot_start_two_analyses(ctx):
+    """Same race as double-confirm, same fix: the expected status is in the
+    WHERE clause, so the second click loses the claim."""
+    from app.db import crucible_runs as runs_db
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    assert runs_db.claim_for_approval(run_id, ctx.company_id) is not None
+    assert runs_db.claim_for_approval(run_id, ctx.company_id) is None
+
+
+def test_approving_a_run_that_has_no_plan_is_refused(ctx):
+    run_id = _start(ctx).json()["id"]           # still awaiting_confirmation
+    r = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert r.status_code == 409
+
+
+def test_the_user_can_drop_a_source_and_the_run_honours_it(ctx):
+    for i in range(4):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": ["customer_voice"]})
+    body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    # Everything seeded is customer_voice, so excluding it leaves nothing.
+    assert body["status"] == "failed" and body["error_code"] == "no_evidence"
+
+
+def test_the_approved_plan_records_what_the_user_decided(ctx):
+    """THE REPORT READS THIS. `build_plan` runs BEFORE the user sees it, so the
+    stored plan still describes the run they were OFFERED. Left alone, the
+    finished report lists a source the user dropped among the ones it read, and
+    loses the hypotheses they typed entirely — a document that misstates its own
+    inputs is worse than one that shows fewer of them."""
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    # A second source type, so excluding one still leaves the run something to
+    # read and the assertion is about the RECORD, not about failing empty.
+    require_client().table("kg_signal").insert({
+        "id": "sig-9001", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "project_mgmt", "content": "tracker signal",
+        "properties": {"customer": "Vandelay Industries"},
+        "provenance": {"doc": "NW-2140"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"excluded_sources": ["project_mgmt"],
+              "hypotheses": ["pricing is the blocker"]},
+    )
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["excluded_sources"] == ["project_mgmt"]
+    assert plan["hypotheses"] == ["pricing is the blocker"]
+    kept = [s["source_type"] for s in plan["sources"]]
+    assert "project_mgmt" not in kept, (
+        "the report would list a dropped source among the ones it read"
+    )
+    assert plan["total_signals"] == sum(s["signal_count"] for s in plan["sources"])
+
+
+def test_the_plan_does_not_promise_a_number_the_engine_cannot_produce(ctx):
+    """The plan step exists to stop a user discovering a limit at the bottom of
+    finished output. A plan that itself overpromises reintroduces the problem —
+    and it nearly did: connecting an analytics source flipped the wording to
+    "sizes stated in the goal's own unit" while the engine still had only a
+    reach-based path."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    promised = " ".join(plan["will_produce"]).lower()
+    assert "reach" in promised
+    assert "goal's own unit" not in promised or "cannot" in promised
+    # And the limit is always stated as a gap, connected sources or not.
+    assert any("points" in g["question"] for g in plan["cannot_answer"])
+
+
+def test_the_plan_does_not_promise_to_adjudicate_hypotheses(ctx):
+    """Second overpromise found in this step, and by a reviewer rather than by
+    me. Nothing in the engine tests a user's stated hypothesis against the
+    evidence; the plan said it would return "a verdict on each". A plan that
+    overpromises reintroduces exactly the problem the plan step was added to
+    remove — a user discovering a limit at the bottom of the output."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"hypotheses": ["onboarding is too long"]})
+
+    from app.crucible.plan import build_plan
+
+    plan = build_plan(company_id=ctx.company_id, goal_text="g",
+                      definition_text="d",
+                      hypotheses=("onboarding is too long",)).to_json()
+    promised = " ".join(plan["will_produce"]).lower()
+    assert "verdict" not in promised
+    assert "does not yet test them" in promised

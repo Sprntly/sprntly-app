@@ -299,6 +299,90 @@ def test_send_drip_email_swallows_exceptions(isolated_settings, monkeypatch):
     ) is False
 
 
+# ── send_project_added_email (existing-user "added to project X") ──────
+
+
+def test_send_project_added_email_no_key_returns_false(isolated_settings, monkeypatch):
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    # Missing key → a clean no-op, never a raise.
+    assert drip.send_project_added_email(
+        to_email="a@b.com", project_name="Payments", project_url="https://x/projects?id=5"
+    ) is False
+
+
+def test_send_project_added_email_success_payload(isolated_settings, monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+    def _fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        captured["headers"] = kwargs.get("headers")
+        return _Resp()
+
+    monkeypatch.setattr(drip.httpx, "post", _fake_post)
+    ok = drip.send_project_added_email(
+        to_email="peer@acme.example",
+        project_name="Payments Revamp",
+        project_url="https://app.sprntly.ai/projects?id=42",
+        recipient_name="Dana",
+    )
+    assert ok is True
+    assert captured["url"] == drip.RESEND_API_URL
+    assert captured["json"]["from"] == "Sprntly <onboarding@mail.sprntly.ai>"
+    assert captured["json"]["to"] == ["peer@acme.example"]
+    # Subject names the project.
+    assert captured["json"]["subject"] == "You've been added to Payments Revamp on Sprntly"
+    assert "Payments Revamp" in captured["json"]["text"]
+    # The branded shell renders, and the CTA links to the specific project.
+    assert "Open Sprntly" in captured["json"]["html"]
+    assert "https://app.sprntly.ai/projects?id=42" in captured["json"]["html"]
+    assert "Bearer re_test" in captured["headers"]["Authorization"]
+
+
+def test_send_project_added_email_non_2xx_returns_false(isolated_settings, monkeypatch):
+    monkeypatch.setenv("RESEND_API_KEY", "re_test")
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+
+    class _Resp:
+        status_code = 422
+        text = "bad"
+
+    monkeypatch.setattr(drip.httpx, "post", lambda url, **kw: _Resp())
+    assert drip.send_project_added_email(
+        to_email="a@b.com", project_name="P"
+    ) is False
+
+
+def test_render_drip_html_cta_url_overrides_button(isolated_settings, monkeypatch):
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    # Default: CTA points at the app root (existing callers unchanged).
+    default_html = drip.render_drip_html(subject="S", body_text="Body")
+    assert "/projects?id=" not in default_html
+    # Override: the CTA button href becomes the project deep-link.
+    html = drip.render_drip_html(subject="S", body_text="Body", cta_url="https://x/projects?id=9")
+    assert "https://x/projects?id=9" in html
+
+
 # ── run_drip_cycle end-to-end (over the fake DB) ──────────────────────
 
 

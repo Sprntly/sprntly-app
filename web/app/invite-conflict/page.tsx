@@ -30,11 +30,15 @@ const SET_PASSWORD_PATH = "/set-password"
  *    invite magic link is opened in a browser already signed in as a DIFFERENT
  *    user. Adopting the invite would silently log the existing user out, so the
  *    callback restores their session, holds the (already minted) invitee
- *    session in memory, and lands here so the user can CHOOSE:
+ *    session, and lands here so the user can CHOOSE:
  *      - Stay signed in as the current account (default — nothing changes), or
  *      - Switch into the invited account (no dead-link re-click needed).
- *    The invite link is one-time, so if the held session is gone (e.g. the page
- *    was reloaded) we can only offer "stay" + guidance to get a fresh invite.
+ *    The held session lives in sessionStorage (see setPendingInviteSession) so
+ *    it SURVIVES A RELOAD of this page. It used to be a module variable, and a
+ *    single refresh destroyed the only remaining route into the invited account
+ *    while the one-time link was already spent. If it is gone anyway (storage
+ *    disabled, or the user landed here in a different tab) we fall back to
+ *    "stay" + recovery guidance.
  */
 export default function InviteConflictPage() {
   const router = useRouter()
@@ -135,8 +139,10 @@ export default function InviteConflictPage() {
       )
     }
 
-    // No held session (e.g. the page was reloaded). The one-time link is spent,
-    // so tell the truth and point at the recoverable paths.
+    // No held session at all — storage disabled, or the user landed here in a
+    // different tab. A plain reload no longer reaches this branch. The one-time
+    // link is spent either way, so tell the truth and point at the recoverable
+    // paths.
     return (
       <AuthShell tag="Workspace invite">
         <div className="auth-h">

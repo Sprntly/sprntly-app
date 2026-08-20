@@ -235,6 +235,108 @@ def looks_like_open_request(message: str) -> bool:
         return False
     return bool(_OPEN_REQUEST_RE.search(text)) and not _AUTHORING_VERB_RE.search(text)
 
+
+# ── Deterministic open-artifact detection ───────────────────────────────────
+# The model classifier is FLAKY on a bare open ("open the prd", "show me the
+# PRD" — an opening verb + an artifact-type noun with NO title): it returns
+# `answer`, the client sends the message to /v1/ask, and the answer engine
+# refuses ("I can't open the PRD in your browser — that's a UI action"). This
+# pair — an artifact-noun matcher and a subject extractor — turns any clear open
+# request into an `open_artifact` verdict WITHOUT the model, so the flake can't
+# happen. It fires only on the same narrow, authoring-free shape the veto uses,
+# so it never swallows a "create/generate a PRD" request, and a null subject is
+# legal (the route's project scope resolves it to the sole/best artifact).
+_ARTIFACT_NOUN_RE = re.compile(
+    r"\b(prds?|spec(?:s|ification)?|requirements?|evidence|"
+    r"prototypes?|mock-?ups?|reports?|tickets?|stor(?:y|ies))\b",
+    re.I,
+)
+
+# List/count asks ("which PRDs", "how many reports", "list my specs") are a
+# DIFFERENT intent (`list_artifacts`); leave them to the model rather than
+# force-opening one document.
+_LIST_CUE_RE = re.compile(r"\b(?:which|what|list|how\s+many|every)\b", re.I)
+
+# The opening verbs, determiners, prepositions and artifact nouns that are
+# CHROME around the subject — everything that is not one of these is the title
+# the user named. Nouns for EVERY kind are dropped (the kind is captured
+# separately), so "open the checkout PRD" yields "checkout", not "checkout prd".
+_OPEN_SUBJECT_DROP = frozenset(
+    {
+        "open", "reopen", "pull", "bring", "up", "show", "find", "locate",
+        "take", "go", "jump", "switch", "load", "display", "view", "let", "see",
+        "me", "to", "where", "is", "are", "hey", "hi", "ok", "okay", "so",
+        "also", "and", "please", "can", "could", "would", "you", "quick",
+        "quickly", "the", "a", "an", "my", "our", "this", "that", "for",
+        "about", "of", "on", "in",
+        "prd", "prds", "spec", "specs", "specification", "requirement",
+        "requirements", "evidence", "prototype", "prototypes", "mockup",
+        "mockups", "report", "reports", "ticket", "tickets", "story", "stories",
+        "doc", "docs", "document", "documents",
+    }
+)
+
+_SUBJECT_WORD_RE = re.compile(r"[a-z0-9][a-z0-9-]*", re.I)
+
+
+def _artifact_type_for_noun(noun: str) -> Optional[str]:
+    """Map a matched artifact noun to a NAMEABLE_ARTIFACT_TYPES value."""
+    n = noun.lower().replace("-", "")
+    if n in ("prd", "prds", "spec", "specs", "specification", "requirement",
+             "requirements"):
+        return "prd"
+    if n == "evidence":
+        return "evidence"
+    if n in ("prototype", "prototypes", "mockup", "mockups"):
+        return "prototype"
+    if n in ("report", "reports"):
+        return "report"
+    if n in ("ticket", "tickets", "story", "stories"):
+        return "tickets"
+    return None
+
+
+def _open_subject(text: str) -> Optional[str]:
+    """The TITLE inside an open request, or None when it is a bare open.
+
+    Everything that is not an opening verb, a determiner/preposition or an
+    artifact noun is the subject — so "open the PRD for compliance reporting"
+    yields "compliance reporting" and "open the PRD" yields None.
+    """
+    kept = [
+        w for w in _SUBJECT_WORD_RE.findall(text.lower())
+        if w not in _OPEN_SUBJECT_DROP
+    ]
+    subject = " ".join(kept).strip()
+    return subject or None
+
+
+def detect_open_intent(message: str) -> Optional[tuple[str, Optional[str]]]:
+    """(`artifact_type`, `artifact_query`) for a clear open request, else None.
+
+    Fires only when the message OPENS with an opening verb, names an
+    artifact-type noun, carries NO authoring verb, and is not a list/count ask.
+    `artifact_query` is the named title, or None for a bare open (a legal value
+    the resolver turns into the sole/best artifact of that kind).
+    """
+    text = (message or "").strip()
+    if not text or len(text) > _PRE_GATE_MAX_CHARS:
+        return None
+    if not _OPEN_REQUEST_RE.search(text):
+        return None
+    if _AUTHORING_VERB_RE.search(text):
+        return None
+    if _LIST_CUE_RE.search(text):
+        return None
+    nm = _ARTIFACT_NOUN_RE.search(text)
+    if not nm:
+        return None
+    artifact_type = _artifact_type_for_noun(nm.group(1))
+    if artifact_type is None:
+        return None
+    return artifact_type, _open_subject(text)
+
+
 # Intents that act ON an existing PRD. edit_prd with no resolvable target is
 # meaningless and downgrades to `answer`; tickets/prototype keep their intent
 # even without a target — the client already has the "generate a PRD first"
@@ -764,6 +866,34 @@ def resolve_chat_intent(
     it only names the subject. The lookup (and its 0/1/many verdict) belongs to
     app.artifact_open, called by the route where the tenant scope lives.
     """
+    # ── Deterministic open-artifact force (before ANY model) ──
+    # A clear open request — an opening verb + an artifact-type noun, with or
+    # without a title — is classified WITHOUT the model, in front of both the
+    # planner and this module's own model call. The classifier is flaky on a
+    # BARE open ("open the prd"), returning `answer`; the client then sends it to
+    # /v1/ask and the answer engine refuses with "that's a UI action". This makes
+    # a clear open deterministic, so that path can't be reached. A null subject
+    # is intentional and legal — the route's project scope resolves it to the
+    # project's sole/best artifact (app.artifact_open), and on main chat to the
+    # sole one or an ambiguous chip list; it NEVER becomes a generation (the
+    # authoring-verb guard in detect_open_intent leaves "create/generate" alone).
+    # Skipped when a file is attached (an "open this" leans toward import — left
+    # to the model, matching the pre-gate's own attachment carve-out).
+    if not has_attachments:
+        detected = detect_open_intent(message)
+        if detected is not None:
+            _open_type, _open_query = detected
+            return {
+                "intent": "open_artifact",
+                "confidence": 1.0,
+                "task": None,
+                "instruction": None,
+                "artifact_type": _open_type,
+                "artifact_query": _open_query,
+                "reason": "deterministic open request",
+                "source": "open_intent",
+            }
+
     # The planner decides for enrolled companies; everyone else takes the path
     # below, unchanged. Wrapped rather than trusted: this endpoint is on the
     # send path, and a planner import or flag read must never break a send.

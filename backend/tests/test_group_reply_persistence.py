@@ -41,6 +41,15 @@ def _seed_project(t) -> int:
 def test_group_reply_persists_structured_payload_with_card_data(
     tenant_client, isolated_settings, monkeypatch
 ):
+    """Retargeted from the deleted in-band group-reply path (the group POST no
+    longer classifies + answers inline; the reply is produced on the `/v1/ask`
+    mount and persisted by `ask_job_runner._persist_group_reply`). The invariant
+    is unchanged: the assistant turn's `content` keeps the plain answer while its
+    `reply` carries the FULL structured payload (answer + key_points + the
+    classify envelope's `artifact_list`/`open` card data), and the realtime
+    broadcast carries the same reply."""
+    from app import ask_job_runner
+
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t)
     conv = conversations_db.create_group_chat(project_id, t.user_id)
@@ -55,32 +64,25 @@ def test_group_reply_persists_structured_payload_with_card_data(
         "artifact": {"type": "prd", "id": 7, "prd_id": 7, "title": "Checkout PRD"},
         "candidates": [{"type": "prd", "id": 7, "prd_id": 7, "title": "Checkout PRD"}],
     }
+    # The answer payload the shared engine produces for a "what are my PRDs?"
+    # group turn — the classify enrichment now rides the reply directly.
+    payload = {
+        "answer": "Here are your PRDs.", "key_points": ["one PRD"], "citations": [],
+        "artifact_list": card_rows, "open": open_result,
+    }
+    broadcasts: list[dict] = []
     monkeypatch.setattr(
-        projects_route, "_classify_group_envelope",
-        lambda *a, **kw: {
-            "intent": "list_artifacts",
-            "artifact_list": card_rows,
-            "open": open_result,
-        },
-    )
-    monkeypatch.setattr(
-        projects_route.qa_agent, "answer",
-        lambda **kw: {"answer": "Here are your PRDs.", "key_points": ["one PRD"], "citations": []},
-    )
-    broadcasts: list[tuple[str, dict]] = []
-    monkeypatch.setattr(
-        projects_route, "publish_broadcast",
-        lambda topic, event, payload: broadcasts.append((event, payload)),
+        "app.project_group_realtime.publish_group_turn_created",
+        lambda pid, cid, turn: broadcasts.append(turn),
     )
 
-    resp = t.client.post(
-        f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly what are my PRDs?"},
+    ask_job_runner._persist_group_reply(
+        ask_id=999_999, project_id=project_id, conversation_id=conv["id"], payload=payload,
     )
-    assert resp.status_code == 200, resp.text
 
     turns = conversations_db.list_group_turns(conv["id"])
     assistant = [x for x in turns if x["role"] == "assistant"]
-    assert assistant, "the mention reply must have posted an assistant turn"
+    assert assistant, "the reply must have posted an assistant turn"
     reply = assistant[-1]["reply"]
     # `content` keeps the plain answer (the pre-column fallback renderer)…
     assert assistant[-1]["content"] == "Here are your PRDs."
@@ -93,11 +95,7 @@ def test_group_reply_persists_structured_payload_with_card_data(
     assert "open_candidates" not in reply
 
     # The realtime broadcast for the assistant turn carries the same reply.
-    agent_payloads = [
-        p for (event, p) in broadcasts
-        if event == "turn.created" and p.get("role") == "assistant"
-    ]
-    assert agent_payloads and agent_payloads[-1]["reply"]["artifact_list"] == card_rows
+    assert broadcasts and broadcasts[-1]["reply"]["artifact_list"] == card_rows
 
 
 def test_prehistory_assistant_turn_roundtrips_from_content(
@@ -117,12 +115,13 @@ def test_prehistory_assistant_turn_roundtrips_from_content(
     assert turns[-1]["reply"] is None
 
 
-def test_dto_whitelist_still_strips_internal_columns(
+def test_dto_whitelist_still_strips_attachments(
     tenant_client, isolated_settings
 ):
-    """Adding `reply` must not loosen the read whitelist: `attachments` and
-    `client_message_id` still never ride the DTO (or the broadcast, which
-    uses `_GROUP_TURN_DTO_KEYS`)."""
+    """Adding `reply` (and later deliberately EXPOSING `client_message_id` so the
+    poster can dedup its own realtime echo) must not let `attachments` — a
+    genuinely internal column — leak onto the read DTO or the broadcast whitelist
+    (`_GROUP_TURN_DTO_KEYS`)."""
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t)
     conv = conversations_db.create_group_chat(project_id, t.user_id)
@@ -138,8 +137,10 @@ def test_dto_whitelist_still_strips_internal_columns(
 
     turns = conversations_db.list_group_turns(conv["id"])
     assert turns and turns[-1]["content"] == "hi team"
+    # `attachments` never rides the DTO…
     assert "attachments" not in turns[-1]
-    assert "client_message_id" not in turns[-1]
+    # …while `client_message_id` is now a deliberately-exposed field (echo-dedup).
+    assert turns[-1]["client_message_id"] == "cmid-1"
     assert "reply" in projects_route._GROUP_TURN_DTO_KEYS
     assert "attachments" not in projects_route._GROUP_TURN_DTO_KEYS
 

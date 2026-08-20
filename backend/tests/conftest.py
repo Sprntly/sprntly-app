@@ -44,7 +44,7 @@ from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 # is `setdefault`, so the csrf negative tests that pass an explicit (foreign/empty/absent)
 # Origin still exercise the 403 path. The Origin is pulled from `settings.origins_list`
 # (derived from ALLOWED_ORIGINS — the SAME allow-list CORS uses; no second list).
-def _wrap_client_origin(cls) -> None:
+def _wrap_client_origin(cls, guard_app_layer: bool = False) -> None:
     _orig = cls.__init__
     if getattr(_orig, "_origin_wrapped", False):
         return
@@ -52,6 +52,8 @@ def _wrap_client_origin(cls) -> None:
     def __init__(self, *a, **kw):
         from app.config import settings  # read lazily so per-test config reloads apply
 
+        if guard_app_layer:
+            _assert_app_layer_expected()
         headers = dict(kw.pop("headers", None) or {})
         headers.setdefault("origin", settings.origins_list[0])
         kw["headers"] = headers
@@ -64,7 +66,11 @@ def _wrap_client_origin(cls) -> None:
 def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
     import starlette.testclient as _tc
 
-    _wrap_client_origin(_tc.TestClient)
+    # Only TestClient carries the app-layer guard: that class exists solely to
+    # drive an ASGI app, so building one is proof the file touches the app.
+    # `httpx.AsyncClient` is also used for ordinary outbound HTTP, so guarding
+    # it would raise on tests that never go near the app.
+    _wrap_client_origin(_tc.TestClient, guard_app_layer=True)
     import httpx
 
     _wrap_client_origin(httpx.AsyncClient)
@@ -73,6 +79,21 @@ def pytest_configure(config):  # noqa: ARG001 — pytest hook signature
 # Modules that import `settings` at top level and therefore need to be
 # reloaded after env vars change. Order matters: config first, then its
 # consumers, then anything that imports the consumers.
+# Split in two because the expensive half is not needed by most tests.
+#
+# MEASURED, not guessed: reloading the whole list costs 469 ms PER TEST, and
+# `app.main` alone is 275 ms of it — 63%. Across the 10,850 tests in the fast
+# lane that is ~85 minutes of CPU spent re-importing a FastAPI app that most
+# tests never touch. `app.main` imports every router, so reloading it re-runs
+# all of them a second time on top of the route entries below. Per-module:
+# app.main 275ms, routes.connectors 49ms, routes.internal_mcp 26ms,
+# routes.prd 21ms, routes.brief 18ms — the top 5 are 90% of the cost.
+#
+# For contrast, the schema reset (`reset_fake_db`, 76 tables) is 6.5 ms. The
+# fixture cost was never the database.
+#
+# The core half is genuinely per-test: these modules read settings at import
+# time and cache clients, so a test that changes env must see them fresh.
 _RELOAD_ORDER = [
     "app.config",
     "app.db.client",
@@ -99,27 +120,34 @@ _RELOAD_ORDER = [
     "app.prd_runner",
     "app.prd_questions",
     "app.brief_runner",
+    "app.connectors.tokens",
+    "app.connectors.google_oauth",
+    "app.connectors.figma_oauth",
+    "app.connectors.github_app",
+    "app.db.mcp_tokens",
+]
+
+# The HTTP layer. Reloaded ONLY by tests that actually build a TestClient —
+# `tests._company_helpers.company_client` already reloaded `app.main` itself,
+# so for route tests this list was being done twice and for everything else it
+# was pure waste.
+_APP_RELOAD_ORDER = [
     "app.routes.health",
     "app.routes.datasets",
     "app.routes.brief",
     "app.routes.ask",
     "app.routes.evidence",
     "app.routes.prd",
-    "app.connectors.tokens",
-    "app.connectors.google_oauth",
-    "app.connectors.figma_oauth",
-    "app.connectors.github_app",
     "app.routes.connectors",
     "app.routes.internal",
-    "app.db.mcp_tokens",
     "app.routes.mcp_tokens",
     "app.routes.internal_mcp",
     "app.main",
 ]
 
 
-def _reload_app_modules() -> None:
-    for name in _RELOAD_ORDER:
+def _reload_modules(names) -> None:
+    for name in names:
         mod = sys.modules.get(name)
         if mod is None:
             try:
@@ -131,6 +159,116 @@ def _reload_app_modules() -> None:
                 importlib.reload(mod)
             except Exception:
                 raise
+
+
+def _reload_app_modules() -> None:
+    """The per-test half: settings-reading modules and cached clients."""
+    _reload_modules(_RELOAD_ORDER)
+
+
+def reload_app_layer() -> None:
+    """Rebuild the HTTP layer immediately. For callers that need it NOW.
+
+    `company_client` uses this because it constructs a TestClient in the same
+    breath. Everyone else gets it from `isolated_settings`, but only when
+    `file_needs_app_layer` says the test file actually touches the app.
+    """
+    _reload_modules(_APP_RELOAD_ORDER)
+
+
+#: Source markers that mean a test file builds or touches the FastAPI app.
+#: Deliberately generous — a false positive costs one file its old speed, a
+#: false negative costs correctness.
+#:
+#: Direct construction is self-marking: a file that writes `TestClient(...)`
+#: contains the word. The entries that are NOT self-marking are the conftest
+#: fixtures that build a client on the test's behalf — `app_client`,
+#: `unauth_client`, `tenant_client`, `company_client`. Those must be listed by
+#: name, because the test file only ever mentions the fixture in its signature.
+#: If you add another app-building fixture, add its name here; the
+#: `_assert_app_layer_expected` guard below will fail loudly if you forget.
+#:
+#: `from tests.test_` is the third case: a handful of files import fixtures
+#: (`env`, `client`) straight out of a sibling test module, so neither a
+#: conftest fixture name nor `TestClient` appears in their own source. Rather
+#: than add generic names like `client` or `env` — which appear in most of the
+#: suite and would switch the optimisation off — we treat any cross-test-module
+#: import as "assume it drags the app in". That is 11 files today.
+_APP_MARKERS = ("app.main", "TestClient", "company_client", "app_client",
+                "unauth_client", "tenant_client", "main_mod",
+                "reload_app_layer", "from tests.test_")
+
+#: Per-file answer to "does this need the HTTP layer", computed once.
+_needs_app_layer: dict[str, bool] = {}
+
+
+def file_needs_app_layer(path: str) -> bool:
+    """Read the test file once and decide whether it touches the app.
+
+    Static, per FILE, and cached — not per test. Reloading the HTTP layer costs
+    ~450 ms of the 469 ms, and 59% of the 10,850 fast-lane tests never touch the
+    app, which is most of the suite's wall-clock. Deciding from the source keeps
+    the reload IDENTICAL where it is needed (same `importlib.reload`, same module
+    identity) rather than changing semantics for everyone to save time for some.
+
+    An earlier attempt evicted the modules from `sys.modules` instead of
+    reloading them. That was faster still and broke 36 tests in
+    test_routes_internal_mcp.py, because eviction gives you a NEW module object
+    and anything holding a reference to the old one (patches, captured
+    handlers, isinstance checks) silently talks to a different module. Reloading
+    mutates in place and keeps identity stable. Do not "optimise" this back.
+
+    Matching is a plain substring scan, so a marker inside a comment or a
+    docstring counts as a hit. That is intentional: it errs toward doing the
+    reload, which costs time, never correctness.
+    """
+    cached = _needs_app_layer.get(path)
+    if cached is not None:
+        return cached
+    try:
+        src = Path(path).read_text(errors="ignore")
+    except OSError:
+        # Cannot read it: assume it needs the app. Being wrong this way is
+        # merely slow; being wrong the other way is a mystery failure.
+        src = "app.main"
+    answer = any(marker in src for marker in _APP_MARKERS)
+    _needs_app_layer[path] = answer
+    return answer
+
+
+#: Path of the test file currently executing, for the guard below.
+_current_test_file: str | None = None
+
+
+def _assert_app_layer_expected() -> None:
+    """Fail loudly if a TestClient is built under a file we classified `no`.
+
+    The gate is a static source scan, so it can be wrong. A false positive is
+    harmless (one file keeps its old speed). A false NEGATIVE is the dangerous
+    one: the test would run against whatever `app.main` the previous test in
+    this worker happened to leave in `sys.modules`, and would fail — if at all —
+    as an ordering-dependent mystery somewhere else entirely.
+
+    Constructing a TestClient is the unambiguous "I am driving the app" signal,
+    so it is the right place to check. Directly-written clients can never trip
+    this (the file contains `TestClient`, so it is classified `yes`); only a
+    fixture building one for a file that forgot a marker will.
+    """
+    path = _current_test_file
+    if path is None or file_needs_app_layer(path):
+        return
+    raise RuntimeError(
+        f"TestClient was constructed during {path}, but that file matches none "
+        f"of the app markers, so isolated_settings skipped the HTTP-layer "
+        f"reload and the app may be stale from a previous test. Add the "
+        f"fixture/helper name to _APP_MARKERS in tests/conftest.py "
+        f"(current markers: {', '.join(_APP_MARKERS)})."
+    )
+
+
+def pytest_runtest_setup(item):
+    global _current_test_file
+    _current_test_file = str(item.fspath)
 
 
 # Schema for the fake Supabase. SQLite-compatible DDL that mirrors the
@@ -1785,7 +1923,7 @@ def tmp_data_dir(tmp_path: Path, repo_root: Path) -> Path:
 
 
 @pytest.fixture
-def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
+def isolated_settings(request, tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_data_dir))
     monkeypatch.setenv("TEMPLATE_DIR", str(tmp_data_dir))
     monkeypatch.setenv("DEMO_PASSWORD", "test-pw")
@@ -1801,6 +1939,9 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role-key")
 
     _reload_app_modules()
+    # The HTTP layer only for the files that touch it — see `file_needs_app_layer`.
+    if file_needs_app_layer(str(request.fspath)):
+        reload_app_layer()
 
     # Wire the in-memory fake Supabase + reset the schema per-test.
     reset_fake_db(_FAKE_SCHEMA)
@@ -2363,18 +2504,72 @@ def _no_leftover_daemon_threads():
 
 @pytest.fixture
 def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Patch every imported reference to `call_json` so no test ever hits Anthropic."""
+    """Patch every imported reference to `call_json` — AND the agentic
+    `run_tool_loop` — so no test ever hits Anthropic.
+
+    Two answer shapes exist and BOTH must be stubbed or a test hits real
+    Anthropic with the dummy `ANTHROPIC_API_KEY` (`isolated_settings` sets
+    "test-key-not-used") and dies on a 401:
+
+      * single-shot JSON/text  -> `app.llm.call_json`  (patched below)
+      * agentic tool loop       -> `app.llm.run_tool_loop`  (patched below)
+
+    `run_tool_loop` is the chokepoint the unified answer engine (`qa_agent`)
+    uses for every project/group turn (`qa_agent.answer` -> the scoped
+    tool-reply path). Unlike `call_json` it builds its OWN `Anthropic(...)`
+    client via `get_client()` and calls `client.messages.create/stream`
+    directly, so the `call_json` patch never reached it — the rewrite that
+    routed project/group chat through `qa_agent.answer` widened that gap and
+    turned every such test red with a 401.
+
+    Both stubs RECORD into `state["calls"]` with the SAME `{system, user,
+    kwargs}` shape, so tests that assert `len(fake_llm["calls"])` / read
+    `calls[i]["user"]` work whichever path produced the answer. The tool-loop
+    stub returns a canned final string (`state["tool_loop_reply"]`) WITHOUT
+    running any real tool iteration — the model would otherwise `dispatch(...)`
+    tools against a live system; tests that want the tools to actually fire
+    patch `run_tool_loop` themselves at a lower level (see below) and, running
+    after this fixture, win for their test.
+    """
     state: dict[str, Any] = {
         "payload": {"week_label": "Test Week", "_schema_version": 1, "insights": []},
         "calls": [],
+        # Canned final text the agentic path returns. A non-empty string so the
+        # answer endpoint marks the turn "ready"; override per-test if an
+        # assertion inspects the reply body.
+        "tool_loop_reply": "ok",
     }
 
     def _fake_call_json(system: str, user: str, **kwargs):  # noqa: ARG001
         state["calls"].append({"system": system, "user": user, "kwargs": kwargs})
         return state["payload"]
 
+    def _fake_run_tool_loop(*, system, user, **kwargs):  # noqa: ARG001
+        # Record with the same shape as `_fake_call_json` so call-count /
+        # prompt assertions are answer-shape-agnostic. `tools`/`dispatch`/
+        # `model`/`meta_out`/`force_tool` all arrive in kwargs and are ignored:
+        # we never dispatch a tool (no live-system round-trip) and return the
+        # canned final text directly.
+        state["calls"].append({"system": system, "user": user, "kwargs": kwargs})
+        meta_out = kwargs.get("meta_out")
+        if meta_out is not None:
+            # Mirror `_capture_meta`'s shape so callers that read usage off the
+            # last turn (cost logging, telemetry) get plausible numbers instead
+            # of an empty dict.
+            meta_out.update(
+                {
+                    "model": kwargs.get("model"),
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return state["tool_loop_reply"]
+
     import app.llm as llm_mod
     monkeypatch.setattr(llm_mod, "call_json", _fake_call_json, raising=False)
+    monkeypatch.setattr(llm_mod, "run_tool_loop", _fake_run_tool_loop, raising=False)
     for mod_name in (
         "app.brief_runner",
         "app.ask_runner",
@@ -2388,6 +2583,97 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "call_json"):
             monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
+    # `qa_agent` does `from app.llm import run_tool_loop` at CALL time, so the
+    # source patch above reaches it. These modules bind the name at IMPORT time
+    # instead, so patch their already-bound reference too (mirrors the
+    # `_no_background_connector_sync` "patch the bound importer" pattern). Only
+    # patched if already imported; tests that stub these at a lower level run
+    # after this fixture and override it for their test.
+    for mod_name in (
+        "app.jira_lookup",
+        "app.ticket_update",
+        "app.connector_lookup.answer",
+    ):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "run_tool_loop"):
+            monkeypatch.setattr(mod, "run_tool_loop", _fake_run_tool_loop, raising=False)
+        # connector_lookup.answer binds it under an alias.
+        if mod is not None and hasattr(mod, "_default_run_loop"):
+            monkeypatch.setattr(mod, "_default_run_loop", _fake_run_tool_loop, raising=False)
+
+    # The single-call gateway (`graph.gateway.llm_call`) is the THIRD Anthropic
+    # entry point on the answer flow — the qa-router classifier
+    # (`qa_agent._route_question`, qa_agent.py:~798, degrade logged at :885) and
+    # the ask planner (`ask_planner.plan`) both route through it. `llm_call`
+    # itself never touches Anthropic directly: it calls the gateway module's OWN
+    # `call_json`/`call_md` (bound at import, graph/gateway.py:30) and wraps their
+    # output in an `LLMResult`. The `app.llm.call_json` patch above does NOT reach
+    # those bound refs, so an unguarded `fake_llm` test fired a real request and
+    # died on a 401.
+    #
+    # Stub the gateway's bound `call_json`/`call_md` (NOT `llm_call` itself):
+    # `llm_call` then runs its REAL body over a benign empty output, returning an
+    # `LLMResult(output={})`. The classifier reads that as a no-decision
+    # (`skill_id`/`company_skill_id` absent -> "none", `in_scope` not `False`) and
+    # the planner as no actionable plan — EXACTLY the graceful-degrade both take
+    # when the live call fails. Stubbing at the `call_json` seam (rather than
+    # replacing `llm_call` wholesale) is what keeps tests that patch
+    # `gateway.call_json` themselves working (e.g. `test_ask_skill_routing`
+    # counts the router's own `call_json` call) — replacing `llm_call` bypassed
+    # that seam and silently zeroed those counts. These stubs deliberately do
+    # NOT record into `state["calls"]` (that ledger is the answer-path
+    # `call_json`/`run_tool_loop` above; recording the router call here would
+    # break `len(fake_llm["calls"])` assertions). A test that patches
+    # `gateway.call_json`/`call_md` runs after this fixture and wins for itself.
+    import app.graph.gateway as _gateway_mod
+
+    def _populate_meta(kwargs):
+        meta_out = kwargs.get("meta_out")
+        if isinstance(meta_out, dict):
+            meta_out.update(
+                {
+                    "model": kwargs.get("model") or "",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "stop_reason": "end_turn",
+                }
+            )
+
+    def _fake_gateway_call_json(**kwargs):  # noqa: ARG001
+        _populate_meta(kwargs)
+        return {}
+
+    def _fake_gateway_call_md(**kwargs):  # noqa: ARG001
+        _populate_meta(kwargs)
+        return ""
+
+    monkeypatch.setattr(_gateway_mod, "call_json", _fake_gateway_call_json, raising=False)
+    monkeypatch.setattr(_gateway_mod, "call_md", _fake_gateway_call_md, raising=False)
+
+    # The ask PLANNER (`ask_planner.plan_for_answer`) is the FOURTH Anthropic
+    # entry point on the answer flow — `ask_job_runner._run_sync` and
+    # `chat_intent.resolve_chat_intent` both call it to decide the turn's action
+    # BEFORE the answer/route path runs. It reaches Anthropic through
+    # `graph.gateway.llm_call` too, but the benign `LLMResult(output={})` stub
+    # above does NOT reproduce the fast lane here: from an empty output the
+    # planner builds a DEFAULT `{"action": "answer"}` plan (a real, non-None
+    # Plan) and the runner then takes the PLANNED path — whereas on CI the
+    # planner call 401s, `plan_for_answer` catches it and returns None, and the
+    # runner answers the OLD way (through `route()` / the skill ladder). That
+    # divergence silently rerouted every routing/skill test (`route()` never
+    # fired) — the exact class that stayed green on CI only because the 401
+    # forced the unplanned path. Stub `plan_for_answer` to None so `fake_llm`
+    # reproduces the fast lane's real "planner defers, answer the old way"
+    # behaviour. `raising=False` + patched on the module both callers read at
+    # call time; a test that wants a real plan patches it back after this
+    # fixture and wins for its test.
+    import app.ask_planner as _ask_planner_mod
+
+    monkeypatch.setattr(
+        _ask_planner_mod, "plan_for_answer", lambda **kwargs: None, raising=False
+    )
     return state
 
 

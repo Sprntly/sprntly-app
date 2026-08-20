@@ -31,8 +31,10 @@ from pydantic import BaseModel, Field
 from app.auth import WorkspaceContext
 from app.crucible.claims import project_signals
 from app.crucible.cluster import assign_clusters, parse_embedding
+from app.crucible.kg_themes import assign_themes, load_theme_map
 from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
 from app.crucible.pipeline import build_findings
+from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
 from app.db import crucible_runs as runs_db
 from app.entitlements import require_crucible_module
@@ -46,8 +48,11 @@ router = APIRouter(prefix="/v1/crucible", tags=["crucible"])
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crucible")
 
 #: Rows per page of the signal read. Small BECAUSE of the embeddings: each row
-#: Rows per page of the metadata read. No embeddings in it, so it can be big.
-_PAGE = 1000
+#: Rows per page of the metadata read. No embeddings in it, but `content` is
+#: free text and 1,000 of them timed out the statement on a 15,569-signal
+#: tenant — measured, after 1,000 worked fine on a 2,777-signal one. Sized for
+#: the big tenant, because the small one does not care.
+_PAGE = 400
 
 #: Rows per page of the EMBEDDING read. Far smaller, because each row carries
 #: ~19KB of JSON. Measured against a real 2,777-signal tenant: 250 alongside
@@ -85,6 +90,8 @@ def _public(row: dict) -> dict:
         # the confirmation step — the one thing the user has to do — is a blank
         # box. `prioritisation` holds no raw error text; it is the run's own
         # framing, which is exactly what the reader needs.
+        # Carries the Stage 0 ask AND the run plan. The plan is the thing the
+        # user approves, so it has to reach the client.
         "prioritisation": row.get("prioritisation") or {},
         "created_at": row.get("created_at"),
         "finished_at": row.get("finished_at"),
@@ -192,6 +199,63 @@ async def confirm(
     return _public(row or claimed)
 
 
+class ApprovePlan(BaseModel):
+    """What the user changed about the plan before saying go."""
+    excluded_sources: list[str] = Field(default_factory=list, max_length=12)
+    hypotheses: list[str] = Field(default_factory=list, max_length=10)
+
+
+@router.post("/{run_id}/approve")
+async def approve(
+    run_id: int,
+    body: ApprovePlan,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """The SECOND gate. The plan said what would be read and what could not be
+    answered; this is the user saying go, having seen both.
+
+    Separate from `/confirm` on purpose. Confirming a goal DEFINITION and
+    approving a method are different decisions, and collapsing them is how a
+    user ends up having agreed to something they never saw.
+    """
+    claimed = await asyncio.to_thread(
+        runs_db.claim_for_approval, run_id, company.company_id
+    )
+    if claimed is None:
+        row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+        if not row:
+            raise HTTPException(404, "Run not found")
+        raise HTTPException(
+            409,
+            f"This run is {row.get('status')}, so there is no plan waiting to "
+            f"be approved.",
+        )
+
+    meta = _meta_of(run_id, company.company_id)
+    definition_text = (meta.get("plan") or {}).get("definition_text") or ""
+
+    kwargs = dict(
+        run_id=run_id, company_id=company.company_id,
+        goal_text=claimed.get("goal_text") or "",
+        definition_text=definition_text,
+        confirmed_by=company.user_id,
+        approved=True,
+        excluded_sources=tuple(body.excluded_sources),
+        hypotheses=tuple(body.hypotheses),
+    )
+    if "pytest" in sys.modules:
+        await asyncio.to_thread(execute_run, **kwargs)
+    else:
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(
+            loop.run_in_executor(_POOL, partial(execute_run, **kwargs))
+        )
+        _inflight.add(task)
+        task.add_done_callback(_inflight.discard)
+    row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+    return _public(row or claimed)
+
+
 def execute_run(
     *,
     run_id: int,
@@ -199,6 +263,9 @@ def execute_run(
     goal_text: str,
     definition_text: Optional[str] = None,
     confirmed_by: Optional[str] = None,
+    approved: bool = False,
+    excluded_sources: tuple[str, ...] = (),
+    hypotheses: tuple[str, ...] = (),
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -274,36 +341,104 @@ def execute_run(
         definition_row_id = runs_db.save_definition(company_id, locked)
         runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
 
+        # ── Stage 1. SAY WHAT WILL BE DONE, then stop for approval. ─────────
+        #
+        # A run reads the whole corpus and takes minutes, and until now the
+        # first thing a user learned about its limits was the coverage notes at
+        # the bottom of the finished output — after the wait, phrased as an
+        # apology. The same facts BEFORE the run are a decision: connect the
+        # missing source, drop one, or accept a qualitative answer knowingly.
+        #
+        # Inventory only, no content read, so this returns in about a second.
+        if not approved:
+            plan = build_plan(
+                company_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                currency="accounts",
+            )
+            meta = dict(_meta_of(run_id, company_id))
+            meta["plan"] = plan.to_json()
+            runs_db.update(run_id, company_id, status="awaiting_approval",
+                           prioritisation=meta)
+            return
+
+        # THE USER'S ANSWER TO THE PLAN IS PART OF THE RECORD. `build_plan`
+        # ran before they saw it, so the stored plan still describes the run
+        # they were OFFERED, not the one they approved. Left alone, the
+        # finished report lists a source the user dropped among the ones it
+        # read, and loses the hypotheses they typed entirely — a report that
+        # misstates its own inputs is worse than one that shows fewer.
+        if excluded_sources or hypotheses:
+            meta = dict(_meta_of(run_id, company_id))
+            plan_json = dict(meta.get("plan") or {})
+            if plan_json:
+                kept = [
+                    src for src in (plan_json.get("sources") or [])
+                    if src.get("source_type") not in excluded_sources
+                ]
+                plan_json["sources"] = kept
+                plan_json["total_signals"] = sum(
+                    src.get("signal_count") or 0 for src in kept
+                )
+                plan_json["excluded_sources"] = list(excluded_sources)
+                plan_json["hypotheses"] = list(hypotheses)
+                meta["plan"] = plan_json
+                runs_db.update(run_id, company_id, prioritisation=meta)
+
         runs_db.update(run_id, company_id, status="running",
                        started_at=now.isoformat())
         runs_db.heartbeat(run_id, company_id)
 
         # ── Stage 4. Project the corpus into claims, then group them. ───────
         signals = _load_signals(company_id)
+        if excluded_sources:
+            # The user dropped a source at the plan step. Honoured here rather
+            # than at the query, so the run can still report how much it left
+            # out — a silently narrower corpus is the thing coverage notes
+            # exist to prevent.
+            dropped = [r for r in signals if r.get("source_type") in excluded_sources]
+            signals = [r for r in signals
+                       if r.get("source_type") not in excluded_sources]
+            logger.info("crucible: user excluded %d signals from %s",
+                        len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
 
-        # Grouping is what turns 2,777 claims into findings rather than into a
-        # reading of our own taxonomy. See app/crucible/cluster.py.
-        # Parsed to float32 AND released from the rows. Each embedding arrives
-        # as a ~19KB JSON string, and a Python list of 1536 floats is roughly
-        # eight times the size of the same numbers as float32 — so on a
-        # 10,000-signal tenant, holding the strings and the lists and the
-        # matrix at once measured near a gigabyte. Dropping the string as soon
-        # as it is parsed is most of that back, and the rows are still needed
-        # afterwards for the ingest-clock check.
-        embeddings = _load_embeddings(
-            company_id, {str(r.get("id")) for r in signals})
-        # ALWAYS called, even with nothing to cluster on. Skipping it left
-        # every claim's cluster id unset, which is precisely how they get
-        # pooled by kind downstream — so a tenant with no embeddings at all got
-        # "40 claims concern finding" and no coverage note, which is the
-        # failure the whole module exists to prevent.
-        if not embeddings:
-            logger.warning(
-                "crucible: no embeddings for %s — nothing can be grouped",
-                company_id,
-            )
-        claims, cluster_stats = assign_clusters(claims, embeddings)
+        # GROUPING: the graph's own themes first, embeddings only for whatever
+        # it left unthemed.
+        #
+        # The KG already joins signals to theme entities labelled by the
+        # extractor — "Parts request dashboard", "Sales Pipeline". Deriving our
+        # own from embeddings re-computed, worse, semantics the graph had
+        # already stored, and produced a private taxonomy labelled with
+        # truncated sentences that lined up with nothing else in the product.
+        # Measured on the test tenant: 165 findings and 3 of them sizeable
+        # became 238 and 20 by reading the graph instead.
+        theme_map = load_theme_map(company_id)
+        claims, unthemed_idx, cluster_stats = assign_themes(claims, theme_map)
+        logger.info(
+            "crucible: graph themed %s of %s claims for %s",
+            cluster_stats.get("themed"), len(claims), company_id,
+        )
+
+        # Only the leftovers pay for the embedding read, which is the slowest
+        # part of a run — so this is a latency win as well as a quality one.
+        unthemed_ids = {str(claims[i].id) for i in unthemed_idx}
+        if unthemed_ids:
+            embeddings = _load_embeddings(company_id, unthemed_ids)
+            if not embeddings:
+                logger.warning(
+                    "crucible: %d unthemed signals and no embeddings for %s",
+                    len(unthemed_ids), company_id,
+                )
+            # ONLY the unthemed ones. Passing the whole list would re-stamp
+            # claims the graph already placed, throwing away the better label.
+            leftovers = [claims[i] for i in unthemed_idx]
+            regrouped, embed_stats = assign_clusters(leftovers, embeddings)
+            for slot, claim in zip(unthemed_idx, regrouped):
+                claims[slot] = claim
+            cluster_stats.update(embed_stats)
+
         runs_db.update(run_id, company_id, claim_count=len(claims))
 
         if not claims:
@@ -442,6 +577,22 @@ def _seconds_between(a, b) -> Optional[float]:
             moment = moment.replace(tzinfo=timezone.utc)
         parsed.append(moment)
     return abs((parsed[0] - parsed[1]).total_seconds())
+
+
+def _meta_of(run_id: int, company_id: str) -> dict:
+    """The run's meta blob. `prioritisation` is the run's own framing — the
+    Stage 0 ask, and now the plan — so it is read-modify-written rather than
+    replaced, or approving a plan would erase the question that produced it."""
+    row = runs_db.get(run_id, company_id) or {}
+    meta = row.get("prioritisation") or {}
+    if isinstance(meta, str):
+        import json
+
+        try:
+            meta = json.loads(meta)
+        except Exception:  # noqa: BLE001
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:

@@ -73,6 +73,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onPickSlackShareTarget,
     handlePrototypeSettled,
     renderUserBody,
+    renderAgentBody,
   } = deps
 
   return thread.map((turn, idx): ChatTranscriptTurn => {
@@ -186,8 +187,14 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     // was no way to take its answer back out of the record; the rewind
     // (`rewindToUserTurn` → `DELETE …/turns/{id}`) is what made past prompts
     // editable at all.
+    //  * a PEER'S message (project GROUP surface): a turn that carries `author`
+    //    belongs to someone else in the shared thread. Copy is fine on it, but
+    //    editing or re-asking a message the viewer didn't write is never theirs
+    //    to do. `author` is unset on main, private, and the viewer's OWN group
+    //    turns, so this is byte-identical for every single-author surface.
     const canReAskTurn =
       !!queryBody &&
+      !turn.author &&
       !isGenerating &&
       !turn.summaryPending &&
       !turn.attachments?.length &&
@@ -195,6 +202,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     const canEditTurn = !!onEditTurn && canReAskTurn
     const canRetryTurn = !!onRetryTurn && canReAskTurn
     const isEditing = canEditTurn && editingTurnId === turn.id
+
+    // Per-surface AGENT-body override (the project chats' on-join greeting
+    // `MORE_MARKER` lead/Show-more split). Returns a node ONLY for the turns it
+    // owns (a greeting carrying the marker); every other turn — and every main
+    // turn, which never passes `renderAgentBody` — returns null and stays on the
+    // default reply ladder, so the mapped output is byte-identical there.
+    const surfaceAgentBody = renderAgentBody ? renderAgentBody(turn) : null
 
     return {
       turnId: turn.id,
@@ -284,6 +298,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       onSubmitClarify: (answers) => submitClarifyAnswers(answers),
       onSkipClarify: () => submitClarifyAnswers([]),
       reply: turn.reply,
+      // The greeting's lead/Show-more body REPLACES the reply ladder (via
+      // ChatBubble's `agentBodyNode` escape hatch). Spread only when the
+      // surface owns this turn, so a normal turn never grows the field.
+      ...(surfaceAgentBody ? { agentBodyNode: surfaceAgentBody } : {}),
       // A report answer is an ARTIFACT: it reads in the panel's Reports tab.
       onOpenReport: openReportByTitle,
       openCandidates: turn.openCandidates,
