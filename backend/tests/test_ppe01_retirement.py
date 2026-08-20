@@ -78,10 +78,11 @@ def test_group_route_no_longer_imports_propose_symbols():
     src = (BACKEND / "app" / "routes" / "projects.py").read_text(encoding="utf-8")
     assert "PROPOSE_PROJECT_PRD_PATCH_TOOL" not in src
     assert "handle_propose_prd_patch" not in src
-    # The survivor IS still imported. `_resolve_prd_id` was dropped from this
-    # list when the shared editor replaced the bespoke resolver (e05577dc) —
-    # the route resolves its write target through `apply_chat_edit_scoped` now.
-    assert "project_prd_edit_enabled" in src
+    # The group route resolves its write target through `apply_chat_edit_scoped`
+    # now — the bespoke resolver AND the `project_prd_edit_enabled` import were
+    # both dropped from this route when the shared editor took over (the flag
+    # survives in `project_prd_patch_tool.py`, asserted by `test_keep_set_intact`).
+    assert "apply_chat_edit_scoped" in src
 
 
 # ── AC11 — the banner is gone, and no longer wired into the individual chat ──
@@ -96,27 +97,28 @@ def test_banner_file_and_test_deleted():
 
 
 def test_individual_chat_no_longer_imports_or_renders_banner():
-    # `ProjectIndividualChat.tsx` was deleted by the chat-shell refactor —
-    # its individual-chat surface now renders as `ProjectPrivateChat.tsx`
-    # through the shared chat shell. The retirement intent (no banner import)
-    # holds vacuously for a file that no longer exists, and holds concretely
-    # for its successor.
-    individual_chat = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectIndividualChat.tsx"
-    )
-    assert not individual_chat.exists()
+    # The chat-shell refactor deleted the per-surface chat components
+    # (`ProjectIndividualChat.tsx`, then `ProjectPrivateChat.tsx`/
+    # `ProjectGroupChat.tsx`): private AND group project chat now render through
+    # ONE shipped component, `ProjectMainThread.tsx` (keyed on project+surface),
+    # over the shared chat shell. The retirement intent (no banner import) holds
+    # vacuously for the deleted files and concretely for the shipped successor.
+    projects_dir = WEB / "app" / "components" / "screens" / "app" / "projects"
+    for gone in ("ProjectIndividualChat.tsx", "ProjectPrivateChat.tsx"):
+        assert not (projects_dir / gone).exists()
 
-    private_chat_src = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectPrivateChat.tsx"
-    ).read_text(encoding="utf-8")
-    assert "ProjectPrdPatchBanner" not in private_chat_src
+    successor_src = (projects_dir / "ProjectMainThread.tsx").read_text(encoding="utf-8")
+    assert "ProjectPrdPatchBanner" not in successor_src
 
 
 def test_group_chat_unchanged_never_referenced_banner():
-    src = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectGroupChat.tsx"
-    ).read_text(encoding="utf-8")
-    assert "ProjectPrdPatchBanner" not in src
+    # `ProjectGroupChat.tsx` was deleted by the same refactor; the group surface
+    # renders through the shipped `ProjectMainThread.tsx`. The banner must not
+    # reappear in production web code — assert it repo-wide (the strongest form
+    # of the retirement invariant), mirroring `test_no_propose_symbols_remain`.
+    projects_dir = WEB / "app" / "components" / "screens" / "app" / "projects"
+    assert not (projects_dir / "ProjectGroupChat.tsx").exists()
+    assert _grep("ProjectPrdPatchBanner", WEB / "app") == []
 
 
 # ── AC12 — the KEEP set is intact ─────────────────────────────────────────────
