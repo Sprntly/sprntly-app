@@ -89,6 +89,15 @@ function Finding({ f }: { f: GoalFinding }) {
       {f.confidence?.cap_reason ? (
         <p className="ga-cap">{f.confidence.cap_reason}</p>
       ) : null}
+      {/* WHERE IT CAME FROM, beside the claim it supports. Without this the
+          panel showed the literal word "corpus" as the only provenance, so a
+          reader could not check a single finding against anything. */}
+      {f.surfaced_by?.length ? (
+        <p className="ga-sources" data-testid="goal-sources">
+          <span className="ga-sources-label">From</span>{" "}
+          {f.surfaced_by.join(" · ")}
+        </p>
+      ) : null}
       {/* I8: every assumed parameter is disclosed where the number is read,
           not in a methodology page nobody opens. */}
       {f.assumed_params?.length ? (

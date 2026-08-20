@@ -314,7 +314,12 @@ def build_findings(
                 independent_authoritative_source_types=len(
                     {c.source_id for c in group if c.authoritative}
                 ),
-                surfaced_by=("corpus",),
+                # THE DOCUMENTS IT ACTUALLY CAME FROM, not the word "corpus".
+                # This field is the only provenance the panel renders, and it
+                # rendered the literal string "corpus" on every finding — so
+                # "8 claims concern X" was unfalsifiable from the screen. The
+                # source documents are already on the claims.
+                surfaced_by=_sources_of(group),
                 solution_evidence_absent=solution_evidence_absent,
             ),
             adjudication=_adjudicate(group),
@@ -387,6 +392,31 @@ def _rank(
         )
 
     return sorted(range(len(findings)), key=key)
+
+
+#: How many source documents to name before summarising. Enough to show the
+#: evidence is spread, short enough to read in a list.
+MAX_NAMED_SOURCES = 4
+
+
+def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
+    """Which documents this finding rests on, most-cited first.
+
+    Deterministic: ties break on the document name, so a re-run names the same
+    sources in the same order.
+    """
+    counts: dict[str, int] = {}
+    for c in claims:
+        doc = (c.artifact_id or "").strip()
+        if doc:
+            counts[doc] = counts.get(doc, 0) + 1
+    if not counts:
+        return ()
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    named = tuple(f"{doc} ({n})" for doc, n in ranked[:MAX_NAMED_SOURCES])
+    if len(ranked) > MAX_NAMED_SOURCES:
+        named += (f"+{len(ranked) - MAX_NAMED_SOURCES} more documents",)
+    return named
 
 
 def _label(claims: Sequence[Claim], key: str) -> str:

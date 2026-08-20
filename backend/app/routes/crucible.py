@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from app.auth import WorkspaceContext
 from app.crucible.claims import project_signals
 from app.crucible.cluster import assign_clusters, parse_embedding
+from app.crucible.kg_themes import assign_themes, load_theme_map
 from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
 from app.crucible.pipeline import build_findings
 from app.crucible.types import GoalDefinition
@@ -46,8 +47,11 @@ router = APIRouter(prefix="/v1/crucible", tags=["crucible"])
 _POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="crucible")
 
 #: Rows per page of the signal read. Small BECAUSE of the embeddings: each row
-#: Rows per page of the metadata read. No embeddings in it, so it can be big.
-_PAGE = 1000
+#: Rows per page of the metadata read. No embeddings in it, but `content` is
+#: free text and 1,000 of them timed out the statement on a 15,569-signal
+#: tenant — measured, after 1,000 worked fine on a 2,777-signal one. Sized for
+#: the big tenant, because the small one does not care.
+_PAGE = 400
 
 #: Rows per page of the EMBEDDING read. Far smaller, because each row carries
 #: ~19KB of JSON. Measured against a real 2,777-signal tenant: 250 alongside
@@ -282,28 +286,41 @@ def execute_run(
         signals = _load_signals(company_id)
         claims, stats = project_signals(signals)
 
-        # Grouping is what turns 2,777 claims into findings rather than into a
-        # reading of our own taxonomy. See app/crucible/cluster.py.
-        # Parsed to float32 AND released from the rows. Each embedding arrives
-        # as a ~19KB JSON string, and a Python list of 1536 floats is roughly
-        # eight times the size of the same numbers as float32 — so on a
-        # 10,000-signal tenant, holding the strings and the lists and the
-        # matrix at once measured near a gigabyte. Dropping the string as soon
-        # as it is parsed is most of that back, and the rows are still needed
-        # afterwards for the ingest-clock check.
-        embeddings = _load_embeddings(
-            company_id, {str(r.get("id")) for r in signals})
-        # ALWAYS called, even with nothing to cluster on. Skipping it left
-        # every claim's cluster id unset, which is precisely how they get
-        # pooled by kind downstream — so a tenant with no embeddings at all got
-        # "40 claims concern finding" and no coverage note, which is the
-        # failure the whole module exists to prevent.
-        if not embeddings:
-            logger.warning(
-                "crucible: no embeddings for %s — nothing can be grouped",
-                company_id,
-            )
-        claims, cluster_stats = assign_clusters(claims, embeddings)
+        # GROUPING: the graph's own themes first, embeddings only for whatever
+        # it left unthemed.
+        #
+        # The KG already joins signals to theme entities labelled by the
+        # extractor — "Parts request dashboard", "Sales Pipeline". Deriving our
+        # own from embeddings re-computed, worse, semantics the graph had
+        # already stored, and produced a private taxonomy labelled with
+        # truncated sentences that lined up with nothing else in the product.
+        # Measured on the test tenant: 165 findings and 3 of them sizeable
+        # became 238 and 20 by reading the graph instead.
+        theme_map = load_theme_map(company_id)
+        claims, unthemed_idx, cluster_stats = assign_themes(claims, theme_map)
+        logger.info(
+            "crucible: graph themed %s of %s claims for %s",
+            cluster_stats.get("themed"), len(claims), company_id,
+        )
+
+        # Only the leftovers pay for the embedding read, which is the slowest
+        # part of a run — so this is a latency win as well as a quality one.
+        unthemed_ids = {str(claims[i].id) for i in unthemed_idx}
+        if unthemed_ids:
+            embeddings = _load_embeddings(company_id, unthemed_ids)
+            if not embeddings:
+                logger.warning(
+                    "crucible: %d unthemed signals and no embeddings for %s",
+                    len(unthemed_ids), company_id,
+                )
+            # ONLY the unthemed ones. Passing the whole list would re-stamp
+            # claims the graph already placed, throwing away the better label.
+            leftovers = [claims[i] for i in unthemed_idx]
+            regrouped, embed_stats = assign_clusters(leftovers, embeddings)
+            for slot, claim in zip(unthemed_idx, regrouped):
+                claims[slot] = claim
+            cluster_stats.update(embed_stats)
+
         runs_db.update(run_id, company_id, claim_count=len(claims))
 
         if not claims:

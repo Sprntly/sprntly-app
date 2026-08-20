@@ -24999,3 +24999,7 @@
 .ga-considered summary { cursor: pointer; opacity: 0.75; }
 .ga-considered ul { margin: 8px 0 0; padding-left: 16px;
   display: flex; flex-direction: column; gap: 6px; }
+
+.ga-sources { margin: 6px 0 0; font-size: 12px; opacity: 0.72; }
+.ga-sources-label { text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10px; opacity: 0.75; }
