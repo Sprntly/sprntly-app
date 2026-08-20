@@ -290,6 +290,22 @@ def _finding_block(finding: dict, rank: int) -> str:
     return "".join(out)
 
 
+#: How many findings get a full block in the document.
+#:
+#: NOT a display preference — a hard constraint made visible. `custom_artifacts`
+#: refuses a body over `MAX_BODY_CHARS` (400,000), and a real run rendered
+#: 831 findings into **421,696 characters**: over the limit, so the document
+#: could not be created at all and the route died on an unhandled
+#: `BodyTooLarge`. The browser saw a dropped connection.
+#:
+#: 150 full blocks is roughly 80,000 characters on that same run — comfortably
+#: inside the limit with the other sections, and far more than anyone reads.
+#: The remainder is NOT dropped: it is listed one line each, and the count is
+#: stated, because a silently shortened report is the failure this feature
+#: exists to avoid.
+MAX_FULL_FINDING_BLOCKS = 150
+
+
 def _findings_section(findings: list[dict]) -> str:
     if not findings:
         return ""
@@ -300,7 +316,26 @@ def _findings_section(findings: list[dict]) -> str:
         "because two sources that may both speak contradicting each other is "
         "worth more than either of them alone."
     ))
-    out.extend(_finding_block(f, i + 1) for i, f in enumerate(findings))
+
+    full = findings[:MAX_FULL_FINDING_BLOCKS]
+    rest = findings[MAX_FULL_FINDING_BLOCKS:]
+    out.extend(_finding_block(f, i + 1) for i, f in enumerate(full))
+
+    if rest:
+        # SAID PLAINLY, where the reader is. A document that stopped at 150
+        # without a word would read as "these are all the findings", which is
+        # exactly the quiet degradation the coverage notes exist to prevent.
+        out.append(_p(
+            f"The remaining {len(rest)} findings are listed below in rank "
+            f"order rather than in full. They are ranked lower by reach and "
+            f"the document has a size limit; nothing has been dropped, and "
+            f"every one of them is still on the run itself."
+        ))
+        rows = []
+        for offset, f in enumerate(rest, start=len(full) + 1):
+            statement = _esc((f.get("statement") or "").strip())
+            rows.append(f"<li>{offset}. {statement}</li>")
+        out.append("<ul>" + "".join(rows) + "</ul>")
     return "".join(out)
 
 

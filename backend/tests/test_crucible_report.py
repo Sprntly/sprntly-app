@@ -252,3 +252,78 @@ def test_the_title_names_the_goal_so_two_reports_are_tellable_apart():
     assert len(title) < 300 and title.endswith("…")
     # A run with no goal text still has a name rather than a bare colon.
     assert report_title({"goal_text": "  "}) == "Goal analysis"
+
+
+# ─── The size ceiling, found on staging ──────────────────────────────────────
+
+def _many_findings(n: int) -> list[dict]:
+    """Findings shaped like real ones — statements and provenance are what make
+    a block big, and a fixture of `{"statement": "x"}` cannot find a size bug."""
+    return [{
+        "id": i,
+        "statement": f"{7 + i % 20} claims across {1 + i % 9} accounts concern "
+                     f"“Theme {i}: a realistically long label of the kind the "
+                     f"knowledge graph actually produces”.",
+        "claim_ids": [f"c{i}-{k}" for k in range(9)],
+        "impact_value": None if i % 3 else float(i % 9),
+        "currency": "accounts",
+        "confidence_band": "medium",
+        "adjudication": "corroborated",
+        "surfaced_by": [f"fireflies-sync-batch-{i % 12} ({4 + i % 6})",
+                        f"slack/#channel-{i % 7} ({1 + i % 3})",
+                        "+3 more documents"],
+        "assumed_params": [{"name": "value_per_account",
+                            "basis": "no revenue data connected; accounts "
+                                     "weighted equally"}],
+        "confidence": {"band": "medium", "weakest_leg": "problem",
+                       "weakest_leg_reason": "nothing in this company's "
+                                             "connected sources records whether "
+                                             "a fix like this has ever worked",
+                       "cap_reason": "capped at medium: no outcome evidence"},
+        "tier": "deep" if i < 5 else "shallow",
+    } for i in range(n)]
+
+
+def test_a_run_with_hundreds_of_findings_still_fits_the_document_store():
+    """THE STAGING BUG. A real 831-finding run rendered to 421,696 characters
+    against a 400,000 limit, so `custom_artifacts` refused the body, the route
+    had no handler, and the browser got a dropped connection — an outage, for
+    what was really a refused write.
+
+    Every unit test passed because every fixture had a handful of findings.
+    """
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    html = render_report_html(
+        {"id": 1, "goal_text": "improve revenue", "coverage_notes": []},
+        _many_findings(831), [], {},
+    )
+    assert len(html) < MAX_BODY_CHARS, (
+        f"rendered {len(html)} chars against a {MAX_BODY_CHARS} limit"
+    )
+
+
+def test_the_findings_beyond_the_cap_are_listed_and_counted_not_dropped():
+    """A document that stopped at the cap without a word would read as "these
+    are all the findings" — the quiet degradation this whole feature exists to
+    avoid."""
+    from app.crucible.report import MAX_FULL_FINDING_BLOCKS
+
+    n = MAX_FULL_FINDING_BLOCKS + 40
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(n), [], {},
+    )
+    assert "The remaining 40 findings" in html
+    assert "nothing has been dropped" in html
+    # The last one is still named, in rank order.
+    assert f"{n}." in html
+
+
+def test_a_small_run_is_not_truncated_at_all():
+    """The control: the cap must not touch an ordinary run."""
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(12), [], {},
+    )
+    assert "The remaining" not in html

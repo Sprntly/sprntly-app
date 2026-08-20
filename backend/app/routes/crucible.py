@@ -352,9 +352,36 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
     from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
+    from app.db.custom_artifacts import BodyTooLarge, _checked_body
 
     run_id, company_id = row["id"], company.company_id
     html = _render_document_html(row, company_id)
+
+    # A BODY THE STORE REFUSES MUST NOT LOOK LIKE A DEAD SERVER.
+    #
+    # `custom_artifacts` caps a body at `MAX_BODY_CHARS` and raises
+    # `BodyTooLarge`. This route did not catch it, so a large report 500'd on an
+    # unhandled exception and the browser reported "Failed to fetch" — a
+    # dropped connection, which reads as an outage rather than as a refused
+    # write. Found on staging against a real 831-finding run that rendered to
+    # 421,696 characters.
+    #
+    # `_findings_section` now bounds the document so this should not fire. It
+    # stays because "should not" is not "cannot": a future run with longer
+    # statements can still cross the line, and when it does the user is owed a
+    # sentence rather than a broken tab.
+    try:
+        checked = _checked_body(html)
+    except BodyTooLarge as exc:
+        logger.error("crucible: report for run %s exceeds the body limit: %s",
+                     run_id, exc)
+        raise HTTPException(
+            413,
+            "This run's report is too large to save as a document. The run "
+            "itself is unaffected and still readable in the panel.",
+        ) from exc
+    html = checked
+
     artifact = create_artifact(
         company_id,
         kind=ARTIFACT_KIND,
