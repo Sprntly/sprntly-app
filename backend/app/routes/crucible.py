@@ -23,10 +23,10 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
-from typing import Optional
+from typing import Annotated, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
 
 from app.auth import WorkspaceContext
 from app.crucible.claims import project_signals
@@ -352,7 +352,6 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
     from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
-    from app.db.custom_artifacts import BodyTooLarge, _checked_body
 
     run_id, company_id = row["id"], company.company_id
     html = _render_document_html(row, company_id)
@@ -370,17 +369,7 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
     # stays because "should not" is not "cannot": a future run with longer
     # statements can still cross the line, and when it does the user is owed a
     # sentence rather than a broken tab.
-    try:
-        checked = _checked_body(html)
-    except BodyTooLarge as exc:
-        logger.error("crucible: report for run %s exceeds the body limit: %s",
-                     run_id, exc)
-        raise HTTPException(
-            413,
-            "This run's report is too large to save as a document. The run "
-            "itself is unaffected and still readable in the panel.",
-        ) from exc
-    html = checked
+    html = _body_or_413(html, run_id)
 
     artifact = create_artifact(
         company_id,
@@ -457,11 +446,40 @@ async def fork_document(
     return await asyncio.to_thread(_fork_document, run, title, body, company)
 
 
+def _body_or_413(html: str, run_id: int) -> str:
+    """The sanitized body, or a 413 that says what happened.
+
+    SHARED BY BOTH WRITERS, which is the point. `custom_artifacts` caps a body
+    at `MAX_BODY_CHARS` and raises `BodyTooLarge`; neither route caught it, so a
+    large report took the worker down mid-request and the browser reported a
+    dropped connection — a refused write presenting as an outage.
+
+    The first version of this fix guarded only `_create_document` and left
+    `_fork_document` eighty lines below calling `create_artifact` with the same
+    unbounded rendered body. Same file, same exception, same failure. Hence one
+    function rather than two try blocks: a third writer gets the behaviour by
+    calling this, not by remembering to.
+    """
+    from app.db.custom_artifacts import BodyTooLarge, _checked_body
+
+    try:
+        return _checked_body(html)
+    except BodyTooLarge as exc:
+        logger.error("crucible: report for run %s exceeds the body limit: %s",
+                     run_id, exc)
+        raise HTTPException(
+            413,
+            "This run's report is too large to save as a document. The run "
+            "itself is unaffected and still readable in the panel.",
+        ) from exc
+
+
 def _fork_document(
     run: dict, title: str, body: str, company: WorkspaceContext
 ) -> dict:
     from app.db.custom_artifacts import create_artifact
 
+    body = _body_or_413(body, int(run.get("id") or 0))
     copy = create_artifact(
         company.company_id,
         # An ordinary document kind, NOT `goal_analysis`. The kind is what the
@@ -532,7 +550,12 @@ async def chat_edit_document(
 class ApprovePlan(BaseModel):
     """What the user changed about the plan before saying go."""
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
-    hypotheses: list[str] = Field(default_factory=list, max_length=10)
+    # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
+    # ten 40,000-char hypotheses render past the document limit with only a
+    # dozen findings. The item constraint is what actually bounds the payload.
+    hypotheses: list[Annotated[str, StringConstraints(max_length=2_000)]] = Field(
+        default_factory=list, max_length=10
+    )
 
 
 @router.post("/{run_id}/approve")

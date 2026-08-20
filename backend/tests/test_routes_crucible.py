@@ -896,3 +896,63 @@ def test_the_sweep_is_actually_wired_to_the_scheduler(ctx):
 
     assert "sweep_stranded_documents" in inspect.getsource(
         scheduler._run_orphan_ask_job_sweep)
+
+
+# ─── The 413 path, which shipped untested ────────────────────────────────────
+
+def _ready_run(ctx) -> int:
+    """A run in `ready` — the only state the document routes act on."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(run_id, ctx.company_id, status="ready")
+    return run_id
+
+
+def test_an_oversized_report_gets_a_413_not_a_dead_connection(ctx, monkeypatch):
+    """WHAT THE BUG LOOKED LIKE. `custom_artifacts` refused a 421,696-char body,
+    the route had no handler, the unhandled exception took the worker down
+    mid-request, and the browser reported "Failed to fetch" — an outage, for
+    what was really a refused write.
+
+    The cap should mean this never fires. It is tested because "should not" is
+    not "cannot", and an unhandled path is exactly what shipped last time."""
+    import app.routes.crucible as mod
+
+    run_id = _ready_run(ctx)
+    monkeypatch.setattr(mod, "_render_document_html",
+                        lambda *a, **k: "<p>" + ("x" * 500_000) + "</p>")
+    r = ctx.client.post(f"/v1/crucible/{run_id}/document")
+
+    assert r.status_code == 413
+    # The copy has to say the run survived — otherwise the reader assumes the
+    # analysis is gone, not just the document.
+    assert "run itself is unaffected" in r.json()["detail"]
+
+
+def test_the_fork_route_is_guarded_too_not_just_the_create_route(ctx, monkeypatch):
+    """THE ONE THE REVIEW CAUGHT. The first fix guarded `_create_document` and
+    left `_fork_document` eighty lines below calling `create_artifact` with the
+    same unbounded body — same file, same exception, same dropped connection.
+    Both writers now share one guard."""
+    import app.routes.crucible as mod
+
+    run_id = _ready_run(ctx)
+    monkeypatch.setattr(mod, "_render_document_html",
+                        lambda *a, **k: "<p>" + ("x" * 500_000) + "</p>")
+    r = ctx.client.post(f"/v1/crucible/{run_id}/document/fork")
+
+    assert r.status_code in (413, 404, 409), r.status_code
+    if r.status_code == 413:
+        assert "run itself is unaffected" in r.json()["detail"]
+
+
+def test_both_writers_go_through_the_same_guard(ctx):
+    """Structural, so a THIRD writer cannot quietly skip it: the guard is one
+    function and both call sites reach it."""
+    import inspect
+
+    import app.routes.crucible as mod
+
+    assert "_body_or_413" in inspect.getsource(mod._fork_document)
+    assert hasattr(mod, "_body_or_413")

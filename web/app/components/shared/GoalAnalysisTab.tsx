@@ -74,6 +74,18 @@ const ERROR_COPY: Record<string, string> = {
   internal: "Something went wrong on our side partway through this run.",
 }
 
+/** The server's own explanation, when it gave one.
+ *
+ *  `ApiError` carries the parsed body; a 413 from the document routes puts a
+ *  full sentence in `detail` ("…too large to save as a document. The run itself
+ *  is unaffected…"). Falling back to a generic string throws that away and
+ *  tells the reader something less true than what the server said. */
+function _detailOf(e: unknown): string {
+  const body = (e as { body?: unknown })?.body
+  const detail = (body as { detail?: unknown })?.detail
+  return typeof detail === "string" && detail.trim() ? detail : ""
+}
+
 export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -239,8 +251,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       const fresh = await goalAnalysisApi.createDocument(runId)
       setDoc(fresh)
       setEditing(true)
-    } catch {
-      setDocNote("We could not open this report for editing.")
+    } catch (e) {
+      // SURFACE THE SERVER'S SENTENCE. A bare `catch` with a fixed string made
+      // the 413 invisible: the server explains that the report is too large
+      // and that the RUN is unaffected, and the user saw "we could not open
+      // this report" — which reads as "your analysis is broken". The whole
+      // point of returning a reason is that somebody sees it.
+      setDocNote(_detailOf(e) || "We could not open this report for editing.")
     } finally {
       setDocBusy(false)
     }

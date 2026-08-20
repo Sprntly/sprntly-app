@@ -284,6 +284,54 @@ def _many_findings(n: int) -> list[dict]:
     } for i in range(n)]
 
 
+def _full_ledger(n: int = 101) -> list[dict]:
+    """The ledger a real run carries — capped at ~101 rows by the pipeline."""
+    return [{
+        "id": i,
+        "label": f"Theme {i}: a rejected candidate with a realistic label",
+        "reason": "all 4 supporting claims land within 6 days and come from "
+                  "one source document — this is one conversation echoing "
+                  "through the corpus, not a pattern over time",
+        "stopped_at_stage": "verification",
+        "claim_ids": [f"c{i}-{k}" for k in range(6)],
+    } for i in range(n)]
+
+
+def _full_plan() -> dict:
+    """A plan with every section populated, as `build_plan` produces."""
+    return {
+        "goal_text": "improve revenue",
+        "definition_text": "recognised revenue from paying accounts, net of "
+                           "refunds, as finance books it",
+        "total_signals": 15570,
+        "sources": [
+            {"source_type": "project_mgmt", "signal_count": 12604,
+             "label": "the tracker",
+             "witnesses": "what was built, broken, blocked or attempted"},
+            {"source_type": "pm_manual", "signal_count": 2007,
+             "label": "your own business context",
+             "witnesses": "the company's stated constraints and goals"},
+            {"source_type": "communication", "signal_count": 387,
+             "label": "Slack and email",
+             "witnesses": "what was discussed, hit and attempted"},
+        ],
+        "cannot_answer": [
+            {"question": "How many points will this move the metric?",
+             "because": "the engine cannot yet size a finding in the goal's "
+                        "own unit — it reports reach instead",
+             "remedy": "no action needed from you; this is the next capability"},
+            {"question": "Did a change like this work last time?",
+             "because": "no measured outcomes are connected",
+             "remedy": "connect your experiment tool, or upload the history"},
+        ],
+        "will_produce": ["Themes ranked by reach", "A considered list",
+                         "Every degradation disclosed"],
+        "hypotheses": ["expansion is stalling because onboarding takes too long",
+                       "customers are blocked on the Jira connector"],
+        "excluded_sources": [],
+    }
+
+
 def test_a_run_with_hundreds_of_findings_still_fits_the_document_store():
     """THE STAGING BUG. A real 831-finding run rendered to 421,696 characters
     against a 400,000 limit, so `custom_artifacts` refused the body, the route
@@ -294,9 +342,19 @@ def test_a_run_with_hundreds_of_findings_still_fits_the_document_store():
     """
     from app.db.custom_artifacts import MAX_BODY_CHARS
 
+    # THE WHOLE DOCUMENT, not just the section the cap bounds. The first
+    # version of this test passed `[]` for the ledger and `{}` for the plan —
+    # so it measured the one part that is now bounded and none of the parts
+    # that are not, which is the same too-small-fixture mistake that let the
+    # original bug ship.
     html = render_report_html(
-        {"id": 1, "goal_text": "improve revenue", "coverage_notes": []},
-        _many_findings(831), [], {},
+        {"id": 1, "goal_text": "improve revenue",
+         "coverage_notes": [
+             {"reason": "evidence is dated by ingest, not by when it happened",
+              "actual": "most signals carry the timestamp we read them at"},
+             {"reason": "most findings could not be sized",
+              "actual": "829 of 831 findings name no account"}]},
+        _many_findings(831), _full_ledger(), _full_plan(),
     )
     assert len(html) < MAX_BODY_CHARS, (
         f"rendered {len(html)} chars against a {MAX_BODY_CHARS} limit"
@@ -327,3 +385,48 @@ def test_a_small_run_is_not_truncated_at_all():
         _many_findings(12), [], {},
     )
     assert "The remaining" not in html
+
+
+def test_a_pathologically_long_statement_cannot_blow_the_budget():
+    """THE ROOT OF WHY 150 WAS CALIBRATED, NOT BOUNDED. `cluster.label_for`
+    caps the embedding path at 90 chars — but that is the FALLBACK. The primary
+    path takes `kg_entity.canonical_label` verbatim with no truncation
+    anywhere, so a statement was unbounded in code. Largest observed was 126;
+    nothing stopped it being 100,000."""
+    from app.crucible.report import MAX_STATEMENT_CHARS
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    monstrous = [{**f, "statement": "word " * 20_000} for f in _many_findings(200)]
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        monstrous, _full_ledger(), _full_plan(),
+    )
+    assert len(html) < MAX_BODY_CHARS
+    assert "word " * 500 not in html          # actually truncated
+    assert MAX_STATEMENT_CHARS < 1_000        # and bounded to something sane
+
+
+def test_ten_enormous_hypotheses_cannot_blow_the_budget():
+    """`ApprovePlan.hypotheses` is `max_length=10` on a `list[str]` — that
+    bounds the LIST, not the strings. Ten 40,000-char hypotheses rendered
+    410,960 chars with only a dozen findings, and the size test still passed
+    because it passed `{}` for the plan."""
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    plan = _full_plan()
+    plan["hypotheses"] = ["believed " * 5_000 for _ in range(10)]
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(12), _full_ledger(), plan,
+    )
+    assert len(html) < MAX_BODY_CHARS
+
+
+def test_the_block_budget_is_arithmetic_not_a_measurement():
+    """A calibrated constant holds until someone's data is shaped differently.
+    The import-time assertion is what makes it a bound."""
+    from app.crucible import report as r
+
+    assert (r.MAX_FULL_FINDING_BLOCKS * r._MAX_FINDING_BLOCK_CHARS
+            + r._OTHER_SECTIONS_BUDGET_CHARS) <= r._BODY_LIMIT
+    assert r._MAX_FINDING_BLOCK_CHARS > r.MAX_STATEMENT_CHARS

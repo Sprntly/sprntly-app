@@ -228,7 +228,7 @@ def _headline_section(findings: list[dict]) -> str:
         return "".join(out)
 
     top = findings[0]
-    out.append(_p(f"<strong>{_esc(top.get('statement'))}</strong>"))
+    out.append(_p(f"<strong>{_esc(_statement_text(top))}</strong>"))
     band = (top.get("confidence_band") or "").strip()
     claims = len(_as_list(top.get("claim_ids")))
     tail = (
@@ -242,8 +242,32 @@ def _headline_section(findings: list[dict]) -> str:
     return "".join(out)
 
 
+#: A single statement's rendered ceiling. THIS is what makes the block budget a
+#: bound rather than a measurement.
+#:
+#: `cluster.label_for` caps the embedding path at 90 chars — but that is the
+#: FALLBACK path. The primary one takes `kg_entity.canonical_label` verbatim
+#: (`kg_themes.py`), a bare text column with no truncation anywhere downstream,
+#: so a statement is unbounded in code even though the largest observed is 126.
+#: Truncating here rather than at ingest because this is a RENDERING budget:
+#: the graph is entitled to a long label, the document is not entitled to
+#: unlimited space for it.
+MAX_STATEMENT_CHARS = 400
+
+
+def _clip(text: str, limit: int) -> str:
+    """`text`, bounded, cut on a word boundary."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= limit else t[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _statement_text(finding: dict) -> str:
+    """A finding's statement, bounded, cut on a word boundary."""
+    return _clip(finding.get("statement") or "", MAX_STATEMENT_CHARS)
+
+
 def _finding_block(finding: dict, rank: int) -> str:
-    out = [f"<h3>{rank}. {_esc(finding.get('statement'))}</h3>"]
+    out = [f"<h3>{rank}. {_esc(_statement_text(finding))}</h3>"]
 
     meta = [_esc(_reach(finding))]
     band = (finding.get("confidence_band") or "").strip()
@@ -305,6 +329,35 @@ def _finding_block(finding: dict, rank: int) -> str:
 #: exists to avoid.
 MAX_FULL_FINDING_BLOCKS = 150
 
+#: The arithmetic that makes 150 a bound rather than a measurement.
+#:
+#: A calibrated constant holds until someone's data is shaped differently. This
+#: states the budget instead: 150 blocks x this ceiling, plus everything else
+#: the document renders, must stay under `MAX_BODY_CHARS`. The assertion below
+#: fails at IMPORT if that stops being true, so a future edit that fattens a
+#: finding block cannot quietly push a real tenant over the line — which is the
+#: failure this whole module just shipped.
+#:
+#: Derived, not measured: `MAX_STATEMENT_CHARS` plus the block's other fields,
+#: every one of which is bounded — `surfaced_by` <= 5 entries
+#: (`MAX_NAMED_SOURCES`), `assumed_params` <= 1, `claim_ids` rendered as a
+#: count, and the confidence reasons are string literals in this file.
+_MAX_FINDING_BLOCK_CHARS = MAX_STATEMENT_CHARS + 1_600
+
+#: What the non-findings sections can take: definition, what-was-read, headline,
+#: hypotheses, the capped ledger, limits, and the overflow list.
+_OTHER_SECTIONS_BUDGET_CHARS = 90_000
+
+_BODY_LIMIT = 400_000  # mirrors custom_artifacts.MAX_BODY_CHARS
+
+assert (
+    MAX_FULL_FINDING_BLOCKS * _MAX_FINDING_BLOCK_CHARS
+    + _OTHER_SECTIONS_BUDGET_CHARS
+) <= _BODY_LIMIT, (
+    "the findings cap no longer fits the document limit — lower "
+    "MAX_FULL_FINDING_BLOCKS or the block ceiling"
+)
+
 
 def _findings_section(findings: list[dict]) -> str:
     if not findings:
@@ -333,7 +386,7 @@ def _findings_section(findings: list[dict]) -> str:
         ))
         rows = []
         for offset, f in enumerate(rest, start=len(full) + 1):
-            statement = _esc((f.get("statement") or "").strip())
+            statement = _esc(_statement_text(f))
             rows.append(f"<li>{offset}. {statement}</li>")
         out.append("<ul>" + "".join(rows) + "</ul>")
     return "".join(out)
@@ -345,7 +398,10 @@ def _hypotheses_section(plan: dict) -> str:
         return ""
     return "".join([
         "<h2>What you already believed</h2>",
-        _ul(_esc(h) for h in hypotheses),
+        # Bounded here too. The API now caps each string, but a plan stored
+        # before that cap existed is still on disk, and the document budget
+        # cannot depend on when a row was written.
+        _ul(_esc(_clip(h, MAX_STATEMENT_CHARS)) for h in hypotheses),
         # NOT A VERDICT. The engine does not test a stated hypothesis against
         # the claims, and listing these beside the findings without saying so
         # would let a reader infer that silence meant "not supported" — a
