@@ -2504,18 +2504,72 @@ def _no_leftover_daemon_threads():
 
 @pytest.fixture
 def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
-    """Patch every imported reference to `call_json` so no test ever hits Anthropic."""
+    """Patch every imported reference to `call_json` — AND the agentic
+    `run_tool_loop` — so no test ever hits Anthropic.
+
+    Two answer shapes exist and BOTH must be stubbed or a test hits real
+    Anthropic with the dummy `ANTHROPIC_API_KEY` (`isolated_settings` sets
+    "test-key-not-used") and dies on a 401:
+
+      * single-shot JSON/text  -> `app.llm.call_json`  (patched below)
+      * agentic tool loop       -> `app.llm.run_tool_loop`  (patched below)
+
+    `run_tool_loop` is the chokepoint the unified answer engine (`qa_agent`)
+    uses for every project/group turn (`qa_agent.answer` -> the scoped
+    tool-reply path). Unlike `call_json` it builds its OWN `Anthropic(...)`
+    client via `get_client()` and calls `client.messages.create/stream`
+    directly, so the `call_json` patch never reached it — the rewrite that
+    routed project/group chat through `qa_agent.answer` widened that gap and
+    turned every such test red with a 401.
+
+    Both stubs RECORD into `state["calls"]` with the SAME `{system, user,
+    kwargs}` shape, so tests that assert `len(fake_llm["calls"])` / read
+    `calls[i]["user"]` work whichever path produced the answer. The tool-loop
+    stub returns a canned final string (`state["tool_loop_reply"]`) WITHOUT
+    running any real tool iteration — the model would otherwise `dispatch(...)`
+    tools against a live system; tests that want the tools to actually fire
+    patch `run_tool_loop` themselves at a lower level (see below) and, running
+    after this fixture, win for their test.
+    """
     state: dict[str, Any] = {
         "payload": {"week_label": "Test Week", "_schema_version": 1, "insights": []},
         "calls": [],
+        # Canned final text the agentic path returns. A non-empty string so the
+        # answer endpoint marks the turn "ready"; override per-test if an
+        # assertion inspects the reply body.
+        "tool_loop_reply": "ok",
     }
 
     def _fake_call_json(system: str, user: str, **kwargs):  # noqa: ARG001
         state["calls"].append({"system": system, "user": user, "kwargs": kwargs})
         return state["payload"]
 
+    def _fake_run_tool_loop(*, system, user, **kwargs):  # noqa: ARG001
+        # Record with the same shape as `_fake_call_json` so call-count /
+        # prompt assertions are answer-shape-agnostic. `tools`/`dispatch`/
+        # `model`/`meta_out`/`force_tool` all arrive in kwargs and are ignored:
+        # we never dispatch a tool (no live-system round-trip) and return the
+        # canned final text directly.
+        state["calls"].append({"system": system, "user": user, "kwargs": kwargs})
+        meta_out = kwargs.get("meta_out")
+        if meta_out is not None:
+            # Mirror `_capture_meta`'s shape so callers that read usage off the
+            # last turn (cost logging, telemetry) get plausible numbers instead
+            # of an empty dict.
+            meta_out.update(
+                {
+                    "model": kwargs.get("model"),
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return state["tool_loop_reply"]
+
     import app.llm as llm_mod
     monkeypatch.setattr(llm_mod, "call_json", _fake_call_json, raising=False)
+    monkeypatch.setattr(llm_mod, "run_tool_loop", _fake_run_tool_loop, raising=False)
     for mod_name in (
         "app.brief_runner",
         "app.ask_runner",
@@ -2529,6 +2583,23 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
         mod = sys.modules.get(mod_name)
         if mod is not None and hasattr(mod, "call_json"):
             monkeypatch.setattr(mod, "call_json", _fake_call_json, raising=False)
+    # `qa_agent` does `from app.llm import run_tool_loop` at CALL time, so the
+    # source patch above reaches it. These modules bind the name at IMPORT time
+    # instead, so patch their already-bound reference too (mirrors the
+    # `_no_background_connector_sync` "patch the bound importer" pattern). Only
+    # patched if already imported; tests that stub these at a lower level run
+    # after this fixture and override it for their test.
+    for mod_name in (
+        "app.jira_lookup",
+        "app.ticket_update",
+        "app.connector_lookup.answer",
+    ):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "run_tool_loop"):
+            monkeypatch.setattr(mod, "run_tool_loop", _fake_run_tool_loop, raising=False)
+        # connector_lookup.answer binds it under an alias.
+        if mod is not None and hasattr(mod, "_default_run_loop"):
+            monkeypatch.setattr(mod, "_default_run_loop", _fake_run_tool_loop, raising=False)
     return state
 
 
