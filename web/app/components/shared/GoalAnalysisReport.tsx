@@ -36,6 +36,11 @@
  */
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
+/** How many rejections render expanded. Beyond this the ledger folds, because
+ *  a run can drop a hundred candidates and an unfolded hundred buries the
+ *  closing section under them. */
+const RULED_OUT_OPEN_MAX = 12
+
 /** Reach, in words. NULL is "could not be sized" and is never rendered as a
  *  number — a 0 and an unknown look alike and mean opposites (I3). */
 function reach(f: GoalFinding): string {
@@ -298,24 +303,31 @@ export function GoalAnalysisReport({ run }: { run: GoalRunDetail }) {
       {/* ── 6. Considered and ruled out ──────────────────────────────────── */}
       {run.considered?.length ? (
         <section className="ga-doc-section" data-testid="goal-considered">
-          <h2 className="ga-doc-h2">
-            Considered and ruled out ({run.considered.length})
-          </h2>
-          <p className="ga-doc-lede">
-            A ranking whose rejections are invisible is a ranking you have to
-            take on faith. Each of these was a candidate and each one died for a
-            stated reason.
-          </p>
-          <ul className="ga-doc-ruled-out">
-            {run.considered.map((r) => (
-              <li key={r.id}>
-                <b>{r.label}</b> — {r.reason}
-                {r.stopped_at_stage ? (
-                  <em> (stopped at {r.stopped_at_stage})</em>
-                ) : null}
-              </li>
-            ))}
-          </ul>
+          {/* OPEN while the list is short, folded once it is long — but the
+              COUNT is in the summary either way, so the ledger is never
+              silently thin. A run can reject a hundred candidates, and an
+              unfolded hundred pushes "what this cannot tell you" off the end
+              of the document, which is the one section a reader must reach. */}
+          <details open={run.considered.length <= RULED_OUT_OPEN_MAX}>
+            <summary className="ga-doc-h2 ga-doc-summary">
+              Considered and ruled out ({run.considered.length})
+            </summary>
+            <p className="ga-doc-lede">
+              A ranking whose rejections are invisible is a ranking you have to
+              take on faith. Each of these was a candidate and each one died for
+              a stated reason.
+            </p>
+            <ul className="ga-doc-ruled-out">
+              {run.considered.map((r) => (
+                <li key={r.id}>
+                  <b>{r.label}</b> — {r.reason}
+                  {r.stopped_at_stage ? (
+                    <em> (stopped at {r.stopped_at_stage})</em>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </details>
         </section>
       ) : null}
 

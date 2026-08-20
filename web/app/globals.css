@@ -25065,6 +25065,8 @@
   opacity: 0.4; min-width: 14px;
 }
 .ga-doc-claims { opacity: 0.6; }
+.ga-doc-summary { cursor: pointer; margin-bottom: 10px; }
+.ga-doc-summary::marker { color: var(--accent, #111); }
 /* The closing section. Tinted, because "what this cannot tell you" is the
    part a reader skips, and it is the part that keeps the rest honest. */
 .ga-doc-limits {

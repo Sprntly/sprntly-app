@@ -324,6 +324,39 @@ describe("the user's own hypotheses", () => {
   })
 })
 
+describe("the ruled-out ledger", () => {
+  const rejection = (i: number) => ({
+    id: i,
+    label: `candidate ${i}`,
+    reason: `only ${i} supporting claims`,
+    stopped_at_stage: "verification",
+    claim_ids: [],
+  })
+
+  it("keeps the closing section reachable when the ledger is long", async () => {
+    // A run can drop a hundred candidates. Rendering all hundred expanded
+    // buries "what this cannot tell you" under them — and that section is the
+    // one a reader has to reach.
+    const many = Array.from({ length: 40 }, (_, i) => rejection(i + 1))
+    render(<GoalAnalysisReport run={{ ...RUN, considered: many }} />)
+    const ledger = screen.getByTestId("goal-considered")
+    // The COUNT is visible whether or not the list is expanded, so a thinner
+    // ledger can never hide behind the fold.
+    expect(ledger.querySelector("summary")!.textContent).toContain("40")
+    expect(ledger.querySelector("details")!.open).toBe(false)
+    // Every reason is still in the document, one click away — not dropped.
+    expect(ledger.textContent).toContain("only 40 supporting claims")
+    expect(screen.getByTestId("goal-limits")).toBeTruthy()
+  })
+
+  it("stays open when there are few enough to read at once", async () => {
+    render(<GoalAnalysisReport run={{ ...RUN, considered: [rejection(1), rejection(2)] }} />)
+    expect(
+      screen.getByTestId("goal-considered").querySelector("details")!.open,
+    ).toBe(true)
+  })
+})
+
 describe("a run where nothing survived", () => {
   it("says so, and points at the list of why", async () => {
     render(
