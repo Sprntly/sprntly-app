@@ -470,12 +470,32 @@ def test_llm_telemetry_existing_exports_unchanged():
         assert hasattr(u, field)
     assert hasattr(u, "est_cost_usd")
 
-    # should_wrap_up / project_next_iter_cost signatures: `iters` is now a
+    # should_wrap_up / project_next_iter_cost signatures: `iters` is a
     # deliberate, REQUIRED 4th/3rd argument (see llm_telemetry.py docstrings).
-    assert list(inspect.signature(should_wrap_up).parameters) == ["usage", "model", "soft_cap", "iters"]
-    assert list(inspect.signature(project_next_iter_cost).parameters) == ["usage", "model", "iters"]
-    # should_abort mirrors the soft-cap helper's shape.
-    assert list(inspect.signature(should_abort).parameters) == ["usage", "model", "hard_cap", "iters"]
+    # Asserted as a PREFIX plus optional extras rather than exact equality —
+    # exact equality made every additive change look like a breaking one, which
+    # is the opposite of what "purely additive" is supposed to mean. Anything
+    # appended must carry a default, so existing positional callers are
+    # unaffected; anything reordered or made required still fails here.
+    for fn, required in (
+        (should_wrap_up, ["usage", "model", "soft_cap", "iters"]),
+        (project_next_iter_cost, ["usage", "model", "iters"]),
+    ):
+        params = list(inspect.signature(fn).parameters.items())
+        assert [n for n, _ in params[:len(required)]] == required, fn.__name__
+        for name, p in params[len(required):]:
+            assert p.default is not inspect.Parameter.empty, (
+                f"{fn.__name__} gained a REQUIRED parameter {name!r} — that is a "
+                "breaking change to a helper the design agent calls positionally"
+            )
+    # should_abort mirrors the soft-cap helper's shape — same prefix-plus-
+    # optional rule as the loop above, for the same reason.
+    abort_params = list(inspect.signature(should_abort).parameters.items())
+    assert [n for n, _ in abort_params[:4]] == ["usage", "model", "hard_cap", "iters"]
+    for name, p in abort_params[4:]:
+        assert p.default is not inspect.Parameter.empty, (
+            f"should_abort gained a REQUIRED parameter {name!r}"
+        )
 
     params = inspect.signature(log_llm_run).parameters
     for name in ("operation", "identifier", "usage", "duration_ms", "status", "model", "error_class"):

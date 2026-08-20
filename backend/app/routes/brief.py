@@ -125,7 +125,11 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     set_status(dataset, "generating")
     run_id = _start_durable_run(dataset, "regenerate")
     try:
-        brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
+        # force=True: user-triggered regenerate. The recompose floor bounds
+        # incidental churn (scheduler ticks, connector syncs), never a click.
+        brief = await asyncio.to_thread(
+            generate_brief_for, dataset, deliver=False, force=True
+        )
         set_status(dataset, "ready")
         _finish_durable_run(run_id)
         logger.info("Synthesis brief generated for %s", dataset)
@@ -234,7 +238,11 @@ async def _full_pipeline_bg(dataset: str) -> None:
 
     # Step 2: seed-if-needed + synthesize the brief off the event loop.
     try:
-        brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
+        # force=True: user-triggered regenerate. The recompose floor bounds
+        # incidental churn (scheduler ticks, connector syncs), never a click.
+        brief = await asyncio.to_thread(
+            generate_brief_for, dataset, deliver=False, force=True
+        )
         set_status(dataset, "ready")
         logger.info("Full-pipeline brief generated for %s", dataset)
     except EmptyKnowledgeGraphError:
@@ -501,7 +509,11 @@ def generate(
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
     try:
-        payload = generate_brief_for(dataset, deliver=False)
+        # force=True: this is the explicit user-triggered 'generate now'.
+        # The recompose floor exists to stop incidental/scheduled churn, not
+        # to make a person wait — a click always composes, provided the KG
+        # has something new in it.
+        payload = generate_brief_for(dataset, deliver=False, force=True)
     except ValueError as e:
         # Unknown dataset/company or an empty KG even after seeding.
         raise HTTPException(409, str(e)) from e

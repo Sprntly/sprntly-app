@@ -39,9 +39,49 @@ import logging
 import time
 from typing import Any
 
-from app.llm_telemetry import RunUsage, UnknownModelError
+from app.llm_telemetry import CACHE_TTL_1H, CACHE_TTL_5M, RunUsage, UnknownModelError
 
 logger = logging.getLogger(__name__)
+
+
+def _requested_cache_ttl(kwargs: Any) -> str:
+    """The cache-write tier this REQUEST asked for, read off the request itself.
+
+    The response reports one `cache_creation_input_tokens` total and says
+    nothing about which tier it was billed at, so the tier has to come from the
+    request. Reading the outgoing kwargs rather than an ambient label makes this
+    ground truth: a call site that changes its `cache_control` is priced
+    correctly with no second place to update.
+
+    `app.llm._build_base_kwargs` puts one tier on every block of a request, so a
+    single answer is well defined. A hand-built request that mixes tiers is
+    priced at the more expensive one — the total cannot be split, and
+    over-reporting a mixed request is the safer direction than under-reporting.
+    """
+    blocks: list[Any] = []
+    system = kwargs.get("system")
+    if isinstance(system, list):
+        blocks.extend(system)
+    for message in kwargs.get("messages") or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            blocks.extend(content)
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        control = block.get("cache_control")
+        if isinstance(control, dict) and control.get("ttl") == CACHE_TTL_1H:
+            return CACHE_TTL_1H
+    return CACHE_TTL_5M
+
+
+def actual_model_hint(message: Any, requested: str | None) -> str | None:
+    """The model the response reports, falling back to the one we asked for.
+
+    Same rule the ledger row uses, kept in one place so the warning above can
+    never name a different model than the row it accompanies.
+    """
+    return getattr(message, "model", None) or requested
 
 
 def _record(
@@ -53,12 +93,13 @@ def _record(
     started_at: float,
     status: str = "succeeded",
     error_class: str | None = None,
+    cache_ttl: str | None = None,
 ) -> None:
     """Stitch one usage row together and hand it to the buffered writer."""
     try:
         from app.db.llm_usage import record_usage
         from app.llm_keys import current_company_id
-        from app.usage_context import current_scope
+        from app.usage_context import Feature, current_scope
 
         company_id = current_company_id()
         if not company_id:
@@ -68,6 +109,27 @@ def _record(
             return
 
         scope = current_scope()
+        if scope.feature == Feature.UNATTRIBUTED:
+            # The module docstring calls an unattributed slice "a visible prompt
+            # to go add the scope" — but nothing made it visible, so ~900 calls
+            # a week accumulated under that label with no way to tell which code
+            # path produced them short of correlating timestamps against the
+            # decision log. This line is that way: it names the model and the
+            # shape of the call, so the path is greppable from one log window
+            # instead of reconstructable from telemetry archaeology.
+            #
+            # WARNING, not exception: metering is fail-soft by contract and an
+            # unlabelled call must still bill correctly. The label is what is
+            # missing, never the spend.
+            logger.warning(
+                "llm_usage unattributed call company=%s model=%s in=%s cache_write=%s "
+                "out=%s — no usage_scope on this path; see app.usage_context",
+                company_id, actual_model_hint(message, model),
+                getattr(getattr(message, "usage", None), "input_tokens", None),
+                getattr(getattr(message, "usage", None),
+                        "cache_creation_input_tokens", None),
+                getattr(getattr(message, "usage", None), "output_tokens", None),
+            )
         usage = getattr(message, "usage", None)
         run = RunUsage(
             input_tokens=getattr(usage, "input_tokens", 0) or 0,
@@ -77,11 +139,14 @@ def _record(
         )
         # The response's own `model` is authoritative (an alias in the request
         # resolves to a concrete id); fall back to what we asked for.
-        actual_model = getattr(message, "model", None) or model
+        actual_model = actual_model_hint(message, model)
 
         cost: float | None
         try:
-            cost = run.est_cost_usd(actual_model) if actual_model else None
+            cost = (
+                run.est_cost_usd(actual_model, cache_ttl or CACHE_TTL_5M)
+                if actual_model else None
+            )
         except UnknownModelError:
             # Fail SOFT here, unlike `log_llm_run` which fails closed. An
             # unpriced model must not take down chat; keep the tokens (the
@@ -120,13 +185,15 @@ class _MeteredStream:
     """
 
     def __init__(
-        self, inner: Any, key_mode: str, provider: str, model: str | None, started_at: float
+        self, inner: Any, key_mode: str, provider: str, model: str | None, started_at: float,
+        cache_ttl: str = CACHE_TTL_5M,
     ):
         self._inner = inner
         self._key_mode = key_mode
         self._provider = provider
         self._model = model
         self._started_at = started_at
+        self._cache_ttl = cache_ttl
         self._recorded = False
 
     def __getattr__(self, name: str) -> Any:
@@ -147,6 +214,7 @@ class _MeteredStream:
                 model=self._model,
                 message=msg,
                 started_at=self._started_at,
+                cache_ttl=self._cache_ttl,
             )
         return msg
 
@@ -154,11 +222,15 @@ class _MeteredStream:
 class _MeteredStreamManager:
     """Proxies the SDK's `MessageStreamManager` context manager."""
 
-    def __init__(self, inner: Any, key_mode: str, provider: str, model: str | None):
+    def __init__(
+        self, inner: Any, key_mode: str, provider: str, model: str | None,
+        cache_ttl: str = CACHE_TTL_5M,
+    ):
         self._inner = inner
         self._key_mode = key_mode
         self._provider = provider
         self._model = model
+        self._cache_ttl = cache_ttl
         self._started_at = time.monotonic()
 
     def __enter__(self) -> _MeteredStream:
@@ -168,6 +240,7 @@ class _MeteredStreamManager:
             self._provider,
             self._model,
             self._started_at,
+            self._cache_ttl,
         )
 
     def __exit__(self, exc_type, exc, tb) -> Any:
@@ -180,6 +253,7 @@ class _MeteredStreamManager:
                 started_at=self._started_at,
                 status="failed",
                 error_class=exc_type.__name__,
+                cache_ttl=self._cache_ttl,
             )
         return self._inner.__exit__(exc_type, exc, tb)
 
@@ -201,6 +275,7 @@ class _MeteredMessages:
     def create(self, **kwargs: Any) -> Any:
         started_at = time.monotonic()
         model = kwargs.get("model")
+        cache_ttl = _requested_cache_ttl(kwargs)
         try:
             msg = self._inner.create(**kwargs)
         except Exception as exc:
@@ -215,6 +290,7 @@ class _MeteredMessages:
                 started_at=started_at,
                 status="failed",
                 error_class=type(exc).__name__,
+                cache_ttl=cache_ttl,
             )
             raise
         _record(
@@ -223,12 +299,14 @@ class _MeteredMessages:
             model=model,
             message=msg,
             started_at=started_at,
+            cache_ttl=cache_ttl,
         )
         return msg
 
     def stream(self, **kwargs: Any) -> _MeteredStreamManager:
         return _MeteredStreamManager(
-            self._inner.stream(**kwargs), self._key_mode, self._provider, kwargs.get("model")
+            self._inner.stream(**kwargs), self._key_mode, self._provider, kwargs.get("model"),
+            _requested_cache_ttl(kwargs),
         )
 
 

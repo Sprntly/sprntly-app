@@ -240,12 +240,16 @@ def test_escalated_run_still_honours_hard_cap(monkeypatch):
     call_count = [0]
     original_should_abort = runner.should_abort
 
-    def _patched_should_abort(usage, model, cap, iters):
+    def _patched_should_abort(usage, model, cap, iters, *args, **kwargs):
+        # *args/**kwargs so this double tracks the real helper's signature
+        # rather than pinning its arity — `should_abort` gained an optional
+        # trailing `cache_ttl`, and a double that cannot accept it turns an
+        # additive change into a spurious 'error' status here.
         call_count[0] += 1
         # Trigger abort only after escalation has occurred (third invocation)
         if call_count[0] >= 3:
             return True
-        return original_should_abort(usage, model, cap, iters)
+        return original_should_abort(usage, model, cap, iters, *args, **kwargs)
 
     monkeypatch.setattr(runner, "should_abort", _patched_should_abort)
     _install_client(monkeypatch, [

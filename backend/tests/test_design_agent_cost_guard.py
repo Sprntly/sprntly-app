@@ -457,10 +457,24 @@ def test_llm_telemetry_existing_exports_unchanged():
     for name in ("operation", "identifier", "usage", "duration_ms", "status", "model", "error_class"):
         assert name in params, f"log_llm_run lost keyword {name!r}"
 
-    # should_wrap_up / project_next_iter_cost signatures: `iters` is now a
+    # should_wrap_up / project_next_iter_cost signatures: `iters` is a
     # deliberate, REQUIRED 4th/3rd argument (see llm_telemetry.py docstrings).
-    assert list(inspect.signature(should_wrap_up).parameters) == ["usage", "model", "soft_cap", "iters"]
-    assert list(inspect.signature(project_next_iter_cost).parameters) == ["usage", "model", "iters"]
+    # Asserted as a PREFIX plus optional extras rather than exact equality —
+    # exact equality made every additive change look like a breaking one, which
+    # is the opposite of what "purely additive" is supposed to mean. Anything
+    # appended must carry a default, so existing positional callers are
+    # unaffected; anything reordered or made required still fails here.
+    for fn, required in (
+        (should_wrap_up, ["usage", "model", "soft_cap", "iters"]),
+        (project_next_iter_cost, ["usage", "model", "iters"]),
+    ):
+        params = list(inspect.signature(fn).parameters.items())
+        assert [n for n, _ in params[:len(required)]] == required, fn.__name__
+        for name, p in params[len(required):]:
+            assert p.default is not inspect.Parameter.empty, (
+                f"{fn.__name__} gained a REQUIRED parameter {name!r} — that is a "
+                "breaking change to a helper the design agent calls positionally"
+            )
 
     # The module still compiles cleanly with the additions.
     py_compile.compile(inspect.getsourcefile(__import__("app.llm_telemetry", fromlist=["x"])),

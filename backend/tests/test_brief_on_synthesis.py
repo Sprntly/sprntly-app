@@ -72,7 +72,11 @@ def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_setting
 
     assert r.status_code == 200, r.text
     # User-triggered: delivery suppressed in synthesis, short ping sent instead.
-    gen.assert_called_once_with("acme", deliver=False)
+    # force=True: both of these are user-triggered regenerate paths. The
+    # recompose floor added in perf/llm-cost-reduction bounds incidental
+    # churn (scheduler ticks, connector syncs) and must never make a click
+    # return a stale brief.
+    gen.assert_called_once_with("acme", deliver=False, force=True)
     ping.assert_called_once()
     body = r.json()
     assert body["summary_headline"] == "synthesis headline"
@@ -132,7 +136,11 @@ def test_synthesis_bg_runner_invokes_generate_brief_for(isolated_settings, monke
     with patch.object(brief_routes, "generate_brief_for") as gen, \
          patch.object(brief_routes, "_notify_brief_ready"):
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
-    gen.assert_called_once_with("acme", deliver=False)
+    # force=True: both of these are user-triggered regenerate paths. The
+    # recompose floor added in perf/llm-cost-reduction bounds incidental
+    # churn (scheduler ticks, connector syncs) and must never make a click
+    # return a stale brief.
+    gen.assert_called_once_with("acme", deliver=False, force=True)
 
 
 def test_synthesis_bg_runner_swallows_errors(isolated_settings, monkeypatch):
