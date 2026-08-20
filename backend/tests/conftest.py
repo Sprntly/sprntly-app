@@ -2604,48 +2604,76 @@ def fake_llm(isolated_settings, monkeypatch: pytest.MonkeyPatch) -> dict:
     # The single-call gateway (`graph.gateway.llm_call`) is the THIRD Anthropic
     # entry point on the answer flow — the qa-router classifier
     # (`qa_agent._route_question`, qa_agent.py:~798, degrade logged at :885) and
-    # the ask planner (`ask_planner.plan`, ask_planner.py:~1989/2559, degrade
-    # logged at :2561) both route through it. The gateway binds its OWN
-    # `call_json`/`call_md` at import time (graph/gateway.py:27), so NEITHER the
-    # `call_json` nor the `run_tool_loop` patch above reaches it — an un-guarded
-    # `fake_llm` test fires a real Anthropic request and dies on a 401.
+    # the ask planner (`ask_planner.plan`) both route through it. `llm_call`
+    # itself never touches Anthropic directly: it calls the gateway module's OWN
+    # `call_json`/`call_md` (bound at import, graph/gateway.py:30) and wraps their
+    # output in an `LLMResult`. The `app.llm.call_json` patch above does NOT reach
+    # those bound refs, so an unguarded `fake_llm` test fired a real request and
+    # died on a 401.
     #
-    # Return a benign empty `LLMResult(output={})`: the classifier reads it as a
-    # no-decision (`skill_id`/`company_skill_id` absent -> "none", `in_scope` is
-    # not `False`) and the planner as no actionable plan — EXACTLY the
-    # graceful-degrade both already take when the live call fails (both wrap it
-    # in `except Exception` and answer directly/unplanned). So behaviour is
-    # unchanged, same rationale as `_no_referent_adjudication` returning None:
-    # the guard cannot invent a decision, only reproduce the no-decision fallback.
-    #
-    # Patch the SOURCE (reaches call-time importers like `call_digest`/
-    # `call_index` that `from ... import llm_call` inside a function) AND every
-    # already-imported module that bound the name at import time — identity-
-    # checked against the real gateway function so nothing else is swapped. Tests
-    # that stub `llm_call` themselves (e.g. `test_qa_agent` patches `qa.llm_call`)
-    # run after this fixture and win for their test.
+    # Stub the gateway's bound `call_json`/`call_md` (NOT `llm_call` itself):
+    # `llm_call` then runs its REAL body over a benign empty output, returning an
+    # `LLMResult(output={})`. The classifier reads that as a no-decision
+    # (`skill_id`/`company_skill_id` absent -> "none", `in_scope` not `False`) and
+    # the planner as no actionable plan — EXACTLY the graceful-degrade both take
+    # when the live call fails. Stubbing at the `call_json` seam (rather than
+    # replacing `llm_call` wholesale) is what keeps tests that patch
+    # `gateway.call_json` themselves working (e.g. `test_ask_skill_routing`
+    # counts the router's own `call_json` call) — replacing `llm_call` bypassed
+    # that seam and silently zeroed those counts. These stubs deliberately do
+    # NOT record into `state["calls"]` (that ledger is the answer-path
+    # `call_json`/`run_tool_loop` above; recording the router call here would
+    # break `len(fake_llm["calls"])` assertions). A test that patches
+    # `gateway.call_json`/`call_md` runs after this fixture and wins for itself.
     import app.graph.gateway as _gateway_mod
 
-    _orig_llm_call = _gateway_mod.llm_call
+    def _populate_meta(kwargs):
+        meta_out = kwargs.get("meta_out")
+        if isinstance(meta_out, dict):
+            meta_out.update(
+                {
+                    "model": kwargs.get("model") or "",
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "stop_reason": "end_turn",
+                }
+            )
 
-    def _fake_llm_call(**kwargs):  # noqa: ARG001
-        return _gateway_mod.LLMResult(
-            output={},
-            model=kwargs.get("model") or "",
-            prompt_version=kwargs.get("prompt_version", ""),
-            input_tokens=0,
-            output_tokens=0,
-            cache_read_input_tokens=0,
-            cache_creation_input_tokens=0,
-            cost_usd=0.0,
-            latency_ms=0,
-            stop_reason="end_turn",
-        )
+    def _fake_gateway_call_json(**kwargs):  # noqa: ARG001
+        _populate_meta(kwargs)
+        return {}
 
-    monkeypatch.setattr(_gateway_mod, "llm_call", _fake_llm_call, raising=False)
-    for _mod in list(sys.modules.values()):
-        if _mod is not None and getattr(_mod, "llm_call", None) is _orig_llm_call:
-            monkeypatch.setattr(_mod, "llm_call", _fake_llm_call, raising=False)
+    def _fake_gateway_call_md(**kwargs):  # noqa: ARG001
+        _populate_meta(kwargs)
+        return ""
+
+    monkeypatch.setattr(_gateway_mod, "call_json", _fake_gateway_call_json, raising=False)
+    monkeypatch.setattr(_gateway_mod, "call_md", _fake_gateway_call_md, raising=False)
+
+    # The ask PLANNER (`ask_planner.plan_for_answer`) is the FOURTH Anthropic
+    # entry point on the answer flow — `ask_job_runner._run_sync` and
+    # `chat_intent.resolve_chat_intent` both call it to decide the turn's action
+    # BEFORE the answer/route path runs. It reaches Anthropic through
+    # `graph.gateway.llm_call` too, but the benign `LLMResult(output={})` stub
+    # above does NOT reproduce the fast lane here: from an empty output the
+    # planner builds a DEFAULT `{"action": "answer"}` plan (a real, non-None
+    # Plan) and the runner then takes the PLANNED path — whereas on CI the
+    # planner call 401s, `plan_for_answer` catches it and returns None, and the
+    # runner answers the OLD way (through `route()` / the skill ladder). That
+    # divergence silently rerouted every routing/skill test (`route()` never
+    # fired) — the exact class that stayed green on CI only because the 401
+    # forced the unplanned path. Stub `plan_for_answer` to None so `fake_llm`
+    # reproduces the fast lane's real "planner defers, answer the old way"
+    # behaviour. `raising=False` + patched on the module both callers read at
+    # call time; a test that wants a real plan patches it back after this
+    # fixture and wins for its test.
+    import app.ask_planner as _ask_planner_mod
+
+    monkeypatch.setattr(
+        _ask_planner_mod, "plan_for_answer", lambda **kwargs: None, raising=False
+    )
     return state
 
 

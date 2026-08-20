@@ -701,6 +701,29 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
+        # Private individual project chat (AC1): persist the assistant's OWN
+        # answer, owned + idempotent, linked to this run via `ask_job_id` (a
+        # resumed poll reuses the same `ask_id`, so it cannot duplicate this
+        # row). Gated on the top-level `project_id` the private chat sends (the
+        # group surface carries its project on `context_source` and persists its
+        # reply as a GROUP turn below instead, so this never double-writes).
+        # Best-effort: the authoritative answer already lives in
+        # `ask_jobs.response`, so a persist failure here never breaks it (AD-P7).
+        if project_id is not None and conversation_id is not None and user_id is not None:
+            from app.db.conversations import post_owned_individual_assistant_turn
+
+            try:
+                post_owned_individual_assistant_turn(
+                    project_id=project_id,
+                    user_id=user_id,
+                    content=payload.get("answer", ""),
+                    ask_job_id=ask_id,
+                )
+            except Exception:  # noqa: BLE001 — best-effort, AD-P7
+                logger.warning(
+                    "failed to persist individual-chat assistant turn "
+                    "ask_id=%s project_id=%s", ask_id, project_id, exc_info=True,
+                )
         # Individual/group project chat: promote a durable insight into project
         # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
         # (the assembler resolved a project `SurfaceScope` for this turn, which

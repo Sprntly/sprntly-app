@@ -668,7 +668,25 @@ async def ask(
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
     # `history` was already loaded above (before cache resolution).
+    # Individual-project-chat persistence identity (AC1/AC4): resolved ONLY for
+    # the project branch — main/PRD/artifact asks stay byte-unchanged (AC7),
+    # never minting or threading a client_message_id at all.
+    resolved_client_message_id = (
+        (body.client_message_id or str(uuid.uuid4())) if body.project_id is not None else None
+    )
+    # Structured attachments (project branch only): fold THIS turn's attachment
+    # text into the question the ANSWER sees, reusing the EXACT
+    # `[Attached: {name}]\n{body}` format `_load_history` folds a prior turn's
+    # attachments with, so behaviour matches today. The CLEAN `body.question`
+    # (no fold) is what gets persisted onto the user turn — so `_load_history`
+    # folds the attachments exactly ONCE on a follow-up (no double-count). On
+    # every non-project branch `answer_question` stays `body.question` (no
+    # attachments read), keeping those sends byte-identical.
     answer_question = body.question
+    if body.project_id is not None and body.attachments:
+        for a in body.attachments:
+            if a.content:
+                answer_question += f"\n\n[Attached: {a.name}]\n{a.content}"
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,
@@ -676,7 +694,37 @@ async def ask(
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
         prd_id=body.prd_id,
+        client_message_id=resolved_client_message_id,
     )
+    if body.project_id is not None:
+        # Persist the USER'S OWN turn at dispatch (AC1) — owned/idempotent,
+        # server-side conversation resolution (AC6), keyed on the SAME
+        # client_message_id just threaded onto the job row above so the answer
+        # (persisted after `complete_ask_job`, ask_job_id-linked) and the
+        # question land as one dialogue pair. The CLEAN question + STRUCTURED
+        # attachments are persisted (not the folded answer text) so a reloaded
+        # thread shows the chip and `_load_history` folds the text exactly once
+        # on a follow-up. Best-effort: a persist failure must never block the
+        # answer that's already generating.
+        from app.db.conversations import post_owned_individual_user_turn
+
+        try:
+            post_owned_individual_user_turn(
+                project_id=body.project_id,
+                user_id=company.user_id,
+                content=body.question,
+                client_message_id=resolved_client_message_id,
+                attachments=(
+                    [a.model_dump(exclude_none=True) for a in body.attachments]
+                    if body.attachments
+                    else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "failed to persist individual-chat user turn ask_id=%s project_id=%s",
+                ask_id, body.project_id, exc_info=True,
+            )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
         # requests, so a fire-and-forget create_task would never run and the
