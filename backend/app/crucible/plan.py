@@ -206,9 +206,15 @@ def build_plan(
         "Every degradation disclosed beside the findings it affects",
     ]
     if hypotheses:
+        # NOT "a verdict on each". Nothing adjudicates hypotheses yet — they are
+        # recorded on the run and shown beside the findings so a reader can
+        # compare by eye. Promising a verdict the engine cannot deliver is the
+        # same overpromise this whole step exists to remove, and it is the
+        # second time I have written one into it.
         produce.append(
-            f"A verdict on each of the {len(hypotheses)} things you already "
-            f"believe — carried or killed, with what killed it"
+            f"The {len(hypotheses)} things you already believe, recorded and "
+            f"shown beside the findings — this run does NOT yet test them "
+            f"against the evidence, so comparing them is still your job"
         )
     # ALWAYS reach, for now. The engine has no numeric sizing path yet: impact
     # is computed from how many accounts a theme touches, whatever sources are

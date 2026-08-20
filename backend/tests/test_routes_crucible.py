@@ -716,3 +716,26 @@ def test_the_plan_does_not_promise_a_number_the_engine_cannot_produce(ctx):
     assert "goal's own unit" not in promised or "cannot" in promised
     # And the limit is always stated as a gap, connected sources or not.
     assert any("points" in g["question"] for g in plan["cannot_answer"])
+
+
+def test_the_plan_does_not_promise_to_adjudicate_hypotheses(ctx):
+    """Second overpromise found in this step, and by a reviewer rather than by
+    me. Nothing in the engine tests a user's stated hypothesis against the
+    evidence; the plan said it would return "a verdict on each". A plan that
+    overpromises reintroduces exactly the problem the plan step was added to
+    remove — a user discovering a limit at the bottom of the output."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"hypotheses": ["onboarding is too long"]})
+
+    from app.crucible.plan import build_plan
+
+    plan = build_plan(company_id=ctx.company_id, goal_text="g",
+                      definition_text="d",
+                      hypotheses=("onboarding is too long",)).to_json()
+    promised = " ".join(plan["will_produce"]).lower()
+    assert "verdict" not in promised
+    assert "does not yet test them" in promised
