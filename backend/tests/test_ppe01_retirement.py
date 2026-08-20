@@ -78,10 +78,24 @@ def test_group_route_no_longer_imports_propose_symbols():
     src = (BACKEND / "app" / "routes" / "projects.py").read_text(encoding="utf-8")
     assert "PROPOSE_PROJECT_PRD_PATCH_TOOL" not in src
     assert "handle_propose_prd_patch" not in src
-    # The survivor IS still imported. `_resolve_prd_id` was dropped from this
-    # list when the shared editor replaced the bespoke resolver (e05577dc) —
-    # the route resolves its write target through `apply_chat_edit_scoped` now.
-    assert "project_prd_edit_enabled" in src
+    # THE SURVIVOR IS STILL CALLED — but not necessarily from here.
+    #
+    # This used to assert `project_prd_edit_enabled in src`, i.e. that THIS
+    # route imports it. Two refactors later the route resolves its write target
+    # through `apply_chat_edit_scoped` and the survivor's only caller is
+    # `routes/design_agent.py`, which keeps the three pending-patch routes
+    # served. The KEEP set is about the symbol surviving, not about which file
+    # happens to import it this month.
+    from app import project_prd_patch_tool as tool
+
+    assert callable(tool.project_prd_edit_enabled)
+    callers = [
+        path.relative_to(BACKEND).as_posix()
+        for path in (BACKEND / "app").rglob("*.py")
+        if "project_prd_edit_enabled" in path.read_text(encoding="utf-8", errors="ignore")
+        and path.name != "project_prd_patch_tool.py"
+    ]
+    assert callers, "the survivor has no caller left — it was retired, not kept"
 
 
 # ── AC11 — the banner is gone, and no longer wired into the individual chat ──
@@ -95,28 +109,27 @@ def test_banner_file_and_test_deleted():
     assert not banner_test.exists()
 
 
-def test_individual_chat_no_longer_imports_or_renders_banner():
-    # `ProjectIndividualChat.tsx` was deleted by the chat-shell refactor —
-    # its individual-chat surface now renders as `ProjectPrivateChat.tsx`
-    # through the shared chat shell. The retirement intent (no banner import)
-    # holds vacuously for a file that no longer exists, and holds concretely
-    # for its successor.
-    individual_chat = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectIndividualChat.tsx"
+def test_the_retired_banner_is_referenced_nowhere_in_the_web_app():
+    """The retirement intent, asserted DIRECTLY instead of file by file.
+
+    This replaced two guards that named `ProjectIndividualChat.tsx`, then
+    `ProjectPrivateChat.tsx` and `ProjectGroupChat.tsx`. Each rename moved the
+    surface and left the guard reading a path that no longer existed, so it
+    failed with `FileNotFoundError` — a red lane reporting a missing FILE, not
+    a returning banner. It has now happened twice, and `test-backend` was red
+    on main for days because of it.
+
+    What the retirement actually means is that nothing renders or imports the
+    banner. That is true of the whole web tree or it is not, and phrased this
+    way the guard survives the next refactor of wherever project chat lives.
+    """
+    hits = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "web" / "app").rglob("*")
+        if path.suffix in {".ts", ".tsx"}
+        and "ProjectPrdPatchBanner" in path.read_text(encoding="utf-8", errors="ignore")
     )
-    assert not individual_chat.exists()
-
-    private_chat_src = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectPrivateChat.tsx"
-    ).read_text(encoding="utf-8")
-    assert "ProjectPrdPatchBanner" not in private_chat_src
-
-
-def test_group_chat_unchanged_never_referenced_banner():
-    src = (
-        WEB / "app" / "components" / "screens" / "app" / "projects" / "ProjectGroupChat.tsx"
-    ).read_text(encoding="utf-8")
-    assert "ProjectPrdPatchBanner" not in src
+    assert not hits, f"the retired banner is referenced again in: {hits}"
 
 
 # ── AC12 — the KEEP set is intact ─────────────────────────────────────────────

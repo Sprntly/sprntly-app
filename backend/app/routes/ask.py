@@ -430,16 +430,34 @@ def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
 def _project_source(body: "AskIn") -> tuple[int, dict] | None:
     """The `(project_id, params)` a project-scoped ask targets, or None for a
     non-project ask. Project chats carry their project on `context_source`
-    (`{"kind": "project", "params": {"project_id", "surface"}}`), never on the
-    top-level `body.project_id`."""
+    (`{"kind": "project", "params": {"project_id", "surface"}}`) OR on the
+    top-level `body.project_id`, which the individual-project-chat client
+    sends. BOTH must reach the membership gate — see the comment below."""
     src = body.context_source if isinstance(body.context_source, dict) else None
-    if not src or src.get("kind") != "project":
-        return None
-    params = src.get("params") or {}
-    proj_raw = params.get("project_id")
-    if proj_raw is None:
-        return None
-    return int(proj_raw), params
+    if src and src.get("kind") == "project":
+        params = src.get("params") or {}
+        proj_raw = params.get("project_id")
+        if proj_raw is not None:
+            return int(proj_raw), params
+
+    # THE TOP-LEVEL FIELD IS ALSO A PROJECT SCOPE, and it was ungated.
+    #
+    # The docstring below used to say project chats "never" use
+    # `body.project_id`. The individual-project-chat client does exactly that —
+    # `web/app/lib/api.ts` sends it, with a comment promising it is
+    # "membership-gated server-side" — and because this returned None for it,
+    # `_gate_project_membership` never ran on that path. A foreign tenant got
+    # 200 where the gate would have said 404, and a same-tenant non-member got
+    # 200 instead of 403. `test_ask_project_context.py` asserts both and has
+    # been failing on main, reporting a real IDOR as a red lane nobody read.
+    #
+    # No surface is inferred here: the caller only claimed a project, so a bare
+    # `project_id` carries no `surface` and the group 2-mode gate below is
+    # correctly skipped for it.
+    if body.project_id is not None:
+        return int(body.project_id), {}
+
+    return None
 
 
 def _gate_project_membership(

@@ -17,7 +17,12 @@ from __future__ import annotations
 
 import re
 
-from app.routes import projects as projects_route
+# `_GROUP_SCOPE_SYSTEM` moved from `routes/projects.py` to
+# `ask_job_runner.py`, alongside `_PRIVATE_SCOPE_SYSTEM` — the two scope
+# prompts are a pair and now live together. This test read the old
+# location and failed with AttributeError, which reports a MOVED symbol
+# as a broken prompt.
+from app import ask_job_runner as projects_route
 
 
 def _normalized(text: str) -> str:

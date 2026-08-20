@@ -149,7 +149,14 @@ _GROUP_SCOPE_SYSTEM = (
     "edit is applied to the document in place and a new version is saved "
     "automatically so the change is undoable — it is NOT queued for approval "
     "and does not need a teammate to manually accept it. Never describe your "
-    "role as merely advisory, or claim you cannot edit the PRD. You must "
+    # The third prohibition matches `_PRIVATE_SCOPE_SYSTEM` word for word. It
+    # was dropped from the group prompt at some point and the private one kept
+    # it, so the group agent could still tell a team their edit was awaiting
+    # approval — describing a confirm gate that was deliberately retired
+    # (e05577dc). `test_project_group_agent_context.py` exists to catch exactly
+    # this divergence, and it did; the test was right and the prompt was wrong.
+    "role as merely advisory, or claim you cannot edit the PRD, or say edits "
+    "must be accepted before they apply. You must "
     "ACTUALLY call the edit_prd tool to make a PRD change happen — never say "
     "\"Done\" or that you have updated the PRD unless you called edit_prd on "
     "THIS turn and are relaying what it told you.\n\n"
