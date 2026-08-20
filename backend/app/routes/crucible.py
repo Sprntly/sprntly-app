@@ -93,6 +93,11 @@ def _public(row: dict) -> dict:
         # Carries the Stage 0 ask AND the run plan. The plan is the thing the
         # user approves, so it has to reach the client.
         "prioritisation": row.get("prioritisation") or {},
+        # The run's report AS AN EDITABLE DOCUMENT, when one has been made.
+        # An id only: the body lives on `custom_artifacts` and is fetched by
+        # `GET /{run_id}/document`, so a run listing does not carry N report
+        # bodies over the wire (the `_LIST_COLUMNS` posture).
+        "artifact_id": row.get("artifact_id"),
         "created_at": row.get("created_at"),
         "finished_at": row.get("finished_at"),
     }
@@ -197,6 +202,304 @@ async def confirm(
         task.add_done_callback(_inflight.discard)
     row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
     return _public(row or claimed)
+
+
+# ── The report as a document ────────────────────────────────────────────────
+#
+# THE RUN IS IMMUTABLE. THE REPORT IS A DOCUMENT ABOUT THE RUN.
+#
+# That sentence is the whole design, and everything below is it being enforced.
+# A run's claim against asking a general model the same question is that it is
+# reproducible: every finding traces to claim ids and source documents, and the
+# same corpus gives the same ranking. An EDITED run would not be that. So the
+# findings and the ledger are never written again after a run finishes, and the
+# prose a user edits lives somewhere else — a `custom_artifacts` row, which
+# already has a body, a version, compare-and-set concurrency and an editor.
+#
+# DETACHMENT IS DERIVED, NOT DECLARED. The run stores `report_body_hash`, the
+# fingerprint of the body it rendered. The report is detached — edited, and no
+# longer regenerated from the run — exactly when the stored body hashes to
+# something else. Nothing has to remember to set a flag, which matters because
+# the ordinary hand edit arrives through `PATCH /v1/custom-artifacts/{id}`, a
+# route that knows nothing about Goal Analysis and should not have to learn.
+
+
+def _document_payload(run: dict, artifact: dict) -> dict:
+    """One report document, as the panel reads it.
+
+    Carries the body, because the caller opened it to render it — unlike the
+    run listing, which carries an id and nothing else.
+    """
+    from app.crucible.report import body_fingerprint
+
+    # THE FINGERPRINT COVERS THE BODY AND NOTHING ELSE, and this line is where
+    # that is decided — `link_document` stores `body_fingerprint(body_html)`,
+    # so anything added here compares against a hash that never included it and
+    # every report reads as edited from the moment it is created.
+    #
+    # The title is deliberately outside it. Renaming a document is filing, not
+    # authorship: it does not change a word of the analysis, and detaching on it
+    # would fire the "no longer regenerated from the run" banner at someone who
+    # only tidied a name.
+    body = artifact.get("body_html") or ""
+    stored_hash = run.get("report_body_hash") or ""
+    return {
+        "run_id": run.get("id"),
+        "id": artifact.get("id"),
+        "kind": artifact.get("kind") or "",
+        "title": artifact.get("title") or "",
+        "status": artifact.get("status") or "ready",
+        "version": int(artifact.get("version") or 1),
+        "body_html": body,
+        "updated_at": artifact.get("updated_at"),
+        "updated_by": artifact.get("updated_by"),
+        # FAIL TOWARDS "DETACHED" WHEN THE HASH IS MISSING. A run linked before
+        # this column existed, or one whose link write half-landed, has no
+        # fingerprint to compare — and the two possible mistakes are not
+        # symmetric. Calling an untouched report edited costs a banner nobody
+        # needed; calling an EDITED report untouched tells the reader their
+        # prose is still the run's own output, which is the false claim this
+        # whole mechanism exists to prevent.
+        "detached": (not stored_hash) or body_fingerprint(body) != stored_hash,
+    }
+
+
+def _load_document(run_id: int, company_id: str) -> Optional[tuple[dict, dict]]:
+    """`(run, artifact)` for a run that has a report, else None.
+
+    Both reads are company-filtered, so a foreign id is absent on the first one
+    and never reaches the second.
+    """
+    from app.db.custom_artifacts import get_artifact
+
+    run = runs_db.get(run_id, company_id)
+    if not run:
+        return None
+    artifact_id = run.get("artifact_id")
+    if not artifact_id:
+        return None
+    artifact = get_artifact(company_id, artifact_id)
+    if artifact is None:
+        return None
+    return run, artifact
+
+
+def _render_document_html(run: dict, company_id: str) -> str:
+    from app.crucible.report import render_report_html
+
+    findings, ledger = runs_db.load_findings(run["id"], company_id)
+    return render_report_html(run, findings, ledger)
+
+
+@router.get("/{run_id}/document")
+async def get_document(
+    run_id: int,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """The run's report document, or 404 when it has none yet."""
+    found = await asyncio.to_thread(_load_document, run_id, company.company_id)
+    if found is None:
+        raise HTTPException(404, "This analysis has no report document")
+    return _document_payload(*found)
+
+
+@router.post("/{run_id}/document")
+async def create_document(
+    run_id: int,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """Render the run to a document and link it. IDEMPOTENT.
+
+    A second call returns the FIRST document, untouched — including when it has
+    since been edited. That is not a convenience: the panel calls this to open
+    the report, so a re-render on the second call would mean opening your own
+    edited report is what destroys it.
+    """
+    found = await asyncio.to_thread(_load_document, run_id, company.company_id)
+    if found is not None:
+        return _document_payload(*found)
+
+    row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+    if not row:
+        # Tenant filter is in the query, so a foreign run and one that was
+        # never issued are the same 404.
+        raise HTTPException(404, "Run not found")
+    if row.get("status") != "ready":
+        raise HTTPException(
+            409,
+            f"This analysis is {row.get('status')}, so there is nothing to "
+            f"write a report from yet.",
+        )
+
+    if row.get("artifact_id"):
+        # A link pointing at a document that is not there. The FK is ON DELETE
+        # SET NULL, so Postgres cannot produce this — but a half-landed link
+        # write can, and leaving the pointer would make the report permanently
+        # unopenable behind a 404 with no way back. Cleared so the create below
+        # can claim the slot.
+        logger.warning(
+            "crucible: run %s points at missing artifact %s; relinking",
+            run_id, row.get("artifact_id"),
+        )
+        await asyncio.to_thread(
+            runs_db.update, run_id, company.company_id, artifact_id=None,
+        )
+
+    return await asyncio.to_thread(_create_document, row, company)
+
+
+def _create_document(row: dict, company: WorkspaceContext) -> dict:
+    """Render, store, link. Blocking; called from a thread."""
+    from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
+    from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
+
+    run_id, company_id = row["id"], company.company_id
+    html = _render_document_html(row, company_id)
+    artifact = create_artifact(
+        company_id,
+        kind=ARTIFACT_KIND,
+        title=report_title(row),
+        body_html=html,
+        # NO `conversation_id`, deliberately, even though the run has one. The
+        # thread-resume probe (`useThreadDocumentSync`) attaches the newest
+        # document of a conversation to the panel's DOCUMENT tab on reload — so
+        # stamping it here would grow a phantom Document tab beside every Goal
+        # Analysis run, holding the same report the analysis tab already shows.
+        # The run carries the link, and the panel finds the report through the
+        # run, which is the relationship that actually exists.
+        created_by=company.user_id,
+    )
+    # The fingerprint is of the STORED body, not the rendered string: the
+    # storage layer sanitizes on write, so hashing what we sent would never
+    # match what is there and every report would read as edited on creation.
+    linked = runs_db.link_document(
+        run_id, company_id,
+        artifact_id=artifact["id"],
+        body_hash=body_fingerprint(artifact.get("body_html") or ""),
+    )
+    if linked is None:
+        # Lost the claim — a concurrent POST linked first. Delete the orphan we
+        # just made (nobody has an id for it, so nothing is lost) and return
+        # the winner's. Without this a double-click leaves a stray report in
+        # the shared library that no run points at.
+        delete_artifact(company_id, artifact["id"])
+        winner = runs_db.get(run_id, company_id) or row
+        existing = get_artifact(company_id, winner.get("artifact_id") or 0)
+        if existing is None:
+            raise HTTPException(409, "The report was being created; try again.")
+        return _document_payload(winner, existing)
+    return _document_payload(linked, artifact)
+
+
+@router.post("/{run_id}/document/fork")
+async def fork_document(
+    run_id: int,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """Save a SEPARATE copy of this report as an ordinary team document.
+
+    The other half of "edit in place". The run's own report keeps its link and
+    is untouched; this is a free-standing document that will never be compared
+    to the run again — no detach marker, because there is nothing to detach
+    from.
+
+    It copies whatever the report SAYS RIGHT NOW, edits included. A fork of the
+    original rendering would be a different feature ("revert"), and offering it
+    under this button would quietly discard the user's edits at the moment they
+    asked to keep them.
+    """
+    found = await asyncio.to_thread(_load_document, run_id, company.company_id)
+    if found is not None:
+        run, artifact = found
+        body, title = artifact.get("body_html") or "", artifact.get("title") or ""
+    else:
+        run = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+        if not run:
+            raise HTTPException(404, "Run not found")
+        if run.get("status") != "ready":
+            raise HTTPException(
+                409,
+                f"This analysis is {run.get('status')}, so there is nothing to "
+                f"write a report from yet.",
+            )
+        body = await asyncio.to_thread(_render_document_html, run, company.company_id)
+        from app.crucible.report import report_title
+
+        title = report_title(run)
+
+    return await asyncio.to_thread(_fork_document, run, title, body, company)
+
+
+def _fork_document(
+    run: dict, title: str, body: str, company: WorkspaceContext
+) -> dict:
+    from app.db.custom_artifacts import create_artifact
+
+    copy = create_artifact(
+        company.company_id,
+        # An ordinary document kind, NOT `goal_analysis`. The kind is what the
+        # chat edit tool resolves its target by, and a fork is not on a run —
+        # calling it a report would let `edit_goal_report` find a document with
+        # no run behind it.
+        kind="Goal analysis copy",
+        title=f"{title} (copy)" if title else "Goal analysis (copy)",
+        body_html=body,
+        # STAMPED HERE, unlike the linked report. A fork is a document the user
+        # deliberately created, so it belongs in the thread's library and in
+        # the Document tab — which is exactly what the linked report must not
+        # do (see `_create_document`).
+        conversation_id=run.get("conversation_id"),
+        created_by=company.user_id,
+    )
+    return {
+        "id": copy["id"],
+        "title": copy.get("title") or "",
+        "kind": copy.get("kind") or "",
+        "version": int(copy.get("version") or 1),
+        "conversation_id": copy.get("conversation_id"),
+        # A fork has no run and never had one.
+        "run_id": None,
+        "detached": False,
+    }
+
+
+class ReportEdit(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/{run_id}/document/chat-edit")
+async def chat_edit_document(
+    run_id: int,
+    body: ReportEdit,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """Apply a free-form chat instruction to this run's report.
+
+    THE TARGET IS THE URL'S RUN, NOT AN ARGUMENT. The client names the report
+    the user has open; nothing in the request body can redirect the write, and
+    the writer re-derives the artifact from the run rather than trusting an id
+    it was handed. Same rule as `edit_prd`, same reason: a model — or a
+    prompt-injected instruction inside a customer's own documents — must not be
+    able to edit a document the user is not looking at.
+
+    Live on call, no confirm gate (retired for PRDs in e05577dc; keeping the
+    two surfaces aligned is worth more here than a second click).
+    """
+    from app.goal_report_chat_edit import apply_report_edit_scoped
+
+    found = await asyncio.to_thread(_load_document, run_id, company.company_id)
+    if found is None:
+        raise HTTPException(404, "This analysis has no report document")
+    run, artifact = found
+    result = await asyncio.to_thread(
+        apply_report_edit_scoped, artifact["id"], body.instruction, company
+    )
+    fresh = await asyncio.to_thread(runs_db.get, run_id, company.company_id) or run
+    return {
+        "document": _document_payload(fresh, result["artifact"]),
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
+    }
 
 
 class ApprovePlan(BaseModel):

@@ -194,6 +194,53 @@ def load_findings(run_id: int, company_id: str) -> tuple[list[dict], list[dict]]
     return findings, ledger
 
 
+def link_document(
+    run_id: int, company_id: str, *, artifact_id: int, body_hash: str
+) -> Optional[dict]:
+    """Attach a freshly rendered report document to its run. None if it lost.
+
+    THE CLAIM IS IN THE WHERE CLAUSE (`artifact_id IS NULL`), for the reason
+    `claim_for_confirmation` states: read-then-write would let two simultaneous
+    POSTs both see an unlinked run and both link, and the second link silently
+    replaces the first — leaving a document the user may already be editing
+    orphaned, reachable from nothing, and invisible until someone notices their
+    edits went to a row nobody opens. A double-click is the ordinary way to
+    produce that.
+
+    The loser gets None and is expected to delete the document it created and
+    return the winner's, which is what makes the endpoint idempotent rather
+    than merely usually-idempotent.
+    """
+    res = (
+        require_client().table(TABLE)
+        .update({
+            "artifact_id": artifact_id,
+            "report_body_hash": body_hash,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        .eq("id", run_id).eq("company_id", company_id)
+        .is_("artifact_id", "null")          # the claim
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
+def get_by_artifact(artifact_id: int, company_id: str) -> Optional[dict]:
+    """The run a report document belongs to, or None.
+
+    The reverse of `link_document`, and the chat edit tool's whole target
+    resolution: the model names no id, the client says which document is open,
+    and this says whether that document is a Goal Analysis report on THIS
+    company's run. Tenant filter in the query, as everywhere else here.
+    """
+    res = (
+        require_client().table(TABLE).select("*")
+        .eq("artifact_id", artifact_id).eq("company_id", company_id)
+        .limit(1).execute()
+    )
+    return (res.data or [None])[0]
+
+
 def sweep_orphans(*, older_than_minutes: int = 45) -> int:
     """Fail runs whose worker died. Returns how many.
 

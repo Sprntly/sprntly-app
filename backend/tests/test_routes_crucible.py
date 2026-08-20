@@ -68,6 +68,11 @@ CREATE TABLE IF NOT EXISTS crucible_runs (
     finished_at        TEXT,
     heartbeat_at       TEXT,
     created_by         TEXT,
+    -- 20260820120000_crucible_run_report_document.sql. The report as an
+    -- editable document, and the fingerprint that says whether it still is
+    -- what the run rendered.
+    artifact_id        INTEGER,
+    report_body_hash   TEXT,
     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
 );

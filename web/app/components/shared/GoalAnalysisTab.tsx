@@ -34,10 +34,12 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   goalAnalysisApi,
+  type GoalReportDoc,
   type GoalRunDetail,
 } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
+import { GoalReportDocument } from "./GoalReportDocument"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
@@ -89,6 +91,24 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // the textarea is reset every three seconds and a long definition is
   // impossible to type.
   const touched = useRef(false)
+
+  // ── The report as a document ────────────────────────────────────────────
+  //
+  // The run is immutable; the report is a document ABOUT the run. `doc` is
+  // that document once one exists, `editing` is whether it is what the panel
+  // is currently showing.
+  //
+  // A DETACHED REPORT OPENS ITSELF. If someone has edited it, the read-only
+  // view would render the RUN's findings — not their words — which is the one
+  // outcome this whole feature exists to prevent: their edit would look like
+  // it had been thrown away. So a detached document takes the panel on load,
+  // once (`autoOpened`), leaving the user free to go back to the analysis
+  // afterwards without the effect dragging them forward again.
+  const [doc, setDoc] = useState<GoalReportDoc | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [docBusy, setDocBusy] = useState(false)
+  const [docNote, setDocNote] = useState<string | null>(null)
+  const autoOpened = useRef(false)
 
   const load = useCallback(async () => {
     try {
@@ -181,6 +201,85 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       setApproving(false)
     }
   }
+
+  // Load the report document, if this run already has one. GATED ON
+  // `artifact_id` rather than fired unconditionally: most runs never have a
+  // document, and a request per ready run to be told 404 is load bought with
+  // nothing. The id rides the run row, so it costs no extra read to know.
+  const artifactId = run?.artifact_id ?? null
+  useEffect(() => {
+    if (artifactId == null) return
+    let live = true
+    void (async () => {
+      try {
+        const fresh = await goalAnalysisApi.document(runId)
+        if (!live) return
+        setDoc(fresh)
+        if (fresh.detached && !autoOpened.current) {
+          autoOpened.current = true
+          setEditing(true)
+        }
+      } catch {
+        // A report that will not load is a missing document, not a broken
+        // analysis. The findings are still on screen, which is the part that
+        // matters, and the Edit button will try again.
+      }
+    })()
+    return () => { live = false }
+  }, [runId, artifactId])
+
+  const openDocument = useCallback(async () => {
+    if (docBusy) return
+    setDocBusy(true)
+    setDocNote(null)
+    try {
+      // IDEMPOTENT ON THE SERVER, which is why this is safe to call whether or
+      // not a document already exists: it returns the FIRST one, edits and
+      // all, rather than re-rendering over them.
+      const fresh = await goalAnalysisApi.createDocument(runId)
+      setDoc(fresh)
+      setEditing(true)
+    } catch {
+      setDocNote("We could not open this report for editing.")
+    } finally {
+      setDocBusy(false)
+    }
+  }, [runId, docBusy])
+
+  const saveCopy = useCallback(async () => {
+    if (docBusy) return
+    setDocBusy(true)
+    setDocNote(null)
+    try {
+      await goalAnalysisApi.forkDocument(runId)
+      setDocNote(
+        "Saved as a separate document in your team library. This report is " +
+        "unchanged.",
+      )
+    } catch {
+      setDocNote("We could not save a copy of this report.")
+    } finally {
+      setDocBusy(false)
+    }
+  }, [runId, docBusy])
+
+  const backToRun = useCallback(() => {
+    setEditing(false)
+    // RE-READ ON THE WAY OUT. The user may have just typed into the document,
+    // which detaches it — and the read-only view behind this button needs to
+    // know, or it offers "Edit" on a report that has already been edited and
+    // says nothing about the version holding their words.
+    //
+    // THIS CAN RACE THE AUTOSAVE, and that is survivable rather than fixed.
+    // Leaving the editor blurs it, which flushes a pending save, but the flush
+    // and this read are two requests with no ordering between them: land the
+    // read first and the report still looks untouched for one render. The cost
+    // is one missing line, not lost text — the document holds their words
+    // either way, and "Edit" reopens THAT document (the create endpoint is
+    // idempotent and returns the stored body), so the way back never depends
+    // on this read having won.
+    void goalAnalysisApi.document(runId).then(setDoc).catch(() => {})
+  }, [runId])
 
   if (error && !run) return <p className="ga-error">{error}</p>
   if (!run) return <p className="ga-loading">Loading…</p>
@@ -275,10 +374,55 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     )
   }
 
+  const note = docNote ? (
+    <p className="ga-doc-note" role="status" data-testid="goal-doc-note">
+      {docNote}
+    </p>
+  ) : null
+
+  if (editing && doc) {
+    return (
+      <div className="ga" data-testid="goal-ready">
+        {banner}
+        {note}
+        <GoalReportDocument
+          doc={doc}
+          onBack={backToRun}
+          onSaveCopy={saveCopy}
+          busy={docBusy}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="ga" data-testid="goal-ready">
       {banner}
-      <GoalAnalysisReport run={run} />
+      {note}
+      {/* An edited version exists and the reader is looking at the original.
+          Saying so is not optional: without it the panel shows the run's own
+          findings with an "Edit" button, and the document holding someone's
+          rewrite is unreachable and invisible. */}
+      {doc?.detached ? (
+        <p className="ga-doc-note" data-testid="goal-report-has-edit">
+          An edited version of this report exists.{" "}
+          <button
+            type="button"
+            className="ga-doc-action"
+            data-testid="goal-report-open-edited"
+            onClick={() => setEditing(true)}
+          >
+            Open it
+          </button>
+        </p>
+      ) : null}
+      <GoalAnalysisReport
+        run={run}
+        editable
+        onEdit={openDocument}
+        onSaveCopy={saveCopy}
+        busy={docBusy}
+      />
     </div>
   )
 }

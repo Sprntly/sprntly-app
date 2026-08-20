@@ -33,6 +33,12 @@
  *    though a footer is where a report would conventionally put them.)
  *  - The closing section is built from the run plan's own gaps, so what the
  *    user was warned about BEFORE the run is what they are reminded of after.
+ *
+ * THIS COMPONENT IS STILL PURE. `editable` adds two BUTTONS and nothing else —
+ * the fetching, the document and the editor all live in `GoalAnalysisTab` and
+ * `GoalReportDocument`. That matters because this file owns the rules above,
+ * and a component that also owned an async lifecycle would be one nobody could
+ * test those rules against without a server.
  */
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
@@ -138,7 +144,28 @@ function ReportFinding({ f, rank }: { f: GoalFinding; rank: number }) {
   )
 }
 
-export function GoalAnalysisReport({ run }: { run: GoalRunDetail }) {
+export function GoalAnalysisReport({
+  run,
+  editable = false,
+  onEdit,
+  onSaveCopy,
+  busy = false,
+}: {
+  run: GoalRunDetail
+  /** Show the document actions. DEFAULT FALSE, so every existing caller — and
+   *  every existing test — renders exactly what it rendered before. */
+  editable?: boolean
+  /** Turn this report into an editable document and open it. The endpoint
+   *  behind it is idempotent, so a double press cannot fork a second copy. */
+  onEdit?: () => void
+  /** Save a SEPARATE copy as an ordinary team document, leaving this report
+   *  alone. The fork half of "edit in place AND fork on demand". */
+  onSaveCopy?: () => void
+  /** A document action is in flight. Both buttons disable together: they write
+   *  to the same run, and letting the second fire while the first is still
+   *  going is how you get a copy of a report that is mid-creation. */
+  busy?: boolean
+}) {
   const plan: GoalRunPlan | undefined = run.prioritisation?.plan
   const findings = run.findings ?? []
   const headline = findings[0]
@@ -154,6 +181,36 @@ export function GoalAnalysisReport({ run }: { run: GoalRunDetail }) {
       <header className="ga-doc-header">
         <p className="ga-doc-eyebrow">Goal analysis</p>
         <h1 className="ga-doc-title">{run.goal_text}</h1>
+        {editable ? (
+          <div className="ga-doc-actions" data-testid="goal-report-actions">
+            <button
+              type="button"
+              className="ga-doc-action"
+              data-testid="goal-report-edit"
+              disabled={busy}
+              onClick={onEdit}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              className="ga-doc-action"
+              data-testid="goal-report-save-copy"
+              disabled={busy}
+              onClick={onSaveCopy}
+            >
+              Save as document
+            </button>
+            {/* SAID BEFORE THE CLICK, not after it. Editing is not a mode you
+                can back out of — it detaches the report from the run for good
+                — and a reader who did not know that would be told only once it
+                had happened. */}
+            <p className="ga-doc-actions-note">
+              Editing keeps the analysis exactly as it is and turns this report
+              into a document you own. It stops updating from the run.
+            </p>
+          </div>
+        ) : null}
       </header>
 
       {/* ── 1. What this was asked to establish ──────────────────────────── */}

@@ -93,6 +93,10 @@ const RUN = {
   coverage_notes: [] as { reason: string; actual: string }[],
   claim_count: 412,
   conversation_id: null,
+  // No document has been rendered from this run. The read-only report is what
+  // every test in this file is about; the editable half is
+  // GoalAnalysisTab.document.dom.test.tsx.
+  artifact_id: null,
   created_at: null,
   finished_at: null,
   findings: [SIZED],
