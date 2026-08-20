@@ -632,6 +632,10 @@ export type GoalFinding = {
    *  checked against anything. */
   surfaced_by: string[]
   assumed_params: { name: string; basis: string }[]
+  /** `deep` for the leading few, `shallow` for the rest — the engine examines
+   *  the top of the ranking in depth and says so, rather than presenting every
+   *  row as equally analysed. */
+  tier?: string | null
   impact: { value: number | null; affected_population: number | null }
   confidence: {
     band: string
@@ -651,16 +655,56 @@ export type GoalRejection = {
   claim_ids: string[]
 }
 
+/** One source the run will read: how much of it there is, and what it can
+ *  actually witness. These counts are an INVENTORY — the plan step reads no
+ *  content, which is why it returns in about a second rather than minutes. */
+export type GoalPlanSource = {
+  source_type: string
+  signal_count: number
+  label: string
+  witnesses: string
+}
+
+/** Something this run will NOT be able to answer. `remedy` is not decoration:
+ *  a gap Sprntly can close is a next step, and stating the gap without the fix
+ *  is the shrug this whole step exists to remove. */
+export type GoalPlanGap = {
+  question: string
+  because: string
+  remedy: string
+}
+
+/** What the run will do, said BEFORE it does it. This is what the user
+ *  approves, and it stays on the run afterwards as the record of what was
+ *  read. */
+export type GoalRunPlan = {
+  goal_text: string
+  definition_text: string
+  currency: string
+  total_signals: number
+  sources: GoalPlanSource[]
+  cannot_answer: GoalPlanGap[]
+  will_produce: string[]
+  /** Source types the user dropped at the plan step. */
+  excluded_sources?: string[]
+  /** The user's own hypotheses, carried into the run. */
+  hypotheses?: string[]
+}
+
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
-  /** Stage 0's question and its prefilled proposal, when the run is waiting. */
+  /** Stage 0's question and its prefilled proposal, when the run is waiting —
+   *  and, once a definition is locked, the plan the user is asked to approve.
+   *  The plan SURVIVES into `ready`: it is the only record of what was read,
+   *  and a report that cannot say what it read is not auditable. */
   prioritisation?: {
     ask?: string
     resolution?: string
     proposed_definition?: string
     proposed_source?: string | null
     conflicts?: unknown[]
+    plan?: GoalRunPlan
   }
 }
 
@@ -678,6 +722,22 @@ export const goalAnalysisApi = {
    *  may be an edit of what we proposed. */
   confirm: (runId: number, definition_text: string) =>
     api.post<GoalRun>(`/v1/crucible/${runId}/confirm`, { definition_text }),
+  /** The SECOND gate. The plan said what would be read and what could not be
+   *  answered; this is the user saying go, having seen both — optionally
+   *  having dropped a source, or told us what they already believe.
+   *
+   *  Both lists are ALWAYS sent, including empty. The body is the whole of the
+   *  user's answer to the plan, so an omitted key would silently mean
+   *  "changed nothing" — which is a different statement from "excluded
+   *  nothing" only when it is wrong. */
+  approve: (
+    runId: number,
+    opts?: { excluded_sources?: string[]; hypotheses?: string[] },
+  ) =>
+    api.post<GoalRun>(`/v1/crucible/${runId}/approve`, {
+      excluded_sources: opts?.excluded_sources ?? [],
+      hypotheses: opts?.hypotheses ?? [],
+    }),
 }
 
 export const askApi = {

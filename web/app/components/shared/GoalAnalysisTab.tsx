@@ -10,22 +10,34 @@
  *    it must not look like one. It is the product's central claim — that the
  *    analysis is about the thing you actually meant — so the question gets the
  *    panel, prefilled and editable.
- *  - An unsized finding is rendered as "could not size", never as 0. They lead
- *    to opposite decisions, and a dash where a number goes is the only honest
- *    rendering of "we do not know" (I3).
- *  - The CONSIDERED list renders. A ranking whose rejections are invisible is
- *    a ranking you have to take on faith; every drop carries the reason it
- *    died and the claims it died on.
- *  - Coverage notes render beside the findings, not in a footer. A quietly
- *    thinner run is indistinguishable from a complete one, which is worse than
- *    the failure it replaced.
+ *  - A finished run is a DOCUMENT, not a list of chips — see
+ *    `GoalAnalysisReport`, which owns every rule about how a finding, its
+ *    provenance, the rejections and the run's own limits are rendered. This
+ *    file owns the STATE MACHINE and nothing else; two components rendering a
+ *    finding is how the "never render an unsized finding as 0" rule ends up
+ *    being true in one of them.
+ *
+ * FOUR STATES, and only two of them are waiting on a machine:
+ *
+ *   awaiting_confirmation  what does this goal MEAN? (the I9 gate)
+ *   awaiting_approval      here is what I will read and what I cannot answer —
+ *                          drop a source, tell me what you already believe,
+ *                          then say go
+ *   running                the only real loading state
+ *   ready                  the REPORT — a document, not a list
+ *
+ * Both gates are terminal for the poller: nothing but a click moves them, and
+ * a click has to RE-ARM the poll (`pollKey`), or the panel sits on the last
+ * status it saw while the run finishes on the server. That bug shipped once
+ * already for confirm; approve is wired the same way for the same reason.
  */
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   goalAnalysisApi,
-  type GoalFinding,
   type GoalRunDetail,
 } from "../../lib/api"
+import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
+import { GoalAnalysisReport } from "./GoalAnalysisReport"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
@@ -40,7 +52,13 @@ const MAX_CONSECUTIVE_FAILURES = 3
  *  which is what `pollKey` below is for. Getting that wrong meant every user
  *  confirmed and then watched "Reading 0 claims…" forever while the run
  *  finished on the server. */
-const TERMINAL = new Set(["ready", "failed", "cancelled", "awaiting_confirmation"])
+const TERMINAL = new Set([
+  "ready", "failed", "cancelled",
+  // BOTH human gates. A run waiting on a person will wait forever, and polling
+  // it is load with no possible new information; the click that releases it
+  // re-arms the poll itself.
+  "awaiting_confirmation", "awaiting_approval",
+])
 
 /** Error codes the backend may return, in the user's language. Anything not
  *  listed falls through to a generic line — the raw `error` is never sent. */
@@ -54,70 +72,12 @@ const ERROR_COPY: Record<string, string> = {
   internal: "Something went wrong on our side partway through this run.",
 }
 
-function money(v: number | null, currency: string | null): string {
-  if (v == null) return "—"
-  if (currency === "accounts") return `${v} account${v === 1 ? "" : "s"}`
-  return String(v)
-}
-
-function Finding({ f }: { f: GoalFinding }) {
-  const unsized = f.impact_value == null
-  return (
-    <li className="ga-finding" data-testid="goal-finding">
-      <p className="ga-finding-statement">{f.statement}</p>
-      <div className="ga-finding-meta">
-        <span
-          className={`ga-size${unsized ? " ga-size--unknown" : ""}`}
-          data-testid={unsized ? "goal-unsized" : "goal-sized"}
-        >
-          {unsized ? "Could not be sized" : money(f.impact_value, f.currency)}
-        </span>
-        {f.confidence_band ? (
-          <span className="ga-band">{f.confidence_band} confidence</span>
-        ) : null}
-        {f.adjudication === "conflict" ? (
-          <span className="ga-conflict" title="Two sources that may both speak to this disagree">
-            sources disagree
-          </span>
-        ) : null}
-      </div>
-      {/* The weakest leg is the actionable half of a confidence score: it says
-          what to go and find out, which a band on its own never does. */}
-      {f.confidence?.weakest_leg_reason ? (
-        <p className="ga-weakest">Weakest link: {f.confidence.weakest_leg_reason}</p>
-      ) : null}
-      {f.confidence?.cap_reason ? (
-        <p className="ga-cap">{f.confidence.cap_reason}</p>
-      ) : null}
-      {/* WHERE IT CAME FROM, beside the claim it supports. Without this the
-          panel showed the literal word "corpus" as the only provenance, so a
-          reader could not check a single finding against anything. */}
-      {f.surfaced_by?.length ? (
-        <p className="ga-sources" data-testid="goal-sources">
-          <span className="ga-sources-label">From</span>{" "}
-          {f.surfaced_by.join(" · ")}
-        </p>
-      ) : null}
-      {/* I8: every assumed parameter is disclosed where the number is read,
-          not in a methodology page nobody opens. */}
-      {f.assumed_params?.length ? (
-        <ul className="ga-assumed">
-          {f.assumed_params.map((p) => (
-            <li key={p.name}>
-              <b>{p.name}</b>: {p.basis}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </li>
-  )
-}
-
 export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [definition, setDefinition] = useState("")
   const [confirming, setConfirming] = useState(false)
+  const [approving, setApproving] = useState(false)
   // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
   // has not changed, so without this the effect never re-runs and the panel
   // stays on the last status it saw.
@@ -200,6 +160,28 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     }
   }
 
+  const approve = async (decision: PlanDecision) => {
+    if (approving) return
+    setApproving(true)
+    try {
+      await goalAnalysisApi.approve(runId, decision)
+      failures.current = 0
+      // Re-arm: `awaiting_approval` is terminal for the poller, so nothing
+      // else would ever look at this run again.
+      setPollKey((k) => k + 1)
+    } catch {
+      // Same shape as a failed confirm, and for the same reason: the server
+      // CLAIMS the row before it starts work, so a response lost after that
+      // claim means the run is going and nothing is watching it. Telling the
+      // user to approve again would 409 forever against their own successful
+      // approval, so poll instead and let the run say what happened.
+      setError("We could not tell whether that started. Checking…")
+      setPollKey((k) => k + 1)
+    } finally {
+      setApproving(false)
+    }
+  }
+
   if (error && !run) return <p className="ga-error">{error}</p>
   if (!run) return <p className="ga-loading">Loading…</p>
 
@@ -250,6 +232,25 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     )
   }
 
+  // ── The plan gate. Not a loading state either — a decision. ──────────────
+  //
+  // The plan is what the user approves, so a missing plan must NOT render as
+  // an approve button over nothing: that would be a click agreeing to
+  // something never shown. It falls through to the running view instead, where
+  // the poll keeps going and the row can correct itself.
+  if (run.status === "awaiting_approval" && run.prioritisation?.plan) {
+    return (
+      <div className="ga" data-testid="goal-approve">
+        {banner}
+        <GoalAnalysisPlan
+          plan={run.prioritisation.plan}
+          approving={approving}
+          onApprove={approve}
+        />
+      </div>
+    )
+  }
+
   if (run.status === "failed") {
     return (
       <div className="ga" data-testid="goal-failed">
@@ -277,47 +278,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   return (
     <div className="ga" data-testid="goal-ready">
       {banner}
-      <p className="ga-goal">{run.goal_text}</p>
-
-      {/* Degradations first. A note explaining that a third of the evidence
-          was undated changes how every number below it should be read, so it
-          cannot sit under them. */}
-      {run.coverage_notes?.length ? (
-        <ul className="ga-coverage" data-testid="goal-coverage">
-          {run.coverage_notes.map((n, i) => (
-            <li key={i}>
-              <b>{n.reason}</b> — {n.actual}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-
-      {run.findings?.length ? (
-        <ul className="ga-findings">
-          {run.findings.map((f) => <Finding key={f.id} f={f} />)}
-        </ul>
-      ) : (
-        <p className="ga-empty">
-          Nothing survived verification. Everything considered is listed below,
-          with why it was dropped.
-        </p>
-      )}
-
-      {run.considered?.length ? (
-        <details className="ga-considered" data-testid="goal-considered">
-          <summary>Considered and dropped ({run.considered.length})</summary>
-          <ul>
-            {run.considered.map((r) => (
-              <li key={r.id}>
-                <b>{r.label}</b> — {r.reason}
-                {r.stopped_at_stage ? (
-                  <em> (stopped at {r.stopped_at_stage})</em>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        </details>
-      ) : null}
+      <GoalAnalysisReport run={run} />
     </div>
   )
 }

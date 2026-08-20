@@ -1,0 +1,377 @@
+"use client"
+
+/**
+ * The finished Goal Analysis, rendered as a REPORT rather than a list.
+ * (Engine name Crucible; that word never appears on screen.)
+ *
+ * WHY A DOCUMENT. The same facts in a list of chips are read as a dashboard —
+ * scanned, ranked by the biggest number, and trusted in proportion to how
+ * finished they look. Read as prose they are read as an argument: this is the
+ * goal, this is what was read to answer it, this is what it says, and this is
+ * what it still cannot tell you. The last part is the product's actual claim
+ * and it is the first thing a dashboard drops.
+ *
+ * WHAT THIS ENGINE CAN HONESTLY SAY TODAY. It is qualitative. It has themes
+ * from the knowledge graph, the source documents behind each one, reach (how
+ * many accounts a theme touches — frequently unknown), confidence bands,
+ * adjudication, a considered-and-dropped ledger with reasons, coverage notes,
+ * and the run plan. It has NO point estimates, no effort, no RICE, no
+ * significance tests, because the graph holds prose and none of those can be
+ * computed from prose. Every place a number is missing, this report says so
+ * and says why, in the section it would have appeared in. A silently omitted
+ * section reads as "not applicable"; a stated absence reads as "not known",
+ * and only one of those is true.
+ *
+ * THE RULES THIS FILE EXISTS TO KEEP:
+ *  - An unsized finding renders as "could not be sized", NEVER as 0. They lead
+ *    to opposite decisions (I3).
+ *  - Every finding that has source documents shows them, beside the claim they
+ *    support, so a reader can check it rather than trust it.
+ *  - Coverage notes sit ABOVE the findings they qualify. A run that read a
+ *    third of the evidence must not be indistinguishable from a complete one.
+ *    (This is why they render inside "What was read" and not in a footer, even
+ *    though a footer is where a report would conventionally put them.)
+ *  - The closing section is built from the run plan's own gaps, so what the
+ *    user was warned about BEFORE the run is what they are reminded of after.
+ */
+import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
+
+/** How many rejections render expanded. Beyond this the ledger folds, because
+ *  a run can drop a hundred candidates and an unfolded hundred buries the
+ *  closing section under them. */
+const RULED_OUT_OPEN_MAX = 12
+
+/** An excluded source is only a KEY by the time the report runs — its label
+ *  went with the entry the run dropped. Rather than keep a second copy of the
+ *  backend's source prose here, where it would drift, the key is softened into
+ *  something readable: `project_mgmt` reads as "project mgmt", not as a column
+ *  name the reader has to decode. */
+function humanSource(sourceType: string): string {
+  return sourceType.replace(/_/g, " ")
+}
+
+/** Reach, in words. NULL is "could not be sized" and is never rendered as a
+ *  number — a 0 and an unknown look alike and mean opposites (I3). */
+function reach(f: GoalFinding): string {
+  if (f.impact_value == null) return "Could not be sized"
+  if (f.currency === "accounts") {
+    return `${f.impact_value} account${f.impact_value === 1 ? "" : "s"}`
+  }
+  return `${f.impact_value}${f.currency ? ` ${f.currency}` : ""}`
+}
+
+/** The size of a finding, wherever it is shown. `idPrefix` exists because the
+ *  headline repeats the leading finding's size, and two elements carrying the
+ *  same test id would make "renders unsized, never zero" ambiguous — the one
+ *  assertion in this file that must never be ambiguous. */
+function Sized({ f, idPrefix = "goal" }: { f: GoalFinding; idPrefix?: string }) {
+  const unsized = f.impact_value == null
+  return (
+    <span
+      className={`ga-size${unsized ? " ga-size--unknown" : ""}`}
+      data-testid={unsized ? `${idPrefix}-unsized` : `${idPrefix}-sized`}
+    >
+      {reach(f)}
+    </span>
+  )
+}
+
+/** One ranked finding, written out: what it says, how big it is, how much of
+ *  it we trust, what it rests on, and what had to be assumed to state it. */
+function ReportFinding({ f, rank }: { f: GoalFinding; rank: number }) {
+  return (
+    <li className="ga-doc-finding" data-testid="goal-finding">
+      <div className="ga-doc-finding-head">
+        <span className="ga-doc-rank" aria-hidden="true">{rank}</span>
+        <p className="ga-finding-statement">{f.statement}</p>
+      </div>
+      <div className="ga-finding-meta">
+        <Sized f={f} />
+        {f.confidence_band ? (
+          <span className="ga-band">{f.confidence_band} confidence</span>
+        ) : null}
+        {f.adjudication === "conflict" ? (
+          <span
+            className="ga-conflict"
+            title="Two sources that may both speak to this disagree"
+          >
+            sources disagree
+          </span>
+        ) : null}
+        {f.claim_ids?.length ? (
+          <span className="ga-doc-claims">
+            {f.claim_ids.length} claim{f.claim_ids.length === 1 ? "" : "s"}
+          </span>
+        ) : null}
+      </div>
+      {/* The weakest leg is the actionable half of a confidence score: it says
+          what to go and find out, which a band on its own never does. */}
+      {f.confidence?.weakest_leg_reason ? (
+        <p className="ga-weakest">
+          <b>Weakest link.</b> {f.confidence.weakest_leg_reason}
+        </p>
+      ) : null}
+      {f.confidence?.cap_reason ? (
+        <p className="ga-cap">{f.confidence.cap_reason}</p>
+      ) : null}
+      {/* WHERE IT CAME FROM, beside the claim it supports. Without this the
+          panel showed the literal word "corpus" as the only provenance, so a
+          reader could not check a single finding against anything. */}
+      {f.surfaced_by?.length ? (
+        <p className="ga-sources" data-testid="goal-sources">
+          <span className="ga-sources-label">Source documents</span>{" "}
+          {f.surfaced_by.join(" · ")}
+        </p>
+      ) : null}
+      {/* I8: every assumed parameter is disclosed where the number is read,
+          not in a methodology page nobody opens. */}
+      {f.assumed_params?.length ? (
+        <ul className="ga-assumed">
+          {f.assumed_params.map((p) => (
+            <li key={p.name}>
+              <b>{p.name}</b>: {p.basis}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </li>
+  )
+}
+
+export function GoalAnalysisReport({ run }: { run: GoalRunDetail }) {
+  const plan: GoalRunPlan | undefined = run.prioritisation?.plan
+  const findings = run.findings ?? []
+  const headline = findings[0]
+  const definition =
+    plan?.definition_text || run.prioritisation?.proposed_definition || ""
+  const excluded = plan?.excluded_sources ?? []
+  const hypotheses = plan?.hypotheses ?? []
+  const gaps = plan?.cannot_answer ?? []
+  const notes = run.coverage_notes ?? []
+
+  return (
+    <article className="ga-doc" data-testid="goal-report">
+      <header className="ga-doc-header">
+        <p className="ga-doc-eyebrow">Goal analysis</p>
+        <h1 className="ga-doc-title">{run.goal_text}</h1>
+      </header>
+
+      {/* ── 1. What this was asked to establish ──────────────────────────── */}
+      <section className="ga-doc-section" data-testid="goal-definition">
+        <h2 className="ga-doc-h2">What this was asked to establish</h2>
+        {definition ? (
+          <>
+            <p className="ga-doc-lede">
+              You confirmed this goal means, in your own words:
+            </p>
+            <blockquote className="ga-doc-quote">{definition}</blockquote>
+            <p className="ga-doc-note">
+              Everything below is measured against that sentence and nothing
+              else. If it is not what you meant, the ranking will be wrong in a
+              way no amount of evidence can correct.
+            </p>
+          </>
+        ) : (
+          // Stated, not skipped. A report with no recorded definition is a
+          // report whose subject is unknown, and hiding that would make it
+          // look like the ordinary case.
+          <p className="ga-doc-note" data-testid="goal-no-definition">
+            No confirmed definition was recorded for this run, so what the goal
+            means is not on the record. Read everything below as being about
+            the goal as typed, nothing narrower.
+          </p>
+        )}
+      </section>
+
+      {/* ── 2. What was read ─────────────────────────────────────────────── */}
+      <section className="ga-doc-section" data-testid="goal-what-was-read">
+        <h2 className="ga-doc-h2">What was read</h2>
+        {plan ? (
+          <>
+            <p className="ga-doc-lede">
+              {plan.total_signals.toLocaleString()} signal
+              {plan.total_signals === 1 ? "" : "s"} across{" "}
+              {plan.sources.length} source
+              {plan.sources.length === 1 ? "" : "s"}. Each one can witness some
+              things and not others, which is why they are listed separately
+              rather than totalled.
+            </p>
+            <ul className="ga-doc-sources">
+              {plan.sources.map((s) => (
+                <li key={s.source_type} data-testid="goal-read-source">
+                  <span className="ga-doc-source-count">
+                    {s.signal_count.toLocaleString()}
+                  </span>{" "}
+                  <b>{s.label}</b> — {s.witnesses}
+                </li>
+              ))}
+            </ul>
+            {excluded.length ? (
+              <p className="ga-doc-note" data-testid="goal-excluded">
+                You excluded {excluded.map(humanSource).join(", ")} before
+                this ran, so nothing below rests on it.
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <p className="ga-doc-note" data-testid="goal-no-plan">
+            This run kept no record of which sources it read, so what is below
+            cannot be checked against its own inputs.
+          </p>
+        )}
+
+        {/* Coverage sits HERE — above the findings — and not in a footer.
+            A note that a third of the evidence was undated changes how every
+            line beneath it should be read, and a degradation discovered after
+            the conclusion has already done its damage. */}
+        {notes.length ? (
+          <>
+            <h3 className="ga-doc-h3">What was missing from it</h3>
+            <ul className="ga-coverage" data-testid="goal-coverage">
+              {notes.map((n, i) => (
+                <li key={i}>
+                  <b>{n.reason}</b> — {n.actual}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </section>
+
+      {/* ── 3. The short version ─────────────────────────────────────────── */}
+      <section className="ga-doc-section" data-testid="goal-headline">
+        <h2 className="ga-doc-h2">The short version</h2>
+        {headline ? (
+          <>
+            <p className="ga-doc-headline">{headline.statement}</p>
+            <p className="ga-doc-note">
+              It is the largest thing this reading found:{" "}
+              <Sized f={headline} idPrefix="goal-headline" />
+              {headline.confidence_band
+                ? `, at ${headline.confidence_band} confidence`
+                : ""}
+              {headline.claim_ids?.length
+                ? `, resting on ${headline.claim_ids.length} claim${
+                    headline.claim_ids.length === 1 ? "" : "s"
+                  }`
+                : ""}
+              . Largest by how much of your book it touches — not by how much it
+              would move the metric, which this reading cannot compute.
+            </p>
+          </>
+        ) : (
+          <p className="ga-empty">
+            Nothing survived verification. Everything that was considered is
+            listed below with the reason it was dropped — that list, not this
+            silence, is the result of this run.
+          </p>
+        )}
+      </section>
+
+      {/* ── 4. The findings, ranked ──────────────────────────────────────── */}
+      {findings.length ? (
+        <section className="ga-doc-section">
+          <h2 className="ga-doc-h2">
+            What the evidence says ({findings.length})
+          </h2>
+          <p className="ga-doc-lede">
+            Ranked by reach — how many accounts each theme touches. An
+            authoritative disagreement is placed first regardless of size,
+            because two sources that may both speak contradicting each other is
+            worth more than either of them alone.
+          </p>
+          <ol className="ga-doc-findings">
+            {findings.map((f, i) => (
+              <ReportFinding key={f.id} f={f} rank={i + 1} />
+            ))}
+          </ol>
+        </section>
+      ) : null}
+
+      {/* ── 5. What you already believed ─────────────────────────────────── */}
+      {hypotheses.length ? (
+        <section className="ga-doc-section" data-testid="goal-hypotheses">
+          <h2 className="ga-doc-h2">What you already believed</h2>
+          <ul className="ga-doc-list">
+            {hypotheses.map((h, i) => (
+              <li key={i}>{h}</li>
+            ))}
+          </ul>
+          {/* NOT a verdict. The engine does not yet test a stated hypothesis
+              against the claims, and rendering these beside the findings
+              without saying so would let a reader infer that silence meant
+              "not supported" — which would be a conclusion nothing produced. */}
+          <p className="ga-doc-note">
+            This reading did not test these. It reports what it found, and
+            nothing above was matched against what you wrote here — so their
+            absence from the findings is not evidence against them.
+          </p>
+        </section>
+      ) : null}
+
+      {/* ── 6. Considered and ruled out ──────────────────────────────────── */}
+      {run.considered?.length ? (
+        <section className="ga-doc-section" data-testid="goal-considered">
+          {/* OPEN while the list is short, folded once it is long — but the
+              COUNT is in the summary either way, so the ledger is never
+              silently thin. A run can reject a hundred candidates, and an
+              unfolded hundred pushes "what this cannot tell you" off the end
+              of the document, which is the one section a reader must reach. */}
+          <details open={run.considered.length <= RULED_OUT_OPEN_MAX}>
+            <summary className="ga-doc-h2 ga-doc-summary">
+              Considered and ruled out ({run.considered.length})
+            </summary>
+            <p className="ga-doc-lede">
+              A ranking whose rejections are invisible is a ranking you have to
+              take on faith. Each of these was a candidate and each one died for
+              a stated reason.
+            </p>
+            <ul className="ga-doc-ruled-out">
+              {run.considered.map((r) => (
+                <li key={r.id}>
+                  <b>{r.label}</b> — {r.reason}
+                  {r.stopped_at_stage ? (
+                    <em> (stopped at {r.stopped_at_stage})</em>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </details>
+        </section>
+      ) : null}
+
+      {/* ── 7. What this cannot tell you ─────────────────────────────────── */}
+      <section className="ga-doc-section ga-doc-limits" data-testid="goal-limits">
+        <h2 className="ga-doc-h2">What this cannot tell you</h2>
+        <p className="ga-doc-lede">
+          This reading is qualitative. It sizes a theme by reach — how many
+          accounts it touches — and it does not produce a point estimate, an
+          effort figure, a prioritisation score or a significance test, because
+          nothing it read carries the numbers those need. Where you expected one
+          of those, this is why it is absent.
+        </p>
+        {gaps.length ? (
+          <ul className="ga-doc-gaps">
+            {gaps.map((g, i) => (
+              <li key={i} data-testid="goal-gap">
+                <p className="ga-doc-gap-q">{g.question}</p>
+                <p className="ga-doc-gap-why">Not answerable here, because {g.because}.</p>
+                <p className="ga-doc-gap-fix">
+                  <span className="ga-sources-label">To close it</span>{" "}
+                  {g.remedy}
+                </p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="ga-doc-note">
+            This run recorded no list of its own gaps, which does not mean it
+            had none — only that it predates the step that states them.
+          </p>
+        )}
+      </section>
+    </article>
+  )
+}
+
+export default GoalAnalysisReport
