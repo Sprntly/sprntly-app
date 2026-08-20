@@ -21,8 +21,6 @@ Set, it must:
 """
 from __future__ import annotations
 
-import logging
-
 from tests._company_helpers import company_client
 from tests._project_helpers import seed_same_tenant_non_member
 
@@ -67,6 +65,15 @@ _STANDARD_PAYLOAD = {
     "answer": "ok", "key_points": [], "citations": [],
     "confidence": 0.9, "unanswered": "",
 }
+
+
+def _project_ctx(project_id: int, surface: str = "private") -> dict:
+    """The current wire shape for a project-scoped ask. Project chats carry
+    their project on `context_source`, NOT the removed top-level `project_id`
+    field — see `app.routes.ask._project_source` (`{"kind": "project",
+    "params": {"project_id", "surface"}}`). The individual project chat is the
+    `"private"` surface."""
+    return {"kind": "project", "params": {"project_id": project_id, "surface": surface}}
 
 
 # ---- A1/A9 — no-project_id regression ---------------------------------------
@@ -130,19 +137,26 @@ def test_ask_with_project_folds_memory_and_role(tenant_client, isolated_settings
     add_entry(project["id"], body="Ship by Friday — no exceptions.", author_user_id=t.user_id)
 
     fake_llm["payload"] = _STANDARD_PAYLOAD
+    # A plain-context question (NOT project-content/tool-shaped): the unified
+    # engine's gate declines it, so it folds project context via the composer
+    # fall-through (`_fold_project_context`) — the path that carries the
+    # AUTHORITATIVE preamble. A content-shaped question ("what should I know
+    # about this project?") instead takes the scoped tool path, where the same
+    # facts ride the SYSTEM prompt without the preamble (covered by the
+    # `context_source` gates below).
     start = t.client.post(
         "/v1/ask",
         json={
-            "question": "What should I know about this project?",
+            "question": "Give me your honest take on where we are.",
             "dataset": "acme-project-fold",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     ).json()
     body = _poll_ask(t.client, start["ask_id"])
     assert body["status"] == "ready"
     assert len(fake_llm["calls"]) == 1
     prompt = fake_llm["calls"][0]["user"]
-    # The private project chat now folds an AUTHORITATIVE project-facts block
+    # The private project chat folds an AUTHORITATIVE project-facts block
     # (the same breadth the @Sprntly group agent gets) rather than the older
     # passive "[Project context]" header — the framing tells the model these
     # lines are the source of truth and NOT to deflect to "connect a connector".
@@ -181,12 +195,14 @@ def test_shared_preamble_equals_prior_ask_literal(tenant_client, isolated_settin
     project = _create_project(t)
 
     fake_llm["payload"] = _STANDARD_PAYLOAD
+    # Plain-context question -> composer fall-through, the path that folds the
+    # AUTHORITATIVE preamble into the turn (see `test_ask_with_project_folds`).
     start = t.client.post(
         "/v1/ask",
         json={
-            "question": "What should I know about this project?",
+            "question": "Give me your honest take on where we are.",
             "dataset": "acme-preamble-literal",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     ).json()
     body = _poll_ask(t.client, start["ask_id"])
@@ -257,7 +273,7 @@ def test_enterprise_kg_still_runs(tenant_client, isolated_settings, fake_llm, mo
         json={
             "question": "What is the biggest churn driver?",
             "dataset": "acme-kg-still-runs",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     ).json()
     body = _poll_ask(t.client, start["ask_id"])
@@ -304,7 +320,7 @@ def test_ask_foreign_project_id_returns_404(tenant_client, isolated_settings):
         json={
             "question": "What does this project know?",
             "dataset": "company-b-proj-ask",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     )
     assert resp.status_code == 404
@@ -326,7 +342,7 @@ def test_ask_same_tenant_non_member_returns_403(isolated_settings, monkeypatch):
         json={
             "question": "What does this project know?",
             "dataset": "acme",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
         headers=non_member_headers,
     )
@@ -358,7 +374,7 @@ def test_ask_project_context_failure_is_best_effort(
         json={
             "question": "What should I know?",
             "dataset": "acme-context-fail",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     ).json()
     body = _poll_ask(t.client, start["ask_id"])
@@ -381,7 +397,7 @@ def test_ask_empty_project_yields_no_block(tenant_client, isolated_settings, fak
         json={
             "question": "What should I know?",
             "dataset": "acme-empty-project",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
         },
     ).json()
     body = _poll_ask(t.client, start["ask_id"])
@@ -390,7 +406,7 @@ def test_ask_empty_project_yields_no_block(tenant_client, isolated_settings, fak
     assert "[Project context]" not in prompt
 
 
-# ---- A9/A10 — conversation binding + cost log --------------------------------
+# ---- A9 — conversation binding (A10 cost-log test removed, see note below) ----
 
 
 def test_conversation_bound_to_project_first_write_wins(
@@ -410,7 +426,7 @@ def test_conversation_bound_to_project_first_write_wins(
         json={
             "question": "What should I know?",
             "dataset": "acme-bind-project",
-            "project_id": project["id"],
+            "context_source": _project_ctx(project["id"]),
             "conversation_id": conv_id,
         },
     ).json()
@@ -435,7 +451,7 @@ def test_conversation_bound_to_project_first_write_wins(
         json={
             "question": "A follow-up question.",
             "dataset": "acme-bind-project",
-            "project_id": other_project["id"],
+            "context_source": _project_ctx(other_project["id"]),
             "conversation_id": conv_id,
         },
     ).json()
@@ -453,28 +469,12 @@ def test_conversation_bound_to_project_first_write_wins(
     assert row2["project_id"] == project["id"]
 
 
-def test_ask_cost_log_includes_project_id(
-    tenant_client, isolated_settings, fake_llm, caplog
-):
-    t = tenant_client.make(slug="acme-cost-log")
-    _seed_corpus(isolated_settings["data_dir"], dataset="acme-cost-log")
-    project = _create_project(t)
-
-    fake_llm["payload"] = _STANDARD_PAYLOAD
-    with caplog.at_level(logging.INFO, logger="app.routes.ask"):
-        start = t.client.post(
-            "/v1/ask",
-            json={
-                "question": "What should I know?",
-                "dataset": "acme-cost-log",
-                "project_id": project["id"],
-            },
-        ).json()
-        _poll_ask(t.client, start["ask_id"])
-
-    joined = "\n".join(
-        r.getMessage() for r in caplog.records if r.name == "app.routes.ask"
-    )
-    assert f"project_id={project['id']}" in joined
-    # Identifiers only — never the memory body that was folded in.
-    assert "Ship by Friday" not in joined
+# NOTE (removed): `test_ask_cost_log_includes_project_id` (AC A10) pinned a
+# `app.routes.ask` INFO cost-log line that carried `project_id=<id>`. The
+# async ask-job rewrite removed that route-level log: cost/analytics now go
+# through `app.db.asks.log_ask(question, answer, citations)` — which carries NO
+# project_id — and a project-scoped ask persists `project_id` on the `ask_jobs`
+# row instead (via the legacy top-level `project_id` channel, not
+# `context_source`). There is no current route-level log to retarget the
+# assertion to, and it is not a safety invariant, so the test was deleted
+# rather than rewritten to assert a mechanism that no longer exists.
