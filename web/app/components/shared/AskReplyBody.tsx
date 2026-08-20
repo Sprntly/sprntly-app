@@ -7,6 +7,11 @@ import type { AskResponse } from "../../lib/api"
 import { stripAnswerHtmlChrome } from "../../lib/answerHtmlChrome"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { reportKindLabel, reportTitleFromHtml } from "../../lib/reportKind"
+import {
+  columnKinds,
+  labelColumnClasses,
+  tableRows,
+} from "../../lib/tableColumnKinds"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
 import { HtmlReportView } from "./HtmlReportView"
 import { JiraChangeConfirm } from "./JiraChangeConfirm"
@@ -60,6 +65,25 @@ const askMarkdownComponents: Components = {
       <code className={className} {...rest}>
         {children}
       </code>
+    )
+  },
+  // A table whose columns are all sized by content alone wraps the SHORT
+  // column to spare the long one — "Inputs & Data Sources" stacked over two
+  // lines beside prose running the full message width. The browser can't tell
+  // a label column from a prose one, so classify them here (see
+  // lib/tableColumnKinds) and mark the label ones; globals.css then sizes
+  // those to their content instead of wrapping them. Returns the table
+  // untouched whenever the heuristic declines, so the existing layout — and
+  // the min-width floor that stops the one-letter collapse — stays the
+  // fallback rather than being replaced.
+  table({ node, className, children, ...rest }) {
+    const kinds = columnKinds(tableRows(node))
+    const marks = labelColumnClasses(kinds)
+    const cls = [className, marks].filter(Boolean).join(" ") || undefined
+    return (
+      <table className={cls} {...rest}>
+        {children}
+      </table>
     )
   },
 }

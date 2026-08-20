@@ -10367,6 +10367,35 @@
     white-space: nowrap;
   }
 
+  /* Label columns, marked per-table by AskReplyBody's `table` override (see
+     lib/tableColumnKinds). The rules above stop a short column collapsing to
+     one letter; these stop it being WRAPPED to spare a prose column beside it
+     — the "Dimension / What It Is" shape, where `Inputs & Data Sources` came
+     out stacked over two lines while the prose ran the full message width.
+
+     Two declarations, both needed. `white-space: nowrap` raises the column's
+     min-content to the whole label, so auto layout can no longer wrap it
+     mid-phrase; `width: 1px` then stops it claiming more than that, since a
+     used width can never go below min-content — the standard shrink-to-fit
+     idiom. Width alone would still let the label wrap; nowrap alone would let
+     a short column drift wider than it needs.
+
+     Positional rather than a `<colgroup>`: `<col>` accepts width but not
+     white-space, and this needs both. Enumerated to 8 because the classifier
+     declines past that — a table that wide is heading for the scroller, and
+     pinning columns there makes it worse. */
+  .ai-bar-reply-answer .md-label-col-1 tr > :nth-child(1),
+  .ai-bar-reply-answer .md-label-col-2 tr > :nth-child(2),
+  .ai-bar-reply-answer .md-label-col-3 tr > :nth-child(3),
+  .ai-bar-reply-answer .md-label-col-4 tr > :nth-child(4),
+  .ai-bar-reply-answer .md-label-col-5 tr > :nth-child(5),
+  .ai-bar-reply-answer .md-label-col-6 tr > :nth-child(6),
+  .ai-bar-reply-answer .md-label-col-7 tr > :nth-child(7),
+  .ai-bar-reply-answer .md-label-col-8 tr > :nth-child(8) {
+    white-space: nowrap;
+    width: 1px;
+  }
+
   .ai-bar-reply-answer a {
     color: var(--accent);
     text-decoration: underline;
