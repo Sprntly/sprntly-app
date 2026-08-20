@@ -34,6 +34,7 @@ from app.crucible.cluster import assign_clusters, parse_embedding
 from app.crucible.kg_themes import assign_themes, load_theme_map
 from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
 from app.crucible.pipeline import build_findings
+from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
 from app.db import crucible_runs as runs_db
 from app.entitlements import require_crucible_module
@@ -89,6 +90,8 @@ def _public(row: dict) -> dict:
         # the confirmation step — the one thing the user has to do — is a blank
         # box. `prioritisation` holds no raw error text; it is the run's own
         # framing, which is exactly what the reader needs.
+        # Carries the Stage 0 ask AND the run plan. The plan is the thing the
+        # user approves, so it has to reach the client.
         "prioritisation": row.get("prioritisation") or {},
         "created_at": row.get("created_at"),
         "finished_at": row.get("finished_at"),
@@ -196,6 +199,63 @@ async def confirm(
     return _public(row or claimed)
 
 
+class ApprovePlan(BaseModel):
+    """What the user changed about the plan before saying go."""
+    excluded_sources: list[str] = Field(default_factory=list, max_length=12)
+    hypotheses: list[str] = Field(default_factory=list, max_length=10)
+
+
+@router.post("/{run_id}/approve")
+async def approve(
+    run_id: int,
+    body: ApprovePlan,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """The SECOND gate. The plan said what would be read and what could not be
+    answered; this is the user saying go, having seen both.
+
+    Separate from `/confirm` on purpose. Confirming a goal DEFINITION and
+    approving a method are different decisions, and collapsing them is how a
+    user ends up having agreed to something they never saw.
+    """
+    claimed = await asyncio.to_thread(
+        runs_db.claim_for_approval, run_id, company.company_id
+    )
+    if claimed is None:
+        row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+        if not row:
+            raise HTTPException(404, "Run not found")
+        raise HTTPException(
+            409,
+            f"This run is {row.get('status')}, so there is no plan waiting to "
+            f"be approved.",
+        )
+
+    meta = _meta_of(run_id, company.company_id)
+    definition_text = (meta.get("plan") or {}).get("definition_text") or ""
+
+    kwargs = dict(
+        run_id=run_id, company_id=company.company_id,
+        goal_text=claimed.get("goal_text") or "",
+        definition_text=definition_text,
+        confirmed_by=company.user_id,
+        approved=True,
+        excluded_sources=tuple(body.excluded_sources),
+        hypotheses=tuple(body.hypotheses),
+    )
+    if "pytest" in sys.modules:
+        await asyncio.to_thread(execute_run, **kwargs)
+    else:
+        loop = asyncio.get_running_loop()
+        task = asyncio.ensure_future(
+            loop.run_in_executor(_POOL, partial(execute_run, **kwargs))
+        )
+        _inflight.add(task)
+        task.add_done_callback(_inflight.discard)
+    row = await asyncio.to_thread(runs_db.get, run_id, company.company_id)
+    return _public(row or claimed)
+
+
 def execute_run(
     *,
     run_id: int,
@@ -203,6 +263,9 @@ def execute_run(
     goal_text: str,
     definition_text: Optional[str] = None,
     confirmed_by: Optional[str] = None,
+    approved: bool = False,
+    excluded_sources: tuple[str, ...] = (),
+    hypotheses: tuple[str, ...] = (),
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -278,12 +341,44 @@ def execute_run(
         definition_row_id = runs_db.save_definition(company_id, locked)
         runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
 
+        # ── Stage 1. SAY WHAT WILL BE DONE, then stop for approval. ─────────
+        #
+        # A run reads the whole corpus and takes minutes, and until now the
+        # first thing a user learned about its limits was the coverage notes at
+        # the bottom of the finished output — after the wait, phrased as an
+        # apology. The same facts BEFORE the run are a decision: connect the
+        # missing source, drop one, or accept a qualitative answer knowingly.
+        #
+        # Inventory only, no content read, so this returns in about a second.
+        if not approved:
+            plan = build_plan(
+                company_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                currency="accounts",
+            )
+            meta = dict(_meta_of(run_id, company_id))
+            meta["plan"] = plan.to_json()
+            runs_db.update(run_id, company_id, status="awaiting_approval",
+                           prioritisation=meta)
+            return
+
         runs_db.update(run_id, company_id, status="running",
                        started_at=now.isoformat())
         runs_db.heartbeat(run_id, company_id)
 
         # ── Stage 4. Project the corpus into claims, then group them. ───────
         signals = _load_signals(company_id)
+        if excluded_sources:
+            # The user dropped a source at the plan step. Honoured here rather
+            # than at the query, so the run can still report how much it left
+            # out — a silently narrower corpus is the thing coverage notes
+            # exist to prevent.
+            dropped = [r for r in signals if r.get("source_type") in excluded_sources]
+            signals = [r for r in signals
+                       if r.get("source_type") not in excluded_sources]
+            logger.info("crucible: user excluded %d signals from %s",
+                        len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
 
         # GROUPING: the graph's own themes first, embeddings only for whatever
@@ -459,6 +554,22 @@ def _seconds_between(a, b) -> Optional[float]:
             moment = moment.replace(tzinfo=timezone.utc)
         parsed.append(moment)
     return abs((parsed[0] - parsed[1]).total_seconds())
+
+
+def _meta_of(run_id: int, company_id: str) -> dict:
+    """The run's meta blob. `prioritisation` is the run's own framing — the
+    Stage 0 ask, and now the plan — so it is read-modify-written rather than
+    replaced, or approving a plan would erase the question that produced it."""
+    row = runs_db.get(run_id, company_id) or {}
+    meta = row.get("prioritisation") or {}
+    if isinstance(meta, str):
+        import json
+
+        try:
+            meta = json.loads(meta)
+        except Exception:  # noqa: BLE001
+            meta = {}
+    return meta if isinstance(meta, dict) else {}
 
 
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
