@@ -2588,7 +2588,7 @@
   {
    "id": 70,
    "verbatim": "Now my account shows multiple, duplicate payments made!!!",
-   "normalized": "Payments repeatedly reported as failing across cards and PayPal, after which the account showed multiple duplicate payments",
+   "normalized": "Payments repeatedly reported as failing across cards and Paylode, after which the account showed multiple duplicate payments",
    "category": "product",
    "type": "bug",
    "source": {
