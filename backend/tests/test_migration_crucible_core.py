@@ -205,14 +205,27 @@ def test_findings_sort_puts_unsizeable_last_without_calling_them_zero():
     assert "impact_value desc nulls last" in sql
 
 
-def test_migration_timestamp_is_unique_and_newest():
+def test_no_two_migrations_share_a_timestamp():
     """A duplicate timestamp blocks EVERY backend deploy from the branch —
-    schema_migrations' primary key is the timestamp alone. Cheapest possible
-    check, and this repo has been bitten twice."""
-    migrations = sorted(MIGRATION.parent.glob("*.sql"))
-    stamps = [p.name.split("_", 1)[0] for p in migrations]
-    assert stamps.count("20260819100000") == 1, "timestamp collision"
-    assert max(stamps) == "20260819100000", (
-        "this migration must be the newest; an out-of-order file applies after "
-        "migrations that already ran and can fail on a fresh database"
-    )
+    `schema_migrations`' primary key is the timestamp alone, so `db push` dies
+    on a duplicate key and takes the whole deploy with it. This repo has been
+    bitten twice.
+
+    THE CHECK IS NOW REPO-WIDE, and it used to also assert that this migration
+    was the NEWEST file in the directory. That second assertion could not
+    survive its own success: the next migration to land anywhere in the repo
+    made it false, whatever it did and however correct it was. A test that
+    every future change breaks is one whose failure teaches nothing — the
+    reader learns to edit the constant rather than to look.
+
+    What it was reaching for is real, but it is a property of a BRANCH against
+    its base, not of a directory listing: "your new migration must sort after
+    everything already applied." That is what the timestamp convention encodes
+    and what a stale branch violates, and it cannot be seen from filenames
+    alone once the file has landed. Uniqueness is the part that is checkable
+    here, and it is the part that actually blocks deploys.
+    """
+    stamps = [p.name.split("_", 1)[0] for p in MIGRATION.parent.glob("*.sql")]
+    dupes = {s for s in stamps if stamps.count(s) > 1}
+    assert not dupes, f"timestamp collision blocks every backend deploy: {dupes}"
+    assert MIGRATION.name.split("_", 1)[0] in stamps

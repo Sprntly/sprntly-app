@@ -612,6 +612,11 @@ export type GoalRun = {
   coverage_notes: { reason: string; actual: string }[]
   claim_count: number
   conversation_id: number | null
+  /** The `custom_artifacts` row this run's report was rendered into, or null
+   *  when nobody has asked for one yet. An ID ONLY — the body is fetched by
+   *  `goalAnalysisApi.document`, so a listing of runs never carries N report
+   *  bodies. */
+  artifact_id: number | null
   created_at: string | null
   finished_at: string | null
 }
@@ -708,6 +713,45 @@ export type GoalRunDetail = GoalRun & {
   }
 }
 
+/** A run's report, as an editable document.
+ *
+ *  THE RUN IS IMMUTABLE; THIS IS A DOCUMENT ABOUT THE RUN. The findings and
+ *  the ruled-out ledger are never rewritten — they are what makes the analysis
+ *  reproducible. The prose lives here, in an ordinary team document, and the
+ *  moment anyone changes it the report DETACHES: it stops being regenerated
+ *  from the run, and says so. */
+export type GoalReportDoc = {
+  /** The run this report is about. */
+  run_id: number
+  /** The `custom_artifacts` id — so the ordinary document PATCH saves it, and
+   *  the ordinary editor edits it. */
+  id: number
+  kind: string
+  title: string
+  status: "generating" | "ready" | "failed"
+  body_html: string
+  /** Optimistic-concurrency counter, same contract as `CustomArtifactDoc`. */
+  version: number
+  updated_at: string | null
+  updated_by: string | null
+  /** True once the body no longer matches what the run rendered — i.e. someone
+   *  edited it, by hand or through chat. The banner exists because a reader
+   *  must be able to tell prose from findings. */
+  detached: boolean
+}
+
+/** A "Save as document" copy: a free-standing team document with no run behind
+ *  it, which is why it can never be detached from one. */
+export type GoalReportFork = {
+  id: number
+  title: string
+  kind: string
+  version: number
+  conversation_id: number | null
+  run_id: null
+  detached: false
+}
+
 export const goalAnalysisApi = {
   /** Start a run. Returns immediately — the row is durable before any work,
    *  so this id is safe to poll even if the worker dies. */
@@ -738,6 +782,32 @@ export const goalAnalysisApi = {
       excluded_sources: opts?.excluded_sources ?? [],
       hypotheses: opts?.hypotheses ?? [],
     }),
+
+  /** This run's report document, or a 404 when it has none yet. */
+  document: (runId: number) =>
+    api.get<GoalReportDoc>(`/v1/crucible/${runId}/document`),
+  /** Render the run into an editable document and link it. IDEMPOTENT — a
+   *  second call returns the FIRST document untouched, edits included. It has
+   *  to be: this is what "Edit" calls, so a re-render on the second press
+   *  would mean reopening your own edited report is what destroys it. */
+  createDocument: (runId: number) =>
+    api.post<GoalReportDoc>(`/v1/crucible/${runId}/document`, {}),
+  /** Save a SEPARATE copy as an ordinary team document — the fork half. The
+   *  run's own report keeps its link and is left exactly as it was. Copies
+   *  what the report says right now, edits included. */
+  forkDocument: (runId: number) =>
+    api.post<GoalReportFork>(`/v1/crucible/${runId}/document/fork`, {}),
+  /** Apply a plain-language edit to this run's report.
+   *
+   *  The target is the RUN IN THE URL — the report the user has open. No id in
+   *  the body can redirect the write, which is the same rule `edit_prd` keeps
+   *  and for the same reason. Live on call; there is no confirm step. */
+  chatEditDocument: (runId: number, instruction: string) =>
+    api.post<{
+      document: GoalReportDoc
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/crucible/${runId}/document/chat-edit`, { instruction }),
 }
 
 export const askApi = {

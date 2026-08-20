@@ -25037,6 +25037,41 @@
 }
 .ga-doc-lede { margin: 0; }
 .ga-doc-note { margin: 0; font-size: 12.5px; opacity: 0.72; }
+/* ── The report as an editable document ───────────────────────────────────
+   The run is immutable; the report is a document ABOUT it. These are the two
+   states that distinction has to be visible in.
+
+   The ACTIONS sit under the title, quiet: editing a report detaches it from
+   its run for good, so the control that does it should not read as the
+   obvious next thing to press. The note beside them carries the consequence,
+   BEFORE the click rather than after it. */
+.ga-doc-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-top: 4px;
+}
+.ga-doc-action {
+  font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--border, #ececec); background: var(--surface, #fff);
+  color: inherit; cursor: pointer;
+}
+.ga-doc-action:disabled { opacity: 0.45; cursor: default; }
+.ga-doc-actions-note {
+  flex-basis: 100%; margin: 0; font-size: 12px; opacity: 0.66;
+}
+.ga-doc-editing { display: flex; flex-direction: column; gap: 14px; }
+/* The DETACHED banner is the product's own honesty, so it is given the weight
+   of a real notice rather than a footnote. Its untouched sibling below is
+   deliberately plainer: nothing has happened yet, and a notice that fires
+   before there is anything to notice is one people learn to skip. */
+.ga-doc-detached, .ga-doc-attached {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 14px; border-radius: 8px;
+  border: 1px solid var(--border, #ececec);
+  background: var(--surface-2, #f7f7f6);
+}
+.ga-doc-detached { border-left: 2px solid var(--accent, #111); }
+.ga-doc-detached-lede { margin: 0; font-size: 12.5px; line-height: 1.55; }
+.ga-doc-detached-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 /* The confirmed definition, quoted verbatim. It is the one sentence the whole
    report is measured against, so it is set apart rather than paraphrased. */
 .ga-doc-quote {
