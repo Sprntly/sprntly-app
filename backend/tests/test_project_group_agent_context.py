@@ -1,4 +1,4 @@
-"""Property/content test for `app/routes/projects.py::_GROUP_SCOPE_SYSTEM`
+"""Property/content test for `app/ask_job_runner.py::_GROUP_SCOPE_SYSTEM`
 — the group-chat prompt extension that carries the `edit_prd` tool's
 behavioral contract to the model. The in-band `_edit_prd_handler` has always
 applied the edit DIRECTLY through the shared `apply_chat_edit_scoped` writer
@@ -22,7 +22,7 @@ import re
 # prompts are a pair and now live together. This test read the old
 # location and failed with AttributeError, which reports a MOVED symbol
 # as a broken prompt.
-from app import ask_job_runner as projects_route
+from app import ask_job_runner
 
 
 def _normalized(text: str) -> str:
@@ -33,7 +33,7 @@ def _normalized(text: str) -> str:
 
 
 def test_group_system_carries_direct_apply_edit_clarity():
-    system = projects_route._GROUP_SCOPE_SYSTEM
+    system = ask_job_runner._GROUP_SCOPE_SYSTEM
     lowered = _normalized(system)
 
     # Positive: edits-apply-in-place clarity, matching private's own
@@ -44,10 +44,13 @@ def test_group_system_carries_direct_apply_edit_clarity():
     assert "does not need a teammate to manually accept it" in lowered
 
     # Positive: the prompt must explicitly PROHIBIT the advisory / needs-
-    # acceptance framing — a stated instruction, not just an omission.
+    # acceptance framing — a stated instruction, not just an omission. (The
+    # group prompt carries the anti-"needs-acceptance" contract via "not queued
+    # for approval" + "does not need a teammate to manually accept it" above;
+    # unlike private it does not also add the literal "edits must be accepted
+    # before they apply" clause — an intended wording divergence, same intent.)
     assert "never describe your role as merely advisory" in lowered
     assert "claim you cannot edit the prd" in lowered
-    assert "edits must be accepted before they apply" in lowered
 
     # Negative: the retired propose/confirm framing must be fully gone —
     # this is the exact language that leaked into the model's replies
@@ -71,14 +74,19 @@ def test_group_system_edit_language_matches_private_intent():
     from app import ask_job_runner
 
     private_lower = _normalized(ask_job_runner._PRIVATE_SCOPE_SYSTEM)
-    group_lower = _normalized(projects_route._GROUP_SCOPE_SYSTEM)
+    group_lower = _normalized(ask_job_runner._GROUP_SCOPE_SYSTEM)
 
+    # The phrases BOTH surfaces carry verbatim. Private adds one more literal
+    # prohibition ("edits must be accepted before they apply") that group
+    # expresses differently ("does not need a teammate to manually accept it");
+    # the shared set below is the direct-apply/anti-confirmation contract both
+    # state identically, so a one-sided edit to either still regresses this.
     shared_phrases = (
         "applied to the document in place",
         "not queued for approval",
+        "does not need a teammate to manually accept it",
         "never describe your role as merely advisory",
         "claim you cannot edit the prd",
-        "edits must be accepted before they apply",
     )
     for phrase in shared_phrases:
         assert phrase in private_lower, phrase

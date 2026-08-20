@@ -125,10 +125,17 @@ def test_private_ask_routes_through_single_shot(monkeypatch):
     import app.project_memory as pm
 
     monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
+    # A project ask now carries its project on `context_source` (not the legacy
+    # top-level `project_id`); scope is built by the assembler, whose membership
+    # gate we stub (no DB in this pure-unit routing test — breadth reads degrade
+    # to empty), same as `_build_private_scope_via_assembler` above.
+    monkeypatch.setattr("app.db.projects.project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr("app.db.projects.is_project_member", lambda *a, **k: True)
 
     asyncio.run(ajr.run_ask_job(
         ask_id=1, enterprise_id="c1", question="q", dataset="d",
-        project_id=9, conversation_id=5, user_id="u1",
+        conversation_id=5, user_id="u1",
+        context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
     ))
     assert captured["scope"] is not None
     assert captured["scope"].surface == Surface.project_private
@@ -225,7 +232,10 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Fortune's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task is TERMINAL: the handler's confirmation OVERRIDES the loop's
+    # free text (anti-fabrication — the reply only claims what actually
+    # happened), so the answer is the narration, not the loop's raw return.
+    assert out["answer"] == "Sent the brief to Fortune's chat."
 
 
 def test_private_bare_send_to_member_fires_gate_no_stream(_offline_db, monkeypatch):
@@ -258,7 +268,8 @@ def test_private_bare_send_to_member_fires_gate_no_stream(_offline_db, monkeypat
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Jay's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task terminal-override (see test above): answer is the narration.
+    assert out["answer"] == "Sent the brief to Jay's chat."
 
 
 def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
@@ -536,32 +547,12 @@ def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
     assert out_green["answer"] == "here is the PRD summary"
 
 
-def test_private_context_block_reaches_engine(_offline_db, monkeypatch):
-    """The private breadth block is folded into `history` by `routes/ask.py`
-    BEFORE `run_ask_job` runs (unchanged by this ticket) — `_run_sync`
-    forwards that same `history` into `qa_agent.answer` unmodified, and
-    `SurfaceScope.context_payload` is intentionally left empty for private
-    (never duplicated)."""
-    captured = {}
-
-    def _fake_answer(**kw):
-        captured.update(kw)
-        return {"answer": "ok", "citations": []}
-
-    monkeypatch.setattr(ajr.qa_agent, "answer", _fake_answer)
-    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
-    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
-    import app.project_memory as pm
-
-    monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
-
-    history_with_block = [{"role": "user", "content": "[PROJECT CONTEXT]\nRoster: ...\n"}]
-    asyncio.run(ajr.run_ask_job(
-        ask_id=1, enterprise_id="c1", question="q", dataset="d",
-        project_id=9, conversation_id=5, user_id="u1", history=history_with_block,
-    ))
-    assert captured["history"] == history_with_block
-    assert captured["scope"].context_payload == ""
+# RETIRED (2026-08-20): test_private_context_block_reaches_engine asserted that
+# `run_ask_job` builds a project-private `SurfaceScope` from the top-level
+# `project_id` (agentic private chat, wired into the ask path). The Slice-1
+# rework (PROJECTS-REBUILD-SLICE1-PLAN.md, 2026-08-18) DEFERS project actions on
+# the private surface — private now behaves like main (client-driven, streamed,
+# scope=None). Re-add with the slice that reintroduces the private tool-scope.
 
 
 # ── Invariant 2 — task-awareness + delegation survival ─────────────────────
@@ -747,8 +738,13 @@ def test_execute_task_post_turn_fires(_offline_db, monkeypatch):
     monkeypatch.setattr("app.project_task_execution.handle_execute_task", _fake_execute)
 
     private_posts = []
+    # The private scope's `post_turn` is built inside
+    # `ProjectContextAssembler.assemble` and closes over the
+    # `app.db.conversations.post_individual_turn` it imports there — patch THAT
+    # seam (not `ask_job_runner`'s re-export), and BEFORE the scope is built
+    # below, so the closure captures the spy.
     monkeypatch.setattr(
-        ajr, "post_individual_turn",
+        "app.db.conversations.post_individual_turn",
         lambda conv_id, role, content: private_posts.append((conv_id, role, content)),
     )
     private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
@@ -1020,30 +1016,15 @@ def test_nudge_on_missed_delegation(monkeypatch):
     assert history and "phrase it explicitly" in history[0]["content"]
 
 
-# ── Backgrounded group reply ─────────────────────────────────────────────
-
-
-def test_group_reply_broadcasts_on_completion(tenant_client, isolated_settings, monkeypatch):
-    from app.db import conversations as conversations_db
-
-    t = tenant_client.make(slug="acme")
-    project = t.client.post("/v1/projects", json={"name": "Broadcast on completion"}).json()
-    project_id = project["id"]
-    monkeypatch.setattr(projects_route, "resolve_chat_intent", lambda *a, **kw: {"intent": "answer"})
-    monkeypatch.setattr(projects_route.qa_agent, "answer", lambda **kw: {"answer": "Reply text", "citations": []})
-    broadcasts = []
-    monkeypatch.setattr(
-        projects_route, "publish_broadcast",
-        lambda topic, event, payload: broadcasts.append((topic, event, payload)),
-    )
-
-    resp = t.client.post(f"/v1/projects/{project_id}/group/turns", json={"content": "@Sprntly hi"})
-    assert resp.status_code == 200, resp.text
-    assert any(b[1] == "turn.created" and b[2]["role"] == "assistant" for b in broadcasts)
-    conv = conversations_db.get_group_chat(project_id)
-    assistant_turns = [row for row in conversations_db.list_group_turns(conv["id"]) if row["role"] == "assistant"]
-    assert len(assistant_turns) == 1
-    assert assistant_turns[0]["content"] == "Reply text"
+# RETIRED (2026-08-20): test_group_reply_broadcasts_on_completion asserted the
+# `POST /group/turns` route GENERATES + persists + broadcasts the @Sprntly reply
+# inline (the "backgrounded group reply" / post-and-receive design). The Slice-1
+# rework (PROJECTS-REBUILD-SLICE1-PLAN.md, 2026-08-18) REMOVES that path: group
+# now behaves like main/private — client-driven and streamed through `/v1/ask` —
+# and the plan explicitly requires that a group post NOT trigger the backend
+# group-agent (`_respond_as_group_agent`) or it double-generates. `/group/turns`
+# is now mount-not-scheduler (persists+broadcasts the HUMAN turn only). Re-add
+# with the slice that reintroduces post-and-receive group mode.
 
 
 # ── Queue-ready must-not-preclude seams ─────────────────────────────────────
