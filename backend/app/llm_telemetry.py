@@ -25,32 +25,42 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-# Per-model pricing ($/token; derived from /MTok in agent-build-research.md §3.1).
+# Cache-write TTL tiers. Anthropic prices a cache WRITE by the TTL the request
+# asked for and a cache READ identically either way, so a model row needs both
+# write rates, not one.
+CACHE_TTL_5M = "5m"   # bare `cache_control: {"type": "ephemeral"}` -> 1.25x input
+CACHE_TTL_1H = "1h"   # explicit `ttl: "1h"`                       -> 2x input
+
+# Per-model pricing ($/token; derived from /MTok in agent-build-research.md 3.1).
 # When a new model is approved (e.g. an Anthropic refresh), append a row here;
 # call sites already passing `model=` Just Work after the addition.
 #
-# KNOWN NAMING MISMATCH — read before adding a row. The `cache_write_1h` key is
-# named for the 1-hour cache-write tier (2x base input), and the sonnet/opus rows
-# below carry that 2x rate. But `_build_base_kwargs` (app/llm.py) only ever sends
-# `cache_control: {"type": "ephemeral"}` with no `ttl`, which is the 5-MINUTE
-# tier at 1.25x. So those two rows over-report cache-write spend by 1.6x
-# (2 / 1.25) on every call this repo actually makes. Left as-is deliberately
-# rather than silently corrected: `est_cost_usd` feeds `should_wrap_up` /
-# `should_abort`, so re-rating sonnet and opus would move the design agent's live
-# budget-cap thresholds and make new decision-log rows incomparable to years of
-# historical ones. That is its own change with its own blast radius. The
-# claude-haiku-4-5 row below is rated at the 1.25x the code's own request shape
-# earns, so at least the newest row is right; correcting the other two (and
-# renaming the key to `cache_write`) is the follow-up.
+# TWO WRITE RATES, ONE READ RATE. This table used to carry a single
+# `cache_write_1h` key holding the 1-hour (2x) rate, while `_build_base_kwargs`
+# only ever sent the bare ephemeral block -- the 5-MINUTE tier at 1.25x. Every
+# sonnet and opus cache write was therefore over-reported by 1.6x (2 / 1.25).
+# That was documented and left alone because `est_cost_usd` feeds the design
+# agent's `should_wrap_up` / `should_abort` budget caps, so re-rating would have
+# moved live thresholds. It is fixed now rather than re-documented because the
+# gateway genuinely uses BOTH tiers: `top-insights` writes at 1h, everything
+# else at 5m, so a single rate can no longer be right for both.
+#
+# The design agent's own calls write at 1h (see app/design_agent/prompts.py) and
+# its call sites pass `cache_ttl=CACHE_TTL_1H` explicitly, so its caps are priced
+# exactly as before this split and its historical decision-log rows stay
+# comparable. Every other caller takes the 5m default, which is what it was
+# actually being billed all along.
 MODEL_PRICING: dict[str, dict[str, float]] = {
     "claude-sonnet-4-6": {
         "input":          3.0 / 1_000_000,
+        "cache_write_5m": 3.75 / 1_000_000,
         "cache_write_1h": 6.0 / 1_000_000,
         "cache_read":     0.3 / 1_000_000,
         "output":         15.0 / 1_000_000,
     },
     "claude-opus-4-7": {  # opus tier — DEEP_MODEL, HEAVY_MODEL, design escalation
         "input":          5.0 / 1_000_000,
+        "cache_write_5m": 6.25 / 1_000_000,
         "cache_write_1h": 10.0 / 1_000_000,
         "cache_read":     0.5 / 1_000_000,
         "output":         25.0 / 1_000_000,
@@ -66,7 +76,8 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     # see the naming-mismatch note above.
     "claude-haiku-4-5": {
         "input":          1.0 / 1_000_000,
-        "cache_write_1h": 1.25 / 1_000_000,
+        "cache_write_5m": 1.25 / 1_000_000,
+        "cache_write_1h": 2.0 / 1_000_000,
         "cache_read":     0.1 / 1_000_000,
         "output":         5.0 / 1_000_000,
     },
@@ -88,7 +99,8 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     # 5,292 calls in 30 days — moves onto this tier.
     "claude-haiku-4-5-20251001": {
         "input":          1.0 / 1_000_000,
-        "cache_write_1h": 1.25 / 1_000_000,
+        "cache_write_5m": 1.25 / 1_000_000,
+        "cache_write_1h": 2.0 / 1_000_000,
         "cache_read":     0.1 / 1_000_000,
         "output":         5.0 / 1_000_000,
     },
@@ -99,7 +111,8 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     # $0.02 /MTok (OpenAI pricing, text-embedding-3-small).
     "text-embedding-3-small": {
         "input":          0.02 / 1_000_000,
-        "cache_write_1h": 0.0,
+        "cache_write_5m": 0.0 / 1_000_000,
+        "cache_write_1h": 0.0 / 1_000_000,
         "cache_read":     0.0,
         "output":         0.0,
     },
@@ -116,19 +129,22 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     # of the 1.6x caveat documented above.
     "gpt-5.6-sol": {  # flagship — the claude-opus-4-7 tier
         "input":          5.0 / 1_000_000,
-        "cache_write_1h": 6.25 / 1_000_000,
+        "cache_write_5m": 6.25 / 1_000_000,
+        "cache_write_1h": 10.0 / 1_000_000,
         "cache_read":     0.5 / 1_000_000,
         "output":         30.0 / 1_000_000,
     },
     "gpt-5.6-terra": {  # balanced — the claude-sonnet-4-6 default tier
         "input":          2.0 / 1_000_000,
-        "cache_write_1h": 2.5 / 1_000_000,
+        "cache_write_5m": 2.5 / 1_000_000,
+        "cache_write_1h": 4.0 / 1_000_000,
         "cache_read":     0.2 / 1_000_000,
         "output":         12.0 / 1_000_000,
     },
     "gpt-5.6-luna": {  # low-cost — the claude-haiku-4-5 router/classifier tier
         "input":          0.2 / 1_000_000,
-        "cache_write_1h": 0.25 / 1_000_000,
+        "cache_write_5m": 0.25 / 1_000_000,
+        "cache_write_1h": 0.4 / 1_000_000,
         "cache_read":     0.02 / 1_000_000,
         "output":         1.2 / 1_000_000,
     },
@@ -140,7 +156,8 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     # table, `est_cost_usd` is a token estimate, not an invoice.
     "gpt-5-search-api": {
         "input":          1.25 / 1_000_000,
-        "cache_write_1h": 1.5625 / 1_000_000,
+        "cache_write_5m": 1.5625 / 1_000_000,
+        "cache_write_1h": 2.5 / 1_000_000,
         "cache_read":     0.125 / 1_000_000,
         "output":         10.0 / 1_000_000,
     },
@@ -170,24 +187,36 @@ class RunUsage:
         self.input_tokens += getattr(usage, "input_tokens", 0) or 0
         self.output_tokens += getattr(usage, "output_tokens", 0) or 0
 
-    def est_cost_usd(self, model: str) -> float:
+    def est_cost_usd(self, model: str, cache_ttl: str = CACHE_TTL_5M) -> float:
         """Compute spend in USD for a given model. Raises UnknownModelError
-        if `model` isn't in MODEL_PRICING — fails closed."""
+        if `model` isn't in MODEL_PRICING — fails closed.
+
+        `cache_ttl` selects which write rate the cache-creation tokens are
+        priced at. It defaults to the 5-minute tier because that is what a bare
+        `cache_control: {"type": "ephemeral"}` earns, and that is what all but
+        one call path in this codebase sends. Pass `CACHE_TTL_1H` from a caller
+        that asked for the 1-hour tier (the design agent, and the gateway when
+        a long-cache skill is bound) — otherwise its writes are under-priced by
+        1.6x, which is the same class of error this split exists to fix.
+        """
         if model not in MODEL_PRICING:
             raise UnknownModelError(
                 f"No pricing for model '{model}'; add to MODEL_PRICING. "
                 f"Known models: {sorted(MODEL_PRICING.keys())}"
             )
         p = MODEL_PRICING[model]
+        write_rate = p["cache_write_1h" if cache_ttl == CACHE_TTL_1H else "cache_write_5m"]
         return (
-            self.cache_creation_input_tokens * p["cache_write_1h"]
+            self.cache_creation_input_tokens * write_rate
             + self.cache_read_input_tokens * p["cache_read"]
             + self.input_tokens * p["input"]
             + self.output_tokens * p["output"]
         )
 
 
-def project_next_iter_cost(usage: RunUsage, model: str, iters: int) -> float:
+def project_next_iter_cost(
+    usage: RunUsage, model: str, iters: int, cache_ttl: str = CACHE_TTL_5M
+) -> float:
     """Projected cumulative cost (USD) IF one more average iteration runs.
 
     current spend + one more iteration's worth at the run's OWN observed
@@ -204,13 +233,16 @@ def project_next_iter_cost(usage: RunUsage, model: str, iters: int) -> float:
     on an unpriced model (fails closed). The soft/hard cap is the caller's to
     pass — this helper is cap-agnostic so any future agent can supply its own.
     """
-    current = usage.est_cost_usd(model)  # raises UnknownModelError — fails closed
+    current = usage.est_cost_usd(model, cache_ttl)  # raises UnknownModelError — fails closed
     if current <= 0 or iters <= 0:
         return 0.0
     return current * (1 + 1 / iters)
 
 
-def should_wrap_up(usage: RunUsage, model: str, soft_cap: float, iters: int) -> bool:
+def should_wrap_up(
+    usage: RunUsage, model: str, soft_cap: float, iters: int,
+    cache_ttl: str = CACHE_TTL_5M,
+) -> bool:
     """True iff the projected next-iteration cost would reach/exceed the soft cap.
 
     Pure decision primitive — the CALLER (e.g. ``agent_loop``) decides what to do
@@ -222,10 +254,13 @@ def should_wrap_up(usage: RunUsage, model: str, soft_cap: float, iters: int) -> 
     iteration count — required, not defaulted, so no future caller can silently
     reproduce the flat-doubling bug by omission (see project_next_iter_cost).
     """
-    return project_next_iter_cost(usage, model, iters) >= soft_cap
+    return project_next_iter_cost(usage, model, iters, cache_ttl) >= soft_cap
 
 
-def should_abort(usage: RunUsage, model: str, hard_cap: float, iters: int) -> bool:
+def should_abort(
+    usage: RunUsage, model: str, hard_cap: float, iters: int,
+    cache_ttl: str = CACHE_TTL_5M,
+) -> bool:
     """True iff the projected next-iteration spend would reach/exceed the HARD cap.
 
     The fail-closed BACKSTOP above AD15's soft cap: when the soft-cap nudge
@@ -239,7 +274,7 @@ def should_abort(usage: RunUsage, model: str, hard_cap: float, iters: int) -> bo
     reuse. ``iters`` is required the same way as ``should_wrap_up`` — see
     project_next_iter_cost.
     """
-    return project_next_iter_cost(usage, model, iters) >= hard_cap
+    return project_next_iter_cost(usage, model, iters, cache_ttl) >= hard_cap
 
 
 def log_llm_run(
@@ -251,6 +286,7 @@ def log_llm_run(
     status: str,
     model: str,
     error_class: str | None = None,
+    cache_ttl: str = CACHE_TTL_5M,
     **extra: Any,
 ) -> None:
     """Emit the canonical LLM cost-summary log line.
@@ -272,7 +308,7 @@ def log_llm_run(
     on unknown model (raises UnknownModelError; the caller is the bug, not the
     log line). Designed for grep-friendly observability + future log-aggregation.
     """
-    cost = usage.est_cost_usd(model)  # raises UnknownModelError — don't swallow
+    cost = usage.est_cost_usd(model, cache_ttl)  # raises UnknownModelError — don't swallow
 
     parts: list[str | None] = [operation]
     for key in sorted(identifier.keys()):

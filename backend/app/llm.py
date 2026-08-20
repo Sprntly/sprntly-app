@@ -400,6 +400,64 @@ def _create_with_retries(
         _llm_gate.release(background=background)
 
 
+# --- Prompt-cache TTL tiers -------------------------------------------------
+# Anthropic prices a cache WRITE by the TTL the request asks for: the bare
+# `{"type": "ephemeral"}` block is the 5-minute tier at 1.25x the input rate,
+# and an explicit `ttl: "1h"` is the 1-hour tier at 2x. A read is 0.1x either
+# way. So the tiers are not strictly ordered — 1h is cheaper per call only when
+# entries actually survive to be read.
+#
+# The rule of thumb this codebase uses: pick 1h when the measured share of
+# calls landing within an hour of the previous one is comfortably above the
+# ~55% break-even, and 5m otherwise. `compose_top_insights` is the clear case
+# (measured over 21 days of production: 14.8% of calls fall within 5 minutes of
+# the previous one, 86.3% within an hour) — see app/graph/gateway.py.
+CACHE_TTL_5M = "5m"
+CACHE_TTL_1H = "1h"
+
+# Minimum cacheable prefix, in TOKENS, per model family. A prefix shorter than
+# this is NOT cached and the API says nothing about it — the response simply
+# comes back with `cache_creation_input_tokens: 0`. Attaching `cache_control`
+# below the floor is therefore not a cheap no-op to be safe about: it burns one
+# of the four breakpoints a request is allowed and makes the telemetry read as
+# "we cache here" when we do not. Sized from Anthropic's published per-model
+# minimums; keep in sync when a model tier is added.
+_MIN_CACHEABLE_TOKENS = {
+    "claude-haiku-4-5": 4096,
+    "claude-opus-4-7": 2048,
+    "claude-sonnet-4-6": 1024,
+}
+# Fail SAFE, not open: an unknown model gets the strictest floor, so a new tier
+# can only ever under-cache (a missed saving) rather than emit dead breakpoints.
+_DEFAULT_MIN_CACHEABLE_TOKENS = 4096
+# Prose runs ~4 chars/token. Only ever used to compare against the floors above,
+# where erring high costs a cache we could have had and erring low costs a dead
+# breakpoint — so this stays deliberately conservative.
+_CHARS_PER_TOKEN = 4
+
+
+def _cache_control(ttl: str | None) -> dict:
+    """The `cache_control` block for a TTL tier.
+
+    `None` / `"5m"` emits the bare ephemeral block — the API's 5-minute default,
+    billed at 1.25x input. `"1h"` emits the explicit 1-hour block, billed at 2x.
+    """
+    if ttl == CACHE_TTL_1H:
+        return {"type": "ephemeral", "ttl": CACHE_TTL_1H}
+    return {"type": "ephemeral"}
+
+
+def _is_cacheable(text: str, model: str) -> bool:
+    """Whether `text` is long enough to actually produce a cache entry on `model`.
+
+    Guards the silent-no-op case described on `_MIN_CACHEABLE_TOKENS`: the
+    triage path, for instance, sends ~2.5k tokens to haiku, whose floor is 4096,
+    so marking it cacheable would look like a fix and change nothing.
+    """
+    floor = _MIN_CACHEABLE_TOKENS.get(model, _DEFAULT_MIN_CACHEABLE_TOKENS)
+    return len(text) >= floor * _CHARS_PER_TOKEN
+
+
 def _build_base_kwargs(
     *,
     model: str,
@@ -408,40 +466,59 @@ def _build_base_kwargs(
     user: str,
     user_cacheable_prefix: str | None,
     temperature: float | None = None,
+    cache_ttl: str | None = None,
 ) -> dict:
     """Build the kwargs dict passed to `messages.create`.
 
-    If `user_cacheable_prefix` is None, returns the simple `content=str` form
-    used by every existing caller — behavior is unchanged. Otherwise builds
-    content as a list of text blocks, with `cache_control: ephemeral` on the
-    prefix (and on the system prompt when it's substantial enough to be
-    worth caching).
+    Prompt caching is applied wherever it can actually pay off:
+
+      * `system` is cached whenever it clears the acting model's minimum
+        cacheable prefix — on BOTH the plain and the prefixed branch. It used
+        to be cached only on the prefixed branch, so every skill-less caller
+        with a large static system prompt (`app.ask_planner` most visibly,
+        whose ~7k-char block is documented as "STATIC and TENANT-INVARIANT so
+        one cache entry serves every company") silently paid full input price
+        on every call. The comment described the intent; the code only
+        implemented half of it.
+      * `user_cacheable_prefix`, when given, is cached under the same TTL.
+
+    A `system` short enough to be uncacheable keeps the plain-string form, so
+    the request shape for small callers is byte-identical to before.
+
+    `cache_ttl` selects the pricing tier for both blocks — see `_cache_control`.
+    One tier per request, deliberately: the two blocks are always written and
+    read together, and a single tier keeps `app.llm_metering` able to price the
+    response's single `cache_creation_input_tokens` total unambiguously.
 
     `temperature` (when not None) is threaded straight through to
     `messages.create` — omitted entirely when None so the API default (1.0) is
     used, keeping every existing caller byte-identical.
     """
+    cc = _cache_control(cache_ttl)
+    cache_system = _is_cacheable(system, model)
+
     if user_cacheable_prefix is None:
         base = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": (
+                [{"type": "text", "text": system, "cache_control": cc}]
+                if cache_system
+                else system
+            ),
             "messages": [{"role": "user", "content": user}],
         }
         if temperature is not None:
             base["temperature"] = temperature
         return base
+
     system_param: list[dict] = [
-        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-        if len(system) > 1000
+        {"type": "text", "text": system, "cache_control": cc}
+        if cache_system
         else {"type": "text", "text": system}
     ]
     content = [
-        {
-            "type": "text",
-            "text": user_cacheable_prefix,
-            "cache_control": {"type": "ephemeral"},
-        },
+        {"type": "text", "text": user_cacheable_prefix, "cache_control": cc},
         {"type": "text", "text": user},
     ]
     base = {
@@ -509,6 +586,7 @@ def call_json(
     max_tokens: int = 16000,
     schema: dict | None = None,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
@@ -543,6 +621,7 @@ def call_json(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
         temperature=temperature,
     )
     if timeout is not None:
@@ -597,6 +676,7 @@ def call_md(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
@@ -627,6 +707,7 @@ def call_md(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
         temperature=temperature,
     )
     if timeout is not None:
@@ -648,6 +729,7 @@ def run_tool_loop(
     max_tokens: int = 8000,
     max_iters: int = 5,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     force_tool: str | None = None,
 ) -> str:
@@ -680,6 +762,7 @@ def run_tool_loop(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
     )
     system_param = base["system"]
     messages = base["messages"]

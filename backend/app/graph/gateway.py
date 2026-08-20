@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.llm import (
+    CACHE_TTL_1H,
     DEFAULT_MODEL,
     LONG_REQUEST_TIMEOUT_S,
     call_json,
@@ -48,6 +49,28 @@ _LONG_OUTPUT_SKILLS = frozenset(
 
 def _is_long_output(skill: Optional[str]) -> bool:
     return skill is not None and skill in _LONG_OUTPUT_SKILLS
+
+
+# Skills whose METHOD block is worth caching at the 1-hour tier rather than the
+# 5-minute default. The tiers are priced differently on the WRITE (1.25x input
+# for 5m, 2x for 1h) and identically on the read (0.1x), so 1h wins only when
+# entries survive long enough to be read — roughly a >55% within-the-hour
+# hit rate. It is not a strictly-better setting to apply everywhere.
+#
+# `top-insights` is the measured case. Its cacheable prefix is the method block
+# alone (the caller passes no prefix of its own) and the block is byte-stable
+# across tenants, so one entry serves every company. Over 21 days of production
+# calls, only 14.8% landed within 5 minutes of the previous one — but 86.3%
+# landed within an hour, and the resulting ~0.16 read/write ratio meant the
+# 32.5k-token block was re-written on nearly every call and almost never read
+# back. Before adding a skill here, measure its own gap distribution rather
+# than assuming; a skill whose prefix carries per-company content has to be
+# measured per company, not system-wide.
+_LONG_CACHE_SKILLS = frozenset({"top-insights"})
+
+
+def _cache_ttl_for(skill: Optional[str]) -> Optional[str]:
+    return CACHE_TTL_1H if skill is not None and skill in _LONG_CACHE_SKILLS else None
 
 
 def _build_method_prefix(
@@ -135,15 +158,27 @@ class LLMResult:
     stop_reason: Optional[str]
 
 
-def _est_cost(meta: dict) -> float:
+def _est_cost(meta: dict, cache_ttl: Optional[str] = None) -> float:
+    """Estimated USD for one call, from the response's own usage numbers.
+
+    `cache_ttl` is the tier the REQUEST asked for — the response does not say.
+    Defaults to the 5-minute tier, which is what a bare ephemeral block earns
+    and what every caller but a long-cache skill sends. This used to hardcode
+    the 1-hour rate, over-reporting every cache write by 1.6x.
+
+    Fails OPEN on an unpriced model (returns 0.0) rather than raising, unlike
+    `RunUsage.est_cost_usd` — a decision-log row must never take down the call
+    it is describing. That asymmetry is deliberate and predates this change.
+    """
     p = MODEL_PRICING.get(meta.get("model", ""))
     if not p:
         return 0.0
+    write_rate = p["cache_write_1h" if cache_ttl == CACHE_TTL_1H else "cache_write_5m"]
     return (
         meta.get("input_tokens", 0) * p["input"]
         + meta.get("output_tokens", 0) * p["output"]
         + meta.get("cache_read_input_tokens", 0) * p["cache_read"]
-        + meta.get("cache_creation_input_tokens", 0) * p["cache_write_1h"]
+        + meta.get("cache_creation_input_tokens", 0) * write_rate
     )
 
 
@@ -215,6 +250,10 @@ def llm_call(
     # default 120s non-streamed path. Other callers keep the non-streamed path.
     # A caller asking for per-delta streaming implies the streaming transport.
     use_long_output = long_output or _is_long_output(skill) or (on_delta is not None)
+    # Cache-TTL tier for this call's method block / system prompt. Resolved
+    # from the bound skill (see _LONG_CACHE_SKILLS); None means the 5-minute
+    # default, which is what every skill but top-insights still wants.
+    cache_ttl = _cache_ttl_for(skill)
     stream = use_long_output
     timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
@@ -259,6 +298,7 @@ def llm_call(
             output: Any = call_json(
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
+                cache_ttl=cache_ttl,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_json_delta=on_delta,
             )
@@ -271,6 +311,7 @@ def llm_call(
             output = call_md(
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 user_cacheable_prefix=user_cacheable_prefix,
+                cache_ttl=cache_ttl,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_delta=on_delta,
             )
@@ -290,7 +331,7 @@ def llm_call(
         output_tokens=meta.get("output_tokens", 0),
         cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
-        cost_usd=round(_est_cost(meta), 6),
+        cost_usd=round(_est_cost(meta, cache_ttl), 6),
         latency_ms=latency_ms,
         stop_reason=meta.get("stop_reason"),
     )
