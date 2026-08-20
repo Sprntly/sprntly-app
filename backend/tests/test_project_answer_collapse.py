@@ -65,10 +65,17 @@ def test_private_ask_routes_through_single_shot(monkeypatch):
     import app.project_memory as pm
 
     monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
+    # A project ask now carries its project on `context_source` (not the legacy
+    # top-level `project_id`); scope is built by the assembler, whose membership
+    # gate we stub (no DB in this pure-unit routing test — breadth reads degrade
+    # to empty), same as `_build_private_scope_via_assembler` above.
+    monkeypatch.setattr("app.db.projects.project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr("app.db.projects.is_project_member", lambda *a, **k: True)
 
     asyncio.run(ajr.run_ask_job(
         ask_id=1, enterprise_id="c1", question="q", dataset="d",
-        project_id=9, conversation_id=5, user_id="u1",
+        conversation_id=5, user_id="u1",
+        context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
     ))
     assert captured["scope"] is not None
     assert captured["scope"].surface == Surface.project_private
@@ -165,7 +172,10 @@ def test_private_delegation_phrased_fires_gate_no_stream(monkeypatch):
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Fortune's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task is TERMINAL: the handler's confirmation OVERRIDES the loop's
+    # free text (anti-fabrication — the reply only claims what actually
+    # happened), so the answer is the narration, not the loop's raw return.
+    assert out["answer"] == "Sent the brief to Fortune's chat."
 
 
 def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
@@ -198,7 +208,8 @@ def test_private_bare_send_to_member_fires_gate_no_stream(monkeypatch):
     )
     assert deltas == []
     assert dispatched == ["Sent the brief to Jay's chat."]
-    assert out["answer"] == "sent"
+    # delegate_task terminal-override (see test above): answer is the narration.
+    assert out["answer"] == "Sent the brief to Jay's chat."
 
 
 def test_private_bare_send_to_non_member_declines_gate_streams(monkeypatch):
