@@ -153,7 +153,10 @@ def test_regenerate_bg_suppresses_full_delivery_and_pings(isolated_settings, mon
          patch.object(brief_routes, "warm_synthesis_drilldowns"):
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
 
-    assert calls == [("acme", {"deliver": False})]
+    # force=True: a user-triggered regenerate composes now. The recompose
+    # floor bounds incidental churn (scheduler ticks, connector syncs), so a
+    # click must never be answered with a stale brief.
+    assert calls == [("acme", {"deliver": False, "force": True})]
     assert pings == [("acme", {"id": 9})]
 
 
@@ -191,7 +194,10 @@ def test_regenerate_all_bg_suppresses_full_delivery_and_pings(
          patch("app.synthesis.delivery.deliver_brief") as full_push:
         asyncio.run(brief_routes._full_pipeline_bg("acme"))
 
-    assert calls == [("acme", {"deliver": False})]  # full message suppressed
+    # force=True: a user-triggered regenerate composes now. The recompose
+    # floor bounds incidental churn (scheduler ticks, connector syncs), so a
+    # click must never be answered with a stale brief.
+    assert calls == [("acme", {"deliver": False, "force": True})]  # full message suppressed
     assert pings == [("acme", {"id": 5})]  # ready ping once, with fresh brief
     full_push.assert_not_called()  # the full weekly push NEVER fires here
 

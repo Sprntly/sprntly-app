@@ -75,7 +75,7 @@ def test_regenerate_route_brackets_a_durable_run(
 
     t = tenant_client.make(slug="acme")
     monkeypatch.setattr(brief_routes, "generate_brief_for",
-                        lambda dataset, deliver: {"insights": []})
+                        lambda dataset, deliver, force=False: {"insights": []})
     monkeypatch.setattr(brief_routes, "_notify_brief_ready",
                         lambda dataset, brief: None)
     monkeypatch.setattr(brief_routes, "warm_synthesis_drilldowns",
@@ -102,7 +102,7 @@ def test_regenerate_supersedes_prior_interrupted_run(
     orphan = create_run("acme", trigger="regenerate")
 
     monkeypatch.setattr(brief_routes, "generate_brief_for",
-                        lambda dataset, deliver: {"insights": []})
+                        lambda dataset, deliver, force=False: {"insights": []})
     monkeypatch.setattr(brief_routes, "_notify_brief_ready",
                         lambda dataset, brief: None)
     monkeypatch.setattr(brief_routes, "warm_synthesis_drilldowns",
