@@ -106,6 +106,87 @@ def test_render_card_derives_accent_from_type(isolated_settings):
     assert "From" in html_body
 
 
+def _pill_brief(insight_types, selected=None, card_type="competitive"):
+    brief = {
+        "summary_headline": "Headline",
+        "week_label": "Week of August 5, 2026",
+        "insights": [{
+            "theme_id": "t1",
+            "tag": "something_new",
+            "title": "fallback title",
+            "insight_types": insight_types,
+            "_card": {"type": card_type, "title": "Card title", "body": "Body.",
+                      "sources": [], "ctas": [], "signal_id": "t1"},
+        }],
+    }
+    if selected is not None:
+        brief["_insight_prefs"] = {"selected": selected, "matched": 1}
+    return brief
+
+
+def test_email_pill_uses_the_reader_vocabulary(isolated_settings):
+    """The emailed pill names the finding in the SAME types the picker offers,
+    not the skill taxonomy's own 8. Before 2026-08-05 a card classified
+    `competitor_moves` was emailed under its skill type, so the email could not
+    evidence the reader's selection."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    _s, html_body, text_body = render_brief_email(
+        _pill_brief(["competitor_moves"]))
+
+    assert "Competitor moves" in html_body and "Competitor moves" in text_body
+    assert "#b07a2e" in html_body          # ochre, the competitor-moves accent
+
+
+def test_email_pill_surfaces_the_selected_type_over_an_unpicked_primary(
+        isolated_settings):
+    """Primary is top_problems but the reader asked only for what-to-build —
+    show what-to-build."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    both = ["top_problems", "build_priorities"]
+    _s, picked, _t = render_brief_email(
+        _pill_brief(both, selected=["build_priorities"]))
+    assert "What to build" in picked and "#1a8a52" in picked
+
+    _s, unpicked, _t = render_brief_email(_pill_brief(both, selected=[]))
+    assert "Top problem" in unpicked and "#b23b52" in unpicked
+
+
+def test_email_pill_keeps_the_primary_when_both_types_were_picked(isolated_settings):
+    """The finding's own order wins; the selection only breaks the tie.
+    Walking the SELECTION order would let the reader's first chip override every
+    card's primary — on a real staging brief that collapsed two distinct
+    findings to the same pill."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    sel = ["top_problems", "build_priorities"]
+    _s, html_body, _t = render_brief_email(
+        _pill_brief(["build_priorities", "top_problems"], selected=sel))
+    assert "What to build" in html_body
+    assert "Top problem" not in html_body
+
+
+def test_email_pill_falls_back_to_skill_type_on_legacy_findings(isolated_settings):
+    """A pre-classifier finding has no `insight_types`; the 8 skill types have
+    no faithful 6-slug counterpart for retention/demand/engagement/compliance,
+    so we keep the old label rather than invent one."""
+    from app.synthesis.email_delivery import render_brief_email
+
+    _s, html_body, _t = render_brief_email(_pill_brief([], card_type="demand"))
+    assert "Demand" in html_body
+    assert "#5f57a6" in html_body  # the skill taxonomy's iris, unchanged
+
+
+def test_email_pill_matches_the_web_badge_vocabulary(isolated_settings):
+    """Backend and frontend badge tables must not drift — same six slugs."""
+    from app.insight_types import INSIGHT_TYPE_BADGES, INSIGHT_TYPE_SLUGS
+
+    assert set(INSIGHT_TYPE_BADGES) == set(INSIGHT_TYPE_SLUGS)
+    labels = [b[0] for b in INSIGHT_TYPE_BADGES.values()]
+    assert len(set(labels)) == len(labels), "two slugs share a badge label"
+
+
 def test_render_card_ctas(isolated_settings):
     from app.synthesis.email_delivery import render_brief_email
 

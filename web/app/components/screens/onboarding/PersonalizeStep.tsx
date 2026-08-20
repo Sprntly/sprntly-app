@@ -9,8 +9,10 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import {
-  SELECTABLE_INSIGHT_TYPES,
-  selectableInsightTypes,
+  DEFAULT_INSIGHT_TYPES,
+  INSIGHT_TYPES,
+  INSIGHT_TYPE_SLUGS,
+  resolveInsightTypes,
 } from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
@@ -41,12 +43,15 @@ import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "personalize-step"
 
-// The insight-type chips come from the shared list of SELECTABLE types
-// (lib/insight-types) so onboarding and Settings → Comms & Brief always offer
-// the same set — currently the three that have a skill behind them. The
-// selection is WORKSPACE-level — persisted on
-// companies.notification_settings.brief_insight_types — so the whole
-// workspace's brief is filtered to what the admin picks here.
+// The insight-type chips come from INSIGHT_TYPES (lib/insight-types) — the ONE
+// list, shared with Settings → Comms & Brief and mirrored by
+// backend/app/insight_types.py, so no surface can offer a type another cannot
+// produce or render. The seed comes from DEFAULT_INSIGHT_TYPES, also shared, so
+// the two screens open in the same state for the same workspace. The selection
+// is WORKSPACE-level — persisted on
+// companies.notification_settings.brief_insight_types — so it orders the whole
+// workspace's brief. It is NEVER empty: clearing every chip resolves to ALL
+// types, which every reader treats as "no filter".
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -81,8 +86,11 @@ export function PersonalizeStep() {
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
+  // DEFAULT_INSIGHT_TYPES, not a literal — Settings → Comms & Brief seeds from
+  // the same constant, so the two screens cannot open in different states for
+  // the same workspace.
   const [surfaces, setSurfaces] = useState<string[]>(
-    (draft?.surfaces as string[]) ?? ["top_problems", "build_priorities"],
+    (draft?.surfaces as string[]) ?? [...DEFAULT_INSIGHT_TYPES],
   )
 
   const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
@@ -110,17 +118,21 @@ export function PersonalizeStep() {
     if (typeof n.brief_channel === "string") setDestination(n.brief_channel)
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Seed the insight-type selection from the workspace's saved default
-  // (notification_settings.brief_insight_types), so returning to the step (or
-  // having set it in Settings) doesn't reset it. A local draft wins; an empty
-  // saved selection keeps the sensible defaults above rather than blanking the
-  // chips. Narrowed to the offered types — a saved slug with no chip would be
-  // invisible state the PM can't see or clear.
+  // Seed the insight-type selection from what the workspace has stored
+  // (notification_settings.brief_insight_types), so returning to the step — or
+  // having set it in Settings → Comms & Brief first — shows the SAME chips
+  // Settings shows. A local draft still wins.
+  //
+  // This used to be `if (saved.length) setSurfaces(saved)`, which ignored a
+  // stored `[]` and left the default preselected — a PM who cleared their chips
+  // in Settings and came back found them switched on again, and Continue wrote
+  // them straight back. `resolveInsightTypes` settles all three cases in one
+  // place: absent => the shared default, cleared => every type, otherwise the
+  // stored selection.
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}
-    const saved = selectableInsightTypes(n.brief_insight_types)
-    if (saved.length) setSurfaces(saved)
+    setSurfaces(resolveInsightTypes(n.brief_insight_types))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -184,10 +196,17 @@ export function PersonalizeStep() {
     [timezone, weekday, hour, frequency],
   )
 
+  // Turning off the LAST chip means "stop filtering", not "show me nothing", so
+  // the picker fills back up instead of emptying. The selection is never empty
+  // in the UI or in the row, and "all selected" is treated as no filter
+  // everywhere it is read.
   function toggleSurface(value: string) {
-    setSurfaces((prev) =>
-      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
-    )
+    setSurfaces((prev) => {
+      const next = prev.includes(value)
+        ? prev.filter((v) => v !== value)
+        : [...prev, value]
+      return next.length ? next : [...INSIGHT_TYPE_SLUGS]
+    })
   }
 
   async function save() {
@@ -208,7 +227,7 @@ export function PersonalizeStep() {
           // check. brief_insight_note is deliberately not written — the
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
-          brief_insight_types: selectableInsightTypes(surfaces),
+          brief_insight_types: resolveInsightTypes(surfaces),
           brief_channel: destination,
           email_enabled: destination === "email",
           brief_frequency: frequency,
@@ -268,14 +287,18 @@ export function PersonalizeStep() {
       {error && <div className="onb-form-error">{error}</div>}
 
       <div className="onb-section">
+        {/* Wording is kept identical to Settings → Comms & Brief: the two
+            screens write the same key, so they must also state the same rule.
+            "Leave empty for everything" is load-bearing — an empty selection is
+            a real choice (no filtering), not an unfinished form. */}
         <div className="onb-section-h">
           What should your workspace surface?{" "}
-          <span className="opt">— pick any</span>
+          <span className="opt">— pick any; clear them all for everything</span>
         </div>
       </div>
 
       <div className="metric-chips" data-field="surfaces">
-        {SELECTABLE_INSIGHT_TYPES.map((opt) => {
+        {INSIGHT_TYPES.map((opt) => {
           const isSel = surfaces.includes(opt.value)
           return (
             <button

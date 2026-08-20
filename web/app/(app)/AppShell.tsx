@@ -29,7 +29,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
-import { selectableInsightTypes } from "../lib/insight-types"
+import { cleanInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useThreadReportsSync } from "../components/shared/useThreadReports"
 import { useThreadDocumentSync } from "../components/shared/useThreadDocument"
@@ -130,7 +130,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // to surfacing everything.
   useEffect(() => {
     if (!workspace) return
-    const types = selectableInsightTypes(workspace.notification_settings?.brief_insight_types)
+    const types = cleanInsightTypes(workspace.notification_settings?.brief_insight_types)
     setContent({ insightTypeFilter: types })
   }, [setContent, workspace])
 
