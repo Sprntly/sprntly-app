@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from app.db.client import require_client
@@ -306,3 +306,89 @@ def save_definition(company_id: str, definition) -> Optional[int]:
     }
     res = require_client().table("crucible_goal_definitions").insert(row).execute()
     return ((res.data or [{}])[0] or {}).get("id")
+
+
+#: How long a report document may sit unlinked before the sweep treats it as
+#: stranded. Generous, because the window it covers is milliseconds wide: the
+#: only way to strand one is for the process to die between `create_artifact`
+#: and `link_document`. A long gate costs nothing and removes any chance of
+#: deleting a document whose link is still in flight on a slow box.
+STRANDED_DOCUMENT_AGE_MINUTES = 60
+
+
+def sweep_stranded_documents(*, older_than_minutes: int | None = None) -> dict:
+    """Delete report documents no run points at. Returns what it did.
+
+    THE FAILURE THIS COVERS. `POST /{id}/document` creates the artifact, then
+    links it. `link_document`'s compare-and-set handles the double-click race —
+    the loser deletes its own document. It cannot handle a process death
+    BETWEEN the two calls, because the process that would do the deleting is
+    gone. What is left is a `goal_analysis` artifact reachable from no run.
+
+    DELETING BLINDLY WOULD BE WORSE THAN THE BUG. A stranded document is not
+    invisible: `custom_artifacts` rows appear in the Artifacts library, so
+    somebody can open one and edit it. Destroying that is a far bigger failure
+    than leaving a stray row in a list.
+
+    So the rule is: delete only what is PROVABLY UNTOUCHED — `version == 1`,
+    meaning no content write has ever landed on it (the store starts version at
+    1 and increments on every write). Anything edited is left alone and
+    reported, because at that point it is somebody's document regardless of how
+    it got there, and a human should decide.
+    """
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import delete_artifact
+
+    minutes = (
+        STRANDED_DOCUMENT_AGE_MINUTES if older_than_minutes is None
+        else older_than_minutes
+    )
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+    client = require_client()
+    out = {"deleted": 0, "kept_edited": 0, "scanned": 0}
+
+    try:
+        candidates = (
+            client.table("custom_artifacts")
+            .select("id,company_id,version,created_at,title")
+            .eq("kind", ARTIFACT_KIND)
+            .lt("created_at", cutoff.isoformat())
+            .order("id")
+            .limit(200)
+            .execute()
+        ).data or []
+    except Exception:  # noqa: BLE001 — a sweep failure must never crash the
+        # scheduler, and a missed pass costs nothing: the next one catches it.
+        logger.exception("crucible: stranded-document scan failed")
+        return out
+
+    out["scanned"] = len(candidates)
+    for row in candidates:
+        artifact_id, company_id = row.get("id"), row.get("company_id")
+        if artifact_id is None or not company_id:
+            continue
+        # Linked? Then it is doing its job and is not stranded.
+        if get_by_artifact(int(artifact_id), str(company_id)):
+            continue
+        if int(row.get("version") or 1) > 1:
+            # Somebody wrote to it. Not ours to delete — see the docstring.
+            out["kept_edited"] += 1
+            logger.warning(
+                "crucible: stranded report document %s (company %s) has edits "
+                "(version %s) — leaving it for a human",
+                artifact_id, str(company_id)[:8], row.get("version"),
+            )
+            continue
+        try:
+            if delete_artifact(str(company_id), int(artifact_id)):
+                out["deleted"] += 1
+        except Exception:  # noqa: BLE001 — one bad row must not end the sweep
+            logger.exception(
+                "crucible: could not delete stranded document %s", artifact_id)
+
+    if out["deleted"] or out["kept_edited"]:
+        logger.info(
+            "crucible: swept %d stranded report document(s); kept %d that had "
+            "edits", out["deleted"], out["kept_edited"],
+        )
+    return out

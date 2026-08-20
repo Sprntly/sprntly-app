@@ -834,6 +834,22 @@ def _run_orphan_ask_job_sweep() -> None:
             logger.info("Failed %d abandoned Goal Analysis run(s)", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan Goal Analysis sweep failed")
+    try:
+        # Report documents no run points at. `link_document`'s compare-and-set
+        # covers the double-click race — the loser deletes its own document —
+        # but not a process death BETWEEN create and link, because the process
+        # that would clean up is gone. Deletes only what is provably untouched;
+        # see the docstring for why an edited stray is left alone.
+        from app.db.crucible_runs import sweep_stranded_documents
+
+        swept = sweep_stranded_documents()
+        if swept.get("deleted") or swept.get("kept_edited"):
+            logger.info(
+                "Swept %d stranded Goal Analysis document(s); kept %d with edits",
+                swept["deleted"], swept["kept_edited"],
+            )
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("stranded Goal Analysis document sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

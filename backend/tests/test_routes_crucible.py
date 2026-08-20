@@ -784,3 +784,115 @@ def test_the_plan_does_not_promise_to_adjudicate_hypotheses(ctx):
     promised = " ".join(plan["will_produce"]).lower()
     assert "verdict" not in promised
     assert "does not yet test them" in promised
+
+
+# ─── The stranded-document sweep ─────────────────────────────────────────────
+
+def _stranded_doc(company_id: str, *, version: int = 1, minutes_old: int = 120,
+                  title: str = "Goal Analysis — improve revenue") -> int:
+    """A `goal_analysis` artifact that no run points at — what a process death
+    between `create_artifact` and `link_document` leaves behind."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.client import require_client
+
+    created = (datetime.now(timezone.utc)
+               - timedelta(minutes=minutes_old)).isoformat()
+    row = (
+        require_client().table("custom_artifacts").insert({
+            "company_id": company_id, "kind": ARTIFACT_KIND, "title": title,
+            "body_html": "<p>a rendered report</p>", "status": "ready",
+            "version": version, "created_at": created, "updated_at": created,
+        }).execute()
+    ).data[0]
+    return int(row["id"])
+
+
+def test_a_stranded_document_is_swept(ctx):
+    """`link_document`'s compare-and-set handles the double-click race — the
+    loser deletes its own document. It cannot handle a process death BETWEEN
+    create and link, because the process that would clean up is gone."""
+    from app.db import crucible_runs as runs_db
+
+    artifact_id = _stranded_doc(ctx.company_id)
+    result = runs_db.sweep_stranded_documents()
+
+    assert result["deleted"] == 1
+    from app.db.custom_artifacts import get_artifact
+
+    assert get_artifact(ctx.company_id, artifact_id) is None
+
+
+def test_a_stranded_document_someone_EDITED_is_never_deleted(ctx):
+    """THE ONE THAT MATTERS. A stranded document is not invisible — it appears
+    in the Artifacts library, so somebody can open and edit it. Destroying that
+    is a far bigger failure than leaving a stray row in a list, so the sweep
+    deletes only what is provably untouched (`version == 1`)."""
+    from app.db import crucible_runs as runs_db
+    from app.db.custom_artifacts import get_artifact
+
+    edited = _stranded_doc(ctx.company_id, version=3, title="my notes")
+    result = runs_db.sweep_stranded_documents()
+
+    assert result["deleted"] == 0
+    assert result["kept_edited"] == 1
+    assert get_artifact(ctx.company_id, edited) is not None
+
+
+def test_a_document_still_linked_to_its_run_is_left_alone(ctx):
+    """Not stranded — it is doing its job."""
+    from app.db import crucible_runs as runs_db
+    from app.db.custom_artifacts import get_artifact
+
+    run_id = _start(ctx).json()["id"]
+    artifact_id = _stranded_doc(ctx.company_id)
+    runs_db.link_document(run_id, ctx.company_id,
+                          artifact_id=artifact_id, body_hash="abc")
+
+    assert runs_db.sweep_stranded_documents()["deleted"] == 0
+    assert get_artifact(ctx.company_id, artifact_id) is not None
+
+
+def test_a_document_younger_than_the_grace_period_is_left_alone(ctx):
+    """Its link may still be in flight. The window this covers is milliseconds
+    wide, so a generous gate costs nothing and removes any chance of deleting a
+    document mid-creation on a slow box."""
+    from app.db import crucible_runs as runs_db
+    from app.db.custom_artifacts import get_artifact
+
+    fresh = _stranded_doc(ctx.company_id, minutes_old=1)
+    assert runs_db.sweep_stranded_documents()["deleted"] == 0
+    assert get_artifact(ctx.company_id, fresh) is not None
+
+
+def test_an_ordinary_team_document_is_never_touched(ctx):
+    """The sweep is scoped to `goal_analysis` artifacts. A team document is
+    unlinked BY DESIGN — it belongs to a thread, not a run — so a sweep that
+    keyed on "no run points at it" alone would delete the whole library."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+    from app.db.custom_artifacts import get_artifact
+
+    doc = (
+        require_client().table("custom_artifacts").insert({
+            "company_id": ctx.company_id, "kind": "leadership update",
+            "title": "Q3 update", "body_html": "<p>hi</p>",
+            "status": "ready", "version": 1,
+            "created_at": "2020-01-01T00:00:00+00:00",
+        }).execute()
+    ).data[0]
+
+    assert runs_db.sweep_stranded_documents()["deleted"] == 0
+    assert get_artifact(ctx.company_id, int(doc["id"])) is not None
+
+
+def test_the_sweep_is_actually_wired_to_the_scheduler(ctx):
+    """A sweep nobody calls heals nothing — the exact mistake `sweep_orphans`
+    shipped with earlier in this feature."""
+    import inspect
+
+    import app.scheduler as scheduler
+
+    assert "sweep_stranded_documents" in inspect.getsource(
+        scheduler._run_orphan_ask_job_sweep)
