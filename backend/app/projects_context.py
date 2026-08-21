@@ -20,9 +20,9 @@ the caller has not been added to must not leak its name into this list, the
 same rule `db.projects.list_projects_for_workspace` enforces for the Projects
 screen and the route layer enforces with a 403. The workspace and the caller
 ride request-scoped ContextVars (`ask_runner.active_workspace_id` /
-`active_user_id`) rather than parameters, for the reason `set_active_project_id`
-records: threading them through `answer()` is the qa_agent.py edit that
-mechanism exists to avoid.
+`active_user_id`) rather than parameters, for the reason the sibling setters in
+that module record: threading a value through `answer()` is the qa_agent.py
+edit the ContextVar mechanism exists to avoid.
 
 Never raises, and returns "" when it cannot scope itself or the read fails —
 "you have no projects" said because a ContextVar was unset would be a confident
