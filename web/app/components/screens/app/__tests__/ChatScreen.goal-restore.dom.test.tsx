@@ -235,26 +235,32 @@ describe("restoring a run after a reload", () => {
     expect(panelProbe()).toBe("prd")
   })
 
-  it("stays closed once the reader closes it", async () => {
-    // Opening once per tab is the difference between "you can get back to it"
-    // and "a panel you dismissed keeps reappearing".
+  it("stays closed while you remain on the thread, once you close it", async () => {
+    // The claim is per VISIT, not per session. Within a visit it must hold:
+    // a reader who dismisses the panel should not have it shoved back by the
+    // next re-render.
+    //
+    // This deliberately no longer asserts that it is still closed after
+    // switching away and back. It used to, and that was asserting the bug:
+    // the tab-switch reconcile closes the panel on the way out, so "closed on
+    // return" was indistinguishable from the run being unreachable again —
+    // which is #1283. Coming back is a new visit, and the sibling test above
+    // ("switching away and back restores again") is what pins that.
     listRuns.mockResolvedValue({
       runs: [{ id: 42, conversation_id: 7, status: "ready" }],
     })
-    seedPersistedTab(
-      { id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1",
-      [{ id: "t2", title: "other", dbConvId: 8, messages: [] }],
-    )
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
     mountApp()
     await waitFor(() => expect(panelProbe()).toBe("goal"))
 
     fireEvent.click(screen.getByTestId("close-panel"))
     await waitFor(() => expect(panelProbe()).toBe("closed"))
 
-    await switchToTab("other")
-    await switchToTab("chat")
-    await waitFor(() => expect(goalProbe()).toBe("42"))
+    // Give the effect every chance to re-fire: the close itself changes the
+    // state it keys on, which is exactly when a missing claim would reopen it.
+    await new Promise((r) => setTimeout(r, 60))
     expect(panelProbe()).toBe("closed")
+    expect(goalProbe()).toBe("42")   // still restored, just not forced on screen
   })
 
   it("ignores a run belonging to a different thread", async () => {
@@ -346,6 +352,12 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(goalProbe()).toBe("43"))
     await switchToTab("A")
     await waitFor(() => expect(goalProbe()).toBe("42"))
+    // AND ON SCREEN. This test's own comment says "the panel never comes
+    // back", and for a while it asserted only the slot — so the panel not
+    // coming back is precisely what it could not see. The tab-switch reconcile
+    // closes the panel on the way out, so without retiring the per-tab claim
+    // the restore declines on return and the run is unreachable again.
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 
   it("two tabs on ONE conversation still re-run the restore", async () => {
@@ -364,5 +376,9 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(goalProbe()).toBe("42"))
     await switchToTab("B")
     await waitFor(() => expect(goalProbe()).toBe("42"))
+    // Same point as above: "nothing ever puts it back" is about the PANEL, so
+    // the assertion has to look at the panel. Two tabs on one conversation is
+    // the harder case — the claim is keyed by tab, so tab B has its own.
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 })

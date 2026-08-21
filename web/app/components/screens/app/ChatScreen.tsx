@@ -4065,6 +4065,13 @@ export function ChatScreen() {
       // `generating` document would lose its live view for the rest of the
       // session.
       documentAutoOpenedRef.current.delete(prevTabForPanelRef.current)
+      // Same claim, same retirement, for a thread whose artifact is a GOAL
+      // ANALYSIS — and for the identical reason the document comment gives.
+      // The reconcile below closes the panel on the way out, so a claim that
+      // outlives the visit means the restore declines on return: slot set,
+      // panel shut, and `ContentPanel` only un-hides the `goal` tab once the
+      // panel is open. That is #1283 again, one tab switch later.
+      goalAutoOpenedRef.current.delete(prevTabForPanelRef.current)
     }
     // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
     // any of the early returns below — a set left on screen is wrong on every
@@ -4570,25 +4577,6 @@ export function ChatScreen() {
         if (goalRunRef.current != null) return
         goalRunRef.current = mine.id
         setContent({ goalRunId: mine.id })
-        // AND PUT IT ON SCREEN. Setting the slot alone left this effect doing
-        // half of what its own comment above promises: `ContentPanel` only
-        // un-hides the `goal` tab once the panel is open, and on a fresh load
-        // it is closed — so the run was restored, invisibly, with no control
-        // anywhere to reveal it. A multi-minute analysis behind two human
-        // gates became single-use, and the editable report unreachable.
-        //
-        // Guarded the way `reportsAutoOpenedRef` guards the reports panel:
-        //  - once per tab, so closing it makes it STAY closed rather than
-        //    reappearing on every return to the thread;
-        //  - never over something already open, because the reader chose that;
-        //  - read through `contentPanelTabRef`, since the closure's value is
-        //    stale by the time this fetch resolves.
-        if (activeTabId
-            && !goalAutoOpenedRef.current.has(activeTabId)
-            && !contentPanelTabRef.current) {
-          goalAutoOpenedRef.current.add(activeTabId)
-          openContentPanel("goal")
-        }
       } catch {
         // A failed restore is a missing panel, not a broken chat. The run row
         // survives and the listing will be tried again on the next switch.
@@ -4599,7 +4587,40 @@ export function ChatScreen() {
     // id, so without it this effect does not re-run on the switch — the reset
     // clears the panel, the restore never fires again, and switching back does
     // not recover it.
-  }, [goalAnalysisOn, activeConvId, activeTabId, setContent, openContentPanel])
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+
+  // ...AND PUT IT ON SCREEN.
+  //
+  // The restore above fills the slot; `ContentPanel` un-hides the `goal` tab
+  // only once the panel is OPEN, and on a fresh load it is closed. Filling the
+  // slot alone therefore restored the run invisibly, with no control anywhere
+  // to reveal it (#1283).
+  //
+  // STATE-DRIVEN, not done inside the fetch, and that distinction is the whole
+  // reason this is a separate effect:
+  //
+  //   - reading `contentPanelTabRef` mid-fetch sees the value from the render
+  //     in which the reconcile called `closeContentPanel()`, so it concludes
+  //     "something is open", declines, and — the fetch being over — nothing
+  //     re-runs. The panel then never opens at all.
+  //   - the closure's `activeTabId` can be a thread the reader has already
+  //     left: `live` only flips when React flushes the cleanup, and a listing
+  //     resolving inside that window would open the panel on thread A's
+  //     analysis, live Confirm button and all, over thread B.
+  //
+  // Keyed on the state instead, both windows close: it re-evaluates whenever
+  // the panel or the active tab actually changes, and `goalRunId` is already
+  // reset per thread, so it can only ever open the run the slot currently
+  // holds. Same shape as the reports auto-open a few hundred lines up.
+  useEffect(() => {
+    if (!goalAnalysisOn || isBriefTab || !activeTabId) return
+    if (content.goalRunId == null) return
+    if (goalAutoOpenedRef.current.has(activeTabId)) return
+    if (contentPanelTab) return // something is already open — don't hijack it
+    goalAutoOpenedRef.current.add(activeTabId)
+    openContentPanel("goal")
+  }, [goalAnalysisOn, isBriefTab, activeTabId, content.goalRunId,
+      contentPanelTab, openContentPanel])
 
   // Start a Goal Analysis run and put its panel on screen.
   //
