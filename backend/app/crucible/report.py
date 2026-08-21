@@ -228,7 +228,7 @@ def _headline_section(findings: list[dict]) -> str:
         return "".join(out)
 
     top = findings[0]
-    out.append(_p(f"<strong>{_esc(top.get('statement'))}</strong>"))
+    out.append(_p(f"<strong>{_esc_statement(top)}</strong>"))
     band = (top.get("confidence_band") or "").strip()
     claims = len(_as_list(top.get("claim_ids")))
     tail = (
@@ -242,8 +242,60 @@ def _headline_section(findings: list[dict]) -> str:
     return "".join(out)
 
 
+#: A single statement's rendered ceiling. THIS is what makes the block budget a
+#: bound rather than a measurement.
+#:
+#: `cluster.label_for` caps the embedding path at 90 chars — but that is the
+#: FALLBACK path. The primary one takes `kg_entity.canonical_label` verbatim
+#: (`kg_themes.py`), a bare text column with no truncation anywhere downstream,
+#: so a statement is unbounded in code even though the largest observed is 126.
+#: Truncating here rather than at ingest because this is a RENDERING budget:
+#: the graph is entitled to a long label, the document is not entitled to
+#: unlimited space for it.
+MAX_STATEMENT_CHARS = 400
+
+
+def _clip(text: str, limit: int) -> str:
+    """`text`, bounded, cut on a word boundary."""
+    t = " ".join((text or "").split())
+    return t if len(t) <= limit else t[:limit].rsplit(" ", 1)[0] + "…"
+
+
+def _esc_clipped(value: Any, limit: int) -> str:
+    """Escaped text whose ESCAPED length is <= `limit`.
+
+    `_clip` then `_esc` bounds the wrong string: escaping expands, and the
+    worst case is 6x (`"` -> `&quot;`), so a 400-char clip can still emit 2,400
+    characters. Every size claim in this module is about rendered bytes, so the
+    bound has to be applied to the rendered form.
+
+    Cutting escaped text can land inside an entity and emit `&am`, so a trailing
+    partial entity is dropped. An entity is at most 6 characters, hence the
+    window.
+    """
+    out = _esc(_clip(value if isinstance(value, str) else str(value or ""), limit))
+    if len(out) <= limit:
+        return out
+    out = out[:limit]
+    amp = out.rfind("&")
+    if amp != -1 and ";" not in out[amp:] and len(out) - amp <= 6:
+        out = out[:amp]
+    return out
+
+
+def _statement_text(finding: dict) -> str:
+    """A finding's statement, bounded, cut on a word boundary."""
+    return _clip(finding.get("statement") or "", MAX_STATEMENT_CHARS)
+
+
+def _esc_statement(finding: dict) -> str:
+    """The statement, escaped, with the BOUND ON THE ESCAPED length."""
+    return _esc_clipped(finding.get("statement") or "", MAX_STATEMENT_CHARS)
+
+
+
 def _finding_block(finding: dict, rank: int) -> str:
-    out = [f"<h3>{rank}. {_esc(finding.get('statement'))}</h3>"]
+    out = [f"<h3>{rank}. {_esc_statement(finding)}</h3>"]
 
     meta = [_esc(_reach(finding))]
     band = (finding.get("confidence_band") or "").strip()
@@ -272,25 +324,125 @@ def _finding_block(finding: dict, rank: int) -> str:
     # WHERE IT CAME FROM, beside the claim it supports. Without this a reader
     # cannot check a single finding against anything, which is the difference
     # between an argument and an assertion.
+    # BOUNDED HERE, not only at write time. `pipeline.MAX_NAMED_SOURCES` caps
+    # what new runs store, but a document name is tenant text of any length and
+    # rows already on disk predate every cap. This was the one string in the
+    # block that nothing truncated: a 255-char name pushed a block to 2,179
+    # against a declared ceiling of 2,000, and the import-time assertion that
+    # was supposed to catch that compared constants to each other and passed.
     surfaced = [s for s in _as_list(finding.get("surfaced_by")) if s]
     if surfaced:
+        shown = [_esc_clipped(s, MAX_SOURCE_NAME_CHARS)
+                 for s in surfaced[:MAX_RENDERED_SOURCES]]
+        extra = len(surfaced) - len(shown)
+        tail = f" (+{extra} more)" if extra > 0 else ""
         out.append(_p(
-            "<strong>Source documents</strong> "
-            + " · ".join(_esc(s) for s in surfaced)
+            "<strong>Source documents</strong> " + " · ".join(shown) + tail
         ))
 
     # I8: every assumed parameter is disclosed WHERE THE NUMBER IS READ, not in
     # a methodology page nobody opens.
+    # Bounded for the same reason as `surfaced_by`: `name` and `basis` are
+    # tenant strings with no cap anywhere upstream. Measuring found a single
+    # block reaching 41,745 characters, almost all of it here — I8 requires the
+    # assumption be DISCLOSED, not reproduced at any length.
     assumed = [a for a in _as_list(finding.get("assumed_params")) if isinstance(a, dict)]
     if assumed:
+        shown = assumed[:MAX_ASSUMED_PARAMS]
         out.append(_ul(
-            f"<strong>{_esc(a.get('name'))}</strong>: {_esc(a.get('basis'))}"
-            for a in assumed
+            f"<strong>{_esc_clipped(a.get('name'), MAX_PARAM_NAME_CHARS)}</strong>"
+            f": {_esc_clipped(a.get('basis'), MAX_PARAM_BASIS_CHARS)}"
+            for a in shown
         ))
+        if len(assumed) > len(shown):
+            out.append(_p(
+                f"and {len(assumed) - len(shown)} further assumed parameters"
+            ))
     return "".join(out)
 
 
-def _findings_section(findings: list[dict]) -> str:
+#: How many findings get a full block in the document.
+#:
+#: NOT a display preference — a hard constraint made visible. `custom_artifacts`
+#: refuses a body over `MAX_BODY_CHARS` (400,000), and a real run rendered
+#: 831 findings into **421,696 characters**: over the limit, so the document
+#: could not be created at all and the route died on an unhandled
+#: `BodyTooLarge`. The browser saw a dropped connection.
+#:
+#: 150 full blocks is roughly 80,000 characters on that same run — comfortably
+#: inside the limit with the other sections, and far more than anyone reads.
+#: The remainder is NOT dropped: it is listed one line each, and the count is
+#: stated, because a silently shortened report is the failure this feature
+#: exists to avoid.
+MAX_FULL_FINDING_BLOCKS = 150
+
+#: An assumed parameter, as rendered. I8 wants it disclosed, not quoted whole.
+MAX_ASSUMED_PARAMS = 8
+MAX_PARAM_NAME_CHARS = 120
+MAX_PARAM_BASIS_CHARS = 300
+
+#: A source document's name, as rendered. Tenant text, so it is bounded.
+MAX_SOURCE_NAME_CHARS = 120
+
+#: How many source names a block prints. `pipeline.MAX_NAMED_SOURCES` bounds
+#: what new runs WRITE; this bounds what any row, however old, RENDERS.
+MAX_RENDERED_SOURCES = 5
+
+#: The overflow list's rows. Each is one clipped statement, and the count of
+#: anything beyond is still stated, so nothing becomes invisible.
+#:
+#: 1,000 rather than 400 because 400 SILENTLY DEGRADED A REAL RUN: the
+#: 831-finding report listed all 681 of its tail before this PR and only 400
+#: after, which is a regression dressed as a safety fix. At 1,000 every run
+#: that exists lists its tail in full, and the ladder still bounds the rest.
+MAX_OVERFLOW_ROWS = 1_000
+
+#: The ledger and the limits section — neither is reachable by the ladder.
+MAX_LEDGER_ROWS = 300
+MAX_LEDGER_LABEL_CHARS = 200
+MAX_LEDGER_REASON_CHARS = 400
+MAX_GAPS = 40
+MAX_GAP_CHARS = 400
+
+_BODY_LIMIT = 400_000  # mirrors custom_artifacts.MAX_BODY_CHARS
+
+#: WHY THERE IS NO IMPORT-TIME ASSERTION HERE ANY MORE.
+#:
+#: The previous version multiplied constants together and claimed the result
+#: was "derived, not measured". It was neither: it compared constants to other
+#: constants and never looked at a rendered character, so it passed while real
+#: data broke the budget it certified. Two things defeated it — `surfaced_by`
+#: held an unclipped tenant filename, and the overflow list grew with the run.
+#:
+#: A truthful static bound is also not worth having. Escaping expands text up
+#: to 6x, so a worst case honest enough to assert would force the full-block cap
+#: from 150 down to roughly 95 — degrading every real report to insure against
+#: a document of pure quote characters that no tenant has.
+#:
+#: So the guarantee is empirical instead: render, MEASURE, and shed detail until
+#: the document fits. Real reports never leave the first rung; pathological ones
+#: shrink themselves and say so. `_body_or_413` stays as the backstop for the
+#: case where even the last rung is too big.
+#: Overflow rows go first and GRADUALLY, then full blocks. A ladder that
+#: halves both at once turns a run that missed rung 1 by a hundred characters
+#: into a report with a tenth of its tail.
+_SHED_LADDER = (
+    (MAX_FULL_FINDING_BLOCKS, MAX_OVERFLOW_ROWS),
+    (MAX_FULL_FINDING_BLOCKS, 600),
+    (MAX_FULL_FINDING_BLOCKS, 400),
+    (MAX_FULL_FINDING_BLOCKS, 200),
+    (100, 150),
+    (50, 75),
+    (20, 30),
+    (10, 10),
+)
+
+
+def _findings_section(
+    findings: list[dict],
+    full_cap: int = MAX_FULL_FINDING_BLOCKS,
+    overflow_cap: int = MAX_OVERFLOW_ROWS,
+) -> str:
     if not findings:
         return ""
     out = [f"<h2>What the evidence says ({len(findings)})</h2>"]
@@ -300,7 +452,42 @@ def _findings_section(findings: list[dict]) -> str:
         "because two sources that may both speak contradicting each other is "
         "worth more than either of them alone."
     ))
-    out.extend(_finding_block(f, i + 1) for i, f in enumerate(findings))
+
+    full = findings[:full_cap]
+    rest = findings[full_cap:]
+    out.extend(_finding_block(f, i + 1) for i, f in enumerate(full))
+
+    if rest:
+        # SAID PLAINLY, where the reader is. A document that stopped at 150
+        # without a word would read as "these are all the findings", which is
+        # exactly the quiet degradation the coverage notes exist to prevent.
+        listed = rest[:overflow_cap]
+        # WRITTEN FROM `listed`, NOT `rest`. Keyed off `rest` this paragraph
+        # promised "the remaining 681 are listed below … nothing has been
+        # dropped" and was then followed by 400 rows and a sentence conceding
+        # 281 were missing. The document contradicted itself in two adjacent
+        # paragraphs, on the very run cited as evidence that it was fine.
+        out.append(_p(
+            f"The next {len(listed)} findings are listed below in rank order "
+            f"rather than in full. They are ranked lower by reach and the "
+            f"document has a size limit; every one of them is still on the "
+            f"run itself."
+        ))
+        rows = []
+        for offset, f in enumerate(listed, start=len(full) + 1):
+            statement = _esc_statement(f)
+            rows.append(f"<li>{offset}. {statement}</li>")
+        out.append("<ul>" + "".join(rows) + "</ul>")
+        # The list itself grows with the run — at 831 findings it alone spent
+        # ~95,000 characters against a 90,000 budget. Bounded, with the
+        # remainder COUNTED rather than dropped in silence.
+        beyond = len(rest) - len(listed)
+        if beyond > 0:
+            out.append(_p(
+                f"A further {beyond} findings are on the run and are not "
+                f"listed here, because this document has a size limit. They "
+                f"were not dropped from the analysis."
+            ))
     return "".join(out)
 
 
@@ -310,7 +497,10 @@ def _hypotheses_section(plan: dict) -> str:
         return ""
     return "".join([
         "<h2>What you already believed</h2>",
-        _ul(_esc(h) for h in hypotheses),
+        # Bounded here too. The API now caps each string, but a plan stored
+        # before that cap existed is still on disk, and the document budget
+        # cannot depend on when a row was written.
+        _ul(_esc_clipped(h, MAX_STATEMENT_CHARS) for h in hypotheses),
         # NOT A VERDICT. The engine does not test a stated hypothesis against
         # the claims, and listing these beside the findings without saying so
         # would let a reader infer that silence meant "not supported" — a
@@ -326,6 +516,12 @@ def _hypotheses_section(plan: dict) -> str:
 def _ledger_section(ledger: list[dict]) -> str:
     if not ledger:
         return ""
+    # BOUNDED. `label` traces to `pipeline._label()` -> `claim.subject` ->
+    # `kg_entity.canonical_label`, the same untruncated tenant string that had
+    # to be clipped for `statement` — and the shed ladder cannot rescue this
+    # section, because it sheds findings only. 102 rows at 4,000-char labels
+    # rendered 828,071 characters, over the limit at every rung.
+    shown = ledger[:MAX_LEDGER_ROWS]
     # ALWAYS EXPANDED HERE, unlike the panel. The panel folds a long ledger
     # behind a `<details>` so it cannot push the limits section off the screen;
     # `<details>` is not on the artifact allowlist and would be unwrapped into
@@ -340,13 +536,17 @@ def _ledger_section(ledger: list[dict]) -> str:
             "for a stated reason."
         ),
         _ul(
-            f"<strong>{_esc(r.get('label'))}</strong> — {_esc(r.get('reason'))}"
+            f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
+            f"</strong> — {_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}"
             + (
-                f" <em>(stopped at {_esc(r.get('stopped_at_stage'))})</em>"
+                f" <em>(stopped at "
+                f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
-            for r in ledger
+            for r in shown
         ),
+        _p(f"{len(ledger) - len(shown)} further rejections are on the run and "
+           f"are not listed here.") if len(ledger) > len(shown) else "",
     ])
 
 
@@ -363,10 +563,27 @@ def _limits_section(plan: dict) -> str:
     if gaps:
         # Built from the run PLAN's own gaps, so what the user was warned about
         # BEFORE the run is what they are reminded of after it.
-        for gap in gaps:
-            out.append(_p(f"<strong>{_esc(gap.get('question'))}</strong>"))
-            out.append(_p(f"Not answerable here, because {_esc(gap.get('because'))}."))
-            out.append(_p(f"<em>To close it</em> {_esc(gap.get('remedy'))}"))
+        # Bounded for the same reason as the ledger: uncapped in count and in
+        # all three fields, and out of the ladder's reach. 500 gaps rendered
+        # 800,349 characters.
+        for gap in gaps[:MAX_GAPS]:
+            out.append(_p(
+                f"<strong>{_esc_clipped(gap.get('question'), MAX_GAP_CHARS)}"
+                f"</strong>"
+            ))
+            out.append(_p(
+                f"Not answerable here, because "
+                f"{_esc_clipped(gap.get('because'), MAX_GAP_CHARS)}."
+            ))
+            out.append(_p(
+                f"<em>To close it</em> "
+                f"{_esc_clipped(gap.get('remedy'), MAX_GAP_CHARS)}"
+            ))
+        if len(gaps) > MAX_GAPS:
+            out.append(_p(
+                f"{len(gaps) - MAX_GAPS} further gaps are recorded on the run "
+                f"and are not listed here."
+            ))
     else:
         out.append(_p(
             "This run recorded no list of its own gaps, which does not mean it "
@@ -404,17 +621,28 @@ def render_report_html(
     plan = _as_dict(plan)
 
     goal = (run.get("goal_text") or "").strip()
-    parts = [
-        f"<h1>{_esc(goal) or 'Goal analysis'}</h1>",
-        _definition_section(run, plan),
-        _what_was_read_section(run, plan),
-        _headline_section(findings),
-        _findings_section(findings),
-        _hypotheses_section(plan),
-        _ledger_section(ledger),
-        _limits_section(plan),
-    ]
-    return "".join(p for p in parts if p)
+    def _assemble(full_cap: int, overflow_cap: int) -> str:
+        parts = [
+            f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
+            _definition_section(run, plan),
+            _what_was_read_section(run, plan),
+            _headline_section(findings),
+            _findings_section(findings, full_cap, overflow_cap),
+            _hypotheses_section(plan),
+            _ledger_section(ledger),
+            _limits_section(plan),
+        ]
+        return "".join(p for p in parts if p)
+
+    # MEASURE, don't assert. See `_SHED_LADDER`. Deterministic: the same row
+    # yields the same rung and therefore the same bytes, which is what
+    # `body_fingerprint` depends on.
+    html = ""
+    for full_cap, overflow_cap in _SHED_LADDER:
+        html = _assemble(full_cap, overflow_cap)
+        if len(html) <= _BODY_LIMIT:
+            return html
+    return html
 
 
 def report_title(run: dict) -> str:

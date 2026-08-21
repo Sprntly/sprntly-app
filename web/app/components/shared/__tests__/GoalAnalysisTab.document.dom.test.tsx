@@ -27,7 +27,12 @@ const get = vi.fn()
 const getDocument = vi.fn()
 const createDocument = vi.fn()
 const forkDocument = vi.fn()
-vi.mock("../../../lib/api", () => ({
+// `importOriginal`, not a bare factory: the component calls the real
+// `apiErrorMessage` to parse a FastAPI `detail`, and a factory that omits it
+// leaves it undefined — the catch block then throws and the error note never
+// renders, which is a test artifact that looks exactly like a product bug.
+vi.mock("../../../lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../lib/api")>()),
   goalAnalysisApi: {
     get: (...a: unknown[]) => get(...a),
     confirm: vi.fn(),
@@ -178,6 +183,41 @@ describe("edit", () => {
     expect((await screen.findByTestId("goal-doc-note")).textContent)
       .toMatch(/could not open this report/i)
   })
+
+  it("shows the server's reason for a 413 instead of a generic failure", async () => {
+    // The bug this PR fixes rendered a fixed string, so the server's
+    // explanation — the report is too large, and the RUN IS FINE — never
+    // reached anyone. "Your analysis is broken" is the wrong thing to imply.
+    get.mockResolvedValue(READY)
+    const tooBig = Object.assign(new Error("Payload Too Large"), {
+      status: 413,
+      body: { detail: "This report is too large to open as a document (run 7 is unaffected)." },
+    })
+    createDocument.mockRejectedValue(tooBig)
+
+    render(<GoalAnalysisTab runId={7} />)
+    fireEvent.click(await screen.findByTestId("goal-report-edit"))
+    const note = (await screen.findByTestId("goal-doc-note")).textContent || ""
+    expect(note).toMatch(/too large/i)
+    expect(note).toMatch(/run 7 is unaffected/i)
+    expect(note).not.toMatch(/could not open this report/i)
+  })
+
+  it("falls back to its own sentence when the error carries no reason", async () => {
+    // `apiErrorMessage` invents "Request failed (500)" when there is no detail.
+    // That is worse than the sentence this component already writes, so it must
+    // not win.
+    get.mockResolvedValue(READY)
+    createDocument.mockRejectedValue(
+      Object.assign(new Error("boom"), { status: 500, body: { oops: true } }),
+    )
+
+    render(<GoalAnalysisTab runId={7} />)
+    fireEvent.click(await screen.findByTestId("goal-report-edit"))
+    const note = (await screen.findByTestId("goal-doc-note")).textContent || ""
+    expect(note).toMatch(/could not open this report/i)
+    expect(note).not.toMatch(/Request failed/i)
+  })
 })
 
 describe("save as document", () => {
@@ -196,5 +236,23 @@ describe("save as document", () => {
     // And it did NOT turn the report into a document behind the user's back.
     expect(createDocument).not.toHaveBeenCalled()
     expect(screen.getByTestId("goal-report")).toBeTruthy()
+  })
+
+  it("shows the server's reason when the copy is refused for size", async () => {
+    // The fork writer is guarded by the same `_body_or_413`. A reason surfaced
+    // on one button and swallowed on the other is still a silent failure.
+    get.mockResolvedValue(READY)
+    forkDocument.mockRejectedValue(
+      Object.assign(new Error("Payload Too Large"), {
+        status: 413,
+        body: { detail: "This report is too large to copy into a document." },
+      }),
+    )
+
+    render(<GoalAnalysisTab runId={7} />)
+    fireEvent.click(await screen.findByTestId("goal-report-save-copy"))
+    const note = (await screen.findByTestId("goal-doc-note")).textContent || ""
+    expect(note).toMatch(/too large to copy/i)
+    expect(note).not.toMatch(/could not save a copy/i)
   })
 })

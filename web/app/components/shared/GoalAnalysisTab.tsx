@@ -36,6 +36,7 @@ import {
   goalAnalysisApi,
   type GoalReportDoc,
   type GoalRunDetail,
+  apiErrorMessage,
 } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
@@ -72,6 +73,32 @@ const ERROR_COPY: Record<string, string> = {
   cancelled: "This run was cancelled.",
   llm_error: "A model call failed partway through.",
   internal: "Something went wrong on our side partway through this run.",
+}
+
+/** The server's own explanation, when it gave one — else ''.
+
+ *  Parsing is delegated to `apiErrorMessage`, which already understands
+ *  FastAPI's `detail` in both forms (a plain string, and the validation-error
+ *  list). I had hand-rolled only the string case.
+ *
+ *  Two deliberate choices:
+ *
+ *  - Duck-typed on `body`, NOT `instanceof ApiError`. The class would couple
+ *    this to one module instance, and an error that crosses a boundary — or
+ *    arrives from a test double — still carries a perfectly good `detail` that
+ *    the user deserves to read.
+ *  - `apiErrorMessage` falls back to "Request failed (413)" when there is no
+ *    detail at all. That is worse than what each caller already says, so it is
+ *    filtered back out to '' and the caller's own sentence wins.
+ */
+function _detailOf(e: unknown): string {
+  const body = (e as { body?: unknown })?.body
+  if (body === null || body === undefined) return ""
+  const status = (e as { status?: unknown })?.status
+  const code = typeof status === "number" ? status : 0
+  const msg = apiErrorMessage(code, body)
+  if (!msg || msg === `Request failed (${code})`) return ""
+  return msg.trim()
 }
 
 export function GoalAnalysisTab({ runId }: { runId: number }) {
@@ -189,12 +216,24 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       // Re-arm: `awaiting_approval` is terminal for the poller, so nothing
       // else would ever look at this run again.
       setPollKey((k) => k + 1)
-    } catch {
-      // Same shape as a failed confirm, and for the same reason: the server
-      // CLAIMS the row before it starts work, so a response lost after that
-      // claim means the run is going and nothing is watching it. Telling the
-      // user to approve again would 409 forever against their own successful
-      // approval, so poll instead and let the run say what happened.
+    } catch (e) {
+      // A REJECTED request is not a LOST one, and they need opposite handling.
+      // 422/413 mean the server refused the body before claiming anything: the
+      // run is still `awaiting_approval` and nothing is running. Polling would
+      // say "Checking…" forever while the user retypes the same over-long
+      // hypothesis, never learning why. Say what the server said instead.
+      const status = (e as { status?: unknown })?.status
+      if (status === 422 || status === 413) {
+        setError(
+          _detailOf(e) ||
+            "That was not accepted. Shorten what you wrote and try again.",
+        )
+        return
+      }
+      // Otherwise: the server CLAIMS the row before it starts work, so a
+      // response lost after that claim means the run is going and nothing is
+      // watching it. Telling the user to approve again would 409 forever
+      // against their own successful approval, so poll and let the run speak.
       setError("We could not tell whether that started. Checking…")
       setPollKey((k) => k + 1)
     } finally {
@@ -239,8 +278,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       const fresh = await goalAnalysisApi.createDocument(runId)
       setDoc(fresh)
       setEditing(true)
-    } catch {
-      setDocNote("We could not open this report for editing.")
+    } catch (e) {
+      // SURFACE THE SERVER'S SENTENCE. A bare `catch` with a fixed string made
+      // the 413 invisible: the server explains that the report is too large
+      // and that the RUN is unaffected, and the user saw "we could not open
+      // this report" — which reads as "your analysis is broken". The whole
+      // point of returning a reason is that somebody sees it.
+      setDocNote(_detailOf(e) || "We could not open this report for editing.")
     } finally {
       setDocBusy(false)
     }
@@ -256,8 +300,12 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         "Saved as a separate document in your team library. This report is " +
         "unchanged.",
       )
-    } catch {
-      setDocNote("We could not save a copy of this report.")
+    } catch (e) {
+      // Same reasoning as the edit path above, and the same 413: `_body_or_413`
+      // guards BOTH writers, so a report too large to open is also too large to
+      // fork. Surfacing the reason in one handler and swallowing it in the
+      // other would just move the silence.
+      setDocNote(_detailOf(e) || "We could not save a copy of this report.")
     } finally {
       setDocBusy(false)
     }

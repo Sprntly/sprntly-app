@@ -17,6 +17,8 @@ can have, all of them silent:
 """
 from __future__ import annotations
 
+import re
+
 from app.crucible.report import (
     body_fingerprint,
     render_report_html,
@@ -252,3 +254,315 @@ def test_the_title_names_the_goal_so_two_reports_are_tellable_apart():
     assert len(title) < 300 and title.endswith("…")
     # A run with no goal text still has a name rather than a bare colon.
     assert report_title({"goal_text": "  "}) == "Goal analysis"
+
+
+# ─── The size ceiling, found on staging ──────────────────────────────────────
+
+def _many_findings(n: int) -> list[dict]:
+    """Findings shaped like real ones — statements and provenance are what make
+    a block big, and a fixture of `{"statement": "x"}` cannot find a size bug."""
+    return [{
+        "id": i,
+        "statement": f"{7 + i % 20} claims across {1 + i % 9} accounts concern "
+                     f"“Theme {i}: a realistically long label of the kind the "
+                     f"knowledge graph actually produces”.",
+        "claim_ids": [f"c{i}-{k}" for k in range(9)],
+        "impact_value": None if i % 3 else float(i % 9),
+        "currency": "accounts",
+        "confidence_band": "medium",
+        "adjudication": "corroborated",
+        "surfaced_by": [f"fireflies-sync-batch-{i % 12} ({4 + i % 6})",
+                        f"slack/#channel-{i % 7} ({1 + i % 3})",
+                        "+3 more documents"],
+        "assumed_params": [{"name": "value_per_account",
+                            "basis": "no revenue data connected; accounts "
+                                     "weighted equally"}],
+        "confidence": {"band": "medium", "weakest_leg": "problem",
+                       "weakest_leg_reason": "nothing in this company's "
+                                             "connected sources records whether "
+                                             "a fix like this has ever worked",
+                       "cap_reason": "capped at medium: no outcome evidence"},
+        "tier": "deep" if i < 5 else "shallow",
+    } for i in range(n)]
+
+
+def _full_ledger(n: int = 101) -> list[dict]:
+    """The ledger a real run carries — capped at ~101 rows by the pipeline."""
+    return [{
+        "id": i,
+        "label": f"Theme {i}: a rejected candidate with a realistic label",
+        "reason": "all 4 supporting claims land within 6 days and come from "
+                  "one source document — this is one conversation echoing "
+                  "through the corpus, not a pattern over time",
+        "stopped_at_stage": "verification",
+        "claim_ids": [f"c{i}-{k}" for k in range(6)],
+    } for i in range(n)]
+
+
+def _full_plan() -> dict:
+    """A plan with every section populated, as `build_plan` produces."""
+    return {
+        "goal_text": "improve revenue",
+        "definition_text": "recognised revenue from paying accounts, net of "
+                           "refunds, as finance books it",
+        "total_signals": 15570,
+        "sources": [
+            {"source_type": "project_mgmt", "signal_count": 12604,
+             "label": "the tracker",
+             "witnesses": "what was built, broken, blocked or attempted"},
+            {"source_type": "pm_manual", "signal_count": 2007,
+             "label": "your own business context",
+             "witnesses": "the company's stated constraints and goals"},
+            {"source_type": "communication", "signal_count": 387,
+             "label": "Slack and email",
+             "witnesses": "what was discussed, hit and attempted"},
+        ],
+        "cannot_answer": [
+            {"question": "How many points will this move the metric?",
+             "because": "the engine cannot yet size a finding in the goal's "
+                        "own unit — it reports reach instead",
+             "remedy": "no action needed from you; this is the next capability"},
+            {"question": "Did a change like this work last time?",
+             "because": "no measured outcomes are connected",
+             "remedy": "connect your experiment tool, or upload the history"},
+        ],
+        "will_produce": ["Themes ranked by reach", "A considered list",
+                         "Every degradation disclosed"],
+        "hypotheses": ["expansion is stalling because onboarding takes too long",
+                       "customers are blocked on the Jira connector"],
+        "excluded_sources": [],
+    }
+
+
+def test_a_run_with_hundreds_of_findings_still_fits_the_document_store():
+    """THE STAGING BUG. A real 831-finding run rendered to 421,696 characters
+    against a 400,000 limit, so `custom_artifacts` refused the body, the route
+    had no handler, and the browser got a dropped connection — an outage, for
+    what was really a refused write.
+
+    Every unit test passed because every fixture had a handful of findings.
+    """
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    # THE WHOLE DOCUMENT, not just the section the cap bounds. The first
+    # version of this test passed `[]` for the ledger and `{}` for the plan —
+    # so it measured the one part that is now bounded and none of the parts
+    # that are not, which is the same too-small-fixture mistake that let the
+    # original bug ship.
+    html = render_report_html(
+        {"id": 1, "goal_text": "improve revenue",
+         "coverage_notes": [
+             {"reason": "evidence is dated by ingest, not by when it happened",
+              "actual": "most signals carry the timestamp we read them at"},
+             {"reason": "most findings could not be sized",
+              "actual": "829 of 831 findings name no account"}]},
+        _many_findings(831), _full_ledger(), _full_plan(),
+    )
+    assert len(html) < MAX_BODY_CHARS, (
+        f"rendered {len(html)} chars against a {MAX_BODY_CHARS} limit"
+    )
+
+
+def test_the_findings_beyond_the_cap_are_listed_and_counted_not_dropped():
+    """A document that stopped at the cap without a word would read as "these
+    are all the findings" — the quiet degradation this whole feature exists to
+    avoid."""
+    from app.crucible.report import MAX_FULL_FINDING_BLOCKS
+
+    n = MAX_FULL_FINDING_BLOCKS + 40
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(n), [], {},
+    )
+    assert "The next 40 findings" in html
+    # The last one is still named, in rank order.
+    assert f"{n}." in html
+
+
+def test_a_small_run_is_not_truncated_at_all():
+    """The control: the cap must not touch an ordinary run."""
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(12), [], {},
+    )
+    assert "The remaining" not in html
+
+
+def test_a_pathologically_long_statement_cannot_blow_the_budget():
+    """THE ROOT OF WHY 150 WAS CALIBRATED, NOT BOUNDED. `cluster.label_for`
+    caps the embedding path at 90 chars — but that is the FALLBACK. The primary
+    path takes `kg_entity.canonical_label` verbatim with no truncation
+    anywhere, so a statement was unbounded in code. Largest observed was 126;
+    nothing stopped it being 100,000."""
+    from app.crucible.report import MAX_STATEMENT_CHARS
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    monstrous = [{**f, "statement": "word " * 20_000} for f in _many_findings(200)]
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        monstrous, _full_ledger(), _full_plan(),
+    )
+    assert len(html) < MAX_BODY_CHARS
+    assert "word " * 500 not in html          # actually truncated
+    assert MAX_STATEMENT_CHARS < 1_000        # and bounded to something sane
+
+
+def test_ten_enormous_hypotheses_cannot_blow_the_budget():
+    """`ApprovePlan.hypotheses` is `max_length=10` on a `list[str]` — that
+    bounds the LIST, not the strings. Ten 40,000-char hypotheses rendered
+    410,960 chars with only a dozen findings, and the size test still passed
+    because it passed `{}` for the plan."""
+    from app.db.custom_artifacts import MAX_BODY_CHARS
+
+    plan = _full_plan()
+    plan["hypotheses"] = ["believed " * 5_000 for _ in range(10)]
+    html = render_report_html(
+        {"id": 1, "goal_text": "g", "coverage_notes": []},
+        _many_findings(12), _full_ledger(), plan,
+    )
+    assert len(html) < MAX_BODY_CHARS
+
+
+def test_the_document_fits_even_when_every_field_is_hostile():
+    """The budget is MEASURED, not asserted.
+
+    The assertion this replaces multiplied constants together and called the
+    result derived. It passed while two real paths broke it: an unclipped
+    source-document name, and an overflow list that grew with the run. This
+    renders both at once, plus a full ledger and plan, and looks at the actual
+    length — the only form of the claim that can fail when it is false.
+    """
+    from app.crucible import report as r
+
+    findings = [
+        _finding(
+            statement="quote " * 8_000,            # 48,000 chars, all escapable
+            surfaced_by=[f'"{c}" report {"x" * 400}.pdf' for c in "abcdefghij"],
+            claim_ids=list(range(50)),
+        )
+        for _ in range(2_000)
+    ]
+    html = r.render_report_html(
+        _run(goal_text="g" * 5_000), findings, _full_ledger(101), _full_plan()
+    )
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)} > {r._BODY_LIMIT}"
+    # It shed detail rather than truncating mid-tag.
+    assert html.rstrip().endswith(">")
+    # And it SAYS that it did, rather than implying these are all the findings.
+    # NOT an `or`. The version of this assertion that used one passed while the
+    # document said "the remaining 681 are listed below … nothing has been
+    # dropped" three lines above "a further 281 are not listed here" — the two
+    # sentences contradicting each other is precisely the bug, so an assertion
+    # satisfied by either of them cannot see it.
+    if "not listed here" in html:
+        # It conceded a remainder, so it must NOT also claim completeness.
+        assert "nothing has been dropped" not in html
+    # The count in the sentence must be the number of rows actually printed.
+    # An earlier version compared against `html.count("<li>")`, which counts
+    # every list item in the document — ledger rows and assumed parameters
+    # included — so it could never have matched and the check was decoration.
+    said = re.search(r"The next (\d+) findings", html)
+    assert said, "the overflow list did not say how many it was listing"
+    overflow_rows = re.findall(r"<li>\d+\. ", html)
+    assert int(said.group(1)) == len(overflow_rows), (
+        f"it said {said.group(1)} but printed {len(overflow_rows)}"
+    )
+
+
+def test_it_sheds_detail_when_the_first_rung_does_not_fit():
+    """The shed ladder is load-bearing, not decoration.
+
+    Every field is individually bounded now, so it takes a run that is large in
+    EVERY dimension at once to overflow the first rung — which is exactly the
+    case the old constant-multiplying assertion claimed was impossible.
+    """
+    from app.crucible import report as r
+
+    fat = [
+        _finding(
+            statement="s" * 2_000,
+            surfaced_by=[f"{'n' * 500}.pdf ({i})" for i in range(10)],
+            assumed_params=[{"name": "p" * 500, "basis": "b" * 500}
+                            for _ in range(20)],
+        )
+        for _ in range(1_500)
+    ]
+    html = r.render_report_html(_run(), fat, _full_ledger(101), _full_plan())
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)}"
+    # It really did drop to a lower rung rather than squeaking under.
+    blocks = html.count("<h3>")
+    assert blocks < r.MAX_FULL_FINDING_BLOCKS, (
+        f"rendered {blocks} full blocks — the ladder never fired, so this test "
+        f"is not exercising what it claims"
+    )
+    assert "not listed here" in html
+
+
+def test_a_long_source_document_name_cannot_inflate_a_block():
+    """The one string in a finding block that nothing used to truncate."""
+    from app.crucible import report as r
+
+    modest = r._finding_block(_finding(surfaced_by=["report.pdf (3)"]), 1)
+    hostile = r._finding_block(
+        _finding(surfaced_by=[f"{'n' * 4_000}.pdf (3)"] * 40), 1
+    )
+    # Bounded by the render caps, not by what the row happens to hold.
+    assert len(hostile) < len(modest) + (
+        r.MAX_RENDERED_SOURCES * (r.MAX_SOURCE_NAME_CHARS + 8) + 40
+    )
+    assert "+35 more" in hostile
+
+
+def test_the_ledger_and_limits_cannot_overrun_the_document():
+    """The shed ladder sheds FINDINGS. These two sections are out of its reach.
+
+    `_ledger_section`'s `label` traces to `kg_entity.canonical_label`, the same
+    untruncated tenant string that had to be clipped for `statement`; and
+    `cannot_answer` is uncapped in count and in all three of its fields. Before
+    this, 102 ledger rows at 4,000-char labels rendered 828,071 characters and
+    500 gaps rendered 800,349 — over the limit at every rung, so the ladder
+    could shed every finding it had and still not fit.
+    """
+    from app.crucible import report as r
+
+    ledger = [{"label": "L" * 4_000, "reason": "R" * 4_000,
+               "stopped_at_stage": "S" * 4_000} for _ in range(500)]
+    plan = {"cannot_answer": [{"question": "q" * 4_000, "because": "b" * 4_000,
+                               "remedy": "m" * 4_000} for _ in range(500)]}
+
+    html = r.render_report_html(_run(), [], ledger, plan)
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)}"
+    # Bounded, and the remainder is COUNTED rather than silently gone.
+    assert "200 further rejections" in html
+    assert "460 further gaps" in html
+
+
+def test_assumed_parameters_are_disclosed_not_reproduced_whole():
+    """I8 requires the assumption be visible; it does not require it verbatim.
+
+    Direct, because the shed ladder would otherwise absorb an unbounded field
+    by dropping whole findings — the document would still fit while quietly
+    losing findings to one fat parameter list.
+    """
+    from app.crucible import report as r
+
+    block = r._finding_block(
+        _finding(assumed_params=[{"name": "p" * 3_000, "basis": "b" * 3_000}
+                                 for _ in range(30)]),
+        1,
+    )
+    assert len(block) < 6_000, f"block is {len(block)} chars"
+    assert "and 22 further assumed parameters" in block
+
+
+def test_clipping_never_emits_a_half_escaped_entity():
+    """Cutting escaped text can land inside `&quot;` and emit `&am`."""
+    from app.crucible import report as r
+
+    for n in range(1, 40):
+        out = r._esc_clipped('"' * 50, n)
+        assert len(out) <= n
+        assert "&" not in out or out.count("&") == out.count(";")

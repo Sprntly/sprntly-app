@@ -26,7 +26,11 @@ vi.hoisted(() => {
 const get = vi.fn()
 const confirm = vi.fn()
 const approve = vi.fn()
-vi.mock("../../../lib/api", () => ({
+// `importOriginal`: the approve path parses a 422 with the real
+// `apiErrorMessage`, and a bare factory leaves it undefined — the catch then
+// throws and the error never renders, which reads exactly like a product bug.
+vi.mock("../../../lib/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../lib/api")>()),
   goalAnalysisApi: {
     get: (...a: unknown[]) => get(...a),
     confirm: (...a: unknown[]) => confirm(...a),
@@ -294,5 +298,81 @@ describe("the engine's name never reaches the screen", () => {
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId(testid)
     expect(document.body.innerHTML).not.toMatch(/crucible/i)
+  })
+})
+
+describe("an approval the server refuses", () => {
+  it("says why, instead of checking forever", async () => {
+    // A REJECTED request is not a LOST one. The 422 leaves the run in
+    // `awaiting_approval` with nothing running, so "Checking…" is both false
+    // and unrecoverable: the user retypes the same over-long hypothesis and
+    // gets the same sentence every time.
+    get.mockResolvedValue(WAITING)
+    approve.mockRejectedValue(
+      Object.assign(new Error("Unprocessable"), {
+        status: 422,
+        body: { detail: [{ msg: "String should have at most 2000 characters" }] },
+      }),
+    )
+
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-plan")
+    fireEvent.click(screen.getByText("Approve and run"))
+
+    const err = (await screen.findByTestId("goal-error")).textContent || ""
+    expect(err).toMatch(/at most 2000 characters/i)
+    expect(err).not.toMatch(/could not tell whether that started/i)
+  })
+
+  it("still polls when the response was merely lost", async () => {
+    // The original reasoning, which must survive: past the claim, the run IS
+    // going, and telling the user to approve again would 409 forever.
+    get.mockResolvedValue(WAITING)
+    approve.mockRejectedValue(new Error("network died"))
+
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-plan")
+    fireEvent.click(screen.getByText("Approve and run"))
+
+    expect((await screen.findByTestId("goal-error")).textContent)
+      .toMatch(/could not tell whether that started/i)
+  })
+})
+
+describe("a hypothesis longer than the API accepts", () => {
+  it("is caught here, where the offending line can be named", async () => {
+    // Prevention, not just a better error. The API rejects rather than
+    // truncates, and a 422 leaves the run in `awaiting_approval` — so without
+    // this the user can only discover the rule by hitting a wall.
+    get.mockResolvedValue(WAITING)
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-plan")
+
+    fireEvent.change(screen.getByLabelText("What you already believe"), {
+      target: { value: "x".repeat(2_001) },
+    })
+
+    expect((await screen.findByTestId("goal-plan-hypothesis-too-long")).textContent)
+      .toMatch(/2001 characters/i)
+    // And it does not send a request that can only fail.
+    fireEvent.click(screen.getByText("Approve and run"))
+    expect(approve).not.toHaveBeenCalled()
+  })
+
+  it("lets an ordinary hypothesis through untouched", async () => {
+    get.mockResolvedValue(WAITING)
+    approve.mockResolvedValue({ ...RUN, status: "running" })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-plan")
+
+    fireEvent.change(screen.getByLabelText("What you already believe"), {
+      target: { value: "onboarding is where they drop off" },
+    })
+    fireEvent.click(screen.getByText("Approve and run"))
+
+    await waitFor(() => expect(approve).toHaveBeenCalled())
+    expect(approve.mock.calls[0][1].hypotheses)
+      .toEqual(["onboarding is where they drop off"])
+    expect(screen.queryByTestId("goal-plan-hypothesis-too-long")).toBeNull()
   })
 })
