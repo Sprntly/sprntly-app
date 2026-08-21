@@ -235,26 +235,32 @@ describe("restoring a run after a reload", () => {
     expect(panelProbe()).toBe("prd")
   })
 
-  it("stays closed once the reader closes it", async () => {
-    // Opening once per tab is the difference between "you can get back to it"
-    // and "a panel you dismissed keeps reappearing".
+  it("stays closed while you remain on the thread, once you close it", async () => {
+    // The claim is per VISIT, not per session. Within a visit it must hold:
+    // a reader who dismisses the panel should not have it shoved back by the
+    // next re-render.
+    //
+    // This deliberately no longer asserts that it is still closed after
+    // switching away and back. It used to, and that was asserting the bug:
+    // the tab-switch reconcile closes the panel on the way out, so "closed on
+    // return" was indistinguishable from the run being unreachable again —
+    // which is #1283. Coming back is a new visit, and the sibling test above
+    // ("switching away and back restores again") is what pins that.
     listRuns.mockResolvedValue({
       runs: [{ id: 42, conversation_id: 7, status: "ready" }],
     })
-    seedPersistedTab(
-      { id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1",
-      [{ id: "t2", title: "other", dbConvId: 8, messages: [] }],
-    )
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
     mountApp()
     await waitFor(() => expect(panelProbe()).toBe("goal"))
 
     fireEvent.click(screen.getByTestId("close-panel"))
     await waitFor(() => expect(panelProbe()).toBe("closed"))
 
-    await switchToTab("other")
-    await switchToTab("chat")
-    await waitFor(() => expect(goalProbe()).toBe("42"))
+    // Give the effect every chance to re-fire: the close itself changes the
+    // state it keys on, which is exactly when a missing claim would reopen it.
+    await new Promise((r) => setTimeout(r, 60))
     expect(panelProbe()).toBe("closed")
+    expect(goalProbe()).toBe("42")   // still restored, just not forced on screen
   })
 
   it("ignores a run belonging to a different thread", async () => {
@@ -346,6 +352,153 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(goalProbe()).toBe("43"))
     await switchToTab("A")
     await waitFor(() => expect(goalProbe()).toBe("42"))
+    // AND ON SCREEN. This test's own comment says "the panel never comes
+    // back", and for a while it asserted only the slot — so the panel not
+    // coming back is precisely what it could not see. The tab-switch reconcile
+    // closes the panel on the way out, so without retiring the per-tab claim
+    // the restore declines on return and the run is unreachable again.
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+  })
+
+  it("a run the reader STARTED also stays closed once dismissed", async () => {
+    // The headline "stays closed" test only ever exercised the RESTORE path,
+    // where the auto-open effect takes the per-tab claim itself. A run the
+    // reader starts opens the panel directly, so unless `startGoalAnalysis`
+    // claims the tab too, the reader's close satisfies every guard and the
+    // effect shoves the panel straight back.
+    //
+    // The file says this out loud one tab over, at the reports hand-off:
+    // "Claim the tab: this IS its one auto-open, so closing the panel here
+    // must not hand straight over to the auto-open effect below."
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    await startAGoal("raise net revenue retention")
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+    await new Promise((r) => setTimeout(r, 60))
+    expect(panelProbe()).toBe("closed")
+  })
+
+  it("claims the tab the run was started ON, not the one last seen", async () => {
+    // `startGoalAnalysis` reads `activeTabId`, so it has to DEPEND on it.
+    // Rebuilt only when the conversation changes, the callback holds a stale
+    // tab id in exactly the two cases this file already calls out by name:
+    // two tabs on one conversation, and two brand-new chats (both
+    // `activeConvId === null`).
+    //
+    // Filing the claim against the tab the reader LEFT breaks it twice over —
+    // here, the run they just started reopens the instant they dismiss it.
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 7, messages: [] }],   // SAME conversation
+    )
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    await switchToTab("B")
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    await startAGoal("raise net revenue retention")
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+    await new Promise((r) => setTimeout(r, 60))
+    expect(panelProbe()).toBe("closed")
+  })
+
+  it("does not mark an innocent tab as already-opened", async () => {
+    // The other half of the same bug: a claim misfiled against tab A marks it
+    // as already-auto-opened, so A's OWN restored analysis never opens when
+    // the reader returns. #1283 again, one tab over — and this one is silent,
+    // because nothing about tab B looks wrong.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 7, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+
+    await switchToTab("B")
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    await startAGoal("raise net revenue retention")
+    await waitFor(() => expect(goalProbe()).toBe("99"))
+
+    // Back to A: a new visit, its claim retired, its own run should show.
+    await switchToTab("A")
+    await waitFor(() => expect(goalProbe()).toBe("42"))
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+  })
+
+  it("does not open on the thread being switched TO, using the old thread's run", async () => {
+    // The switch commit reads a FRESH `activeTabId` beside a STALE
+    // `content.goalRunId`, because the per-thread reset is itself an effect in
+    // the same flush. Unguarded, arriving on a thread with no analysis opened a
+    // goal panel that went blank the moment the reset landed.
+    //
+    // The dismissal matters: it is what leaves `contentPanelTab` legitimately
+    // null, so the hijack guard cannot mask the bug.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 8, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+
+    await switchToTab("B")
+    await new Promise((r) => setTimeout(r, 60))
+    // B has no run. A goal panel here is either blank or showing A's analysis;
+    // both are wrong, and one of them is clickable.
+    expect(panelProbe()).not.toBe("goal")
+  })
+
+  it("never shows one thread's run on another thread", async () => {
+    // The hazard `ChatScreen.tsx:2184` exists to prevent, raised in severity by
+    // this feature: leaving the slot set showed thread A's analysis — WITH A
+    // LIVE CONFIRM BUTTON — on thread B. While the panel stayed shut that was
+    // invisible; opening it makes it actionable, so the guarantee now has to
+    // hold visibly.
+    //
+    // It holds because the per-thread reset is declared ~2,400 lines before the
+    // open effect and React runs effects in order, so the open only ever sees a
+    // slot already cleared for the thread being entered. That is an ORDERING
+    // property, and ordering is exactly what a refactor changes silently — so
+    // it is pinned here rather than left to the declaration order.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "awaiting_confirmation" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 8, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+    expect(goalProbe()).toBe("42")
+
+    await switchToTab("B")
+    // B has no run of its own. Whatever the panel does, it must not be
+    // displaying 42 — that is thread A's, and its Confirm button would lock a
+    // goal definition against a conversation the reader is not looking at.
+    await waitFor(() => expect(goalProbe()).toBe("none"))
+    expect(panelProbe()).not.toBe("goal")
   })
 
   it("two tabs on ONE conversation still re-run the restore", async () => {
@@ -364,5 +517,9 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(goalProbe()).toBe("42"))
     await switchToTab("B")
     await waitFor(() => expect(goalProbe()).toBe("42"))
+    // Same point as above: "nothing ever puts it back" is about the PANEL, so
+    // the assertion has to look at the panel. Two tabs on one conversation is
+    // the harder case — the claim is keyed by tab, so tab B has its own.
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 })
