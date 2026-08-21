@@ -300,6 +300,56 @@ def _parse_created_at(raw: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def has_current_report(
+    company_id: str,
+    spec: ReportSpec,
+    now: datetime | None = None,
+    tz: ZoneInfo | None = None,
+) -> bool:
+    """Does a scheduled report for THIS period already exist?
+
+    Read by `qa_agent` before it hands a routed question to a report engine.
+    The engines answer by buying a multi-minute web sweep, which was the only
+    option while the KG held first-party signal alone — but a saved report is
+    now extracted into the graph, so the same question can be answered from
+    signals that already carry the report's own provenance. This is the check
+    that tells those two situations apart.
+
+    Deliberately the SAME period the scheduler uses, rather than a separate
+    freshness constant: "there is a report for this quarter" is exactly the
+    condition under which the graph holds the current picture, and a second
+    notion of recency would be one more thing to keep in step with the
+    cadence.
+
+    UTC by default. A period boundary is a date, and shifting it by a
+    company's timezone changes the answer only for a few hours either side of
+    a quarter opening — during which the worst case is buying the sweep the
+    scheduler was about to run anyway.
+
+    FAILS CLOSED, to the sweep. This runs on the answer path for every routed
+    report question, so a Supabase blip must not take the answer down with it
+    — an unreadable ledger degrades to "no current report", which is exactly
+    the behaviour this branch had before the check existed. The cost of being
+    wrong that way is one sweep; the cost of raising is no answer at all.
+    """
+    from app import db
+
+    try:
+        saved = _parse_created_at(db.latest_report_at(
+            company_id, skill=spec.skill, question=spec.question,
+        ))
+    except Exception:  # noqa: BLE001 — never break the answer path
+        logger.exception(
+            "monthly-reports: freshness read failed for %s / %s — sweeping",
+            company_id, spec.skill,
+        )
+        return False
+    if saved is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return saved >= period_start(now, tz or ZoneInfo("UTC"), spec.cadence)
+
+
 def period_start(now: datetime, tz: ZoneInfo, cadence: str) -> datetime:
     """The instant this report's current period opened, as aware UTC.
 

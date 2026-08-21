@@ -30,6 +30,11 @@ KEEPERS = {
     "hubspot-extraction",
     "clickup-extraction",
     "roadmap-extraction",
+    # The two scheduled report methods, vendored 2026-08-20. The engines have
+    # named these since the monthly reports shipped; until now the id matched
+    # no directory and both ran METHOD-LESS (`+bare` in prompt_version).
+    "competitive-intelligence-review",
+    "public-feedback-report",
 }
 
 

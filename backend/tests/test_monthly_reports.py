@@ -212,6 +212,93 @@ def test_the_opening_day_waits_for_each_spec_s_own_hour():
         [s.skill for s in mr.MONTHLY_REPORT_SPECS])
 
 
+def test_has_current_report_tracks_the_spec_s_own_period():
+    """The freshness check `qa_agent` routes on.
+
+    Deliberately the SAME period the scheduler uses: "there is a report for
+    this quarter" is exactly the condition under which the graph holds the
+    current picture, so a chat question can be answered from signals instead
+    of buying another sweep. A separate freshness constant would be one more
+    thing to keep in step with the cadence.
+    """
+    spec = mr.CIR_SPEC
+    assert spec.cadence == mr.CADENCE_QUARTERLY
+    q3 = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+
+    # Nothing saved at all -> the sweep must still run.
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is False
+
+    # LAST quarter's report is not this quarter's picture.
+    _save_report_at(spec, datetime(2026, 5, 2, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is False
+
+    # This quarter's is.
+    _save_report_at(spec, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is True
+
+
+def test_has_current_report_is_per_spec():
+    """A saved competitive report must not make the market question answer
+    from a graph that holds no market findings."""
+    q3 = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], mr.CIR_SPEC, q3) is True
+    assert mr.has_current_report(COMPANY["id"], mr.MI_SPEC, q3) is False
+
+
+def test_has_current_report_ignores_a_human_chat_report():
+    """Only a SCHEDULED row counts. A human running the same skill in chat
+    saves a row carrying their own words, and that report was never ingested
+    into the graph — answering from the KG on the strength of it would cite
+    signals that are not there."""
+    from app import db
+
+    db.save_report(COMPANY["id"], skill=mr.CIR_SPEC.skill, title="t",
+                   html="## body", question="what are rivals charging?")
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    ) is False
+
+
+def test_qa_agent_guards_each_report_branch_with_its_own_spec():
+    """`qa_agent` skips the paid sweep when this period's report is already in
+    the graph — for ALL THREE reports, each consulting ITS OWN spec.
+
+    Covering only some of them is its own bug: the three reports are one
+    behaviour to a user asking a question in chat, and a half-guarded set
+    means two questions answer instantly while the third quietly costs six
+    minutes and a paid sweep.
+
+    A source scan rather than a dispatch test on purpose: `qa_agent.answer` is
+    a thousand-line function and exercising it end to end costs far more than
+    it proves here. `has_current_report` is tested directly above; what is
+    left to get wrong is the wiring — a competitive branch checking MI_SPEC
+    would either sweep forever or never sweep, silently, and neither shows up
+    in any other test.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "qa_agent.py").read_text(
+        encoding="utf-8")
+    for skill_id, spec_name in (
+        ("competitive-intelligence-review", "CIR_SPEC"),
+        ("market-intelligence-report", "MI_SPEC"),
+        ("public-feedback-report", "PF_SPEC"),
+    ):
+        block = re.search(
+            rf'decision\.skill_id == "{re.escape(skill_id)}"(.{{0,200}})',
+            src, re.S,
+        )
+        assert block, f"no routing branch found for {skill_id}"
+        guard = block.group(1)
+        assert "has_current_report" in guard, (
+            f"{skill_id} still sweeps unconditionally — a saved report for "
+            "this period is already in the KG and answers in seconds")
+        assert f"monthly_reports.{spec_name}" in guard, (
+            f"{skill_id} is guarded by the wrong spec (expected {spec_name})")
+
+
 def test_the_report_hours_are_distinct():
     """Guards the stagger itself: if two specs drift onto the same hour the
     test above still passes on one of them, but the load control is gone."""
