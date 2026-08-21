@@ -332,6 +332,38 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
   })
 })
 
+describe("dispatchChatIntent — create_project", () => {
+  it("routes to onCreateProject with the envelope when a name came through", () => {
+    const ex = executors()
+    const onCreateProject = vi.fn()
+    const env = envelope({ intent: "create_project", task: "Billing revamp" })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onCreateProject })
+    expect(onCreateProject).toHaveBeenCalledWith(env)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("falls through to the grounded ask on a surface with no project affordance", () => {
+    // The honest outcome: a surface that cannot make a project must answer,
+    // never reply as though it made one.
+    const ex = executors()
+    const env = envelope({ intent: "create_project", task: "Billing revamp" })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onAnswer).toHaveBeenCalled()
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("falls through when no name came through, rather than minting an untitled one", () => {
+    const ex = executors()
+    const onCreateProject = vi.fn()
+    const env = envelope({ intent: "create_project", task: null })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onCreateProject })
+    expect(onCreateProject).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalled()
+    expect(result).toEqual({ handled: false })
+  })
+})
+
 describe("dispatchChatIntent — share_to_slack", () => {
   it("routes to onShareToSlack with the envelope, unguarded", () => {
     // No target/channel guard on purpose: the executor's preview call resolves

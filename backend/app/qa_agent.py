@@ -1613,6 +1613,97 @@ def _library_only_plan(plan) -> bool:
     )
 
 
+def _planned_team_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """The company's own member list, when the PLAN asked for it.
+
+    The third block in the `_planned_library_context` family and the same
+    shape: one deterministic read of the rows Settings → Team shows, handed to
+    `compose_ask_answer` as a THUNK so it runs in wave 1 beside the embedding
+    and the corpus load.
+
+    Never raises — `team_block` already swallows its own read failure and
+    returns "" — but wrapped anyway, on the rule every gather leg here
+    follows: no context block is worth an answer."""
+    if not enterprise_id or not plan.include_team:
+        return ""
+    try:
+        from app.team_context import team_block
+
+        block = team_block(enterprise_id)
+        logger.info(
+            "[planner] exec team company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a roster read degrades, it never breaks chat
+        logger.exception("[planner] team block failed for %s", enterprise_id)
+        return ""
+
+
+def _team_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the people here and
+    about nothing else — the exact twin of `_library_only_plan`, and it
+    narrows the grounding the same way for the same reason.
+
+    The contamination it excludes is people rather than templates: every
+    connected source and half the document index is full of Slack authors,
+    Jira assignees and call speakers, and a model asked "who's on my team"
+    with those beside the roster will fold them in. A mixed question — "what
+    has Dave shipped this week" — plans include_team WITH the knowledge graph
+    and keeps every reader it asked for."""
+    return bool(
+        plan is not None
+        and plan.include_team
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
+def _planned_projects_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """The workspace's projects, when the PLAN asked for them.
+
+    Third of the own-records thunks (`_planned_library_context`,
+    `_planned_team_context`), same shape and same wave. The block scopes itself
+    to the caller and their workspace off the request ContextVars — this
+    function passes only the company, exactly as its two siblings do.
+
+    Never raises — `projects_block` swallows its own read failure — but wrapped
+    anyway, on the rule every gather leg here follows."""
+    if not enterprise_id or not plan.include_projects:
+        return ""
+    try:
+        from app.projects_context import projects_block
+
+        block = projects_block(enterprise_id)
+        logger.info(
+            "[planner] exec projects company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a projects read degrades, never breaks chat
+        logger.exception("[planner] projects block failed for %s", enterprise_id)
+        return ""
+
+
+def _projects_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about projects and about
+    nothing else — the third twin of `_library_only_plan`.
+
+    The contamination it excludes is the word itself: every connected tracker
+    has "projects", the document index is full of them, and a model asked "what
+    projects do I have" with Jira beside the real list will answer with Jira."""
+    return bool(
+        plan is not None
+        and plan.include_projects
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
 def _persist_live_records(enterprise_id: str, result) -> None:
     """Hand what a live read produced to the KG persister.
 
@@ -3043,6 +3134,8 @@ def answer(
         # Separate from the live one because the two get opposite instructions
         # downstream (`compose_ask_answer`'s `library_context_fn` says why).
         library_context_fn = None
+        team_context_fn = None
+        projects_context_fn = None
         # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
         # With the connector refresh on a 10-minute cadence, the knowledge
         # graph already holds near-live connector data — so the per-question
@@ -3134,11 +3227,29 @@ def answer(
             library_context_fn = lambda: _planned_library_context(  # noqa: E731
                 enterprise_id, plan
             )
+            # The roster read is a Postgres SELECT too, and rides both branches
+            # for the same reason the library does: "who's on my team" is as
+            # askable from a PRD tab as from the main chat.
+            team_context_fn = lambda: _planned_team_context(  # noqa: E731
+                enterprise_id, plan
+            )
+            projects_context_fn = lambda: _planned_projects_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
             library_context_fn=library_context_fn,
-            library_only=_library_only_plan(plan),
+            team_context_fn=team_context_fn,
+            projects_context_fn=projects_context_fn,
+            # One flag, three blocks: each is an exhaustive read of Sprntly's
+            # own records, and a question about any of them is narrowed away
+            # from the corpus/KG/document index identically.
+            library_only=(
+                _library_only_plan(plan)
+                or _team_only_plan(plan)
+                or _projects_only_plan(plan)
+            ),
             on_delta=on_delta,
         )
 

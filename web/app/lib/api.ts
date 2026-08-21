@@ -1237,6 +1237,13 @@ export type ChatIntentEnvelope = {
      *  (POST /v1/share/slack/send), because a message in a team channel is
      *  public and cannot be taken back. */
     | "share_to_slack"
+    /** "Create a project for the billing revamp" — make the CONTAINER (POST
+     *  /v1/projects), not a document. `task` carries the name the planner
+     *  extracted, in the user's own words, and is the whole argument: a
+     *  task-less create is downgraded to `answer` server-side, because an
+     *  untitled container is worse than a question back. The client confirms
+     *  in the thread and opens the new project. */
+    | "create_project"
     /** The private project chat's classify route ONLY (`POST /{project_id}/
      *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
      *  main chat runs, so a `switch (envelope.intent)` consumer that never

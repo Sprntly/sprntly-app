@@ -480,6 +480,12 @@ def _run_sync(
         )
 
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
+    # The workspace, by the same route: a project list scopes to `(company,
+    # workspace, my memberships)`, and this function is the only place on the
+    # answer path that holds all three. Cleared in the same `finally` — a
+    # pooled thread holding the last ask's workspace would scope the next
+    # caller's list to someone else's.
+    workspace_token = ask_runner.set_active_workspace_id(workspace_id)
     embedding_token = ask_runner.set_active_question_embedding_pending()
     # The prior turns, by the same route and for the same reason: document
     # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
@@ -574,6 +580,7 @@ def _run_sync(
         payload = _single_shot()
     finally:
         ask_runner.reset_active_conversation(context_token)
+        ask_runner.reset_active_workspace_id(workspace_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
         ask_runner.reset_active_planned_documents(planned_docs_token)

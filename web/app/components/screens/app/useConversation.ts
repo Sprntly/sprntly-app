@@ -27,6 +27,7 @@
  */
 
 import { useCallback, useEffect, useRef } from "react"
+import { useRouter } from "next/navigation"
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, RefObject, SetStateAction } from "react"
 import { addToSet, removeFromSet } from "../../../lib/chatAskState"
 import { getPendingAsk } from "../../../lib/runAskGeneration"
@@ -49,7 +50,11 @@ import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 import { buildQuotedMessage } from "../../../lib/chatQuote"
 import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
-import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../shared/chat-shell/conversation/actions"
+import {
+  runEditPrdAction, runShareToSlackAction, runAssignTicketsAction,
+  runCreateProjectAction,
+} from "../../shared/chat-shell/conversation/actions"
+import { projectPath } from "../../../lib/routes"
 import { providerNoticeFromEnvelope, providerNoticeTitle } from "../../../lib/providerLimitNotice"
 import { useMainConversation, type MainConversation } from "./useMainConversation"
 import { useConversationGeneration } from "./useConversationGeneration"
@@ -191,6 +196,10 @@ export type Conversation = MainConversation &
   }
 
 export function useConversation(adapter: MainConversationAdapter): Conversation {
+  // Only consumer today is the create-project executor, which OPENS the project
+  // it just made (the owner's call). Client-side nav, same as the create modal's
+  // — a full reload would drop every other tab in this chat on the floor.
+  const router = useRouter()
   const {
     tabsRef,
     activeTabId,
@@ -563,6 +572,19 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               },
               onCreateArtifact: (env) => {
                 documentCommandFlow(trimmed, env)
+                settlePendingSend()
+              },
+              // "Create a project for the billing revamp" — make the
+              // container, confirm it in the thread, then OPEN it (the owner's
+              // call: the point of asking for a project is to start working in
+              // it). The navigation is this surface's own answer to
+              // `onProjectCreated`; the action itself knows nothing about
+              // routes.
+              onCreateProject: (env) => {
+                void runCreateProjectAction(trimmed, env, {
+                  emitTurn: emitCommandTurn,
+                  onProjectCreated: (project) => router.push(projectPath(project.id)),
+                })
                 settlePendingSend()
               },
               onShareToSlack: (env) => {
