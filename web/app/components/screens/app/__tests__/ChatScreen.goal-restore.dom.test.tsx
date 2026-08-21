@@ -95,12 +95,21 @@ vi.mock("../../../../context/WorkspaceContext", () => ({
   }),
 }))
 
-import { NavigationProvider } from "../../../../context/NavigationContext"
+import { NavigationProvider, useNavigation } from "../../../../context/NavigationContext"
 import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
 function Harness() {
   const { content } = useContent()
+  // The panel's OPEN state, which the slot probe below cannot see.
+  //
+  // Every test in this file asserted `goal-probe` — the content slot — and the
+  // slot was always set correctly. What shipped broken was the other half:
+  // `ContentPanel` only un-hides the `goal` tab once the panel is open, so a
+  // restored run sat in the slot with nothing on screen and no control to
+  // reveal it. A probe that cannot distinguish "restored" from "restored and
+  // visible" is why that had coverage and still shipped.
+  const nav = useNavigation()
   return React.createElement(
     React.Fragment,
     null,
@@ -108,6 +117,21 @@ function Harness() {
       "div",
       { "data-testid": "goal-probe" },
       content.goalRunId != null ? String(content.goalRunId) : "none",
+    ),
+    React.createElement(
+      "div",
+      { "data-testid": "panel-probe" },
+      nav.contentPanelTab ?? "closed",
+    ),
+    React.createElement(
+      "button",
+      { "data-testid": "close-panel", onClick: () => nav.closeContentPanel() },
+      "close",
+    ),
+    React.createElement(
+      "button",
+      { "data-testid": "open-prd-panel", onClick: () => nav.openContentPanel("prd") },
+      "open prd",
     ),
     React.createElement(ChatScreen),
   )
@@ -124,6 +148,7 @@ function mountApp() {
 }
 
 const goalProbe = () => screen.getByTestId("goal-probe").textContent
+const panelProbe = () => screen.getByTestId("panel-probe").textContent
 
 function seedPersistedTab(
   tab: Record<string, unknown>,
@@ -181,6 +206,55 @@ describe("restoring a run after a reload", () => {
     seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
     mountApp()
     await waitFor(() => expect(goalProbe()).toBe("42"))
+  })
+
+  it("puts it ON SCREEN, not merely in the slot", async () => {
+    // The bug this file's other tests could not see. `ContentPanel` un-hides
+    // the `goal` tab only once the panel is open, and on a fresh load it is
+    // closed — so a run restored into the slot was invisible, with no control
+    // anywhere to reveal it. A multi-minute analysis behind two human gates
+    // became single-use.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(goalProbe()).toBe("42"))
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+  })
+
+  it("does not hijack a panel the reader already has open", async () => {
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
+    mountApp()
+    fireEvent.click(screen.getByTestId("open-prd-panel"))
+    await waitFor(() => expect(goalProbe()).toBe("42"))
+    // Restored and reachable, but the reader's own choice still wins.
+    expect(panelProbe()).toBe("prd")
+  })
+
+  it("stays closed once the reader closes it", async () => {
+    // Opening once per tab is the difference between "you can get back to it"
+    // and "a panel you dismissed keeps reappearing".
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1",
+      [{ id: "t2", title: "other", dbConvId: 8, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+
+    await switchToTab("other")
+    await switchToTab("chat")
+    await waitFor(() => expect(goalProbe()).toBe("42"))
+    expect(panelProbe()).toBe("closed")
   })
 
   it("ignores a run belonging to a different thread", async () => {
