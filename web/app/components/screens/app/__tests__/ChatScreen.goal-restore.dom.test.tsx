@@ -360,6 +360,38 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 
+  it("never shows one thread's run on another thread", async () => {
+    // The hazard `ChatScreen.tsx:2184` exists to prevent, raised in severity by
+    // this feature: leaving the slot set showed thread A's analysis — WITH A
+    // LIVE CONFIRM BUTTON — on thread B. While the panel stayed shut that was
+    // invisible; opening it makes it actionable, so the guarantee now has to
+    // hold visibly.
+    //
+    // It holds because the per-thread reset is declared ~2,400 lines before the
+    // open effect and React runs effects in order, so the open only ever sees a
+    // slot already cleared for the thread being entered. That is an ORDERING
+    // property, and ordering is exactly what a refactor changes silently — so
+    // it is pinned here rather than left to the declaration order.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "awaiting_confirmation" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 8, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+    expect(goalProbe()).toBe("42")
+
+    await switchToTab("B")
+    // B has no run of its own. Whatever the panel does, it must not be
+    // displaying 42 — that is thread A's, and its Confirm button would lock a
+    // goal definition against a conversation the reader is not looking at.
+    await waitFor(() => expect(goalProbe()).toBe("none"))
+    expect(panelProbe()).not.toBe("goal")
+  })
+
   it("two tabs on ONE conversation still re-run the restore", async () => {
     // `activeTabId` in the deps. Two tabs can share a conversation id, so
     // without it the effect does not re-run on the switch: the content reset
