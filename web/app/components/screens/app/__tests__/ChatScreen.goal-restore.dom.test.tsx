@@ -360,6 +360,59 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 
+  it("a run the reader STARTED also stays closed once dismissed", async () => {
+    // The headline "stays closed" test only ever exercised the RESTORE path,
+    // where the auto-open effect takes the per-tab claim itself. A run the
+    // reader starts opens the panel directly, so unless `startGoalAnalysis`
+    // claims the tab too, the reader's close satisfies every guard and the
+    // effect shoves the panel straight back.
+    //
+    // The file says this out loud one tab over, at the reports hand-off:
+    // "Claim the tab: this IS its one auto-open, so closing the panel here
+    // must not hand straight over to the auto-open effect below."
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    await startAGoal("raise net revenue retention")
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+    await new Promise((r) => setTimeout(r, 60))
+    expect(panelProbe()).toBe("closed")
+  })
+
+  it("does not open on the thread being switched TO, using the old thread's run", async () => {
+    // The switch commit reads a FRESH `activeTabId` beside a STALE
+    // `content.goalRunId`, because the per-thread reset is itself an effect in
+    // the same flush. Unguarded, arriving on a thread with no analysis opened a
+    // goal panel that went blank the moment the reset landed.
+    //
+    // The dismissal matters: it is what leaves `contentPanelTab` legitimately
+    // null, so the hijack guard cannot mask the bug.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 42, conversation_id: 7, status: "ready" }],
+    })
+    seedPersistedTab(
+      { id: "t1", title: "A", dbConvId: 7, messages: [] },
+      "t1",
+      [{ id: "t2", title: "B", dbConvId: 8, messages: [] }],
+    )
+    mountApp()
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
+    fireEvent.click(screen.getByTestId("close-panel"))
+    await waitFor(() => expect(panelProbe()).toBe("closed"))
+
+    await switchToTab("B")
+    await new Promise((r) => setTimeout(r, 60))
+    // B has no run. A goal panel here is either blank or showing A's analysis;
+    // both are wrong, and one of them is clickable.
+    expect(panelProbe()).not.toBe("goal")
+  })
+
   it("never shows one thread's run on another thread", async () => {
     // The hazard `ChatScreen.tsx:2184` exists to prevent, raised in severity by
     // this feature: leaving the slot set showed thread A's analysis — WITH A

@@ -4615,6 +4615,25 @@ export function ChatScreen() {
   useEffect(() => {
     if (!goalAnalysisOn || isBriefTab || !activeTabId) return
     if (content.goalRunId == null) return
+    // TWO SOURCES OF TRUTH, AND ONLY ONE OF THEM IS CURRENT HERE.
+    //
+    // On the commit where the reader switches tabs, `activeTabId` is already
+    // the NEW tab while `content.goalRunId` is still the OLD thread's: the
+    // per-thread reset at `:2188` is itself an effect, and passive effects in
+    // one flush all close over the same render, so this runs BEFORE that
+    // setContent has re-rendered. `contentPanelTab` is stale for the same
+    // reason, so the hijack guard below cannot save it either.
+    //
+    // Left unchecked that opened `goal` on a thread with no analysis — a blank
+    // 60vw panel once the reset landed — and, being the last write in the
+    // commit, it overwrote a PRD the reconcile had just opened for the thread
+    // the reader actually navigated to.
+    //
+    // `goalRunRef` is the value that IS current: the restore effect declared
+    // above clears it synchronously at the top, so a mismatch means the slot
+    // still holds the previous thread's run and this flush has no business
+    // acting on it.
+    if (goalRunRef.current !== content.goalRunId) return
     if (goalAutoOpenedRef.current.has(activeTabId)) return
     if (contentPanelTab) return // something is already open — don't hijack it
     goalAutoOpenedRef.current.add(activeTabId)
@@ -4633,6 +4652,12 @@ export function ChatScreen() {
       })
       goalRunRef.current = run.id
       setContent({ goalRunId: run.id })
+      // Claim the tab: this IS its one auto-open, so closing the panel here
+      // must not hand straight over to the auto-open effect above. Same
+      // sentence as the reports hand-off at `:4164` and the ticket-set one.
+      // Without it the claim was only ever taken on the RESTORE path, so a run
+      // the reader STARTED reopened the instant they dismissed it.
+      if (activeTabId) goalAutoOpenedRef.current.add(activeTabId)
       openContentPanel("goal")
     } catch (e) {
       // A 403 here is the entitlement gate, and it is the one failure worth
