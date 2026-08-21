@@ -9,7 +9,7 @@ board, and "what is a project" got a generic definition of the English word.
 
 TWO HALVES, and the concept half is the one that was missing: the block opens
 by saying what a project IS in this product (a shared container for a topic —
-its artifacts, its members, its group chat, its own memory), then lists the
+its artifacts, its members, its own memory), then lists the
 caller's own. A model that can list them but cannot explain them answers the
 second question badly, and "what even is this" is the first thing a new user
 asks.
@@ -73,10 +73,9 @@ def _project_line(p: dict) -> str:
     name = (p.get("name") or "").strip() or "(untitled project)"
     members = p.get("member_count") or 0
     memory = p.get("memory_count") or 0
-    chat = "group chat started" if p.get("has_group_chat") else "no group chat yet"
     return (
         f"- {name} — {members} member{'s' if members != 1 else ''} — "
-        f"{_artifacts_phrase(p.get('artifact_counts') or {})} — {chat} — "
+        f"{_artifacts_phrase(p.get('artifact_counts') or {})} — "
         f"{memory} memory note{'s' if memory != 1 else ''} — project id: {p.get('id')}"
     )
 
@@ -88,10 +87,9 @@ def _project_line(p: dict) -> str:
 _WHAT_A_PROJECT_IS = (
     "A PROJECT in Sprntly is a shared container for one topic or piece of "
     "work. It gathers that topic's artifacts (PRDs, evidence, prototypes, "
-    "reports, ticket sets) in one place, has its own members, its own group "
-    "chat where the team and Sprntly talk together, a private chat per member, "
-    "and its own memory — notes and decisions that persist across every "
-    "conversation held inside it. It is NOT a Jira project, a Confluence "
+    "reports, ticket sets) in one place, has its own members, a private chat "
+    "per member, and its own memory — notes and decisions that persist across "
+    "every conversation held inside it. It is NOT a Jira project, a Confluence "
     f"space, or anything in a connected tool. Projects live on the "
     f"{_PROJECTS_SCREEN} screen, and one can be created from this chat by "
     "asking for it."

@@ -96,13 +96,13 @@ def test_update_agent_promoted_entry_revises_body_and_touches_updated_at(
 
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     entry = memory_db.add_agent_promoted_entry(
         project["id"], body="Original agent fact.", source_conversation_id=conv["id"]
     )
 
-    conv2 = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv2 = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     updated = memory_db.update_agent_promoted_entry(
         project["id"], entry["id"], body="Revised agent fact.",
         source_conversation_id=conv2["id"],
@@ -132,7 +132,7 @@ def test_update_agent_promoted_entry_never_touches_user_entry(
 
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     user_entry = memory_db.add_entry(
         project["id"], body="Human-written guardrail.", author_user_id=ctx.user_id
@@ -162,7 +162,7 @@ def test_update_agent_promoted_entry_scoped_to_project(isolated_settings, monkey
     ctx = company_client(monkeypatch)
     project_a = _create_project(ctx, name="Project A")
     project_b = _create_project(ctx, name="Project B")
-    conv = conversations_db.create_group_chat(project_a["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project_a["id"], ctx.user_id)
 
     entry = memory_db.add_agent_promoted_entry(
         project_a["id"], body="Belongs to A.", source_conversation_id=conv["id"]
@@ -185,7 +185,7 @@ def test_update_agent_promoted_entry_flips_stale(isolated_settings, monkeypatch)
 
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     entry = memory_db.add_agent_promoted_entry(
         project["id"], body="Original.", source_conversation_id=conv["id"]
     )
@@ -492,7 +492,7 @@ def test_memory_insight_returns_latest_agent_entry(isolated_settings, monkeypatc
     from app.db import conversations as conversations_db
     from app.db import project_memory_entries as memory_db_mod
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     memory_db_mod.add_agent_promoted_entry(
         project["id"], body="Older insight.", source_conversation_id=conv["id"]
     )
@@ -504,13 +504,13 @@ def test_memory_insight_returns_latest_agent_entry(isolated_settings, monkeypatc
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
     assert r.status_code == 200
-    # source_kind="group" — the promoting conversation is the project's
-    # group chat (FIX: previously this label was hardcoded regardless of
-    # the actual source, mislabeling individual-chat promotions too).
+    # source_kind reflects the promoting conversation's real `kind` column
+    # (FIX: previously this label was hardcoded regardless of the actual
+    # source, mislabeling promotions).
     assert r.json() == {
         "by": "Sprntly",
         "text": "Newest insight — flat pricing, not tiered.",
-        "source_kind": "group",
+        "source_kind": "individual",
     }
 
 
@@ -535,7 +535,7 @@ def test_memory_insight_ignores_user_entries(isolated_settings, monkeypatch):
     from app.db import conversations as conversations_db
     from app.db import project_memory_entries as memory_db_mod
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     memory_db_mod.add_agent_promoted_entry(
         project["id"], body="Older agent insight.", source_conversation_id=conv["id"]
     )
@@ -545,7 +545,7 @@ def test_memory_insight_ignores_user_entries(isolated_settings, monkeypatch):
 
     r = ctx.client.get(f"/v1/projects/{project['id']}/memory/insight")
     assert r.status_code == 200
-    assert r.json() == {"by": "Sprntly", "text": "Older agent insight.", "source_kind": "group"}
+    assert r.json() == {"by": "Sprntly", "text": "Older agent insight.", "source_kind": "individual"}
 
 
 def test_memory_insight_labels_individual_chat_source_correctly(isolated_settings, monkeypatch):

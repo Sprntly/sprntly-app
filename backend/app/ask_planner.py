@@ -293,7 +293,7 @@ _ACTIONS: frozenset[str] = frozenset({
     # rather than a message in front of the wrong audience.
     "share_to_slack",
     # Create a PROJECT — the shared container for one topic (its artifacts,
-    # its members, its group chat, its own memory). Its own action rather than
+    # its members, its own memory). Its own action rather than
     # a shading of `create_artifact`, because the two produce different things
     # and the confusion runs one way: a project is a CONTAINER and an artifact
     # is a DOCUMENT, so "create a project for the billing revamp" answered as
@@ -756,7 +756,7 @@ or wants an answer.
   not a document filed in the shared library. When you are unsure, choose
   `answer` — the assistant can offer to write it, and the user can say yes.
 - create_project — create a PROJECT: the shared container for one topic, which
-  holds that topic's artifacts, its members, its group chat and its own memory.
+  holds that topic's artifacts, its members, and its own memory.
   "create a project for the billing revamp", "make a project for onboarding",
   "start a project called Pricing 2027", "set up a project for this work". Set
   `task` to what the project is ABOUT, in the user's own words and short — it
@@ -1254,7 +1254,7 @@ question.
 === QUESTIONS ABOUT PROJECTS ===
 
 A PROJECT is a Sprntly container for one topic: its artifacts, its members, its
-group chat, its own memory. It is NOT a Jira project, a Confluence space, or
+own memory. It is NOT a Jira project, a Confluence space, or
 anything in a connected tool, and a question about "my projects" is about these.
 
 Set include_projects=true for: "what projects do I have", "what is a project",

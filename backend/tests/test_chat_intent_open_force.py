@@ -68,6 +68,31 @@ def _seed_project_with_prd(t, prd_id: int) -> int:
     return project["id"]
 
 
+def _insert_legacy_group_conversation(t, project_id: int) -> dict:
+    """A `kind='group'` conversation row inserted directly (the group-chat
+    WRITE path — `create_group_chat` — was removed with the group-chat
+    backend; pre-existing group rows are explicitly NOT deleted from the
+    database, so project-scope resolution must keep working for them)."""
+    from app.db.client import require_client
+
+    ws_id = ensure_default_workspace(t.company_id)["id"]
+    return (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": t.company_id,
+                "workspace_id": ws_id,
+                "user_id": t.user_id,
+                "project_id": project_id,
+                "kind": "group",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+
+
 # ─── the pure detector ───────────────────────────────────────────────────────
 
 
@@ -147,7 +172,7 @@ def test_group_chat_bare_open_resolves_project_prd(
     project_prd = _seed_prd(db, dataset="acme", title="Compliance Reporting", theme_id="g")
     _seed_prd(db, dataset="acme", title="Compliance Reporting", theme_id="gws")
     project_id = _seed_project_with_prd(t, project_prd)
-    group = conversations_db.create_group_chat(project_id, t.user_id)
+    group = _insert_legacy_group_conversation(t, project_id)
 
     body = t.client.post(
         "/v1/chat/intent",

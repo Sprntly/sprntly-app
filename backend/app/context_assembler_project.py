@@ -1,12 +1,11 @@
 """Project-surface context assembler — registers under `context_source`
 kind `"project"`.
 
-Produces a BREADTH-ONLY `SurfaceScope` for the two project-chat surfaces
-(private "My chat with Sprntly" and the @Sprntly group agent): the project's
-roster + task-ledger digest + artifact manifest + memory, framed
-authoritatively, reusing the EXISTING single-sourced assemblers in
-`app.project_group_context` so private and group can never drift on which
-members/tasks/artifacts they report.
+Produces a BREADTH-ONLY `SurfaceScope` for the private ("My chat with
+Sprntly") project-chat surface: the project's roster + task-ledger digest +
+artifact manifest + memory, framed authoritatively, reusing the EXISTING
+single-sourced assembler in `app.project_group_context`
+(`assemble_private_project_context`).
 
 Membership gate FIRST (IDOR-critical), ported verbatim in shape from the
 pre-collapse caller (`routes/ask.py` at commit `b09801dd^`): a project not in
@@ -46,7 +45,6 @@ class ProjectContextAssembler:
     def assemble(self, req: AssembleRequest) -> SurfaceScope:
         params = req.params or {}
         project_id_raw = params.get("project_id")
-        surface_name = params.get("surface") or "private"
 
         # No project to scope to → behave as the no-source main path (a
         # main-surface scope is a no-op ALIAS for `scope is None`).
@@ -69,35 +67,25 @@ class ProjectContextAssembler:
         if not is_project_member(project_id, req.user_id):
             raise HTTPException(403, "Not a member of this project")
 
-        surface = (
-            Surface.project_group
-            if surface_name == "group"
-            else Surface.project_private
-        )
+        surface = Surface.project_private
 
         # ── Breadth block ────────────────────────────────────────────────────
-        # The SAME single-sourced assemblers both surfaces already use — private
-        # gets the caller's own memory + roster/ledger/manifest; group gets the
-        # memory-summary + latest-insight + roster/ledger/manifest variant.
-        # Best-effort (AD-P7): a read failure degrades to an empty block. The
-        # authoritative preamble is added by `qa_agent._fold_project_context`,
-        # NOT here (folding it in would double it).
+        # The single-sourced private assembler — the caller's own memory +
+        # roster/ledger/manifest. Best-effort (AD-P7): a read failure degrades
+        # to an empty block. The authoritative preamble is added by
+        # `qa_agent._fold_project_context`, NOT here (folding it in would
+        # double it).
         block = ""
         try:
             from app import project_group_context
 
-            if surface == Surface.project_group:
-                block = project_group_context.assemble_group_agent_context(
-                    project_id, req.dataset, req.company_id
-                )
-            else:
-                block = project_group_context.assemble_private_project_context(
-                    project_id, req.user_id, req.dataset, req.company_id
-                )
+            block = project_group_context.assemble_private_project_context(
+                project_id, req.user_id, req.dataset, req.company_id
+            )
         except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
             logger.warning(
                 "project context assembly failed project_id=%s surface=%s",
-                project_id, surface_name, exc_info=True,
+                project_id, surface.value, exc_info=True,
             )
             block = ""
 
@@ -150,34 +138,11 @@ class ProjectContextAssembler:
         # facts. Reuses the `roster` fetched just above for the sidecars (no
         # re-fetch). The constants/helper are imported (not reimplemented) from
         # `app.ask_job_runner`, where they still live on this commit.
-        #
-        # Both surfaces fold in the depth guidance so the model gets WHEN/HOW
-        # guidance for delegate_task / edit_prd + the roster block (free-text
-        # assignee → member), not just the project facts. The private and group
-        # scope-systems carry the SAME behavioral contract re-cast for their
-        # register. The tools + `assigner_identity` (= the requesting human,
-        # `req.user_id`) already ride the returned scope below; this is the
-        # guidance that makes the model actually delegate on a human's request
-        # (group parity — the group agent previously got the tools but not the
-        # guidance, so it could answer/do the task itself instead of delegating).
-        if surface == Surface.project_private:
-            from app.ask_job_runner import (
-                _PRIVATE_SCOPE_SYSTEM,
-                _private_roster_block,
-            )
+        from app.ask_job_runner import _PRIVATE_SCOPE_SYSTEM, _private_roster_block
 
-            system_addendum = (
-                f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
-            )
-        else:
-            from app.ask_job_runner import (
-                _GROUP_SCOPE_SYSTEM,
-                _private_roster_block,
-            )
-
-            system_addendum = (
-                f"{_GROUP_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
-            )
+        system_addendum = (
+            f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
+        )
         if instr_block:
             system_addendum = f"{system_addendum}\n\n{instr_block}"
 
@@ -196,28 +161,16 @@ class ProjectContextAssembler:
                 )
             )
 
-        # `complete_task` is GROUP-only: the assignee reporting their task done
-        # in the shared thread is where the deterministic ledger-write tool is
-        # needed. The private surface already records completion via the
-        # `delegation_status_ingest` classifier at its own turn seam, so adding
-        # the tool there would double-drive that path — keep private unchanged.
-        completion_tools = (
-            (project_delegation.COMPLETE_TASK_TOOL,)
-            if surface == Surface.project_group
-            else ()
-        )
         return SurfaceScope(
             surface=surface,
             project_id=project_id,
             context_payload=block,
             system_addendum=system_addendum,
-            # The project tools, stable order: delegate (+ complete, group
-            # only) + execute + the 4 shared read tools. Non-empty
-            # `extra_tools` is the on-switch the sixth branch gates on (along
-            # with its intent gate).
+            # The project tools, stable order: delegate + execute + the 4
+            # shared read tools. Non-empty `extra_tools` is the on-switch the
+            # sixth branch gates on (along with its intent gate).
             extra_tools=(
                 project_delegation.DELEGATE_TASK_TOOL,
-                *completion_tools,
                 project_task_execution.EXECUTE_TASK_TOOL,
                 *read_tools(),
             ),

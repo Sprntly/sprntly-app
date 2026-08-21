@@ -1,7 +1,6 @@
 """SurfaceScope — the single typed descriptor that parameterizes
-`qa_agent.answer()` across the three answer surfaces: main chat, the
-private ("My chat with Sprntly") project chat, and the @Sprntly group
-project chat.
+`qa_agent.answer()` across the two answer surfaces: main chat and the
+private ("My chat with Sprntly") project chat.
 
 `scope is None` — the default for every caller that predates this module —
 or `SurfaceScope(surface=Surface.main)` are BOTH no-ops: `answer()` runs its
@@ -21,7 +20,6 @@ from typing import Callable, Optional
 class Surface(str, Enum):
     main = "main"
     project_private = "project_private"
-    project_group = "project_group"
 
 
 #: Accept-with-nudge (Babajide decision — the fix for `is_project_tool_
@@ -71,40 +69,30 @@ PROJECT_FACTS_AUTHORITATIVE_PREAMBLE = (
 @dataclass(frozen=True)
 class SurfaceScope:
     """One turn's surface-specific context, built once by the caller
-    (`ask_job_runner._single_shot` for the private surface,
-    `routes.projects._respond_as_group_agent` for the group surface) and
-    handed to `qa_agent.answer(scope=...)`.
+    (`ask_job_runner._single_shot` for the private surface) and handed to
+    `qa_agent.answer(scope=...)`.
 
     Field-by-field mapping to the pre-collapse code it replaces:
       - `context_payload` — the breadth block. Private: already folded into
         `history` by `routes/ask.py` before this ever reaches `answer()`, so
-        the private scope leaves this "" (nothing to duplicate). Group:
-        `project_group_context.assemble_group_agent_context`'s block.
+        the private scope leaves this "" (nothing to duplicate).
       - `system_addendum` — the surface's own system-prompt text (private:
-        the relocated individual-chat instructions + roster; group: the
-        relocated group instructions + roster + addressing note + any
-        edit-status note), appended ahead of `context_payload`.
+        the relocated individual-chat instructions + roster), appended ahead
+        of `context_payload`.
       - `extra_tools` — exactly the 4 project read tools + `delegate_task` +
-        `execute_task` (6 total) for both project surfaces; empty for main.
+        `execute_task` (6 total) for the project surface; empty for main.
       - `roster` — `list_members(project_id)`, fetched once per turn.
-      - `assigner_identity` — `{assigner_user_id, source_conversation_id}`
-        (private) or `{assigner_user_id, source_turn_id}` (group); threaded
-        into `handle_delegate_task`/`handle_execute_task` so delegation
-        attribution survives the collapse.
+      - `assigner_identity` — `{assigner_user_id, source_conversation_id}`;
+        threaded into `handle_delegate_task`/`handle_execute_task` so
+        delegation attribution survives the collapse.
       - `post_turn` — the surface's own turn-writer, handed to
         `handle_execute_task` for its progress posts.
-      - `prerendered_transcript` — group only: the speaker-attributed
-        transcript (`"Name (job role): message"` lines), passed through
-        WITHOUT being re-flattened into `answer()`'s single-user history
-        model.
       - `capabilities` — declarative only (streaming/cancel flags this
         descriptor documents); nothing in `answer()` branches on it — the
         real streaming/cancel behaviour is a structural property of WHICH
         code path a turn takes (the sixth tool-loop branch never streams;
         the untouched composer path always does), not a flag read at
         runtime.
-      - `multi_party` — flags the group surface for router/interceptor
-        behaviour (the LT-8 input-shape decision, pinned at ship-gate).
     """
 
     surface: Surface
@@ -115,19 +103,14 @@ class SurfaceScope:
     roster: tuple[dict, ...] = ()
     assigner_identity: Optional[dict] = None
     post_turn: Optional[Callable[[str], None]] = None
-    prerendered_transcript: Optional[str] = None
     capabilities: Optional[dict] = None
-    multi_party: bool = False
-    #: GROUP surface only: the in-band `edit_prd` tool's handler. Given the
-    #: tool's `{instruction}` input, it applies the edit DIRECTLY through the
-    #: shared editor against a target the handler closes over (the turn's
-    #: open-drawer PRD id — never a model-supplied one), returning
-    #: `(narration, None)`. The `Optional[dict]` second element is now
-    #: ALWAYS `None` — edits apply in-band, so there is no pending mutation
-    #: to ride out; the type is kept as-is for signature stability. `None`
-    #: for main/private (they register no edit tool), so the sixth-branch
-    #: tool loop only ever routes an `edit_prd` call to a handler on the
-    #: group surface — private/main `answer()` result shape is unaffected.
+    #: An in-band `edit_prd` tool's handler, given the tool's `{instruction}`
+    #: input to apply an edit DIRECTLY through the shared editor against a
+    #: target the handler closes over, returning `(narration, None)`. No
+    #: surface currently populates this field — always `None` today — but it
+    #: is kept (with its `Callable[..., tuple[str, Optional[dict]]]` type)
+    #: because `qa_agent.py` unconditionally reads `scope.edit_prd_handler`
+    #: guarded on `is not None`; removing the field would break that read.
     edit_prd_handler: Optional[Callable[[dict], "tuple[str, Optional[dict]]"]] = None
 
     @property

@@ -56,3 +56,13 @@ def test_individual_system_carries_context_and_edit_clarity():
     assert "entire context" not in weak_lower
     assert "never describe your role as merely advisory" not in weak_lower
     assert "purely advisory" in weak_lower  # the weak prompt DOES make the bad claim
+
+
+def test_individual_system_edit_language_no_teammate_accept_needed():
+    """PORTED (from the retired group-chat prompt-parity suite): the direct-
+    apply/anti-confirmation contract's remaining phrase not already asserted
+    above — the prompt must say the change does NOT need a teammate to
+    manually accept it before it takes effect, positive coverage of the
+    KEPT private prompt (AC10/AC12)."""
+    lowered = ask_job_runner._PRIVATE_SCOPE_SYSTEM.lower()
+    assert "does not need a teammate to manually accept it" in lowered

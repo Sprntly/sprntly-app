@@ -7,14 +7,8 @@
 // `mapDeps.onRetryTurn` / `onSubmitTurnEdit` — the exact handlers the rendered
 // action buttons call — asserting:
 //
-//   * GROUP re-post respects the EXISTING 2-mode reply gate. A multi-human
-//     project re-posting an UNTAGGED message posts silently (no agent ask); the
-//     same project re-posting an `@Sprntly` message, and a SOLO project
-//     re-posting anything, DO fire the ask. The re-post never rewinds shared
-//     history (peers' messages must survive).
-//   * PRIVATE (single-author) edit/retry rewinds the persisted conversation to
-//     the turn (its OWN `rewindToTurn`, not main's) and re-asks — screen and DB
-//     agree — and never touches the group post path.
+//   * Edit/retry rewinds the persisted conversation to the turn (its OWN
+//     `rewindToTurn`, not main's) and re-asks — screen and DB agree.
 import * as React from "react"
 import { act, cleanup, render, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -26,10 +20,7 @@ const h = vi.hoisted(() => ({
   handleStopAsk: vi.fn(),
   runActionTurnInTab: vi.fn(async () => {}),
   // Project turn API spies.
-  groupChat: vi.fn(async () => ({ id: 7 })),
   individualChat: vi.fn(async () => ({ id: 7 })),
-  groupTurns: vi.fn(async () => []),
-  postGroupTurn: vi.fn(async () => ({ id: 101 })),
   listTurns: vi.fn(async () => ({ turns: [] })),
   rewindToTurn: vi.fn(async () => {}),
 }))
@@ -47,7 +38,7 @@ vi.hoisted(() => {
 })
 
 // Stub the generation engine + IO-bound project hooks; keep everything else
-// (the real composer, generation flows, persistence, mention helpers) genuine.
+// (the real composer, generation flows, persistence) genuine.
 vi.mock("../../useMainConversation", () => ({
   useMainConversation: () => ({
     runConversationAsk: h.runConversationAsk,
@@ -56,9 +47,6 @@ vi.mock("../../useMainConversation", () => ({
   }),
 }))
 vi.mock("../useRealtimeChannel", () => ({ useRealtimeChannel: () => {} }))
-vi.mock("../useMentionPicker", () => ({
-  useMentionPicker: () => ({ handleKeys: vi.fn(), handleComposerInput: vi.fn(), pickerNode: null, open: false }),
-}))
 
 // Contexts.
 vi.mock("../../../../../context/CompanyContext", () => ({ useCompany: () => ({ activeCompany: { id: 1 } }) }))
@@ -85,10 +73,7 @@ vi.mock("../../../../../lib/api", async (importOriginal) => {
     ...actual,
     projectsApi: {
       ...actual.projectsApi,
-      groupChat: h.groupChat,
       individualChat: h.individualChat,
-      groupTurns: h.groupTurns,
-      postGroupTurn: h.postGroupTurn,
     },
     conversationsApi: {
       ...actual.conversationsApi,
@@ -107,79 +92,62 @@ vi.mock("../../../../../lib/api", async (importOriginal) => {
 import { useProjectConversation, type ProjectConversationProps } from "../useProjectConversation"
 
 let bag: ProjectConversationProps | null = null
-function Harness({ surface, memberCount }: { surface: "group" | "individual"; memberCount: number }) {
-  bag = useProjectConversation(101, surface, undefined, "Acme", memberCount, ["Me", "Bao"])
+function Harness({ projectId }: { projectId: number | string }) {
+  bag = useProjectConversation(projectId)
   return null
 }
 
-async function mount(surface: "group" | "individual", memberCount: number) {
+async function mount(projectId: number | string) {
   await act(async () => {
-    render(<Harness surface={surface} memberCount={memberCount} />)
+    render(<Harness projectId={projectId} />)
   })
-  const resolver = surface === "group" ? h.groupChat : h.individualChat
-  await waitFor(() => expect(resolver).toHaveBeenCalled())
+  await waitFor(() => expect(h.individualChat).toHaveBeenCalled())
 }
 
 beforeEach(() => { bag = null; vi.clearAllMocks() })
 afterEach(cleanup)
 
-describe("group re-post respects the 2-mode reply gate", () => {
-  it("multi-human + UNTAGGED retry re-posts silently — the agent is NOT asked", async () => {
-    await mount("group", 2)
-    await act(async () => {
-      bag!.mapDeps.onRetryTurn!({ id: "g-own", query: "let's sync friday", postedOnly: true } as never)
-    })
-    await waitFor(() => expect(h.postGroupTurn).toHaveBeenCalled())
-    // The message went back onto the shared thread, but no reply was triggered…
-    expect(h.runConversationAsk).not.toHaveBeenCalled()
-    // …and shared history was NOT rewound (a peer's messages must survive).
-    expect(h.rewindToTurn).not.toHaveBeenCalled()
-  })
-
-  it("multi-human + @Sprntly retry DOES ask the agent to reply", async () => {
-    await mount("group", 2)
-    await act(async () => {
-      bag!.mapDeps.onRetryTurn!({ id: "g-own2", query: "@Sprntly summarize the thread", postedOnly: false } as never)
-    })
-    await waitFor(() => expect(h.runConversationAsk).toHaveBeenCalled())
-    expect(h.rewindToTurn).not.toHaveBeenCalled()
-  })
-
-  it("SOLO project asks the agent even on an untagged retry", async () => {
-    await mount("group", 1)
-    await act(async () => {
-      bag!.mapDeps.onRetryTurn!({ id: "g-solo", query: "how's the launch looking", postedOnly: false } as never)
-    })
-    await waitFor(() => expect(h.runConversationAsk).toHaveBeenCalled())
-  })
-
-  it("an edited untagged re-post is still gated silent; an edit that adds @Sprntly asks", async () => {
-    await mount("group", 2)
-    // Edit that stays untagged → silent re-post, no ask.
-    await act(async () => {
-      bag!.mapDeps.onSubmitTurnEdit!({ id: "g-e1", query: "old wording" } as never, "revised plain wording")
-    })
-    await waitFor(() => expect(h.postGroupTurn).toHaveBeenCalledTimes(1))
-    expect(h.runConversationAsk).not.toHaveBeenCalled()
-
-    // A second edit that adds @Sprntly → the gate lets the ask through.
-    await act(async () => {
-      bag!.mapDeps.onSubmitTurnEdit!({ id: "g-e2", query: "old wording" } as never, "@Sprntly please weigh in")
-    })
-    await waitFor(() => expect(h.runConversationAsk).toHaveBeenCalled())
-  })
-})
-
 describe("private edit/retry rewinds the conversation and re-asks", () => {
-  it("retry rewinds to the turn (its OWN rewindToTurn) and fires the ask; never posts to the group", async () => {
-    await mount("individual", 1)
+  it("retry rewinds to the turn (its OWN rewindToTurn) and fires the ask", async () => {
+    await mount(101)
     await act(async () => {
       bag!.mapDeps.onRetryTurn!({ id: "resumed-7-0", query: "what changed?", dbTurnId: 42 } as never)
     })
     // The persisted conversation is rewound to this DB row, then re-asked.
     await waitFor(() => expect(h.rewindToTurn).toHaveBeenCalledWith(7, 42))
     await waitFor(() => expect(h.runConversationAsk).toHaveBeenCalled())
-    // Private is single-author — it never touches the group post path.
-    expect(h.postGroupTurn).not.toHaveBeenCalled()
+  })
+})
+
+describe("engine hook — private path intact, group symbols gone (AC4/AC6)", () => {
+  it("test_use_project_conversation_sends_individual_turn — a send resolves through the individual conversation path; the api client has no group turn method left to call", async () => {
+    const api = await import("../../../../../lib/api")
+    // Closed-world at the call-surface this hook actually uses: there is no
+    // `postGroupTurn`/`groupTurns`/`groupChat` method left on `projectsApi`
+    // for a send to reach even by accident.
+    expect("postGroupTurn" in api.projectsApi).toBe(false)
+    await mount(101)
+    await act(async () => {
+      void bag!.submitAsk("what changed?")
+    })
+    await waitFor(() => expect(h.runConversationAsk).toHaveBeenCalled())
+  })
+
+  it("test_use_project_conversation_hydrates_individual_turns — hydrate resolves via projectsApi.individualChat + conversationsApi.listTurns; groupTurns/groupChat do not exist to hydrate from", async () => {
+    await mount(101)
+    expect(h.individualChat).toHaveBeenCalledWith(101)
+    expect(h.listTurns).toHaveBeenCalledWith(7)
+    const api = await import("../../../../../lib/api")
+    expect("groupTurns" in api.projectsApi).toBe(false)
+    expect("groupChat" in api.projectsApi).toBe(false)
+  })
+
+  it("test_use_project_conversation_keeps_greeting_body_renderer — renderAgentBody still routes a MORE_MARKER reply to GreetingTurnBody", async () => {
+    const { MORE_MARKER } = await import("../../../../shared/chat-shell/types")
+    await mount(101)
+    const node = bag!.mapDeps.renderAgentBody!({ reply: { answer: `Welcome!${MORE_MARKER}more detail` } })
+    expect(node).toBeTruthy()
+    // A reply with no marker stays on the default reply ladder (null here).
+    expect(bag!.mapDeps.renderAgentBody!({ reply: { answer: "plain answer" } })).toBeNull()
   })
 })

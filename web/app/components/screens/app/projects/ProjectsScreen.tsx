@@ -158,10 +158,6 @@ function ProjectCard({ project, onOpen }: { project: ProjectListItem; onOpen: (i
       <div className={styles.footer}>
         <AvatarStack memberCount={project.member_count} />
         <div className={styles.metaRow}>
-          <span className={styles.metaItem} title={project.has_group_chat ? "Group chat" : "No group chat yet"}>
-            <ChatIcon />
-            {project.has_group_chat ? "Group chat" : "No group chat yet"}
-          </span>
           <span className={styles.metaItem} title="Artifacts on this project">
             <span className={styles.memDot} aria-hidden="true" />
             {artifactCount} artifact{artifactCount === 1 ? "" : "s"}

@@ -72,7 +72,6 @@ const MANUAL_PROJECT: ProjectListItem = {
   updated_at: hoursAgo(2),
   artifact_counts: { prd: 2, ticket_set: 14, prototype: 3, evidence: 6 },
   member_count: 4,
-  has_group_chat: true,
   memory_count: 24,
 }
 
@@ -87,7 +86,6 @@ const AUTO_PROJECT: ProjectListItem = {
   updated_at: hoursAgo(26),
   artifact_counts: { prd: 1, ticket_set: 9, prototype: 1 },
   member_count: 2,
-  has_group_chat: false,
   memory_count: 11,
 }
 
@@ -139,7 +137,7 @@ describe("ProjectsView — card content", () => {
     expect(html).not.toContain("634AB0")
   })
 
-  it("renders the avatar stack, artifact indicator, and chats indicator", () => {
+  it("renders the avatar stack and artifact indicator", () => {
     render(React.createElement(ProjectsView, viewProps()))
     const cards = screen.getAllByTestId("project-card")
     expect(cards).toHaveLength(2)
@@ -150,13 +148,17 @@ describe("ProjectsView — card content", () => {
     // MANUAL = prd 2 + ticket_set 14 + prototype 3 + evidence 6 = 25.
     expect(manualCard.getByText(/25 artifacts/)).toBeTruthy()
     expect(manualCard.queryByText(/insight/)).toBeNull()
-    expect(manualCard.getByText("Group chat")).toBeTruthy()
 
     const autoCard = within(cards[1])
     expect(autoCard.getByTestId("av-stack").getAttribute("aria-label")).toBe("2 members")
     // AUTO = prd 1 + ticket_set 9 + prototype 1 = 11 artifacts.
     expect(autoCard.getByText(/11 artifacts/)).toBeTruthy()
-    expect(autoCard.getByText("No group chat yet")).toBeTruthy()
+  })
+
+  it("renders no group-chat badge/copy on any card (removed with the group chat surface)", () => {
+    render(React.createElement(ProjectsView, viewProps()))
+    expect(screen.queryByText("Group chat")).toBeNull()
+    expect(screen.queryByText("No group chat yet")).toBeNull()
   })
 
   it("shows 'Auto · from PRD' iff origin==='prd_auto'", () => {
@@ -221,16 +223,13 @@ describe("ProjectsView — states", () => {
 })
 
 describe("ProjectsView — accessibility", () => {
-  it("every card is a real, keyboard-reachable <button>; icon-only indicators carry a title", () => {
+  it("every card is a real, keyboard-reachable <button>", () => {
     render(React.createElement(ProjectsView, viewProps()))
     const cards = screen.getAllByTestId("project-card")
     for (const card of cards) {
       expect(card.tagName).toBe("BUTTON")
       expect(card.hasAttribute("disabled")).toBe(false)
     }
-    // Chats indicator is meaning-bearing (icon + text) and carries a title.
-    expect(within(cards[0]).getByTitle("Group chat")).toBeTruthy()
-    expect(within(cards[1]).getByTitle("No group chat yet")).toBeTruthy()
     // Search input is labeled (not a bare icon-only control).
     expect(screen.getByLabelText("Search projects")).toBeTruthy()
   })

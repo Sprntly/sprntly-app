@@ -86,7 +86,6 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
-    is_project_completion_request,
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
@@ -1934,22 +1933,6 @@ _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: The completion sibling — a model turn that claims a delegated task is
-#: recorded/marked done ("noted, I'll mark that done", "got it, recorded",
-#: "marking the review complete") but never called `complete_task`, so the
-#: ledger was never written. Triggers the completion forcing pass. Scoped to
-#: a record/mark-done framing so it doesn't fire on `complete_task`'s own
-#: grounded confirmation ("I've marked … as done on the ledger").
-_COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
-    r"\b(?:i'?ll|i will|let me|going to|gonna)\b[^.!?\n]{0,40}?"
-    r"\b(?:mark\w*|record\w*|log\w*|updat\w*|clos\w*)\b[^.!?\n]{0,30}?"
-    r"\b(?:done|complete\w*|finished|off)\b"
-    r"|\b(?:noted|recorded|logged)\b[^.!?\n]{0,30}\b(?:done|complete\w*|finished)\b"
-    r"|\b(?:marking|recording|logging)\b[^.!?\n]{0,30}\b(?:done|complete\w*|as\s+finished)\b",
-    re.IGNORECASE,
-)
-
-
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
     enterprise_id: str, dataset: str,
@@ -1994,8 +1977,8 @@ def _try_scoped_tool_answer(
     # in the model's own claim.
     edit_prd_narrations: list[str] = []
     # Captures every `delegate_task` dispatch's handoff confirmation, in call
-    # order. `delegate_task` is a TERMINAL action: `_GROUP_SCOPE_SYSTEM`'s
-    # "once you call delegate_task ... you are DONE" contract says the turn
+    # order. `delegate_task` is a TERMINAL action: `_PRIVATE_SCOPE_SYSTEM`'s
+    # "once you call delegate_task ... you are done" contract says the turn
     # ends on the plain handoff, and the agent must NOT then also answer the
     # underlying question in the teammate's place. But `run_tool_loop` always
     # grants the model a post-tool turn, and guidance ALONE does not stop the
@@ -2025,11 +2008,14 @@ def _try_scoped_tool_answer(
         if read is not None:
             return read
         if name == "edit_prd" and scope.edit_prd_handler is not None:
-            # GROUP-only in-band PRD edit → applies DIRECTLY through the
-            # shared editor against the handler's own closed-over
-            # open-drawer target (never a model-supplied id). The handler
-            # always returns `(narration, None)` — the edit is already
-            # applied by the time the narration is produced.
+            # In-band PRD edit → applies DIRECTLY through the shared editor
+            # against the handler's own closed-over open-drawer target
+            # (never a model-supplied id). The handler always returns
+            # `(narration, None)` — the edit is already applied by the time
+            # the narration is produced. No surface currently populates
+            # `edit_prd_handler` (see `SurfaceScope.edit_prd_handler`), so
+            # this branch is presently unreachable but kept for signature
+            # stability.
             narration, _pending = scope.edit_prd_handler(tool_input)
             edit_prd_narrations.append(narration)
             return narration
@@ -2082,11 +2068,7 @@ def _try_scoped_tool_answer(
         return f"(unknown tool: {name})"
 
     system = "\n\n".join(p for p in (scope.system_addendum, scope.context_payload) if p)
-    user = (
-        scope.prerendered_transcript
-        if scope.prerendered_transcript is not None
-        else _render_scoped_transcript(history, question)
-    )
+    user = _render_scoped_transcript(history, question)
     meta: dict = {}
     try:
         from app.llm import DEFAULT_MODEL, run_tool_loop
@@ -2112,23 +2094,13 @@ def _try_scoped_tool_answer(
         # turns that DID call the tool are byte-unchanged (no extra LLM call).
         if not delegate_task_narrations and _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
             logger.warning(
-                "group_delegation_promise_without_tool_call project_id=%s — forcing delegate_task",
+                "delegation_promise_without_tool_call project_id=%s — forcing delegate_task",
                 scope.project_id,
             )
             run_tool_loop(
                 system=system, user=user, tools=list(scope.extra_tools),
                 dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
                 meta_out=meta, force_tool="delegate_task",
-            )
-        elif not complete_task_narrations and _COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
-            logger.warning(
-                "group_completion_promise_without_tool_call project_id=%s — forcing complete_task",
-                scope.project_id,
-            )
-            run_tool_loop(
-                system=system, user=user, tools=list(scope.extra_tools),
-                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
-                meta_out=meta, force_tool="complete_task",
             )
     except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
         logger.warning(
@@ -2162,7 +2134,7 @@ def _try_scoped_tool_answer(
         # handler's own confirmation is authoritative regardless of outcome
         # (delivered, declined, or an ambiguity/who-did-you-mean prompt), so
         # it OVERRIDES the model's free text — mechanical enforcement of the
-        # `_GROUP_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
+        # `_PRIVATE_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
         # below. Last call wins, matching the `edit_prd` precedent. (Checked
         # before `edit_prd`: when no delegation occurred this list is empty
         # and the `edit_prd` path below is reached byte-for-byte unchanged.)
@@ -2173,40 +2145,16 @@ def _try_scoped_tool_answer(
         # `edit_prd` call's actual result. Last call wins — mirrors "the
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
-    elif (
-        scope.edit_prd_handler is not None
-        and _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE.search(text or "")
-    ):
-        # The OTHER mechanism: `edit_prd` was never invoked this turn at
-        # all, yet the model's own final text claims the PRD was changed.
-        # There is no tool result to ground on here (the tool never ran) —
-        # the only honest answer is to say so, never to relay the model's
-        # unearned success claim.
-        logger.warning(
-            "group_edit_prd_claim_without_tool_call project_id=%s",
-            scope.project_id,
-        )
-        text = (
-            "I didn't actually make that change — open the PRD beside this "
-            "chat and ask me again so I can apply it."
-        )
 
     # Exactly one structured cost line per scoped reply — identifiers only,
-    # never the body/question (Rule #24). Relocated from the two duplicate
-    # call sites (`respond_individual`, `_respond_as_group_agent`) into this
-    # one shared branch.
+    # never the body/question (Rule #24). Relocated from `respond_individual`
+    # into this shared branch.
     from app.llm_telemetry import RunUsage, log_llm_run
 
-    operation = (
-        "projects.individual_chat.reply" if scope.surface == Surface.project_private
-        else "projects.group_chat.mention_reply"
-    )
-    # Identifiers only — matches each surface's pre-collapse identifier
-    # shape exactly (private: project_id alone; group: + conversation_id,
-    # threaded through `assigner_identity` alongside the delegation fields).
+    operation = "projects.individual_chat.reply"
+    # Identifiers only — matches the private surface's pre-collapse
+    # identifier shape exactly (project_id alone).
     identifier: dict = {"project_id": scope.project_id}
-    if scope.surface == Surface.project_group and "conversation_id" in identity:
-        identifier["conversation_id"] = identity["conversation_id"]
     usage = RunUsage(
         cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
         cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
@@ -2220,7 +2168,7 @@ def _try_scoped_tool_answer(
         duration_ms=int((time.monotonic() - start) * 1000),
         status="complete",
         model=meta.get("model") or DEFAULT_MODEL,
-        mode="individual" if scope.surface == Surface.project_private else "group",
+        mode="individual",
     )
     result: dict = {"answer": text, "citations": []}
     return result
@@ -2234,30 +2182,25 @@ def _fold_project_context(
     as one synthetic context row, reusing the exact technique `routes/
     ask.py:347` already uses for the private surface's own breadth block.
 
-    BREADTH-IDEMPOTENT for private — `scope.context_payload` is "" there
-    (that breadth already reached `history` independently, upstream, via
-    `routes/ask.py`, before `answer()` ever ran, so this adds no NEW
-    project information) — but LOAD-BEARING for group, which has no other
-    path for its roster/ledger/memory block to reach the composer at all.
+    LOAD-BEARING for the private surface, which has no other path for its
+    roster/ledger/memory block to reach the composer once the sixth-branch
+    gate declines a turn.
 
-    Also where the accept-with-nudge instruction reaches a plain-Q&A turn
-    on BOTH surfaces: `scope.system_addendum` carries the nudge sentence
-    (see `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`), so a
-    delegation-phrased ask the sixth-branch gate MISSED still tells the
-    user to phrase it explicitly rather than silently doing nothing.
+    Also where the accept-with-nudge instruction reaches a plain-Q&A turn:
+    `scope.system_addendum` carries the nudge sentence (see
+    `_PRIVATE_SCOPE_SYSTEM`), so a delegation-phrased ask the sixth-branch
+    gate MISSED still tells the user to phrase it explicitly rather than
+    silently doing nothing.
 
     A no-op (returns `history` unchanged) for `scope is None`/main, or a
     project scope whose `system_addendum`/`context_payload` are both empty.
 
-    `context_payload`, when non-empty (group only — private already leaves
-    it "", its own breadth having reached `history` upstream via `routes/
-    ask.py` WITH the same framing), is prepended with `PROJECT_FACTS_
-    AUTHORITATIVE_PREAMBLE` — the exact "answer from THIS block, don't
-    deflect" header the private surface already uses — so the group
-    composer fall-through frames its ledger/roster/memory facts the same
-    authoritative way instead of folding them as a passive, deflectable
-    "Context:" row. Join order is UNCHANGED: `system_addendum` first,
-    `context_payload` second."""
+    `context_payload`, when non-empty, is prepended with `PROJECT_FACTS_
+    AUTHORITATIVE_PREAMBLE` — the "answer from THIS block, don't deflect"
+    header — so the composer fall-through frames the project's
+    ledger/roster/memory facts authoritatively instead of folding them as
+    a passive, deflectable "Context:" row. Join order is UNCHANGED:
+    `system_addendum` first, `context_payload` second."""
     if scope is None or scope.surface == Surface.main:
         return history
     parts = []
@@ -2341,8 +2284,8 @@ def answer(
     move the tenant boundary to whoever called us.
 
     `scope` — a `SurfaceScope` (see `app.surface_scope`) naming which of the
-    three answer surfaces (main / project_private / project_group) this turn
-    is for. `None` (every caller that predates this parameter) and
+    two answer surfaces (main / project_private) this turn is for. `None`
+    (every caller that predates this parameter) and
     `SurfaceScope(surface=Surface.main)` are BOTH no-ops — nothing below this
     docstring changes when `scope` carries no project tools. A project scope
     whose `extra_tools` is non-empty is claimed by the SIXTH ladder branch,
@@ -2373,17 +2316,6 @@ def answer(
         scope is not None and scope.surface != Surface.main and scope.extra_tools
         and (
             is_project_tool_request(routing_text, history)
-            # A first-person "I'm done with <task>" completion claim must REACH
-            # the tool loop so the model can call `complete_task` and the
-            # ledger actually records the completion — otherwise it falls to
-            # the composer, which answers conversationally but writes nothing
-            # (the completion-ledger defect). GROUP-only (the surface that
-            # carries `complete_task`); authz is enforced inside the handler,
-            # so admitting on the phrasing alone is safe.
-            or (
-                scope.surface == Surface.project_group
-                and is_project_completion_request(routing_text, history)
-            )
             or is_project_content_request(routing_text, history)
             # A bare "send/assign/hand/route to <roster member>" — no
             # pronoun object — is a delegation signal `is_project_tool_

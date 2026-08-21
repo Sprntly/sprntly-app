@@ -1,6 +1,6 @@
 """Projects — the shared container that gathers a topic's artifacts plus
-the collaboration layer on top of them (group chat, per-user chats,
-project-scoped memory).
+the collaboration layer on top of them (per-user chats, project-scoped
+memory).
 
 Tenancy follows the workspace-scoped pattern (`WorkspaceContext` /
 `require_workspace`, `backend/app/routes/ask.py`), NOT the dataset-slug
@@ -124,17 +124,6 @@ def list_projects_for_workspace(company_id: str, workspace_id: str, user_id: str
     for row in member_rows:
         member_counts[row["project_id"]] = member_counts.get(row["project_id"], 0) + 1
 
-    group_chat_rows = (
-        client.table("conversations")
-        .select("id, project_id")
-        .in_("project_id", project_ids)
-        .eq("kind", "group")
-        .execute()
-        .data
-        or []
-    )
-    has_group_chat = {row["project_id"] for row in group_chat_rows}
-
     memory_rows = (
         client.table("project_memory_entries")
         .select("id, project_id")
@@ -155,7 +144,6 @@ def list_projects_for_workspace(company_id: str, workspace_id: str, user_id: str
                 **p,
                 "artifact_counts": artifact_counts.get(pid, {}),
                 "member_count": member_counts.get(pid, 0),
-                "has_group_chat": pid in has_group_chat,
                 "memory_count": memory_counts.get(pid, 0),
             }
         )
@@ -273,7 +261,7 @@ def remove_member(project_id: int, target_user_id: str) -> bool:
 def get_instructions(project_id: int) -> str | None:
     """The project's saved free-text instructions for the Sprntly agent, or
     None when nothing has been set. Single-column read — the hot-path caller
-    is scope assembly on every project-private/group agent turn."""
+    is scope assembly on every private-project agent turn."""
     rows = (
         require_client()
         .table("projects")
@@ -432,26 +420,6 @@ def resolve_member(project_id: int, needle: str) -> dict:
     if not is_project_member(project_id, member["user_id"]):
         return {"status": "no_match", "roster": roster}
     return {"status": "resolved", "member": member}
-
-
-@retry_on_disconnect
-def get_group_chat_id(project_id: int) -> int | None:
-    """The project's single group-chat `conversations.id`, or None if it
-    hasn't been created yet (a separate group-chat surface creates it —
-    this module only reads). Exactly one `kind='group'` row per project
-    is enforced in the schema by a partial unique index."""
-    rows = (
-        require_client()
-        .table("conversations")
-        .select("id")
-        .eq("project_id", project_id)
-        .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    return rows[0]["id"] if rows else None
 
 
 @retry_on_disconnect

@@ -48,7 +48,10 @@ def test_active_attempt_index_additive_no_rewrite():
 
 def test_active_attempt_index_enforces_one_live_attempt(tenant_client, isolated_settings):
     """AC12/AC18: a SECOND `generating` insert for the same source_turn_id is
-    rejected; a TERMINAL (ready) row for the same turn is allowed (partial)."""
+    rejected; a TERMINAL (ready) row for the same turn is allowed (partial).
+    The index is keyed on `source_turn_id` alone — any real turn id proves
+    it; uses the individual-chat path (the group-chat write path that
+    originally seeded this test's turn was removed)."""
     from app.db import conversations as conversations_db
     from app.db import projects as projects_db
     from app.db.asks import complete_ask_job, start_ask_job
@@ -58,25 +61,25 @@ def test_active_attempt_index_enforces_one_live_attempt(tenant_client, isolated_
     project_id = projects_db.create_project(
         company_id=t.company_id, workspace_id=ws_id, name="mig", created_by=t.user_id,
     )["id"]
-    conv = conversations_db.create_group_chat(project_id, t.user_id)
-    turn = conversations_db.post_group_turn(conv["id"], t.user_id, "@Sprntly go")
+    conv = conversations_db.create_individual_project_chat(project_id, t.user_id)
+    turn = conversations_db.post_individual_turn(conv["id"], "assistant", "go")
 
     j1 = start_ask_job(
         company_id=t.company_id, dataset="acme", question="", conversation_id=conv["id"],
-        kind="project_group", project_id=project_id, source_turn_id=turn["id"], run_id="r1",
+        kind="project_private", project_id=project_id, source_turn_id=turn["id"], run_id="r1",
     )
     # Second LIVE attempt for the same turn → rejected by the partial-unique.
     with pytest.raises(sqlite3.IntegrityError):
         start_ask_job(
             company_id=t.company_id, dataset="acme", question="", conversation_id=conv["id"],
-            kind="project_group", project_id=project_id, source_turn_id=turn["id"], run_id="r2",
+            kind="project_private", project_id=project_id, source_turn_id=turn["id"], run_id="r2",
         )
     # Move the first row terminal, then a NEW live attempt is allowed (the
     # partial predicate no longer covers the ready row).
     complete_ask_job(j1, {"answer": "ok"})
     j3 = start_ask_job(
         company_id=t.company_id, dataset="acme", question="", conversation_id=conv["id"],
-        kind="project_group", project_id=project_id, source_turn_id=turn["id"], run_id="r3",
+        kind="project_private", project_id=project_id, source_turn_id=turn["id"], run_id="r3",
     )
     assert j3 != j1
 
@@ -90,20 +93,12 @@ def test_modified_files_references_intact():
     ask` / `active_project_id` have zero remaining READERS after the swap."""
     ask_runner_src = (_APP_DIR / "ask_job_runner.py").read_text()
     routes_ask_src = (_APP_DIR / "routes" / "ask.py").read_text()
-    projects_src = (_APP_DIR / "routes" / "projects.py").read_text()
-    conversations_src = (_APP_DIR / "db" / "conversations.py").read_text()
     qa_src = (_APP_DIR / "qa_agent.py").read_text()
 
     # Arity-stable public seams still present.
     assert "run_ask_job(" in routes_ask_src
     assert "def run_ask_job(" in ask_runner_src
     assert "def run_execution_job(" in ask_runner_src
-    # The group reply is now produced on the shared `/v1/ask` mount and
-    # persisted+broadcast by `_persist_group_reply` (the "mount-not-scheduler"
-    # Choice-A seam that replaced the deleted `_schedule_group_reply` /
-    # `_respond_as_group_agent` in-band group-reply path).
-    assert "def _persist_group_reply(" in ask_runner_src
-    assert "def list_group_turns(" in conversations_src
     assert "def start_ask_job(" in (_APP_DIR / "db" / "asks.py").read_text()
 
     # `_project_scoped_ask` is fully removed — no def, no call, anywhere in app/.

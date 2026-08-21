@@ -6063,7 +6063,6 @@ export type ProjectListItem = {
   updated_at: string
   artifact_counts: Partial<Record<ProjectArtifactType, number>>
   member_count: number
-  has_group_chat: boolean
   memory_count: number
 }
 
@@ -6090,11 +6089,9 @@ export type ProjectMember =
     }
 
 /** `GET /v1/projects/{id}` — the project row plus its member roster
- *  (human members + the prepended virtual agent member, AD-P6) and the
- *  project's single group-chat id (`null` until a group chat has been
- *  created for this project). Membership-gated server-side: a same-tenant
- *  non-member gets 403, a foreign-tenant project id 404s
- *  (`ApiError.status`, never a crash). */
+ *  (human members + the prepended virtual agent member, AD-P6).
+ *  Membership-gated server-side: a same-tenant non-member gets 403, a
+ *  foreign-tenant project id 404s (`ApiError.status`, never a crash). */
 export type ProjectDetail = {
   id: number
   company_id: string
@@ -6105,7 +6102,6 @@ export type ProjectDetail = {
   created_at: string
   updated_at: string
   members: ProjectMember[]
-  group_chat_id: number | null
 }
 
 /** `GET /v1/projects/{id}/memory/summary` — the cached synthesized
@@ -6164,55 +6160,6 @@ export type ProjectMemoryEntry = {
   updated_at: string
 }
 
-/** One row from `GET/POST /v1/projects/{id}/group/turns`
- *  (`backend/app/db/conversations.py`'s `list_group_turns`/`post_group_turn`).
- *  A human turn carries `author_user_id`/`author_name`/`author_job_role`; an
- *  agent turn (the `@Sprntly`-mention reply) carries `author_user_id: null`
- *  and `role: "assistant"` — the only conversation_turns rows with a
- *  `role`/author split at all, since single-owner individual chats never
- *  needed one. */
-export type GroupTurn = {
-  id: number
-  role: "user" | "assistant"
-  content: string
-  author_user_id: string | null
-  author_name: string | null
-  author_job_role: string | null
-  /** The send-identity key. On a human turn it is the poster's own
-   *  idempotency key; on the agent reply it is the SAME key the originating
-   *  ask carried. Lets the poster recognise its own turn/reply realtime echo
-   *  (id-precise correlation, never a timing guess). Null on turns written
-   *  before the key existed / by the cross-user helpers. */
-  client_message_id?: string | null
-  created_at: string
-  /** Artifact-open candidates for this turn (the same disambiguation shape
-   *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by
-   *  `list_group_turns`/`post_group_turn` today — group turns carry no
-   *  artifact-resolution envelope yet (that's a `/v1/ask`-only mechanism).
-   *  Optional and wired here so `ProjectGroupChat` composes the real
-   *  `OpenArtifactChips` primitive rather than a bespoke one the day the
-   *  backend starts sending this. */
-  open_candidates?: OpenArtifactCandidate[]
-  /** The FULL structured reply persisted on an assistant turn
-   *  (`conversation_turns.reply` jsonb): the engine's `AskResponse`
-   *  (answer/key_points/citations), optionally merged with the classify
-   *  envelope's card data (`artifact_list`, nested `open.candidates`).
-   *  Null/absent for human turns and for assistant turns persisted before
-   *  the column existed — those render from `content` alone. */
-  reply?: (AskResponse & {
-    artifact_list?: ChatArtifactItem[]
-    open?: { candidates?: OpenArtifactCandidate[] } | null
-  }) | null
-  /** The latest agent run-status, attached by the backend onto the HUMAN turn
-   *  whose id == the run's `source_turn_id` (already mapped to the FE
-   *  vocabulary at the DTO edge: running/done/failed/declined). Drives the
-   *  group chat's "thinking" pending state so a reply that's still generating
-   *  never flashes a false "Sprntly stayed out". Null/absent on turns with no
-   *  associated run. */
-  run_status?: "queued" | "running" | "done" | "failed" | "declined" | null
-  error_class?: string | null
-}
-
 /** Response from `POST /v1/projects/{id}/individual` — the caller's durable
  *  individual project chat (`conversations.kind='individual'`, scoped
  *  project_id+user_id). Get-or-create, idempotent per (project, caller):
@@ -6232,11 +6179,10 @@ export type IndividualChatConversation = {
  *  (`backend/app/db/conversations.py`'s `list_individual_turns`) — the
  *  caller's OWN individual project chat, never another member's (own-
  *  conversation read gate, the read-side counterpart of the delegate-tool's
- *  cross-user write). No `author_user_id`/`author_name` split like
- *  `GroupTurn`: an individual chat is single-owner, so a `role: "user"` row
- *  is always the caller and a `role: "assistant"` row is always the agent
- *  (either a normal reply or a delegated brief delivered with no paired
- *  question). */
+ *  cross-user write). No `author_user_id`/`author_name` split: an individual
+ *  chat is single-owner, so a `role: "user"` row is always the caller and a
+ *  `role: "assistant"` row is always the agent (either a normal reply or a
+ *  delegated brief delivered with no paired question). */
 export type IndividualTurn = {
   id: number
   role: "user" | "assistant"
@@ -6247,20 +6193,6 @@ export type IndividualTurn = {
    *  session turn against its now-persisted history row by this key
    *  instead of the numeric id (which the session turn never has). */
   client_message_id?: string | null
-}
-
-/** Response from `GET /v1/projects/{id}/individual/unread` and
- *  `POST /v1/projects/{id}/individual/read` — the caller's OWN derived
- *  unread signal for their individual project chat (AD-P3/AD-P20: `unread`
- *  is derived server-side at read time from a stored read cursor, never a
- *  stored boolean). `latest_turn_id` is `null` when the chat has no turns
- *  yet; `last_read_turn_id` is `0` when the caller has never read it. The
- *  `/read` route omits `unread`/`latest_turn_id` (it only reports the
- *  cursor it just advanced to), so those two fields are optional here. */
-export type IndividualUnreadStatus = {
-  unread?: boolean
-  latest_turn_id?: number | null
-  last_read_turn_id: number
 }
 
 /** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
@@ -6329,9 +6261,17 @@ export const projectsApi = {
    *  `prd_id` is only meaningful for `origin: "prd_auto"` — the create-
    *  modal's "Auto · from PRD" tab sends the forked PRD's id so the server
    *  can dedupe (first-write-wins, AD-P9): re-selecting an already-forked
-   *  PRD returns the EXISTING project instead of a new one. */
-  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact"; prd_id?: number }) =>
-    api.post<ProjectListItem>("/v1/projects", payload),
+   *  PRD returns the EXISTING project instead of a new one. `seed_text` is
+   *  an optional free-text "why" for manual/artifact origins — when
+   *  non-empty the server seeds a grounded origin-memory entry from it;
+   *  omit or leave empty to no-op (`prd_auto`'s "why" always comes from the
+   *  PRD fork hook instead, never this field). */
+  create: (payload: {
+    name: string
+    origin?: "manual" | "prd_auto" | "artifact"
+    prd_id?: number
+    seed_text?: string
+  }) => api.post<ProjectListItem>("/v1/projects", payload),
   /** Add an existing user to the project by email
    *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`
    *  404 when no account exists for that email — inviting a
@@ -6488,69 +6428,17 @@ export const projectsApi = {
    *  none exists yet. */
   memoryInsight: (id: number | string) =>
     api.get<ProjectMemoryInsight | null>(`/v1/projects/${encodeURIComponent(String(id))}/memory/insight`),
-  /** Poll read (AD-P4 — no realtime in v1): group turns after the `since`
-   *  cursor (a turn id), ascending. `since` omitted fetches the whole
-   *  history. Empty (never a crash) when the group chat hasn't been
-   *  created yet — `backend/app/routes/projects.py`'s
-   *  `list_group_turns_route` returns `{turns: []}` in that case. */
-  groupTurns: (id: number | string, since?: number) =>
-    api
-      .get<{ turns: GroupTurn[] }>(
-        `/v1/projects/${encodeURIComponent(String(id))}/group/turns${since != null ? `?since=${since}` : ""}`,
-      )
-      .then((r) => r.turns),
-  /** Post a human turn to the project's group chat (create-if-absent
-   *  server-side). An `@Sprntly` mention in `content` triggers ONE
-   *  best-effort agent reply — the POST resolves only after that reply
-   *  attempt completes (or is skipped for a non-mention), so the caller's
-   *  busy state should span the whole request, not just the network hop. */
-  postGroupTurn: (
-    id: number | string,
-    content: string,
-    opts?: {
-      /** The pinned skill riding this send (its trigger is ALREADY spliced
-       *  into `content` by the engine — the same single splice rule every
-       *  surface uses; this field additionally names the pick on the wire). */
-      pinned_skill?: { id: string; trigger: string; label?: string } | null
-      /** Resolved attachment refs ({name, content, key?, mime?, size?}) —
-       *  persisted on the turn and folded into the agent's question
-       *  server-side (mirrors the private surface's attachment ride). */
-      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
-      /** The idempotency key: a retry/double-submit carrying the same id
-       *  replays the original turn instead of double-posting. */
-      client_message_id?: string
-      /** The PRD open in the artifact drawer beside this group chat — the
-       *  explicit `edit_prd` target (parity with main chat's own open-tab
-       *  `prd_id`). `null`/omitted means no PRD is open, so an in-band edit
-       *  request gets the "open a PRD" clarify rather than a guess. */
-      prd_id?: number | null
-    },
-  ) =>
-    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, {
-      content,
-      ...(opts?.pinned_skill ? { pinned_skill: opts.pinned_skill } : {}),
-      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
-      ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
-      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
-    }),
   /** Get-or-create the caller's durable individual project chat
-   *  (create-if-absent, idempotent — mirrors the group chat's own
-   *  `POST .../group`, one level down). Called once per chat session
-   *  (the result is cached client-side) so every ask on this thread
-   *  reuses the SAME `conversation_id`. */
+   *  (create-if-absent, idempotent). Called once per chat session (the
+   *  result is cached client-side) so every ask on this thread reuses the
+   *  SAME `conversation_id`. */
   individualChat: (id: number | string) =>
     api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
-  /** Get-or-create the project's ONE shared group chat (a real `conversations`
-   *  row, `kind='group'`, per project) and return it — its `id` is what the
-   *  rebuilt group chat mount binds to and threads into main's unscoped
-   *  `/v1/ask`. Mirrors `individualChat` one level up (per-project vs per-user). */
-  groupChat: (id: number | string) =>
-    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/group`),
-  /** Load-on-open read of the caller's own individual project chat (create-if-
-   *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
-   *  `since` omitted fetches the whole history. Empty (never a crash) when
-   *  the caller hasn't opened this chat yet — `list_individual_turns_route`
-   *  returns `{turns: []}` in that case, same as the group-chat route. */
+  /** Load-on-open read of the caller's own individual project chat
+   *  (create-if-absent NOT implied). `since` omitted fetches the whole
+   *  history. Empty (never a crash) when the caller hasn't opened this chat
+   *  yet — `list_individual_turns_route` returns `{turns: []}` in that
+   *  case. */
   individualTurns: (id: number | string, since?: number) =>
     api
       .get<{ turns: IndividualTurn[] }>(
@@ -6589,22 +6477,6 @@ export const projectsApi = {
   removeMember: (id: number | string, userId: string) =>
     api.delete<{ removed: true }>(
       `/v1/projects/${encodeURIComponent(String(id))}/members/${encodeURIComponent(userId)}`,
-    ),
-  /** The caller's OWN derived unread signal for their individual project
-   *  chat (`GET /v1/projects/{id}/individual/unread`, AD-P3/AD-P20 — no
-   *  stored boolean; derived server-side from the read cursor). Never
-   *  throws on "chat not opened yet" — the route returns the zero-state
-   *  `{unread: false, latest_turn_id: null, last_read_turn_id: 0}`. */
-  individualUnread: (id: number | string) =>
-    api.get<IndividualUnreadStatus>(`/v1/projects/${encodeURIComponent(String(id))}/individual/unread`),
-  /** Advance the caller's OWN read cursor to the latest turn in their
-   *  individual project chat (`POST /v1/projects/{id}/individual/read`) —
-   *  clears the rail badge. Advance-only server-side (a stale re-post can
-   *  never move the cursor backward); safe to call every time the
-   *  individual chat is opened, not just the first time. */
-  markIndividualRead: (id: number | string) =>
-    api.post<{ last_read_turn_id: number }>(
-      `/v1/projects/${encodeURIComponent(String(id))}/individual/read`,
     ),
   /** Append one lifecycle event to a delegation
    *  (`POST /v1/projects/{id}/delegations/{delegationId}/events`) — server-

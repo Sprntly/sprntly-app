@@ -215,7 +215,7 @@ export function TaskModalView({ open, projectId, onClose, ledgerVersion }: TaskM
               <ChecklistIcon /> Task ledger
             </h2>
             <p className="modal-sub">
-              Who owes what across the project — from the group chat, individual chats and agent hand-offs. Each
+              Who owes what across the project — from individual chats and agent hand-offs. Each
               task is simply done or not done.
             </p>
           </div>

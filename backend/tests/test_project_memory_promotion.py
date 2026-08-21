@@ -133,7 +133,7 @@ def test_add_agent_promoted_entry_provenance(isolated_settings, monkeypatch):
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     entry = memory_db.add_agent_promoted_entry(
         project["id"],
@@ -159,7 +159,7 @@ def test_add_agent_promoted_entry_flips_stale(isolated_settings, monkeypatch):
     from app.db import conversations as conversations_db
     from app.db.client import require_client
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     require_client().table("project_memory_summary").insert(
         {
             "project_id": project["id"],
@@ -233,6 +233,76 @@ def test_promotion_prompt_defines_three_way_action_and_user_guardrail():
     assert "\"update\"" not in weak_prompt
 
 
+def test_promote_system_covers_david_categories():
+    """AC9: the enriched prompt instructs promotion across David's full
+    decision-centric category set, not just "decisions" — required-content
+    property (not vacuous — the negative-space check proves a prompt
+    lacking these categories would fail)."""
+    lowered = project_memory._PROMOTE_SYSTEM.lower()
+    for keyword in (
+        "key decisions",
+        "why",
+        "goal",
+        "origin",
+        "status",
+        "what's been done",
+        "open question",
+        "assignment",
+        "my items",
+        "user-supplied richness",
+    ):
+        assert keyword in lowered, f"prompt must cover the {keyword!r} category"
+
+    weak_prompt = "Promote only explicit decisions the team reaches."
+    for keyword in ("why / goal / origin", "what's been done", "open question", "my items"):
+        assert keyword not in weak_prompt.lower()
+
+
+def test_promote_system_retains_exclusions():
+    """AC9 negative-space: the pre-existing small-talk/ack/Sprntly-meta
+    exclusions must survive the enrichment untouched."""
+    lowered = project_memory._PROMOTE_SYSTEM.lower()
+    assert "small talk" in lowered
+    assert "greetings" in lowered
+    assert "thanks" in lowered
+    assert "sprntly" in lowered and "capabilit" in lowered  # "capabilities"/"capability"
+
+
+def test_promote_system_no_group_chat_wording():
+    """AC10: no stale "group chat"/"group agent" phrasing anywhere in the
+    promotion module — grep-equivalent property test."""
+    import inspect
+
+    for text in (project_memory._PROMOTE_SYSTEM, project_memory.__doc__ or "", inspect.getsource(project_memory)):
+        lowered = text.lower()
+        assert "group chat" not in lowered
+        assert "group agent" not in lowered
+
+
+def test_promote_schema_and_flat_insert_unchanged():
+    """AC9/AC12: the enrichment is prompt-text only — the classifier's
+    output schema and the flat `add_agent_promoted_entry` insert are
+    byte-identical to before. No new column, no migration."""
+    schema = project_memory._PROMOTE_SCHEMA
+    assert schema["properties"]["action"]["enum"] == ["new", "duplicate", "update", "none"]
+    assert set(schema["required"]) == {"action", "target_entry_id", "body"}
+    assert schema["additionalProperties"] is False
+
+    import inspect
+
+    src = inspect.getsource(memory_db.add_agent_promoted_entry)
+    assert "project_id" in src and "body" in src and "source_conversation_id" in src
+    assert "ALTER" not in src.upper()
+    assert "CREATE TABLE" not in src.upper()
+
+
+def test_promote_system_length_within_bounds():
+    """Property test — the enriched prompt grew (more categories) but must
+    stay within a sane bound, never unboundedly."""
+    length = len(project_memory._PROMOTE_SYSTEM)
+    assert 500 < length < 6_000, f"_PROMOTE_SYSTEM length {length} outside the sane bound"
+
+
 def test_render_promotion_user_tags_provenance_and_bounds_length():
     """AC-adjacent property test on the LLM-facing rendering function
     (mirrors `_render_entries`'s own content-cap posture): every entry is
@@ -271,7 +341,7 @@ def test_maybe_promote_turn_swallows_failure(isolated_settings, monkeypatch, fak
     from app.db import conversations as conversations_db
     from app.db.client import require_client
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     # Classifier failure.
     fake_promote_llm["raise_error"] = True
@@ -309,7 +379,7 @@ def test_promoted_entry_editable_and_removable(isolated_settings, monkeypatch, f
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     entry = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert entry is not None
@@ -332,7 +402,7 @@ def test_promotion_action_new_creates_row(isolated_settings, monkeypatch, fake_p
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "new"
     fake_promote_llm["body"] = "Never auto-enable telemetry."
@@ -355,7 +425,7 @@ def test_promotion_action_duplicate_and_none_create_no_row(
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "new"
     fake_promote_llm["body"] = "Never auto-enable telemetry."
@@ -396,7 +466,7 @@ def test_promotion_action_update_revises_existing_agent_entry(
     from app.db import conversations as conversations_db
     from app.db.client import require_client
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "new"
     fake_promote_llm["body"] = "API rate limit is 100 req/min per tenant."
@@ -411,7 +481,7 @@ def test_promotion_action_update_revises_existing_agent_entry(
     fake_promote_llm["action"] = "update"
     fake_promote_llm["target_entry_id"] = original_id
     fake_promote_llm["body"] = "API rate limit is 250 req/min per tenant, revised after load testing."
-    conv2 = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv2 = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     updated = project_memory.maybe_promote_turn(
         project["id"], conv2["id"], "Ada: @Sprntly bump the rate limit to 250/min.\n"
         "Sprntly: Updated — 250 req/min per tenant now.",
@@ -443,7 +513,7 @@ def test_promotion_update_guardrail_rejects_user_entry_target(
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     user_entry = memory_db.add_entry(
         project["id"], body="Original user guardrail.", author_user_id=ctx.user_id
     )
@@ -477,7 +547,7 @@ def test_promotion_update_guardrail_rejects_unknown_target(
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "update"
     fake_promote_llm["target_entry_id"] = 999_999_999
@@ -485,29 +555,6 @@ def test_promotion_update_guardrail_rejects_unknown_target(
     result = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert result is None
     assert memory_db.list_entries(project["id"]) == []
-
-
-def test_human_turn_no_promotion(isolated_settings, monkeypatch, fake_promote_llm, caplog):
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
-        r = ctx.client.post(
-            f"/v1/projects/{project['id']}/group/turns",
-            json={"content": "morning team, nothing to see here"},
-        )
-    assert r.status_code == 200
-    assert fake_promote_llm["calls"] == [], "no @Sprntly mention → no classifier call at all"
-
-    cost_lines = [
-        rec.getMessage()
-        for rec in caplog.records
-        if "projects.memory.promotion" in rec.getMessage()
-    ]
-    assert cost_lines == []
-
-    rows = memory_db.list_entries(project["id"])
-    assert rows == []
 
 
 def test_promotion_cost_log_no_body_text(isolated_settings, monkeypatch, fake_promote_llm, caplog):
@@ -519,7 +566,7 @@ def test_promotion_cost_log_no_body_text(isolated_settings, monkeypatch, fake_pr
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
     fake_promote_llm["insight"] = "SECRET_INSIGHT_DO_NOT_LOG"
     secret_transcript = "Ada: @Sprntly SECRET_TRANSCRIPT_DO_NOT_LOG, lock it in."
 
@@ -659,7 +706,7 @@ def test_promote_durable_insight_writes_row(client, fixture_ids, project_ids, sb
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     entry = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert entry is not None, "a durable rate-limit decision must be promoted"
@@ -680,7 +727,7 @@ def test_promote_smalltalk_writes_nothing(client, fixture_ids, project_ids, sb):
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     result = project_memory.maybe_promote_turn(project["id"], conv["id"], _SMALLTALK_TRANSCRIPT)
     assert result is None
@@ -705,7 +752,7 @@ def test_promotion_regenerates_summary_content(client, fixture_ids, project_ids,
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     entry = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert entry is not None, "setup: the durable transcript must promote for this test to prove anything"
@@ -740,7 +787,7 @@ def test_live_repeated_thanks_turn_is_skipped(client, fixture_ids, project_ids, 
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     first = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert first is not None, "setup: the durable fact must promote first"
@@ -772,7 +819,7 @@ def test_live_revision_turn_updates_existing_agent_entry(client, fixture_ids, pr
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     original = project_memory.maybe_promote_turn(project["id"], conv["id"], _DURABLE_TRANSCRIPT)
     assert original is not None, "setup: the durable fact must promote first"
@@ -818,7 +865,7 @@ def test_live_user_authored_restate_is_skipped(client, fixture_ids, project_ids,
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], fixture_ids["user_id"])
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
 
     user_entry = memory_db.add_entry(
         project["id"],

@@ -35,7 +35,7 @@ def _project(**kw):
     row = {
         "id": 7, "name": "Billing revamp", "member_count": 3,
         "artifact_counts": {"prd": 2, "prototype": 1},
-        "has_group_chat": True, "memory_count": 4,
+        "memory_count": 4,
     }
     row.update(kw)
     return row
@@ -73,7 +73,7 @@ def test_the_block_explains_what_a_project_is(monkeypatch, request_scope):
 
     assert "shared container" in block
     assert "NOT a Jira project" in block
-    assert "group chat" in block and "memory" in block
+    assert "memory" in block
 
 
 def test_a_project_line_carries_its_shape(monkeypatch, request_scope):
@@ -85,7 +85,6 @@ def test_a_project_line_carries_its_shape(monkeypatch, request_scope):
     assert "3 members" in block
     assert "2 PRDs" in block
     assert "1 prototype" in block
-    assert "group chat started" in block
     assert "4 memory notes" in block
     assert "project id: 7" in block
 
@@ -94,14 +93,13 @@ def test_an_empty_project_still_renders_its_row(monkeypatch, request_scope):
     """A project spends its first hour with nothing in it; "no artifacts yet"
     is a fact about it, not a reason to drop the line."""
     _rows(monkeypatch, [_project(
-        artifact_counts={}, member_count=1, has_group_chat=False, memory_count=0,
+        artifact_counts={}, member_count=1, memory_count=0,
     )])
 
     block = projects_context.projects_block("co-1")
 
     assert "1 member" in block
     assert "no artifacts yet" in block
-    assert "no group chat yet" in block
 
 
 def test_a_member_of_nothing_gets_the_explanation_anyway(monkeypatch, request_scope):

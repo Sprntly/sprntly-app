@@ -2,8 +2,8 @@
 <teammate> to prioritize" request must actually delegate (root cause #1 —
 the planner's action-classification must not read a named PERSON as a
 Slack destination), and the agent must never fabricate the delegatee's
-work after handing it off (root cause #2 — both project-surface system
-prompts must forbid self-performing the task or claiming completion).
+work after handing it off (root cause #2 — the private-surface system
+prompt must forbid self-performing the task or claiming completion).
 
 These are LLM-facing prompt/tool-description property tests (content +
 negative-space, no live model call) — the same discipline
@@ -20,12 +20,6 @@ from __future__ import annotations
 
 import app.ask_job_runner as ajr
 import app.ask_planner as ap
-# `_GROUP_SCOPE_SYSTEM` moved from `routes/projects.py` to
-# `ask_job_runner.py`, alongside `_PRIVATE_SCOPE_SYSTEM` — the two scope
-# prompts are a pair and now live together. This test read the old
-# location and failed with AttributeError, which reports a MOVED symbol
-# as a broken prompt.
-import app.ask_job_runner as projects_route
 
 
 # ── Root cause #1: a person is not a Slack destination ───────────────────
@@ -75,8 +69,12 @@ def _assert_forbids_fabrication(system: str, *, label: str) -> None:
     )
 
 
-def test_group_scope_system_forbids_fabricated_delegation_result():
-    _assert_forbids_fabrication(projects_route._GROUP_SCOPE_SYSTEM, label="group")
+def test_private_scope_system_mentions_delegate_task_and_forbids_fabrication():
+    """Root cause #2: the private surface's system prompt must mention
+    `delegate_task` and forbid fire-and-fabricate after a handoff — the
+    tool rode only on `extra_tools` with no behavioral guidance around it
+    before this fix."""
+    _assert_forbids_fabrication(ajr._PRIVATE_SCOPE_SYSTEM, label="private")
 
     weak = "You have a delegate_task tool: call it when asked to hand off a task."
     with_out_error = False
@@ -87,25 +85,12 @@ def test_group_scope_system_forbids_fabricated_delegation_result():
     assert with_out_error, "the property check must actually catch a prompt missing the rule"
 
 
-def test_private_scope_system_mentions_delegate_task_and_forbids_fabrication():
-    """Root cause #2 also covers the private surface, whose system prompt
-    did not mention `delegate_task` AT ALL before this fix — the tool rode
-    only on `extra_tools` with no behavioral guidance around it."""
-    _assert_forbids_fabrication(ajr._PRIVATE_SCOPE_SYSTEM, label="private")
-
-
-def test_group_and_private_prompts_share_the_same_confirmation_shape():
-    """Both surfaces should land on the same honest, non-fabricated
-    confirmation shape ("I've asked <name> to <task> ... once it's in") —
-    proving the fix was applied consistently rather than only on the
-    surface the repro happened to hit."""
-    for system, label in (
-        (projects_route._GROUP_SCOPE_SYSTEM, "group"),
-        (ajr._PRIVATE_SCOPE_SYSTEM, "private"),
-    ):
-        lower = system.lower()
-        assert "i've asked" in lower, f"{label}: missing the honest confirmation example"
-        assert "bring" in lower or "once it's in" in lower, (
-            f"{label}: confirmation example must point at a future report-back, "
-            "not a fabricated result now"
-        )
+def test_private_prompt_uses_honest_confirmation_shape():
+    """The private surface lands on an honest, non-fabricated confirmation
+    shape ("I've asked <name> to <task> ... once it's in")."""
+    lower = ajr._PRIVATE_SCOPE_SYSTEM.lower()
+    assert "i've asked" in lower, "missing the honest confirmation example"
+    assert "bring" in lower or "once it's in" in lower, (
+        "confirmation example must point at a future report-back, "
+        "not a fabricated result now"
+    )

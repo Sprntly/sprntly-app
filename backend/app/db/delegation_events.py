@@ -120,12 +120,13 @@ def list_status_for_assigner(project_id: int, user_id: str) -> list[dict]:
 @retry_on_disconnect
 def list_status_for_project(project_id: int) -> list[dict]:
     """EVERY delegation's derived-status row in this project, newest-first by
-    `status_at` — the party-blind, project-wide read the group agent's
-    project-awareness needs (it speaks for the whole room, not one party).
+    `status_at` — the party-blind, project-wide read the private agent's
+    project-awareness needs (its task-ledger digest speaks for the whole
+    project, not one party).
 
     Deliberately NOT exposed as an HTTP route: the human ledger surface is
     strictly party-filtered (AD-P29, `list_status_for_assignee`/`_assigner`),
-    but the group agent replying in the shared chat already has whole-project
+    but the agent's project-context assembly already has whole-project
     context, so a project-scoped (never cross-project) digest is in-bounds.
     Scoped to the single `project_id` — no cross-project rows can appear."""
     return (

@@ -34,8 +34,6 @@ const getMock = vi.fn()
 const artifactsMock = vi.fn()
 const memorySummaryMock = vi.fn()
 const memoryInsightMock = vi.fn()
-const individualUnreadMock = vi.fn()
-const markIndividualReadMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
 const emitDelegationEventMock = vi.fn()
@@ -59,8 +57,6 @@ vi.mock("../../../../../lib/api", async () => {
       artifacts: (...a: unknown[]) => artifactsMock(...a),
       memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
       memoryInsight: (...a: unknown[]) => memoryInsightMock(...a),
-      individualUnread: (...a: unknown[]) => individualUnreadMock(...a),
-      markIndividualRead: (...a: unknown[]) => markIndividualReadMock(...a),
       ledgerCounts: (...a: unknown[]) => ledgerCountsMock(...a),
       ledger: (...a: unknown[]) => ledgerMock(...a),
       emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
@@ -165,7 +161,6 @@ const PROJECT: ProjectDetail = {
   created_by: "owner",
   created_at: hoursAgo(48),
   updated_at: hoursAgo(2),
-  group_chat_id: 55,
   members: [
     {
       kind: "human",
@@ -247,8 +242,6 @@ async function renderDetailReady() {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  individualUnreadMock.mockResolvedValue({ unread: false, latest_turn_id: null, last_read_turn_id: 0 })
-  markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 0 })
   ledgerCountsMock.mockImplementation(() => Promise.resolve(counts))
   ledgerMock.mockImplementation((_id: unknown, view: string) =>
     Promise.resolve(view === "assigned_to_me" ? assignedRows : waitingRows),

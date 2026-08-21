@@ -220,7 +220,7 @@ def schedule_regen(project_id: int) -> None:
 
 # ── Agent memory promotion (AD-P7 best-effort, AD-P3 provenance) ───────────
 #
-# After the group agent replies (`routes/projects.py::_respond_as_group_agent`),
+# After the project agent replies (`routes/projects.py::_respond_as_group_agent`),
 # `maybe_promote_turn` runs ONE bounded classifier call over the clamped
 # transcript the caller already built PLUS the project's existing memory
 # entries, and decides whether the exchange holds a durable, project-relevant
@@ -240,7 +240,7 @@ def schedule_regen(project_id: int) -> None:
 # makes (still one LLM call) so the model can compare candidate-vs-memory
 # by MEANING, not by string equality.
 
-_PROMOTE_SYSTEM = """You read a short excerpt of a project team's group \
+_PROMOTE_SYSTEM = """You read a short excerpt of a project team's project \
 chat — including Sprntly's own last reply — plus the project's EXISTING \
 memory entries recorded so far. Decide whether the exchange holds a \
 DURABLE, project-relevant insight worth remembering for teammates who were \
@@ -264,6 +264,26 @@ statement of WHAT was decided and, briefly, why; never copy the deciding \
 line verbatim, and never include personal or off-topic detail from the \
 conversation — a distilled decision keeps teammates informed without \
 flooding the shared memory.
+
+Beyond key decisions, promote a durable insight from ANY of these \
+categories when the excerpt genuinely holds one — never invent content to \
+fill a category that isn't actually there:
+- key decisions — see above; always first-class.
+- why / goal / origin — the reason the project exists, or a goal the team \
+states for it.
+- status — where something has gotten to ("shipped to staging", "blocked \
+on design review", "in progress").
+- what's been done — concrete work a teammate reports as completed.
+- open questions — something the team has explicitly flagged as unresolved.
+- assignments — who owns what, INCLUDING the reader's own "my items" \
+("I'm taking the API work", "assign the migration to Ada").
+- user-supplied richness / constraints — a preference, detail, or \
+constraint a teammate states by hand that should shape how the work goes.
+Each of these follows the SAME "new"/"update"/"duplicate" dispatch as a \
+decision — there is no separate store per category, only the flat entry \
+list. A category with nothing genuinely present in the excerpt simply \
+contributes nothing; do not manufacture a status or an assignment to check \
+a box.
 
 Sprntly's OWN descriptions of what IT can do, what Sprntly the product can \
 do, or its role/capabilities/meta-behaviour — for example "I'm your project \
@@ -385,7 +405,7 @@ def _log_promotion_run(*, project_id: int, conversation_id: int, meta: dict,
 
 
 def maybe_promote_turn(project_id: int, conversation_id: int, transcript: str) -> dict | None:
-    """Best-effort classifier writer, called at the end of a group agent
+    """Best-effort classifier writer, called at the end of a project agent
     reply. Never raises (AD-P7): on ANY classifier or DB failure this
     promotes nothing and returns None.
 

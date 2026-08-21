@@ -3,8 +3,8 @@
 /**
  * The shared chat-ACTION layer — the command bodies a resolved intent dispatches
  * to (list artifacts, generate a PRD, share to Slack, …), written ONCE and
- * CONFIGURED by the caller. Every surface (main, project private, project group)
- * runs the SAME action; the only per-surface differences flow through the
+ * CONFIGURED by the caller. Every surface (main, project private) runs the
+ * SAME action; the only per-surface differences flow through the
  * `ActionConfig` a caller supplies.
  *
  * THE HARD RULE (the reason this layer exists): an action body NEVER branches on
@@ -43,8 +43,8 @@ export type DockQuestion =
   | { kind: "assign"; questions: TicketAssignQuestion[]; applied: string[] }
 
 /**
- * The per-surface configuration an action reads. The caller (main, private,
- * group) supplies the surface-specific bits; the action logic is identical.
+ * The per-surface configuration an action reads. The caller (main, private)
+ * supplies the surface-specific bits; the action logic is identical.
  *
  * Grows by field as higher-coupling actions land — each a new primitive, NEVER a
  * surface branch. So far:
@@ -403,7 +403,7 @@ export async function runCreateProjectAction(
   if (!name) {
     config.emitTurn(proseTurn(
       seedQuery,
-      "I can create a project — what should it be called? A project is a shared container for one topic: its PRDs, evidence, prototypes and tickets in one place, with its own members, group chat and memory.",
+      "I can create a project — what should it be called? A project is a shared container for one topic: its PRDs, evidence, prototypes and tickets in one place, with its own members and memory.",
     ))
     return
   }
@@ -412,7 +412,7 @@ export async function runCreateProjectAction(
     const project = await projectsApi.create({ name, origin: "manual" })
     config.emitTurn(proseTurn(
       seedQuery,
-      `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own group chat and memory.`,
+      `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own memory.`,
     ))
     config.onProjectCreated?.({ id: project.id, name: project.name })
   } catch (e) {
