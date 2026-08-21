@@ -1096,6 +1096,13 @@ export function ChatScreen() {
   // while its request was in flight, and depending on `content` would re-fire
   // the restore on every unrelated content change.
   const goalRunRef = useRef<number | null>(null)
+  // Tabs whose analysis has already been PUT on screen once by the restore.
+  //
+  // Mirrors `reportsAutoOpenedRef`: opening once per tab is what separates
+  // "you can get back to your analysis" from "a panel you closed keeps coming
+  // back every time you return to this thread". Keyed by tab, not by run,
+  // because two tabs can share one conversation.
+  const goalAutoOpenedRef = useRef<Set<string>>(new Set())
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -4563,6 +4570,25 @@ export function ChatScreen() {
         if (goalRunRef.current != null) return
         goalRunRef.current = mine.id
         setContent({ goalRunId: mine.id })
+        // AND PUT IT ON SCREEN. Setting the slot alone left this effect doing
+        // half of what its own comment above promises: `ContentPanel` only
+        // un-hides the `goal` tab once the panel is open, and on a fresh load
+        // it is closed — so the run was restored, invisibly, with no control
+        // anywhere to reveal it. A multi-minute analysis behind two human
+        // gates became single-use, and the editable report unreachable.
+        //
+        // Guarded the way `reportsAutoOpenedRef` guards the reports panel:
+        //  - once per tab, so closing it makes it STAY closed rather than
+        //    reappearing on every return to the thread;
+        //  - never over something already open, because the reader chose that;
+        //  - read through `contentPanelTabRef`, since the closure's value is
+        //    stale by the time this fetch resolves.
+        if (activeTabId
+            && !goalAutoOpenedRef.current.has(activeTabId)
+            && !contentPanelTabRef.current) {
+          goalAutoOpenedRef.current.add(activeTabId)
+          openContentPanel("goal")
+        }
       } catch {
         // A failed restore is a missing panel, not a broken chat. The run row
         // survives and the listing will be tried again on the next switch.
@@ -4573,7 +4599,7 @@ export function ChatScreen() {
     // id, so without it this effect does not re-run on the switch — the reset
     // clears the panel, the restore never fires again, and switching back does
     // not recover it.
-  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent, openContentPanel])
 
   // Start a Goal Analysis run and put its panel on screen.
   //
