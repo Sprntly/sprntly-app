@@ -961,3 +961,34 @@ def test_both_writers_go_through_the_same_guard(ctx):
 
     assert "_body_or_413" in inspect.getsource(mod._fork_document)
     assert hasattr(mod, "_body_or_413")
+
+
+def test_the_panel_and_the_api_agree_on_the_hypothesis_cap():
+    """A cap copied by hand into two languages, made loud when it drifts.
+
+    The panel refuses an over-long hypothesis so the user learns the rule where
+    the offending line can be named, instead of hitting a 422 that leaves the
+    run in `awaiting_approval` and reads as "we could not tell whether that
+    started". That only works while the two numbers are the same one — and
+    nothing else in the build would notice if they stopped being.
+    """
+    import re
+    from pathlib import Path
+
+    tsx = (Path(__file__).resolve().parents[2] / "web" / "app" / "components"
+           / "shared" / "GoalAnalysisPlan.tsx")
+    assert tsx.exists(), f"panel moved: {tsx}"
+    m = re.search(r"MAX_HYPOTHESIS_CHARS\s*=\s*([\d_]+)", tsx.read_text())
+    assert m, "MAX_HYPOTHESIS_CHARS is gone from the panel"
+    panel_cap = int(m.group(1).replace("_", ""))
+
+    api = Path(__file__).resolve().parents[1] / "app" / "routes" / "crucible.py"
+    m2 = re.search(r"hypotheses: list\[Annotated\[str, StringConstraints\("
+                   r"max_length=([\d_]+)\)\]\]", api.read_text())
+    assert m2, "the API's hypothesis constraint moved; update this contract test"
+    api_cap = int(m2.group(1).replace("_", ""))
+
+    assert panel_cap == api_cap, (
+        f"the panel refuses at {panel_cap} but the API refuses at {api_cap} — "
+        f"whichever is larger produces the unrecoverable 422 this guards"
+    )
