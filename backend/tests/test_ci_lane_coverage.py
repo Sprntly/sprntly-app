@@ -201,27 +201,6 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
     ),
-    ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE"): (
-        "Real local-Supabase + real-Anthropic round-trip for the group "
-        "smart-trigger port: proves the REAL classifier's continuation/"
-        "ambiguous-work-request judgment (the AD-P10 posture shift) AND "
-        "the B2 no-fabrication narration — that a 'Done' claim only ever "
-        "follows an actual prd_versions write — end to end. A stubbed "
-        "classifier/editor can prove wiring only, not that the model "
-        "actually honors the new prompt rules or that the narration guard "
-        "holds against a real editor response. Deterministic backstop: "
-        "test_group_trigger_and_no_fabrication.py covers the "
-        "agent_spoke_last/trigger_kind derivation, the in-band edit tool "
-        "handler's cases, the proposal narration branch, the "
-        "addressing-note selection, and the DRY source-scans in the fast "
-        "lane; this suite is the real-DB/real-LLM proof, run locally "
-        "against the dev rig when touching this trigger surface."
-    ),
-    ("test_group_trigger_live.py", "ANTHROPIC_API_KEY"): (
-        "Same live tests as RUN_GROUP_TRIGGER_LIVE above — both variables "
-        "gate the identical tests, so this is the other half of that same "
-        "exemption. See that entry for the deterministic backstop."
-    ),
     ("test_project_answer_collapse_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
         "Real local-Supabase + real-Anthropic round-trip for the project "
         "chat engine collapse (LT-2..LT-9): proves multi-party speaker "
@@ -269,33 +248,6 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "staging when access lands."
     ),
     ("test_individual_persistence_live.py", "ANTHROPIC_API_KEY"): (
-        "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
-        "variables gate the identical tests, so this is the other half of "
-        "that same exemption. See that entry for the deterministic backstop."
-    ),
-    ("test_group_execution_lifecycle_live.py", "RUN_PROJECT_CHAT_PARITY_LIVE"): (
-        "Real local-Supabase + real-Anthropic round-trip for the GROUP send "
-        "routed through the shared run_execution_job lifecycle primitive "
-        "(LP-1..LP-6): a real group reply posts a turn AND flips the run row "
-        "ready; a forced failure writes status='error'+error_class with no "
-        "fabricated turn and no raw text broadcast; a named-source question "
-        "hits a connector while an unnamed PM-noun grounds in the project "
-        "ledger; a retry re-answers with a new run_id/attempt while a "
-        "side-effect run refuses; a reload after a failure surfaces "
-        "run_status='failed'; and main chat answer/cancel/fail is unchanged "
-        "post-extraction — a stubbed LLM proves wiring only, never the "
-        "model's actual tool engagement or router/interceptor judgement on a "
-        "multi-speaker transcript. Deterministic backstop: "
-        "test_run_execution_job.py (primitive lifecycle + terminal-once + "
-        "error_class + byte-identity), test_group_execution_lifecycle.py "
-        "(group-through-primitive success/failure, retry 409/422/202, "
-        "connector decision, run-status-on-read, active_project_id-unset, all "
-        "mutation proofs), and test_ask_jobs_active_attempt_migration.py "
-        "(migration additivity + partial-unique enforcement) cover the wiring "
-        "against fakes in the fast lane; this suite is the real-DB/real-LLM "
-        "proof, DEFERRED-TO-STAGING — run on staging when access lands."
-    ),
-    ("test_group_execution_lifecycle_live.py", "ANTHROPIC_API_KEY"): (
         "Same live tests as RUN_PROJECT_CHAT_PARITY_LIVE above — both "
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
@@ -603,24 +555,6 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "Same live tests as RUN_PROJECT_JOIN_GREETING_LIVE above — both "
         "variables gate the identical tests, so this is the other half of "
         "that same exemption. See that entry for the deterministic backstop."
-    ),
-    ("test_group_chat_turns_live.py", "RUN_GROUP_CHAT_LIVE"): (
-        "Real local-Supabase round-trip for the group-chat surface: "
-        "`db/conversations.py`'s create_group_chat/get_group_chat/"
-        "list_group_turns/post_group_turn helpers AND the /v1/projects/{id}/"
-        "group* routes, driven over real HTTP through PostgREST against a "
-        "real local Postgres — the fake Supabase client cannot enforce the "
-        "uq_one_group_chat_per_project partial unique index, seed a real "
-        "project_chat_members roster, or prove the membership gate against "
-        "genuine rows. The one @Sprntly-triggered LLM call is stubbed here "
-        "too (app.routes.projects.run_tool_loop monkeypatched), so no "
-        "ANTHROPIC_API_KEY dependency. Deterministic backstop: "
-        "test_group_chat_turns.py covers the same create/idempotent-create, "
-        "human-vs-mention turn shape, roster/author fields, since-cursor "
-        "polling, foreign-tenant 404, same-tenant non-member 403, and the "
-        "individual-conversation isolation logic against FakeSupabaseClient "
-        "in the fast lane; this suite is the real-DB proof, run locally "
-        "against the dev rig when touching this surface."
     ),
     ("test_project_from_prd.py", "RUN_PROJECT_FROM_PRD_LIVE"): (
         "Real local-Supabase round-trip for the auto-create-from-PRD hook "
@@ -968,11 +902,3 @@ def test_ci_lane_registry_has_project_prd_content_live():
     ) in _KNOWN_UNRUNNABLE
 
 
-def test_ci_lane_registry_has_group_trigger_live():
-    """AC backstop: the group smart-trigger live suite is registered in
-    `_KNOWN_UNRUNNABLE` under both env vars that gate it. Removing either
-    entry reddens this test (and `test_no_test_is_gated_on_an_env_var_no_
-    workflow_provides` above) — the live no-fabrication proof must never
-    silently drop out of the accounted set."""
-    assert ("test_group_trigger_live.py", "RUN_GROUP_TRIGGER_LIVE") in _KNOWN_UNRUNNABLE
-    assert ("test_group_trigger_live.py", "ANTHROPIC_API_KEY") in _KNOWN_UNRUNNABLE

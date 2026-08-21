@@ -227,7 +227,7 @@ def maybe_pin_conversation_artifact_to_project(
     The generalised, artifact-type-agnostic sibling of the PRD-specific
     `maybe_auto_create_project_for_prd`'s already-bound branch (line ~168):
     given a conversation that already belongs to a project (a project's own
-    individual/group chat, or a chat auto-forked into a project), UPSERT the
+    individual chat, or a chat auto-forked into a project), UPSERT the
     generated artifact into that project's `project_artifacts` so it shows up
     on the project's artifact rail AND in the project context manifest the
     context-assembler injects (both are derived at read time from
