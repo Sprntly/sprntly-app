@@ -942,7 +942,12 @@ def test_the_fork_route_is_guarded_too_not_just_the_create_route(ctx, monkeypatc
                         lambda *a, **k: "<p>" + ("x" * 500_000) + "</p>")
     r = ctx.client.post(f"/v1/crucible/{run_id}/document/fork")
 
-    assert r.status_code in (413, 404, 409), r.status_code
+    # EXACTLY 413. Accepting 404/409 as well is how this test stops testing
+    # anything: the fixture drifts, the run is not found or not claimable, the
+    # route returns before it ever renders a body, and the assertion still
+    # passes while the guard goes unexercised.
+    assert r.status_code == 413, r.status_code
+    assert "too large" in (r.json().get("detail") or "").lower()
     if r.status_code == 413:
         assert "run itself is unaffected" in r.json()["detail"]
 

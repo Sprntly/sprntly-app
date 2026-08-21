@@ -390,7 +390,19 @@ MAX_RENDERED_SOURCES = 5
 
 #: The overflow list's rows. Each is one clipped statement, and the count of
 #: anything beyond is still stated, so nothing becomes invisible.
-MAX_OVERFLOW_ROWS = 400
+#:
+#: 1,000 rather than 400 because 400 SILENTLY DEGRADED A REAL RUN: the
+#: 831-finding report listed all 681 of its tail before this PR and only 400
+#: after, which is a regression dressed as a safety fix. At 1,000 every run
+#: that exists lists its tail in full, and the ladder still bounds the rest.
+MAX_OVERFLOW_ROWS = 1_000
+
+#: The ledger and the limits section — neither is reachable by the ladder.
+MAX_LEDGER_ROWS = 300
+MAX_LEDGER_LABEL_CHARS = 200
+MAX_LEDGER_REASON_CHARS = 400
+MAX_GAPS = 40
+MAX_GAP_CHARS = 400
 
 _BODY_LIMIT = 400_000  # mirrors custom_artifacts.MAX_BODY_CHARS
 
@@ -411,11 +423,17 @@ _BODY_LIMIT = 400_000  # mirrors custom_artifacts.MAX_BODY_CHARS
 #: the document fits. Real reports never leave the first rung; pathological ones
 #: shrink themselves and say so. `_body_or_413` stays as the backstop for the
 #: case where even the last rung is too big.
+#: Overflow rows go first and GRADUALLY, then full blocks. A ladder that
+#: halves both at once turns a run that missed rung 1 by a hundred characters
+#: into a report with a tenth of its tail.
 _SHED_LADDER = (
     (MAX_FULL_FINDING_BLOCKS, MAX_OVERFLOW_ROWS),
-    (150, 150),
-    (75, 75),
-    (30, 30),
+    (MAX_FULL_FINDING_BLOCKS, 600),
+    (MAX_FULL_FINDING_BLOCKS, 400),
+    (MAX_FULL_FINDING_BLOCKS, 200),
+    (100, 150),
+    (50, 75),
+    (20, 30),
     (10, 10),
 )
 
@@ -443,13 +461,18 @@ def _findings_section(
         # SAID PLAINLY, where the reader is. A document that stopped at 150
         # without a word would read as "these are all the findings", which is
         # exactly the quiet degradation the coverage notes exist to prevent.
-        out.append(_p(
-            f"The remaining {len(rest)} findings are listed below in rank "
-            f"order rather than in full. They are ranked lower by reach and "
-            f"the document has a size limit; nothing has been dropped, and "
-            f"every one of them is still on the run itself."
-        ))
         listed = rest[:overflow_cap]
+        # WRITTEN FROM `listed`, NOT `rest`. Keyed off `rest` this paragraph
+        # promised "the remaining 681 are listed below … nothing has been
+        # dropped" and was then followed by 400 rows and a sentence conceding
+        # 281 were missing. The document contradicted itself in two adjacent
+        # paragraphs, on the very run cited as evidence that it was fine.
+        out.append(_p(
+            f"The next {len(listed)} findings are listed below in rank order "
+            f"rather than in full. They are ranked lower by reach and the "
+            f"document has a size limit; every one of them is still on the "
+            f"run itself."
+        ))
         rows = []
         for offset, f in enumerate(listed, start=len(full) + 1):
             statement = _esc_statement(f)
@@ -477,7 +500,7 @@ def _hypotheses_section(plan: dict) -> str:
         # Bounded here too. The API now caps each string, but a plan stored
         # before that cap existed is still on disk, and the document budget
         # cannot depend on when a row was written.
-        _ul(_esc(_clip(h, MAX_STATEMENT_CHARS)) for h in hypotheses),
+        _ul(_esc_clipped(h, MAX_STATEMENT_CHARS) for h in hypotheses),
         # NOT A VERDICT. The engine does not test a stated hypothesis against
         # the claims, and listing these beside the findings without saying so
         # would let a reader infer that silence meant "not supported" — a
@@ -493,6 +516,12 @@ def _hypotheses_section(plan: dict) -> str:
 def _ledger_section(ledger: list[dict]) -> str:
     if not ledger:
         return ""
+    # BOUNDED. `label` traces to `pipeline._label()` -> `claim.subject` ->
+    # `kg_entity.canonical_label`, the same untruncated tenant string that had
+    # to be clipped for `statement` — and the shed ladder cannot rescue this
+    # section, because it sheds findings only. 102 rows at 4,000-char labels
+    # rendered 828,071 characters, over the limit at every rung.
+    shown = ledger[:MAX_LEDGER_ROWS]
     # ALWAYS EXPANDED HERE, unlike the panel. The panel folds a long ledger
     # behind a `<details>` so it cannot push the limits section off the screen;
     # `<details>` is not on the artifact allowlist and would be unwrapped into
@@ -507,13 +536,17 @@ def _ledger_section(ledger: list[dict]) -> str:
             "for a stated reason."
         ),
         _ul(
-            f"<strong>{_esc(r.get('label'))}</strong> — {_esc(r.get('reason'))}"
+            f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
+            f"</strong> — {_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}"
             + (
-                f" <em>(stopped at {_esc(r.get('stopped_at_stage'))})</em>"
+                f" <em>(stopped at "
+                f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
-            for r in ledger
+            for r in shown
         ),
+        _p(f"{len(ledger) - len(shown)} further rejections are on the run and "
+           f"are not listed here.") if len(ledger) > len(shown) else "",
     ])
 
 
@@ -530,10 +563,27 @@ def _limits_section(plan: dict) -> str:
     if gaps:
         # Built from the run PLAN's own gaps, so what the user was warned about
         # BEFORE the run is what they are reminded of after it.
-        for gap in gaps:
-            out.append(_p(f"<strong>{_esc(gap.get('question'))}</strong>"))
-            out.append(_p(f"Not answerable here, because {_esc(gap.get('because'))}."))
-            out.append(_p(f"<em>To close it</em> {_esc(gap.get('remedy'))}"))
+        # Bounded for the same reason as the ledger: uncapped in count and in
+        # all three fields, and out of the ladder's reach. 500 gaps rendered
+        # 800,349 characters.
+        for gap in gaps[:MAX_GAPS]:
+            out.append(_p(
+                f"<strong>{_esc_clipped(gap.get('question'), MAX_GAP_CHARS)}"
+                f"</strong>"
+            ))
+            out.append(_p(
+                f"Not answerable here, because "
+                f"{_esc_clipped(gap.get('because'), MAX_GAP_CHARS)}."
+            ))
+            out.append(_p(
+                f"<em>To close it</em> "
+                f"{_esc_clipped(gap.get('remedy'), MAX_GAP_CHARS)}"
+            ))
+        if len(gaps) > MAX_GAPS:
+            out.append(_p(
+                f"{len(gaps) - MAX_GAPS} further gaps are recorded on the run "
+                f"and are not listed here."
+            ))
     else:
         out.append(_p(
             "This run recorded no list of its own gaps, which does not mean it "

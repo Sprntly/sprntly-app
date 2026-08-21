@@ -17,6 +17,8 @@ can have, all of them silent:
 """
 from __future__ import annotations
 
+import re
+
 from app.crucible.report import (
     body_fingerprint,
     render_report_html,
@@ -372,8 +374,7 @@ def test_the_findings_beyond_the_cap_are_listed_and_counted_not_dropped():
         {"id": 1, "goal_text": "g", "coverage_notes": []},
         _many_findings(n), [], {},
     )
-    assert "The remaining 40 findings" in html
-    assert "nothing has been dropped" in html
+    assert "The next 40 findings" in html
     # The last one is still named, in rank order.
     assert f"{n}." in html
 
@@ -449,7 +450,16 @@ def test_the_document_fits_even_when_every_field_is_hostile():
     # It shed detail rather than truncating mid-tag.
     assert html.rstrip().endswith(">")
     # And it SAYS that it did, rather than implying these are all the findings.
-    assert "not listed here" in html or "listed below in rank order" in html
+    # NOT an `or`. The version of this assertion that used one passed while the
+    # document said "the remaining 681 are listed below … nothing has been
+    # dropped" three lines above "a further 281 are not listed here" — the two
+    # sentences contradicting each other is precisely the bug, so an assertion
+    # satisfied by either of them cannot see it.
+    listed = html.count("<li>")
+    if "not listed here" in html:
+        # It conceded a remainder, so it must NOT also claim completeness.
+        assert "nothing has been dropped" not in html
+    assert re.search(rf"The next {listed - 0} findings|The next \d+ findings", html)
 
 
 def test_it_sheds_detail_when_the_first_rung_does_not_fit():
@@ -495,6 +505,31 @@ def test_a_long_source_document_name_cannot_inflate_a_block():
         r.MAX_RENDERED_SOURCES * (r.MAX_SOURCE_NAME_CHARS + 8) + 40
     )
     assert "+35 more" in hostile
+
+
+def test_the_ledger_and_limits_cannot_overrun_the_document():
+    """The shed ladder sheds FINDINGS. These two sections are out of its reach.
+
+    `_ledger_section`'s `label` traces to `kg_entity.canonical_label`, the same
+    untruncated tenant string that had to be clipped for `statement`; and
+    `cannot_answer` is uncapped in count and in all three of its fields. Before
+    this, 102 ledger rows at 4,000-char labels rendered 828,071 characters and
+    500 gaps rendered 800,349 — over the limit at every rung, so the ladder
+    could shed every finding it had and still not fit.
+    """
+    from app.crucible import report as r
+
+    ledger = [{"label": "L" * 4_000, "reason": "R" * 4_000,
+               "stopped_at_stage": "S" * 4_000} for _ in range(500)]
+    plan = {"cannot_answer": [{"question": "q" * 4_000, "because": "b" * 4_000,
+                               "remedy": "m" * 4_000} for _ in range(500)]}
+
+    html = r.render_report_html(_run(), [], ledger, plan)
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)}"
+    # Bounded, and the remainder is COUNTED rather than silently gone.
+    assert "200 further rejections" in html
+    assert "460 further gaps" in html
 
 
 def test_assumed_parameters_are_disclosed_not_reproduced_whole():

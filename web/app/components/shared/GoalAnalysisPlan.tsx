@@ -35,6 +35,10 @@ export type PlanDecision = {
   hypotheses: string[]
 }
 
+/** Mirrors the API's per-hypothesis cap. One place it can drift, stated here
+ *  rather than discovered as a 422. */
+export const MAX_HYPOTHESIS_CHARS = 2_000
+
 export function GoalAnalysisPlan({
   plan,
   approving,
@@ -65,8 +69,18 @@ export function GoalAnalysisPlan({
     })
   }
 
+  // Mirrors `HYPOTHESIS_MAX_CHARS` on `/v1/crucible/{id}/approve`. The API
+  // REJECTS an over-long line rather than truncating it, and a 422 there is
+  // unrecoverable from the panel: the run stays `awaiting_approval`, so the
+  // user retries the same text forever. Caught here, where the offending line
+  // can actually be named.
+  const tooLong = hypothesesText
+    .split("\n")
+    .map((h) => h.trim())
+    .filter((h) => h.length > MAX_HYPOTHESIS_CHARS)
+
   const submit = () => {
-    if (approving || nothingLeft) return
+    if (approving || nothingLeft || tooLong.length) return
     onApprove({
       excluded_sources: [...excluded],
       // One per line. Blank lines are dropped rather than sent as empty
@@ -179,6 +193,16 @@ export function GoalAnalysisPlan({
           onChange={(e) => setHypothesesText(e.target.value)}
         />
       </section>
+
+      {tooLong.length ? (
+        <p className="ga-doc-note" data-testid="goal-plan-hypothesis-too-long">
+          {tooLong.length === 1
+            ? `One hypothesis is ${tooLong[0].length} characters long. `
+            : `${tooLong.length} of these are over ${MAX_HYPOTHESIS_CHARS} characters. `}
+          Each one has to be under {MAX_HYPOTHESIS_CHARS} characters — shorten
+          it, or split it across lines.
+        </p>
+      ) : null}
 
       {nothingLeft ? (
         <p className="ga-doc-note" data-testid="goal-plan-empty-warning">
