@@ -53,7 +53,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     # `tracker` are already resolved here.
     from app.ask_planner import Plan as AskPlan
 
-from app import call_index, datasets
+from app import call_index, datasets, monthly_reports
 from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
@@ -3161,11 +3161,20 @@ def answer(
             return _maybe_verify(payload, enterprise_id)
 
     # Public-feedback routed: the report needs the public WEB (app stores,
-    # Reddit, review sites), which the generic skill answer can't reach — it
-    # would answer from the KG's first-party signal. Run the dedicated
-    # web-search pipeline instead; it returns None only when the company
-    # profile can't be read, falling through to the generic answer.
-    if decision.skill_id == "public-feedback-report":
+    # Reddit, review sites). Same expired premise as the two branches below —
+    # "the generic answer would reach only the KG's first-party signal" stopped
+    # being true once the scheduled report started extracting itself into the
+    # graph, and a 3P feedback report's findings ARE public voice. Sweep only
+    # when this period has no saved report to answer from.
+    #
+    # Monthly here, not quarterly (PF_SPEC.cadence), so the fallback to a live
+    # sweep comes round twelve times a year rather than four — which matches
+    # how fast public sentiment actually moves.
+    if (
+        decision.skill_id == "public-feedback-report"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.PF_SPEC)
+    ):
         from app import public_feedback
 
         pf = public_feedback.answer(
@@ -3194,14 +3203,27 @@ def answer(
             return _maybe_verify(cr, enterprise_id)
 
     # Competitive-intelligence routed: the review needs the public WEB (what a
-    # rival shipped, their pricing page, their app-store rating), which the
-    # generic skill answer can't reach — it would answer from the KG's
-    # first-party signal, and the skill's own integrity rule then forbids the
-    # numbers it would need. Run the dedicated staged web-research pipeline
-    # instead (Scan when prior state exists, Review otherwise). It returns None
-    # only when the company profile can't be read, falling through to the
-    # generic answer.
-    if decision.skill_id == "competitive-intelligence-review":
+    # rival shipped, their pricing page, their app-store rating). That used to
+    # be unreachable from here — the KG held first-party signal alone, so the
+    # generic answer had no rival pricing to cite and the skill's integrity
+    # rule forbade inventing it. Hence the dedicated staged web-research
+    # pipeline (Scan when prior state exists, Review otherwise).
+    #
+    # THAT PREMISE EXPIRED when the scheduled reports began extracting
+    # themselves into the graph: a saved report puts its competitor findings in
+    # as dated, sourced signals carrying the report's own provenance. So the
+    # sweep is now the fallback, not the default — when this period's report
+    # already exists, fall through to the generic path, which reads those
+    # signals (`_retrieve_kg_bundle`) and answers in seconds instead of buying
+    # minutes of paid web search for findings we already hold.
+    #
+    # Cost of getting this wrong in the other direction is small: with no
+    # current report the sweep runs exactly as before.
+    if (
+        decision.skill_id == "competitive-intelligence-review"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.CIR_SPEC)
+    ):
         from app import competitive_intel
 
         cir = competitive_intel.answer(
@@ -3217,13 +3239,17 @@ def answer(
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
-    # Market-intelligence routed: the report is public-web news about the
-    # CATEGORY (funding, M&A, entrants, category movement, regulation, analyst
-    # coverage), which the generic skill answer can't reach — the KG holds
-    # first-party signal, not the trade press. Run the dedicated web-search
-    # pipeline instead; it returns None only when the company profile can't be
-    # read, falling through to the generic answer.
-    if decision.skill_id == "market-intelligence-report":
+    # Market-intelligence routed: public-web news about the CATEGORY (funding,
+    # M&A, entrants, category movement, regulation, analyst coverage). Same
+    # expired premise as the competitive branch above — "the KG holds
+    # first-party signal, not the trade press" stopped being true once the
+    # scheduled report started extracting itself into the graph. Sweep only
+    # when this period has no saved report to answer from.
+    if (
+        decision.skill_id == "market-intelligence-report"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.MI_SPEC)
+    ):
         from app import market_intel
 
         mi = market_intel.answer(

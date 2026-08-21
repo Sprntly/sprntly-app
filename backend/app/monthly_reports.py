@@ -1,21 +1,22 @@
-"""Monthly scheduled intelligence reports — run, save into the library, ingest.
+"""Scheduled intelligence reports — run, save into the library, ingest.
 
 The intelligence reports (competitive intelligence, 3P feedback and market
 intelligence) have always been PULL: someone remembers
 to ask, a multi-minute web sweep runs, the answer lands in that chat and
-nowhere else. This module runs them on a monthly cadence instead: once a month,
-per company, each registered report runs headlessly, the finished document is
+nowhere else. This module runs them on a calendar cadence instead: once a
+quarter or once a month, per company, each registered report runs headlessly, the finished document is
 saved into the `reports` artifacts library, and its contents are extracted into
 the knowledge graph — so the report exists whether or not anyone remembered to
 ask for it, and answers a question the moment someone does.
 
 Three deliberate reuses, so this stays a thin layer over proven parts:
 
-  CADENCE   — the pure `app.brief_schedule` decisions with the frequency
-              FORCED to MONTHLY: the report fires the first configured brief
-              weekday of each month at the company's configured brief time,
-              in the company's timezone. One mental model ("my Sprntly
-              things arrive on my brief day"), zero new date logic.
+  CADENCE   — the calendar, per spec. Competitive and market intelligence
+              are QUARTERLY (1 Jan / 1 Apr / 1 Jul / 1 Oct); 3P feedback is
+              MONTHLY (the 1st), each at its own staggered local hour
+              (08:00 / 11:00 / 15:00) so they never start together — the
+              report's own calendar and clock, no longer borrowed from the
+              brief's weekday schedule.
   ENGINE    — `competitive_intel.answer` exactly as chat and Slack call it
               (the Slack events path proved it runs headlessly). A scheduled
               run is a Scan against stored state — the cheap concurrent
@@ -45,14 +46,20 @@ Two ledgers, for two different failure costs:
               RETRY_BACKOFF — it does NOT mark the cycle done, which is the
               durable ledger's job alone.
 
-THE TICK'S REAL QUESTION IS "does this company have this month's report yet?"
-The window spans the whole cycle (REPORT_DUE_WINDOW), so a company is due from
-its fire instant until the next one, and anything missed on the fire day is
-picked up the next day. That matters because the tenants are not spread out:
-they cluster on two fire slots, the tick walks them sequentially, and one
-report costs tens of minutes — so a narrow window silently starved whoever
-sorted last. The durable ledger is what makes a wide window safe: it can catch
-up indefinitely, but a saved row ends the cycle, so it can never double-fire.
+THE TICK'S REAL QUESTION IS "does this company have THIS PERIOD's report yet?"
+The period is also the window: a company is due from the moment its quarter or
+month opens until a saved row closes it, so a run missed on the 1st is picked
+up on the 2nd, or the 9th. That matters because the tick walks companies
+SEQUENTIALLY and one report costs roughly 25 minutes of sweep plus extraction
+— 40 tenants x 3 reports cannot fit in any narrow window, and a cliff would
+silently starve whoever sorted last. The durable ledger is what makes an open
+window safe: it can catch up indefinitely, but a saved row ends the period, so
+it can never double-fire.
+
+IT ALSO MAKES THE JOIN RUN FREE. A tenant that finishes onboarding mid-period
+has no report for that period, so the next tick finds it due, runs each report
+once, and the saved rows carry it to the next boundary. No onboarding hook, no
+backfill job, no separate first-run path to keep in sync with this one.
 
 Ingest is best-effort by contract — the report is already saved, and losing the
 artifact as well would turn a retrievability problem into data loss. But
@@ -84,28 +91,40 @@ from datetime import datetime, timedelta, timezone
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from app.brief_schedule import FREQ_MONTHLY, should_run_brief
 
 logger = logging.getLogger(__name__)
 
-# The whole cycle counts as due — there is deliberately NO window cliff.
+CADENCE_QUARTERLY = "quarterly"
+CADENCE_MONTHLY = "monthly"
+
+# The report's own calendar, no longer borrowed from the brief's schedule.
 #
-# This was 24h, which quietly meant "miss the day, miss the month". The
-# arithmetic that killed it: 39 of 40 tenants sit on the same fire slot (first
-# Monday, 06:00 or 09:00), the tick walks companies SEQUENTIALLY, and one
-# report costs roughly 25 minutes of sweep plus extraction. 25 companies x 3
-# reports is already ~31 hours of work aimed at a 24-hour window, so the
-# tenants at the back of the list would have silently received nothing — no
-# error, no report, no signals, and no second chance until September.
+# The brief fires on a weekday the company picks; a report fires on a date.
+# Reusing `should_run_brief` meant a report's cadence was expressed as "the
+# first configured weekday of the month", which is not a thing anyone asked
+# for and which put every tenant on whatever weekday they had chosen for an
+# unrelated surface. The period is now the calendar quarter or month, and the
+# hour of day still comes from the brief settings so Sprntly things keep
+# arriving at the time the company chose.
 #
-# 35 days covers the longest possible gap between two monthly fire instants,
-# so a company stays due from its fire instant until the next one. The
-# question the tick effectively asks each hour is the durable one — "does this
-# company have this month's report yet?" — and anything missed on the fire day
-# is simply picked up the next day, or the day after. The reports-row ledger
-# is what makes a wide window safe: it can catch up, but it can never
-# double-fire, because a saved row for this cycle ends it.
-REPORT_DUE_WINDOW = timedelta(days=35)
+# THE PERIOD IS ALSO THE WINDOW. There is no separate due-window constant any
+# more: a company is due from the moment its period opens until it has a saved
+# report for that period, and the saved row is what closes it. That is what
+# makes the join case free — a tenant that onboards on 12 February has no
+# report for February, so the next tick treats it as due, runs once, and the
+# saved row carries it to 1 March. No onboarding hook, no backfill job.
+_QUARTER_START_MONTHS = (1, 4, 7, 10)
+
+# Each report has its OWN hour, and the gaps are the point.
+#
+# The tick walks companies sequentially and a single report costs roughly 25
+# minutes of web sweep plus extraction, so three reports opening at the same
+# instant would queue every tenant's whole set behind one another and pile the
+# paid sweeps into one window. Staggering them by hours means a company's
+# quarterly pair is already finished before its monthly report starts, and the
+# load spreads across the day rather than landing at once.
+#
+# Local to the company, so the spread holds per tenant rather than globally.
 
 # How long a SPENT attempt suppresses the next one, when that attempt produced
 # no report (the engine degraded, the sweep raised).
@@ -141,11 +160,18 @@ class ReportSpec:
     carries `_report: True` AND its `_skill` equals `skill` — see
     `_is_report`; the `_skill` half alone would also accept the engines'
     degraded apologies and their query-mode follow-ups.
+
+    `cadence` is how often the report repeats: "quarterly" fires on 1 Jan /
+    1 Apr / 1 Jul / 1 Oct, "monthly" on the 1st. `hour` is the local hour it
+    opens at — staggered per spec so three reports never start together and
+    queue a tenant's whole set behind one sweep.
     """
     skill: str
     question: str
     label: str
     runner: Callable[[dict], dict | None]
+    cadence: str = CADENCE_MONTHLY
+    hour: int = 10
 
 
 def _run_cir(company: dict) -> dict | None:
@@ -172,6 +198,8 @@ CIR_SPEC = ReportSpec(
     question="Scheduled monthly competitive intelligence scan",
     label="Competitive Intelligence report",
     runner=_run_cir,
+    cadence=CADENCE_QUARTERLY,
+    hour=8,
 )
 
 def _run_pf(company: dict) -> dict | None:
@@ -199,6 +227,7 @@ PF_SPEC = ReportSpec(
     question="Scheduled monthly public feedback report",
     label="3P Feedback report",
     runner=_run_pf,
+    hour=15,
 )
 
 def _run_mi(company: dict) -> dict | None:
@@ -222,6 +251,8 @@ MI_SPEC = ReportSpec(
     question="Scheduled monthly market intelligence report",
     label="Market Intelligence report",
     runner=_run_mi,
+    cadence=CADENCE_QUARTERLY,
+    hour=11,
 )
 
 # The monthly roster. Each entry is independent: one spec degrading, raising,
@@ -269,22 +300,88 @@ def _parse_created_at(raw: str | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def has_current_report(
+    company_id: str,
+    spec: ReportSpec,
+    now: datetime | None = None,
+    tz: ZoneInfo | None = None,
+) -> bool:
+    """Does a scheduled report for THIS period already exist?
+
+    Read by `qa_agent` before it hands a routed question to a report engine.
+    The engines answer by buying a multi-minute web sweep, which was the only
+    option while the KG held first-party signal alone — but a saved report is
+    now extracted into the graph, so the same question can be answered from
+    signals that already carry the report's own provenance. This is the check
+    that tells those two situations apart.
+
+    Deliberately the SAME period the scheduler uses, rather than a separate
+    freshness constant: "there is a report for this quarter" is exactly the
+    condition under which the graph holds the current picture, and a second
+    notion of recency would be one more thing to keep in step with the
+    cadence.
+
+    UTC by default. A period boundary is a date, and shifting it by a
+    company's timezone changes the answer only for a few hours either side of
+    a quarter opening — during which the worst case is buying the sweep the
+    scheduler was about to run anyway.
+
+    FAILS CLOSED, to the sweep. This runs on the answer path for every routed
+    report question, so a Supabase blip must not take the answer down with it
+    — an unreadable ledger degrades to "no current report", which is exactly
+    the behaviour this branch had before the check existed. The cost of being
+    wrong that way is one sweep; the cost of raising is no answer at all.
+    """
+    from app import db
+
+    try:
+        saved = _parse_created_at(db.latest_report_at(
+            company_id, skill=spec.skill, question=spec.question,
+        ))
+    except Exception:  # noqa: BLE001 — never break the answer path
+        logger.exception(
+            "monthly-reports: freshness read failed for %s / %s — sweeping",
+            company_id, spec.skill,
+        )
+        return False
+    if saved is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return saved >= period_start(now, tz or ZoneInfo("UTC"), spec.cadence)
+
+
+def period_start(now: datetime, tz: ZoneInfo, cadence: str) -> datetime:
+    """The instant this report's current period opened, as aware UTC.
+
+    Quarterly → 1 Jan / 1 Apr / 1 Jul / 1 Oct; monthly → the 1st. Computed in
+    the company's timezone so a tenant in Auckland and one in Los Angeles each
+    get their period boundary at their own local midnight-plus-brief-hour,
+    then converted back to UTC because that is what `created_at` is stored in.
+    """
+    local = now.astimezone(tz)
+    month = (
+        max(m for m in _QUARTER_START_MONTHS if m <= local.month)
+        if cadence == CADENCE_QUARTERLY
+        else local.month
+    )
+    return local.replace(
+        month=month, day=1, hour=0, minute=0, second=0, microsecond=0,
+    ).astimezone(timezone.utc)
+
+
 def due_specs(
     company_id: str,
     now: datetime,
     tz: ZoneInfo,
-    schedule: dict,
 ) -> list[ReportSpec]:
     """The specs due for this company right now.
 
-    `schedule` is the company's resolved brief schedule dict (weekday, hour,
-    minute, frequency, anchor) — the FREQUENCY IS OVERRIDDEN to monthly here,
-    deliberately: a company on a daily or weekly brief cadence still gets its
-    reports once a month, on the first configured weekday.
+    Due = this company has no saved report for the CURRENT PERIOD (the
+    calendar quarter for CIR/MI, the month for 3P feedback) AND no attempt was
+    spent in the last RETRY_BACKOFF.
 
-    Due = we are at or past this month's fire instant AND this company has no
-    saved report for this cycle AND no attempt was spent in the last
-    RETRY_BACKOFF.
+    The brief's schedule is no longer consulted at all: the period boundary is
+    a date, not a weekday, and each spec opens at its own staggered `hour`.
 
     The two ledgers answer different questions and are deliberately no longer
     folded into one `last_run`. The SAVED REPORT is the durable, permanent
@@ -308,14 +405,15 @@ def due_specs(
                 company_id, skill=spec.skill, question=spec.question,
             )
         )
-        if not should_run_brief(
-            now, tz, last_saved,
-            weekday=schedule.get("weekday", 0),
-            hour=schedule.get("hour", 6),
-            minute=schedule.get("minute", 0),
-            frequency=FREQ_MONTHLY,
-            window=REPORT_DUE_WINDOW,
-        ):
+        opened = period_start(now, tz, spec.cadence)
+        # Hold the opening day's run until this spec's hour. Only the first
+        # day is gated: a tenant that onboards mid-period, or a period whose
+        # opening tick was missed, is due immediately rather than waiting for
+        # a clock that has already gone past.
+        local = now.astimezone(tz)
+        if local.day == 1 and local.hour < spec.hour:
+            continue
+        if last_saved is not None and last_saved >= opened:
             continue
         attempted = _last_attempt.get((company_id, spec.skill))
         if attempted is not None and (now - attempted) < RETRY_BACKOFF:
