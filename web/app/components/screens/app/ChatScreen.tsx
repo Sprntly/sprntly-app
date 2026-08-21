@@ -4671,7 +4671,16 @@ export function ChatScreen() {
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
     }
-  }, [activeConvId, setContent, openContentPanel, showToast])
+    // `activeTabId` IS A REAL DEPENDENCY, not a lint appeasement — the same
+    // sentence this file already carries at `:2191` and `:4586`, and I still
+    // read it here without listing it. Rebuilt only on a CONVERSATION change,
+    // this callback holds a stale tab id whenever the conversation does not
+    // change: two tabs on one conversation, and two brand-new chats (which
+    // share `activeConvId === null`). The claim then files against the tab the
+    // reader LEFT — so the run they just started reopens the moment they
+    // dismiss it, and the innocent tab is marked as already-auto-opened, which
+    // hides its own restored analysis on the next visit.
+  }, [activeConvId, activeTabId, setContent, openContentPanel, showToast])
 
   // Goal mode intercepts the composer submit BEFORE the ask path: a run takes
   // the goal in the user's own words, so a slash trigger spliced into the front
