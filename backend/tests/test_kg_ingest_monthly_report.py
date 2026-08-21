@@ -396,3 +396,18 @@ def test_an_ingested_finding_is_retrievable_by_question(isolated_settings):
     assert hit["provenance"]["report_skill"] == CIR
     assert hit["provenance"]["report_period"] == "August 2026"
     assert hit["provenance"]["report_id"] == 7
+
+    # THE RENDERED PROMPT has to name it too, which is a separate claim and the
+    # one that actually failed in production. `render_context_section` builds
+    # its provenance line from `source` / `doc` / `connector` ONLY, so the keys
+    # asserted above — however precise — reached the model as a bare
+    # "[pm_manual/...]" line. Asked for a competitor review, the answer then
+    # disclaimed its own evidence ("I'm answering from your synced sources
+    # only"), cited every finding as "[Source: pm_manual]", and recommended
+    # running the very review those findings came from.
+    from app.graph.retrieval import render_context_section
+
+    rendered = render_context_section(bundle)
+    assert "Competitive Intelligence report · August 2026" in rendered, (
+        "the report's findings render with no provenance, so the model cannot "
+        "tell a paid web sweep from a hand-typed PM note")
