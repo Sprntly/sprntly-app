@@ -46,6 +46,8 @@ from app.prompts import (
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_LIBRARY_ADDENDUM,
     ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
+    ASK_SYSTEM_PROJECTS_ADDENDUM,
+    ASK_SYSTEM_TEAM_ADDENDUM,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -575,6 +577,49 @@ def active_project_id() -> int | None:
     """This ask's project id, or None on a non-project ask / when nothing set
     one. Read by `qa_agent.answer()` to gate the connector-lookup interceptors."""
     return _active_project_id.get()
+
+
+# THIS ASK'S WORKSPACE. The company is a parameter everywhere; the WORKSPACE is
+# not, and two reads need it: a project list is scoped to `(company_id,
+# workspace_id)` and further to the caller's own memberships, so a block that
+# skipped either would show a member of Workspace A the projects of Workspace B.
+#
+# Rides a ContextVar for the same reason the four values above do — threading a
+# parameter through `answer()` is the qa_agent.py edit this mechanism exists to
+# avoid. Set once per ask in `ask_job_runner._run_sync`, which already receives
+# `workspace_id` from the route. `None` on any caller that does not set it, and
+# every reader treats None as "cannot scope — render nothing".
+_active_workspace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ask_runner_active_workspace_id", default=None
+)
+
+
+def set_active_workspace_id(workspace_id: str | None):
+    """Record THIS ask's workspace. Call from `ask_job_runner._run_sync` beside
+    `set_active_conversation`, and always undo in the same `finally` — a pooled
+    worker thread holding a previous ask's workspace would scope the next
+    caller's project list to someone else's workspace.
+
+    Returns an opaque token for `reset_active_workspace_id`."""
+    return _active_workspace_id.set(workspace_id)
+
+
+def reset_active_workspace_id(token) -> None:
+    """Undo `set_active_workspace_id` — call from a `finally`."""
+    _active_workspace_id.reset(token)
+
+
+def active_workspace_id() -> str | None:
+    """This ask's workspace id, or None when nothing set one."""
+    return _active_workspace_id.get()
+
+
+def active_user_id() -> str | None:
+    """This ask's CALLER, or None when nothing set one. The same slot
+    `set_active_conversation` fills — exposed on its own because a reader can
+    need the person without needing the conversation (the project list is
+    membership-scoped, and membership is a property of the user alone)."""
+    return _active_conversation_user_id.get()
 
 
 def _owned_conversation_attachments(
@@ -1833,6 +1878,8 @@ def compose_ask_answer(
     live_context: str = "",
     live_context_fn=None,
     library_context_fn=None,
+    team_context_fn=None,
+    projects_context_fn=None,
     library_only: bool = False,
     on_delta=None,
 ) -> dict:
@@ -1894,6 +1941,28 @@ def compose_ask_answer(
     the wrong answer to "what skills do I have". Same slot, same wave, its own
     section and its own addendum — the shape every other block here already has.
 
+    `team_context_fn`, when given, is a thunk producing the company's own
+    TEAM block (app/team_context.py) — who is in this workspace, with each
+    member's email, job and access level — asked for by the planner when the
+    question is about the people here. Its own parameter for the same reason
+    the library has one: it needs the OPPOSITE instruction to the live sweep
+    (this list is exhaustive, and a name found in a connected source is not a
+    member), and it must be able to ride a prompt that carries neither the
+    library nor a sweep.
+
+    `projects_context_fn`, when given, is a thunk producing the PROJECTS block
+    (app/projects_context.py) — what a project is in this product, and the ones
+    the caller belongs to. Its own parameter for the same reason as the two
+    above, plus one specific to it: the block scopes itself to the caller and
+    their workspace off the request ContextVars, so it must run INSIDE this
+    request rather than be resolved by a caller that has neither.
+
+    `library_only` covers ALL THREE of those blocks, despite its name: they are
+    the exhaustive reads of Sprntly's OWN records, and a question about any of
+    them is narrowed away from the corpus, the KG and the document index by the
+    same verdict (`qa_agent._library_only_plan` / `_team_only_plan` /
+    `_projects_only_plan`).
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
@@ -1953,6 +2022,10 @@ def compose_ask_answer(
         wave1["live"] = live_context_fn
     if library_context_fn is not None:
         wave1["library"] = library_context_fn
+    if team_context_fn is not None:
+        wave1["team"] = team_context_fn
+    if projects_context_fn is not None:
+        wave1["projects"] = projects_context_fn
     if wants_corpus_and_kg:
         wave1["corpus"] = lambda: load_corpus(dataset)
 
@@ -1994,6 +2067,8 @@ def compose_ask_answer(
     # concurrent route and only qa_agent's planned path uses it.
     live_context = live_context or (gathered.get("live") or "")
     library_context = gathered.get("library") or ""
+    team_context = gathered.get("team") or ""
+    projects_context = gathered.get("projects") or ""
     corpus = gathered.get("corpus") if wants_corpus_and_kg else None
 
     # WAVE 2 — the two consumers of the vector, which do not feed each other.
@@ -2047,13 +2122,21 @@ def compose_ask_answer(
                   # model answered "your templates" from the document index's
                   # Confluence pages instead.
                   + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                  # The roster rides the PRD tab too — "who owns this" is asked
+                  # from beside a PRD as often as from the main chat.
+                  + (ASK_SYSTEM_TEAM_ADDENDUM if team_context else "")
+                  + (ASK_SYSTEM_PROJECTS_ADDENDUM if projects_context else "")
                   + today_line() + connected_sources_line(enterprise_id))
-        if library_context:
-            # The block is per-company and self-invalidating (uploads change
-            # it), so it rides the uncached user turn — the per-PRD cacheable
-            # prefix below must stay byte-stable across the conversation.
+        own_records = "\n\n---\n\n".join(
+            p for p in (library_context, team_context, projects_context) if p
+        )
+        if own_records:
+            # The block is per-company and self-invalidating (uploads and
+            # membership change it), so it rides the uncached user turn — the
+            # per-PRD cacheable prefix below must stay byte-stable across the
+            # conversation.
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
-                kg_context=library_context, question=question
+                kg_context=own_records, question=question
             )
         else:
             user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
@@ -2085,6 +2168,10 @@ def compose_ask_answer(
         # nearest section to the question is the one a model weighs hardest.
         if library_context:
             context_sections.append(library_context)
+        if team_context:
+            context_sections.append(team_context)
+        if projects_context:
+            context_sections.append(projects_context)
 
         if context_sections:
             # Each addendum is gated on ITS OWN section being present. The KG
@@ -2096,6 +2183,8 @@ def compose_ask_answer(
                       + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
                       + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
                       + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                      + (ASK_SYSTEM_TEAM_ADDENDUM if team_context else "")
+                      + (ASK_SYSTEM_PROJECTS_ADDENDUM if projects_context else "")
                       + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question

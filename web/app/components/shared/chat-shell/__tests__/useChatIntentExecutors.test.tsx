@@ -124,6 +124,31 @@ describe("useChatIntentExecutors — the shared intent→executor wiring (AC1–
     expect(result).toEqual({ handled: true })
   })
 
+  it("omitting onCreateProject leaves the slot undefined so dispatch falls through", () => {
+    // Same rule as the share slot below, and the same stake: a surface with no
+    // project affordance must answer, never claim it made one.
+    const onAnswer = vi.fn()
+    const executors = useChatIntentExecutors({ onAnswer })
+    expect(executors.onCreateProject).toBeUndefined()
+
+    const result = dispatchChatIntent(
+      envelope({ intent: "create_project", task: "Billing revamp" }),
+      ctx(),
+      executors,
+    )
+    expect(result).toEqual({ handled: false })
+    expect(onAnswer).toHaveBeenCalledTimes(1)
+  })
+
+  it("a supplied onCreateProject survives the assembler", () => {
+    const onCreateProject = vi.fn()
+    const executors = useChatIntentExecutors({ onAnswer: vi.fn(), onCreateProject })
+    const env = envelope({ intent: "create_project", task: "Billing revamp" })
+
+    expect(dispatchChatIntent(env, ctx(), executors)).toEqual({ handled: true })
+    expect(onCreateProject).toHaveBeenCalledWith(env)
+  })
+
   it("omitting onShareToSlack leaves the slot undefined so dispatch falls through", () => {
     // A surface with no share UI omits onShareToSlack; the hook must NOT
     // synthesize a slot for it, so dispatch's share_to_slack case falls through

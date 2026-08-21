@@ -55,6 +55,7 @@ export function useChatIntentExecutors(
     onListArtifacts: adapter.onListArtifacts ?? fallToAnswer,
     // OPTIONAL: undefined when omitted → dispatch falls through to onAnswer.
     onShareToSlack: adapter.onShareToSlack,
+    onCreateProject: adapter.onCreateProject,
     onAnswer,
   }
 }

@@ -1096,6 +1096,13 @@ export function ChatScreen() {
   // while its request was in flight, and depending on `content` would re-fire
   // the restore on every unrelated content change.
   const goalRunRef = useRef<number | null>(null)
+  // Tabs whose analysis has already been PUT on screen once by the restore.
+  //
+  // Mirrors `reportsAutoOpenedRef`: opening once per tab is what separates
+  // "you can get back to your analysis" from "a panel you closed keeps coming
+  // back every time you return to this thread". Keyed by tab, not by run,
+  // because two tabs can share one conversation.
+  const goalAutoOpenedRef = useRef<Set<string>>(new Set())
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -4058,6 +4065,13 @@ export function ChatScreen() {
       // `generating` document would lose its live view for the rest of the
       // session.
       documentAutoOpenedRef.current.delete(prevTabForPanelRef.current)
+      // Same claim, same retirement, for a thread whose artifact is a GOAL
+      // ANALYSIS — and for the identical reason the document comment gives.
+      // The reconcile below closes the panel on the way out, so a claim that
+      // outlives the visit means the restore declines on return: slot set,
+      // panel shut, and `ContentPanel` only un-hides the `goal` tab once the
+      // panel is open. That is #1283 again, one tab switch later.
+      goalAutoOpenedRef.current.delete(prevTabForPanelRef.current)
     }
     // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
     // any of the early returns below — a set left on screen is wrong on every
@@ -4575,6 +4589,58 @@ export function ChatScreen() {
     // not recover it.
   }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
 
+  // ...AND PUT IT ON SCREEN.
+  //
+  // The restore above fills the slot; `ContentPanel` un-hides the `goal` tab
+  // only once the panel is OPEN, and on a fresh load it is closed. Filling the
+  // slot alone therefore restored the run invisibly, with no control anywhere
+  // to reveal it (#1283).
+  //
+  // STATE-DRIVEN, not done inside the fetch, and that distinction is the whole
+  // reason this is a separate effect:
+  //
+  //   - reading `contentPanelTabRef` mid-fetch sees the value from the render
+  //     in which the reconcile called `closeContentPanel()`, so it concludes
+  //     "something is open", declines, and — the fetch being over — nothing
+  //     re-runs. The panel then never opens at all.
+  //   - the closure's `activeTabId` can be a thread the reader has already
+  //     left: `live` only flips when React flushes the cleanup, and a listing
+  //     resolving inside that window would open the panel on thread A's
+  //     analysis, live Confirm button and all, over thread B.
+  //
+  // Keyed on the state instead, both windows close: it re-evaluates whenever
+  // the panel or the active tab actually changes, and `goalRunId` is already
+  // reset per thread, so it can only ever open the run the slot currently
+  // holds. Same shape as the reports auto-open a few hundred lines up.
+  useEffect(() => {
+    if (!goalAnalysisOn || isBriefTab || !activeTabId) return
+    if (content.goalRunId == null) return
+    // TWO SOURCES OF TRUTH, AND ONLY ONE OF THEM IS CURRENT HERE.
+    //
+    // On the commit where the reader switches tabs, `activeTabId` is already
+    // the NEW tab while `content.goalRunId` is still the OLD thread's: the
+    // per-thread reset at `:2188` is itself an effect, and passive effects in
+    // one flush all close over the same render, so this runs BEFORE that
+    // setContent has re-rendered. `contentPanelTab` is stale for the same
+    // reason, so the hijack guard below cannot save it either.
+    //
+    // Left unchecked that opened `goal` on a thread with no analysis — a blank
+    // 60vw panel once the reset landed — and, being the last write in the
+    // commit, it overwrote a PRD the reconcile had just opened for the thread
+    // the reader actually navigated to.
+    //
+    // `goalRunRef` is the value that IS current: the restore effect declared
+    // above clears it synchronously at the top, so a mismatch means the slot
+    // still holds the previous thread's run and this flush has no business
+    // acting on it.
+    if (goalRunRef.current !== content.goalRunId) return
+    if (goalAutoOpenedRef.current.has(activeTabId)) return
+    if (contentPanelTab) return // something is already open — don't hijack it
+    goalAutoOpenedRef.current.add(activeTabId)
+    openContentPanel("goal")
+  }, [goalAnalysisOn, isBriefTab, activeTabId, content.goalRunId,
+      contentPanelTab, openContentPanel])
+
   // Start a Goal Analysis run and put its panel on screen.
   //
   // The panel opens on the run id RATHER THAN on a result, because the first
@@ -4586,6 +4652,12 @@ export function ChatScreen() {
       })
       goalRunRef.current = run.id
       setContent({ goalRunId: run.id })
+      // Claim the tab: this IS its one auto-open, so closing the panel here
+      // must not hand straight over to the auto-open effect above. Same
+      // sentence as the reports hand-off at `:4164` and the ticket-set one.
+      // Without it the claim was only ever taken on the RESTORE path, so a run
+      // the reader STARTED reopened the instant they dismissed it.
+      if (activeTabId) goalAutoOpenedRef.current.add(activeTabId)
       openContentPanel("goal")
     } catch (e) {
       // A 403 here is the entitlement gate, and it is the one failure worth
@@ -4599,7 +4671,16 @@ export function ChatScreen() {
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
     }
-  }, [activeConvId, setContent, openContentPanel, showToast])
+    // `activeTabId` IS A REAL DEPENDENCY, not a lint appeasement — the same
+    // sentence this file already carries at `:2191` and `:4586`, and I still
+    // read it here without listing it. Rebuilt only on a CONVERSATION change,
+    // this callback holds a stale tab id whenever the conversation does not
+    // change: two tabs on one conversation, and two brand-new chats (which
+    // share `activeConvId === null`). The claim then files against the tab the
+    // reader LEFT — so the run they just started reopens the moment they
+    // dismiss it, and the innocent tab is marked as already-auto-opened, which
+    // hides its own restored analysis on the next visit.
+  }, [activeConvId, activeTabId, setContent, openContentPanel, showToast])
 
   // Goal mode intercepts the composer submit BEFORE the ask path: a run takes
   // the goal in the user's own words, so a slash trigger spliced into the front
