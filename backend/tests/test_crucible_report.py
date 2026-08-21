@@ -455,11 +455,19 @@ def test_the_document_fits_even_when_every_field_is_hostile():
     # dropped" three lines above "a further 281 are not listed here" — the two
     # sentences contradicting each other is precisely the bug, so an assertion
     # satisfied by either of them cannot see it.
-    listed = html.count("<li>")
     if "not listed here" in html:
         # It conceded a remainder, so it must NOT also claim completeness.
         assert "nothing has been dropped" not in html
-    assert re.search(rf"The next {listed - 0} findings|The next \d+ findings", html)
+    # The count in the sentence must be the number of rows actually printed.
+    # An earlier version compared against `html.count("<li>")`, which counts
+    # every list item in the document — ledger rows and assumed parameters
+    # included — so it could never have matched and the check was decoration.
+    said = re.search(r"The next (\d+) findings", html)
+    assert said, "the overflow list did not say how many it was listing"
+    overflow_rows = re.findall(r"<li>\d+\. ", html)
+    assert int(said.group(1)) == len(overflow_rows), (
+        f"it said {said.group(1)} but printed {len(overflow_rows)}"
+    )
 
 
 def test_it_sheds_detail_when_the_first_rung_does_not_fit():
