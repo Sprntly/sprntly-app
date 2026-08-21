@@ -36,6 +36,7 @@ import {
   goalAnalysisApi,
   type GoalReportDoc,
   type GoalRunDetail,
+  apiErrorMessage,
 } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
@@ -74,16 +75,30 @@ const ERROR_COPY: Record<string, string> = {
   internal: "Something went wrong on our side partway through this run.",
 }
 
-/** The server's own explanation, when it gave one.
+/** The server's own explanation, when it gave one — else ''.
+
+ *  Parsing is delegated to `apiErrorMessage`, which already understands
+ *  FastAPI's `detail` in both forms (a plain string, and the validation-error
+ *  list). I had hand-rolled only the string case.
  *
- *  `ApiError` carries the parsed body; a 413 from the document routes puts a
- *  full sentence in `detail` ("…too large to save as a document. The run itself
- *  is unaffected…"). Falling back to a generic string throws that away and
- *  tells the reader something less true than what the server said. */
+ *  Two deliberate choices:
+ *
+ *  - Duck-typed on `body`, NOT `instanceof ApiError`. The class would couple
+ *    this to one module instance, and an error that crosses a boundary — or
+ *    arrives from a test double — still carries a perfectly good `detail` that
+ *    the user deserves to read.
+ *  - `apiErrorMessage` falls back to "Request failed (413)" when there is no
+ *    detail at all. That is worse than what each caller already says, so it is
+ *    filtered back out to '' and the caller's own sentence wins.
+ */
 function _detailOf(e: unknown): string {
   const body = (e as { body?: unknown })?.body
-  const detail = (body as { detail?: unknown })?.detail
-  return typeof detail === "string" && detail.trim() ? detail : ""
+  if (body === null || body === undefined) return ""
+  const status = (e as { status?: unknown })?.status
+  const code = typeof status === "number" ? status : 0
+  const msg = apiErrorMessage(code, body)
+  if (!msg || msg === `Request failed (${code})`) return ""
+  return msg.trim()
 }
 
 export function GoalAnalysisTab({ runId }: { runId: number }) {
@@ -273,8 +288,12 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         "Saved as a separate document in your team library. This report is " +
         "unchanged.",
       )
-    } catch {
-      setDocNote("We could not save a copy of this report.")
+    } catch (e) {
+      // Same reasoning as the edit path above, and the same 413: `_body_or_413`
+      // guards BOTH writers, so a report too large to open is also too large to
+      // fork. Surfacing the reason in one handler and swallowing it in the
+      // other would just move the silence.
+      setDocNote(_detailOf(e) || "We could not save a copy of this report.")
     } finally {
       setDocBusy(false)
     }

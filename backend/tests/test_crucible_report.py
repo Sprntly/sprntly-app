@@ -422,11 +422,104 @@ def test_ten_enormous_hypotheses_cannot_blow_the_budget():
     assert len(html) < MAX_BODY_CHARS
 
 
-def test_the_block_budget_is_arithmetic_not_a_measurement():
-    """A calibrated constant holds until someone's data is shaped differently.
-    The import-time assertion is what makes it a bound."""
+def test_the_document_fits_even_when_every_field_is_hostile():
+    """The budget is MEASURED, not asserted.
+
+    The assertion this replaces multiplied constants together and called the
+    result derived. It passed while two real paths broke it: an unclipped
+    source-document name, and an overflow list that grew with the run. This
+    renders both at once, plus a full ledger and plan, and looks at the actual
+    length — the only form of the claim that can fail when it is false.
+    """
     from app.crucible import report as r
 
-    assert (r.MAX_FULL_FINDING_BLOCKS * r._MAX_FINDING_BLOCK_CHARS
-            + r._OTHER_SECTIONS_BUDGET_CHARS) <= r._BODY_LIMIT
-    assert r._MAX_FINDING_BLOCK_CHARS > r.MAX_STATEMENT_CHARS
+    findings = [
+        _finding(
+            statement="quote " * 8_000,            # 48,000 chars, all escapable
+            surfaced_by=[f'"{c}" report {"x" * 400}.pdf' for c in "abcdefghij"],
+            claim_ids=list(range(50)),
+        )
+        for _ in range(2_000)
+    ]
+    html = r.render_report_html(
+        _run(goal_text="g" * 5_000), findings, _full_ledger(101), _full_plan()
+    )
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)} > {r._BODY_LIMIT}"
+    # It shed detail rather than truncating mid-tag.
+    assert html.rstrip().endswith(">")
+    # And it SAYS that it did, rather than implying these are all the findings.
+    assert "not listed here" in html or "listed below in rank order" in html
+
+
+def test_it_sheds_detail_when_the_first_rung_does_not_fit():
+    """The shed ladder is load-bearing, not decoration.
+
+    Every field is individually bounded now, so it takes a run that is large in
+    EVERY dimension at once to overflow the first rung — which is exactly the
+    case the old constant-multiplying assertion claimed was impossible.
+    """
+    from app.crucible import report as r
+
+    fat = [
+        _finding(
+            statement="s" * 2_000,
+            surfaced_by=[f"{'n' * 500}.pdf ({i})" for i in range(10)],
+            assumed_params=[{"name": "p" * 500, "basis": "b" * 500}
+                            for _ in range(20)],
+        )
+        for _ in range(1_500)
+    ]
+    html = r.render_report_html(_run(), fat, _full_ledger(101), _full_plan())
+
+    assert len(html) <= r._BODY_LIMIT, f"rendered {len(html)}"
+    # It really did drop to a lower rung rather than squeaking under.
+    blocks = html.count("<h3>")
+    assert blocks < r.MAX_FULL_FINDING_BLOCKS, (
+        f"rendered {blocks} full blocks — the ladder never fired, so this test "
+        f"is not exercising what it claims"
+    )
+    assert "not listed here" in html
+
+
+def test_a_long_source_document_name_cannot_inflate_a_block():
+    """The one string in a finding block that nothing used to truncate."""
+    from app.crucible import report as r
+
+    modest = r._finding_block(_finding(surfaced_by=["report.pdf (3)"]), 1)
+    hostile = r._finding_block(
+        _finding(surfaced_by=[f"{'n' * 4_000}.pdf (3)"] * 40), 1
+    )
+    # Bounded by the render caps, not by what the row happens to hold.
+    assert len(hostile) < len(modest) + (
+        r.MAX_RENDERED_SOURCES * (r.MAX_SOURCE_NAME_CHARS + 8) + 40
+    )
+    assert "+35 more" in hostile
+
+
+def test_assumed_parameters_are_disclosed_not_reproduced_whole():
+    """I8 requires the assumption be visible; it does not require it verbatim.
+
+    Direct, because the shed ladder would otherwise absorb an unbounded field
+    by dropping whole findings — the document would still fit while quietly
+    losing findings to one fat parameter list.
+    """
+    from app.crucible import report as r
+
+    block = r._finding_block(
+        _finding(assumed_params=[{"name": "p" * 3_000, "basis": "b" * 3_000}
+                                 for _ in range(30)]),
+        1,
+    )
+    assert len(block) < 6_000, f"block is {len(block)} chars"
+    assert "and 22 further assumed parameters" in block
+
+
+def test_clipping_never_emits_a_half_escaped_entity():
+    """Cutting escaped text can land inside `&quot;` and emit `&am`."""
+    from app.crucible import report as r
+
+    for n in range(1, 40):
+        out = r._esc_clipped('"' * 50, n)
+        assert len(out) <= n
+        assert "&" not in out or out.count("&") == out.count(";")
