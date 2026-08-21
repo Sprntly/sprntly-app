@@ -94,6 +94,8 @@ export type CreateProjectModalViewProps = {
   onTabChange: (t: CreateTab) => void
   name: string
   onNameChange: (v: string) => void
+  whyText: string
+  onWhyChange: (v: string) => void
   rows: InviteRowState[]
   onRowEmailChange: (i: number, v: string) => void
   onRowRoleChange: (i: number, v: InviteRole) => void
@@ -117,6 +119,8 @@ export function CreateProjectModalView({
   onTabChange,
   name,
   onNameChange,
+  whyText,
+  onWhyChange,
   rows,
   onRowEmailChange,
   onRowRoleChange,
@@ -270,6 +274,21 @@ export function CreateProjectModalView({
               </div>
 
               <div className={styles.field}>
+                <label className="field-label" htmlFor="create-project-why">
+                  What&apos;s this project about? <span className={styles.hint}>(optional)</span>
+                </label>
+                <input
+                  id="create-project-why"
+                  className="input"
+                  type="text"
+                  placeholder="One line on the goal / why this project exists (optional)"
+                  value={whyText}
+                  onChange={(e) => onWhyChange(e.target.value)}
+                  data-testid="create-project-why-input"
+                />
+              </div>
+
+              <div className={styles.field}>
                 <label className="field-label">Invite teammates (optional)</label>
                 <div className="invite-rows" data-testid="create-project-invite-rows">
                   {rows.map((row, i) => (
@@ -330,6 +349,20 @@ export function CreateProjectModalView({
                 Pick any artifact — it becomes the project&apos;s first item, and the project takes its name. A PRD
                 is just one selectable artifact here, never the project&apos;s identity.
               </p>
+              <div className={styles.field}>
+                <label className="field-label" htmlFor="create-project-why">
+                  What&apos;s this project about? <span className={styles.hint}>(optional)</span>
+                </label>
+                <input
+                  id="create-project-why"
+                  className="input"
+                  type="text"
+                  placeholder="One line on the goal / why this project exists (optional)"
+                  value={whyText}
+                  onChange={(e) => onWhyChange(e.target.value)}
+                  data-testid="create-project-why-input"
+                />
+              </div>
               {artifactsStatus === "loading" ? (
                 <div className={styles.stateWrap} aria-busy="true" data-testid="create-project-artifacts-loading">
                   Loading artifacts…
@@ -463,6 +496,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
 
   const [tab, setTab] = useState<CreateTab>("manual")
   const [name, setName] = useState("")
+  const [whyText, setWhyText] = useState("")
   const [rows, setRows] = useState<InviteRowState[]>([{ email: "", role: "member" }])
   const [artifactsStatus, setArtifactsStatus] = useState<ArtifactsLoadState>("loading")
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
@@ -478,6 +512,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     if (!open) return
     setTab("manual")
     setName("")
+    setWhyText("")
     setRows([{ email: "", role: "member" }])
     setSelectedArtifact(null)
     setSelectedPrd(null)
@@ -525,7 +560,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       }
       setCreating(true)
       projectsApi
-        .create({ name: trimmed, origin: "manual" })
+        .create({ name: trimmed, origin: "manual", seed_text: whyText.trim() || undefined })
         .then((project) => {
           // Best-effort member-add for rows with a non-empty email — never
           // blocks navigation. A row with no account behind that email
@@ -569,7 +604,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       // its own binding so the guard's proof actually reaches the call.
       const artifactType = artifact.type
       projectsApi
-        .create({ name: artifactTitle(artifact), origin: "artifact" })
+        .create({ name: artifactTitle(artifact), origin: "artifact", seed_text: whyText.trim() || undefined })
         .then((project) =>
           projectsApi
             .addArtifact(project.id, artifactType, artifact.id)
@@ -628,7 +663,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
         .catch(() => setError("Couldn't create the project. Try again."))
         .finally(() => setCreating(false))
     }
-  }, [creating, tab, name, rows, selectedArtifact, selectedPrd, router, onClose])
+  }, [creating, tab, name, whyText, rows, selectedArtifact, selectedPrd, router, onClose])
 
   return (
     <CreateProjectModalView
@@ -637,6 +672,8 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       onTabChange={setTab}
       name={name}
       onNameChange={setName}
+      whyText={whyText}
+      onWhyChange={setWhyText}
       rows={rows}
       onRowEmailChange={onRowEmailChange}
       onRowRoleChange={onRowRoleChange}

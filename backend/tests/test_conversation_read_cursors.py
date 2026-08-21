@@ -1,19 +1,25 @@
-"""Tests for the assignee-awareness unread badge (inputs-only read cursor,
-AD-P3/AD-P20): `conversation_read_cursors` migration + `db/conversation_read_
-cursors.py` + the two `GET/POST /v1/projects/{id}/individual/unread|read`
-routes.
+"""Tests for the per-(conversation, user) read-cursor primitive
+(AD-P3/AD-P20): `conversation_read_cursors` migration +
+`db/conversation_read_cursors.py`'s `get_cursor`/`set_cursor`.
+
+The unread-badge feature this module originally served (the two
+`GET/POST /v1/projects/{id}/individual/unread|read` routes, and the
+`unread_for`/`latest_individual_turn_id` derivation helpers) was removed —
+its own routes were orphaned when the group-chat backend was removed, and
+`unread_for`/`latest_individual_turn_id` lost their only callers with it.
+`get_cursor`/`set_cursor` survive: `db.conversations._advance_own_cursor`
+(a private-chat write-path helper, unrelated to the retired badge) still
+calls `set_cursor` so writing your own turn and leaving doesn't flip your
+own chat to unread in a FUTURE unread surface.
 
 Split, mirroring the wave's established two-tier pattern:
 
   - Real local-Supabase round-trip (`RUN_CONVERSATION_READ_CURSORS_
-    ROUNDTRIP`, mirrors `test_project_delegations.py`): the migration's PK
-    shape, RLS + policy, and a `set_cursor`/`get_cursor` round trip against
-    the REAL Postgres — the fake-Supabase tier has no SQL engine behind it
-    and cannot enforce a composite PK or an RLS/policy catalog lookup.
-  - Fake-Supabase blast-radius tier (mirrors `test_individual_turns.py`):
-    unread derivation, read-clears-unread, advance-only clamping, the own-
-    cursor isolation gate (mutation-proofed RED->GREEN), and the membership
-    gate — all logic that does not depend on a real SQL engine.
+    ROUNDTRIP`): the migration's PK shape, RLS + policy, and a
+    `set_cursor`/`get_cursor` round trip against the REAL Postgres — the
+    fake-Supabase tier has no SQL engine behind it and cannot enforce a
+    composite PK or an RLS/policy catalog lookup.
+  - Fake-Supabase blast-radius tier: advance-only clamping.
 
 Run the real-DB tier with:
 
@@ -30,7 +36,6 @@ import uuid
 import pytest
 
 from tests._company_helpers import company_client
-from tests._project_helpers import seed_same_tenant_non_member
 
 # ── Real local-Supabase round-trip ────────────────────────────────────────
 
@@ -243,79 +248,6 @@ def _open_individual_chat(ctx, project_id) -> dict:
     return conv
 
 
-def test_unread_true_when_turn_beyond_cursor(isolated_settings, monkeypatch):
-    """A delivered turn with id > cursor makes `unread_for` true (AC2/AC3)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-    conv = _open_individual_chat(ctx, project["id"])
-
-    from app.db.conversation_read_cursors import unread_for
-
-    assert unread_for(conv["id"], ctx.user_id) is True
-
-    r = ctx.client.get(f"/v1/projects/{project['id']}/individual/unread")
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert body["unread"] is True
-    assert body["latest_turn_id"] is not None
-    assert body["last_read_turn_id"] == 0
-
-
-def test_unread_false_on_empty_conversation(isolated_settings, monkeypatch):
-    """No turns at all → unread is false, even with no cursor row (AC2)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    from app.db import conversations as conversations_db
-    from app.db.conversation_read_cursors import unread_for
-
-    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
-    assert unread_for(conv["id"], ctx.user_id) is False
-
-    r = ctx.client.get(f"/v1/projects/{project['id']}/individual/unread")
-    assert r.status_code == 200, r.text
-    assert r.json() == {"unread": False, "latest_turn_id": None, "last_read_turn_id": 0}
-
-    # And with no conversation created at all yet — same zero-state, no 404.
-    project2 = _create_project(ctx, name="No chat opened yet")
-    r2 = ctx.client.get(f"/v1/projects/{project2['id']}/individual/unread")
-    assert r2.status_code == 200, r2.text
-    assert r2.json() == {"unread": False, "latest_turn_id": None, "last_read_turn_id": 0}
-
-
-def test_read_clears_unread(isolated_settings, monkeypatch):
-    """POST /individual/read advances the cursor to the latest turn; a
-    subsequent GET /individual/unread returns unread: false (AC4)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-    conv = _open_individual_chat(ctx, project["id"])
-
-    r_before = ctx.client.get(f"/v1/projects/{project['id']}/individual/unread")
-    assert r_before.json()["unread"] is True
-
-    r_read = ctx.client.post(f"/v1/projects/{project['id']}/individual/read")
-    assert r_read.status_code == 200, r_read.text
-
-    from app.db.conversation_read_cursors import get_cursor, latest_individual_turn_id
-
-    assert get_cursor(conv["id"], ctx.user_id) == latest_individual_turn_id(conv["id"])
-
-    r_after = ctx.client.get(f"/v1/projects/{project['id']}/individual/unread")
-    assert r_after.status_code == 200, r_after.text
-    assert r_after.json()["unread"] is False
-
-
-def test_read_route_no_conversation_yet(isolated_settings, monkeypatch):
-    """POST /individual/read with no individual chat created yet — a no-op
-    zero-state, never a 500/404 (not having opened the chat is legitimate)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    r = ctx.client.post(f"/v1/projects/{project['id']}/individual/read")
-    assert r.status_code == 200, r.text
-    assert r.json() == {"last_read_turn_id": 0}
-
-
 def test_set_cursor_advance_only(isolated_settings, monkeypatch):
     """Posting an older/stale latest id never moves the cursor backward —
     `max(existing, new)` (AC5)."""
@@ -337,119 +269,21 @@ def test_set_cursor_advance_only(isolated_settings, monkeypatch):
     assert latest == 0  # sanity: our baseline really was the pre-cursor state
 
 
-# ── Isolation (mutation-proofed — AC6/AC7, load-bearing) ──────────────────
+def test_own_turn_write_advances_cursor(isolated_settings, monkeypatch):
+    """`db.conversations._advance_own_cursor` (the remaining real-world
+    caller of `set_cursor`) advances the writer's own cursor to the turn
+    they just wrote — the CURRENT purpose of the surviving primitive."""
+    import uuid as uuid_mod
 
-
-def test_cursor_isolated_per_user(isolated_settings, monkeypatch):
-    """User A advancing their own cursor never changes user B's unread for
-    the SAME conversation-owning project's chats — each user's individual
-    chat + cursor is fully separate (AC6)."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
     from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-    from app.db.client import require_client
-    from app.db.conversation_read_cursors import unread_for
-
-    require_client().table("profiles").insert(
-        {"id": "member-b", "email": "b@co.com"}
-    ).execute()
-    projects_db.add_member(project["id"], "member-b")
-
-    conv_a = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
-    conversations_db.post_individual_turn(conv_a["id"], "assistant", "A's brief")
-
-    conv_b = conversations_db.create_individual_project_chat(project["id"], "member-b")
-    conversations_db.post_individual_turn(conv_b["id"], "assistant", "B's brief")
-
-    assert unread_for(conv_a["id"], ctx.user_id) is True
-    assert unread_for(conv_b["id"], "member-b") is True
-
-    # A reads/advances only A's own cursor via the route.
-    r = ctx.client.post(f"/v1/projects/{project['id']}/individual/read")
-    assert r.status_code == 200, r.text
-
-    assert unread_for(conv_a["id"], ctx.user_id) is False
-    # B's unread state is completely untouched by A's read.
-    assert unread_for(conv_b["id"], "member-b") is True
-
-
-def test_unread_endpoint_membership_gated(isolated_settings, monkeypatch):
-    """Same-tenant non-member gets 403; cross-tenant caller gets 404
-    (existence not disclosed) — for both endpoints (AC7)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-    _, non_member_headers = seed_same_tenant_non_member(ctx)
-
-    r_unread = ctx.client.get(
-        f"/v1/projects/{project['id']}/individual/unread", headers=non_member_headers
-    )
-    assert r_unread.status_code == 403
-
-    r_read = ctx.client.post(
-        f"/v1/projects/{project['id']}/individual/read", headers=non_member_headers
-    )
-    assert r_read.status_code == 403
-
-    from app.db import projects as projects_db
-
-    foreign = projects_db.create_project(
-        company_id="foreign-co", workspace_id="foreign-ws", name="Not mine",
-        created_by="someone-else",
-    )
-    assert ctx.client.get(f"/v1/projects/{foreign['id']}/individual/unread").status_code == 404
-    assert ctx.client.post(f"/v1/projects/{foreign['id']}/individual/read").status_code == 404
-
-
-def test_endpoints_ignore_client_supplied_ids(isolated_settings, monkeypatch):
-    """Neither endpoint accepts a client-supplied `user_id`/`conversation_id`
-    — they always resolve the caller's OWN individual conversation via
-    `ctx.user_id`. This is the RED/GREEN mutation proof: an UNGATED stand-in
-    read (identical query, minus the owner-gate clause) DOES return another
-    user's unread state for their conversation_id; the real route, given the
-    exact same query-string injection attempt, ignores it entirely and
-    returns the caller's own (different) state (AC7)."""
-    ctx = company_client(monkeypatch)
-    project = _create_project(ctx)
-
-    from app.db import conversations as conversations_db
-    from app.db import projects as projects_db
-    from app.db.client import require_client
-    from app.db.conversation_read_cursors import latest_individual_turn_id
-
-    require_client().table("profiles").insert(
-        {"id": "member-b", "email": "b@co.com"}
-    ).execute()
-    projects_db.add_member(project["id"], "member-b")
-
-    conv_b = conversations_db.create_individual_project_chat(project["id"], "member-b")
-    conversations_db.post_individual_turn(conv_b["id"], "assistant", "B's private brief")
-
-    # RED: an ungated stand-in — the identical "latest turn for this
-    # conversation_id" computation, with no ownership check at all. It DOES
-    # resolve B's real unread turn, proving B's data genuinely exists and
-    # would leak if the route accepted a client id.
-    assert latest_individual_turn_id(conv_b["id"]) is not None
-
-    # GREEN: the real route, sent B's conversation_id as an (unsupported,
-    # ignored) query param — it resolves ctx.user_id's OWN conversation
-    # (which doesn't exist yet), never conv_b.
-    r = ctx.client.get(
-        f"/v1/projects/{project['id']}/individual/unread",
-        params={"conversation_id": conv_b["id"], "user_id": "member-b"},
-    )
-    assert r.status_code == 200, r.text
-    assert r.json() == {"unread": False, "latest_turn_id": None, "last_read_turn_id": 0}
-
-    r_read = ctx.client.post(
-        f"/v1/projects/{project['id']}/individual/read",
-        params={"conversation_id": conv_b["id"], "user_id": "member-b"},
-    )
-    assert r_read.status_code == 200, r_read.text
-    assert r_read.json() == {"last_read_turn_id": 0}
-
-    # B's cursor is completely untouched by A's attempted injection.
     from app.db.conversation_read_cursors import get_cursor
 
-    assert get_cursor(conv_b["id"], "member-b") == 0
+    conv_id = conversations_db._owned_conversation_id(project["id"], ctx.user_id)
+    turn = conversations_db.post_owned_individual_user_turn(
+        project_id=project["id"], user_id=ctx.user_id, content="hello",
+        client_message_id=uuid_mod.uuid4().hex,
+    )
+    assert get_cursor(conv_id, ctx.user_id) == turn["id"]

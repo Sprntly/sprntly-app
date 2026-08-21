@@ -52,7 +52,6 @@ const PROJECT: ProjectDetail = {
   created_by: "u1",
   created_at: hoursAgo(48),
   updated_at: hoursAgo(2),
-  group_chat_id: 55,
   members: [
     {
       kind: "agent",

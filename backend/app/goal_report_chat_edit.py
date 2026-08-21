@@ -58,8 +58,7 @@ _AGENT = "crucible"
 EDIT_PROMPT_VERSION = "goal-report-chat-edit-v1"
 
 #: The in-band chat tool. Its DESCRIPTION carries the contract, because the
-#: description is the only part of this the model reads — see `EDIT_PRD_TOOL`
-#: in project_group_context.py, which this mirrors sentence for sentence.
+#: description is the only part of this the model reads.
 EDIT_GOAL_REPORT_TOOL = {
     "name": "edit_goal_report",
     "description": (

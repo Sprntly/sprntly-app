@@ -201,6 +201,7 @@ def maybe_auto_create_project_for_prd(
             # the conversation-less path: there is no chat thread to read.
             seed_project_origin_memory(
                 project_id=project_id,
+                origin="prd_auto",
                 prd_id=prd_id,
                 prd_title=prd_title,
                 conversation_id=conversation_id,

@@ -156,15 +156,37 @@ def test_individual_turns_reject_other_users_conversation(isolated_settings, mon
 
 def test_individual_turns_reject_group_conversation(isolated_settings, monkeypatch):
     """A `kind='group'` conversation id is never readable through the
-    individual-turns reader, even for the conversation's own creator —
-    mirrors `list_group_turns`'s own non-group refusal one level up."""
+    individual-turns reader, even for the conversation's own creator. The
+    group-chat WRITE path is removed, but pre-existing `kind='group'` rows
+    are explicitly NOT deleted from the database — this proves a legacy
+    group row (inserted directly, mirroring what still exists in prod)
+    stays refused."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
     from app.db import conversations as conversations_db
+    from app.db.client import require_client
+    from app.db.workspaces import ensure_default_workspace
 
-    group_conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
-    conversations_db.post_group_turn(group_conv["id"], ctx.user_id, "group turn")
+    ws_id = ensure_default_workspace(ctx.company_id)["id"]
+    client = require_client()
+    group_conv = (
+        client.table("conversations")
+        .insert(
+            {
+                "company_id": ctx.company_id,
+                "workspace_id": ws_id,
+                "user_id": ctx.user_id,
+                "project_id": project["id"],
+                "kind": "group",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+    client.table("conversation_turns").insert(
+        {"conversation_id": group_conv["id"], "role": "user", "content": "group turn"}
+    ).execute()
 
     assert conversations_db.list_individual_turns(group_conv["id"], ctx.user_id) == []
 

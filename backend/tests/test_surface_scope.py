@@ -35,9 +35,7 @@ def test_surface_scope_frozen_and_defaulted():
     assert scope.roster == ()
     assert scope.assigner_identity is None
     assert scope.post_turn is None
-    assert scope.prerendered_transcript is None
     assert scope.capabilities is None
-    assert scope.multi_party is False
     with pytest.raises(dataclasses.FrozenInstanceError):
         scope.project_id = 5  # type: ignore[misc]
 
@@ -50,7 +48,6 @@ def test_surface_scope_main_is_noop():
     assert scope.is_noop is True
     assert scope.extra_tools == ()
     assert scope.system_addendum == ""
-    assert scope.prerendered_transcript is None
 
 
 def test_surface_scope_project_private_is_not_noop():

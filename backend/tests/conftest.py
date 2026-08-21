@@ -2254,6 +2254,58 @@ def _no_background_origin_seed(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_background_greeting_synthesis(request, monkeypatch):
+    """Keep the on-join greeting's narrative pass from firing a REAL
+    Anthropic request.
+
+    `post_join_greeting` (`app/project_join_greeting.py`) makes ONE bounded
+    `call_md` call per member-add (private-first memory wave — the module's
+    FIRST LLM call; before this wave the greeting was a deterministic
+    digest with no LLM call at all) — not just from the tests that mean to
+    exercise the greeting itself. ANY test that adds/tags a project member
+    or accepts a project invite (`test_project_members.py`,
+    `test_project_tag_candidate.py`, `db/team.py`'s invite-accept path, and
+    any other route test that adds a member in passing) would otherwise
+    fire a real Anthropic request using the suite's fake API key — the same
+    hazard class `_no_background_memory_synthesis`/`_no_background_origin_
+    seed` above exist for.
+
+    Defaults to a short placeholder body carrying the literal `MORE_MARKER`
+    so an unrelated test asserting only "a greeting turn was posted" still
+    sees the expected shape. A test that means to drive the greeting itself
+    (`test_project_join_greeting.py`) patches `app.project_join_greeting.
+    call_md` directly; that patch runs AFTER this autouse fixture and wins
+    for that test (same ordering the sibling guards rely on). Opt out with
+    `@pytest.mark.real_greeting_synthesis` — the dedicated real-LLM live
+    suite drives an UNSTUBBED `call_md` instead."""
+    if request.node.get_closest_marker("real_greeting_synthesis"):
+        yield
+        return
+    import importlib
+
+    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {
+                    "model": model,
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                }
+            )
+        return "Autouse placeholder greeting.<!--more-->Placeholder rest for isolated tests."
+
+    try:
+        mod = importlib.import_module("app.project_join_greeting")
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(mod, "call_md", _fake_call_md, raising=False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_background_interjection_gate(request, monkeypatch):
     """Keep a non-mention group turn from firing a REAL Anthropic request.
 

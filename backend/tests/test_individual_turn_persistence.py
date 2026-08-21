@@ -323,7 +323,6 @@ def test_own_turn_write_advances_read_cursor(isolated_settings, monkeypatch):
         content="hi", client_message_id="cmid-cursor",
     )
     conv = conversations_db.get_individual_project_chat(project["id"], ctx.user_id)
-    assert read_cursors_db.unread_for(conv["id"], ctx.user_id) is False
     assert read_cursors_db.get_cursor(conv["id"], ctx.user_id) >= row["id"]
 
     # A teammate's cursor is untouched by MY write.

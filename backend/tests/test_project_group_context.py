@@ -1,8 +1,8 @@
 """Deterministic (fast-lane) tests for `app/project_group_context.py` — the
-@Sprntly group agent's project-awareness: the injected breadth blocks
-(`assemble_group_agent_context` / `assemble_private_project_context`) and the
-four on-demand depth read tools (`get_project_memory`, `list_project_artifacts`,
-`get_artifact_content`, `get_task_ledger`) wired through `dispatch_read_tool`.
+private project chat's project-awareness: the injected breadth block
+(`assemble_private_project_context`) and the four on-demand depth read tools
+(`get_project_memory`, `list_project_artifacts`, `get_artifact_content`,
+`get_task_ledger`) wired through `dispatch_read_tool`.
 
 The load-bearing invariant this file mutation-proofs is TENANCY SCOPING:
 every read is scoped to the ONE `(project_id, company_id)` the caller already
@@ -64,8 +64,8 @@ def test_read_tools_are_the_four_project_scoped_tools():
 
 
 def test_dispatch_falls_through_for_a_non_read_tool():
-    """A tool that is not one of the four read tools returns None so the group
-    agent's own dispatch (delegate_task, unknown-tool fallback) still runs."""
+    """A tool that is not one of the four read tools returns None so the
+    caller's own dispatch (delegate_task, unknown-tool fallback) still runs."""
     assert (
         pgc.dispatch_read_tool(
             "delegate_task", {"assignee": "x"},
@@ -197,21 +197,6 @@ def test_dispatch_never_raises_on_a_handler_failure(monkeypatch):
     assert "problem" in out.lower()
 
 
-def test_group_agent_context_degrades_and_never_raises(monkeypatch):
-    def _boom(*a, **k):
-        raise RuntimeError("read failed")
-
-    monkeypatch.setattr(pgc.memory_db, "get_summary", _boom)
-    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", _boom)
-    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", _boom)
-    monkeypatch.setattr(pgc, "list_artifacts_for_project", _boom)
-    monkeypatch.setattr(pgc.projects_db, "list_members", _boom)
-
-    block = pgc.assemble_group_agent_context(1, "acme", "c1")
-    assert "PROJECT CONTEXT" in block  # still a usable block, just placeholders
-    assert "(none yet)" in block or "(unavailable)" in block
-
-
 def test_private_project_context_degrades_and_never_raises(monkeypatch):
     import app.project_context as project_context_mod
 
@@ -228,34 +213,25 @@ def test_private_project_context_degrades_and_never_raises(monkeypatch):
     assert "never another company's data" in block
 
 
-# ── Group breadth self-carries the roster (memory + members context) ──────
+def test_private_context_no_group_window_dependency():
+    """AC12 (option (b)): `assemble_private_project_context` no longer reads
+    any group-chat turn — `_recent_group_chat_window` and its call-site were
+    removed together with the group-only read helpers it depended on
+    (`db.conversations.list_group_turns`, `db.projects.get_group_chat_id`).
+    Proven at the source level: the symbol is gone from the module, and the
+    private assembler's own source contains no group-turn read call."""
+    import inspect
 
-
-def test_group_agent_context_includes_roster(monkeypatch):
-    """`assemble_group_agent_context`'s breadth block now carries its own
-    roster line (DRY reuse of `_roster_block`), rather than relying solely
-    on the group system-prompt addendum to deliver it — the breadth block
-    becomes independently verifiable."""
-    monkeypatch.setattr(
-        pgc.projects_db, "list_members",
-        lambda pid: [{"user_id": "u1", "name": "Ada Lovelace", "job_role": "PM"}],
-    )
-    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "summary text"})
-    monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)
-    monkeypatch.setattr(pgc.delegation_events_db, "list_status_for_project", lambda pid: [])
-    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
-
-    block = pgc.assemble_group_agent_context(1, "acme", "c1")
-    assert "Project roster (who is on this project):" in block
-    assert "Ada Lovelace" in block
-    assert "summary text" in block  # memory summary still present alongside the roster
+    assert not hasattr(pgc, "_recent_group_chat_window")
+    src = inspect.getsource(pgc.assemble_private_project_context)
+    assert "list_group_turns" not in src
+    assert "get_group_chat_id" not in src
+    assert "group" not in src.lower()
 
 
 def test_private_context_still_has_summary_and_roster(monkeypatch):
     """Regression guard: the private surface's breadth block continues to
-    carry BOTH the memory summary and the roster (it already did before
-    this ticket) — the group-only roster addition must not have touched
-    this function."""
+    carry BOTH the memory summary and the roster."""
     import app.project_context as project_context_mod
 
     monkeypatch.setattr(
@@ -331,12 +307,12 @@ def test_artifact_manifest_gate_is_load_bearing(monkeypatch):
     assert "can't find that artifact" in _read_artifact("prd", 4242).lower()
 
 
-# ── the two surfaces assemble core facts through ONE shared assembler ──
+# ── the private surface assembles core facts through the shared assembler ──
 
 
 def _stub_core_facts(monkeypatch):
-    """Deterministic roster/ledger/manifest for both surfaces, so the shared
-    core-fact block is verifiable byte-for-byte."""
+    """Deterministic roster/ledger/manifest, so the shared core-fact block
+    is verifiable byte-for-byte."""
     monkeypatch.setattr(
         pgc.projects_db, "list_members",
         lambda pid: [
@@ -351,10 +327,10 @@ def _stub_core_facts(monkeypatch):
     )
 
 
-def test_group_context_matches_shared_assembler(monkeypatch):
-    """AC4: group and private assemble their roster/ledger/artifacts through
-    the ONE shared `assemble_project_fact_core`, so a fixture yields the SAME
-    core fact strings on both surfaces — they cannot drift."""
+def test_private_context_matches_shared_assembler(monkeypatch):
+    """The private surface assembles its roster/ledger/artifacts through the
+    shared `assemble_project_fact_core`, so a fixture's core fact strings
+    appear verbatim in the assembled block."""
     _stub_core_facts(monkeypatch)
     monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "S"})
     monkeypatch.setattr(pgc.memory_db, "get_latest_insight", lambda pid: None)
@@ -365,15 +341,12 @@ def test_group_context_matches_shared_assembler(monkeypatch):
     )
 
     roster, ledger, manifest = pgc.assemble_project_fact_core(1, "acme", "c1")
-    group_block = pgc.assemble_group_agent_context(1, "acme", "c1")
     private_block = pgc.assemble_private_project_context(1, "user-1", "acme", "c1")
 
-    # The identical core facts appear on BOTH surfaces (single-sourced).
-    for surface_block in (group_block, private_block):
-        assert roster in surface_block
-        assert ledger in surface_block
-        assert manifest in surface_block
-    # Both name the same members and the same artifact.
+    assert roster in private_block
+    assert ledger in private_block
+    assert manifest in private_block
+    # Names the same members and the same artifact.
     assert "Ada Lovelace" in roster and "Grace Hopper" in roster
     assert "Our PRD" in manifest
 

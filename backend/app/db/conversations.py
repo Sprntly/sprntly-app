@@ -227,13 +227,15 @@ def get_conversation_project_id(
 
     A project-bound conversation is a `conversations` row with a non-null
     `project_id`; `kind` is `individual` (the private per-user project chat) or
-    `group` (the one shared project chat). A MAIN-CHAT row shares `kind`'s
-    `individual` default but carries `project_id = NULL`, so it returns None and
-    stays workspace-scoped — `project_id` is the real discriminator, and the
-    `kind` guard only fences off any future non-project kind. Company-scoped
-    only — no per-user gate, because a `kind='group'` row is owned by its
-    creator, not the member currently classifying a message; the caller already
-    reached this conversation_id through an ownership/membership-checked surface,
+    the legacy shared-thread value the old group chat wrote (still readable —
+    no DB rows were removed when the group surface was retired). A MAIN-CHAT
+    row shares `kind`'s `individual` default but carries `project_id = NULL`,
+    so it returns None and stays workspace-scoped — `project_id` is the real
+    discriminator, and the `kind` guard only fences off any future non-project
+    kind. Company-scoped only — no per-user gate, because a legacy shared-kind
+    row is owned by its creator, not the member currently classifying a
+    message; the caller already reached this conversation_id through an
+    ownership/membership-checked surface,
     and the value only NARROWS the read-only artifact listing to that project's
     own documents (never widens it, never mutates), so the company scope is the
     boundary that matters. Best-effort: any error → None.
@@ -338,458 +340,10 @@ def get_conversation_evidence_id(
         return None
 
 
-# ── Group chat (build spec §4.4/§4.5, AD-P2) ──────────────────────────────
-#
-# ADDITIVE ONLY. Everything below is a NEW authorization/read/write path used
-# exclusively when `conversations.kind='group'` — it never touches
-# `conversation_belongs_to_company` or any per-user helper above. A group
-# chat's `user_id` is its creator (for symmetry with the existing schema);
-# real authorization is `project_chat_members` (v1: seeded 1:1 from
-# `project_members` — see build spec §4.5), read via the helpers below only.
-#
-# Every helper here that accepts a bare `conversation_id` re-checks
-# `kind='group'` before reading/writing it — a private single-owner
-# conversation id can never be read or written through this path, even if a
-# caller upstream forgets the project-membership gate (isolation regression,
-# R4/§9).
-
-
-AGENT_AUTHOR_NAME = "Sprntly"  # constant label for assistant turns (author_user_id=NULL)
-
-
-def get_group_chat(project_id: int) -> dict[str, Any] | None:
-    """The project's single `kind='group'` conversation row, or None if it
-    hasn't been created yet. Read-only counterpart of `create_group_chat`."""
-    rows = (
-        require_client()
-        .table("conversations")
-        .select("*")
-        .eq("project_id", project_id)
-        .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    return rows[0] if rows else None
-
-
-def _seed_roster_from_members(client: Any, conversation_id: int, project_id: int) -> None:
-    """Populate `project_chat_members` from the project's CURRENT
-    `project_members` at group-chat creation time (v1: the group chat is
-    open to all members, build spec §4.5). Upserted (not inserted) so a
-    re-run after the race backstop in `create_group_chat` can never raise a
-    duplicate-PK error."""
-    members = (
-        client.table("project_members")
-        .select("user_id")
-        .eq("project_id", project_id)
-        .execute()
-        .data
-        or []
-    )
-    if not members:
-        return
-    client.table("project_chat_members").upsert(
-        [{"conversation_id": conversation_id, "user_id": m["user_id"]} for m in members],
-        on_conflict="conversation_id,user_id",
-    ).execute()
-
-
-@retry_on_disconnect
-def create_group_chat(project_id: int, creator_id: str) -> dict[str, Any]:
-    """Create-if-absent: the project's ONE `kind='group'` conversation.
-    Idempotent — a second call for the same project returns the SAME row.
-
-    The schema's partial unique index (`uq_one_group_chat_per_project`) is
-    the concurrency backstop: if two requests race to create the group chat,
-    exactly one INSERT wins and the other raises a unique-violation here —
-    caught below, re-reading and returning the WINNER's row rather than
-    erroring the loser's caller (build spec §5.3).
-
-    Seeds `project_chat_members` from `project_members` on the winning
-    creation only (never on an idempotent no-op return, and never again on
-    the losing side of a race)."""
-    existing = get_group_chat(project_id)
-    if existing:
-        return existing
-
-    from app.db.projects import get_project  # local import: avoid a load-order cycle
-
-    project = get_project(project_id)
-    if not project:
-        raise ValueError(f"create_group_chat: project {project_id} not found")
-
-    client = require_client()
-    try:
-        row = (
-            client.table("conversations")
-            .insert(
-                {
-                    "company_id": project["company_id"],
-                    "workspace_id": project["workspace_id"],
-                    "user_id": creator_id,
-                    "project_id": project_id,
-                    "kind": "group",
-                }
-            )
-            .execute()
-            .data[0]
-        )
-    except Exception:
-        # Race backstop — see docstring. Only re-raise if the re-read also
-        # comes back empty (a real failure, not a lost race).
-        existing = get_group_chat(project_id)
-        if existing:
-            return existing
-        raise
-
-    _seed_roster_from_members(client, row["id"], project_id)
-    return row
-
-
-def user_in_group_roster(conversation_id: int, user_id: str) -> bool:
-    """Whether `user_id` is seeded into this group chat's roster
-    (`project_chat_members`). v1: membership is effectively project
-    membership (the roster is seeded from it 1:1 at creation, build spec
-    §4.5) — routes gate on project membership directly; this helper exists
-    for the forward-compatible explicit-roster check (e.g. a future
-    topic-chat whose roster is a SUBSET of project members)."""
-    rows = (
-        require_client()
-        .table("project_chat_members")
-        .select("conversation_id")
-        .eq("conversation_id", conversation_id)
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-        .data
-        or []
-    )
-    return bool(rows)
-
-
-def _author_display(
-    author_user_id: str | None, profiles_by_id: dict[str, dict[str, Any]]
-) -> tuple[str | None, str | None]:
-    """(author_name, author_job_role) for one turn. Agent turns
-    (author_user_id=None) get the constant Sprntly label with no job role;
-    human turns resolve their name the same way `db.projects.list_members`
-    does (full_name, else first+last, else None) and `job_role` from
-    `profiles.role` (AD-P5 — the person's own job designation)."""
-    if not author_user_id:
-        return AGENT_AUTHOR_NAME, None
-    prof = profiles_by_id.get(author_user_id) or {}
-    full = (prof.get("full_name") or "").strip()
-    first = (prof.get("first_name") or "").strip()
-    last = (prof.get("last_name") or "").strip()
-    name = full or (f"{first} {last}".strip() if (first or last) else None) or None
-    return name, prof.get("role")
-
-
-def list_group_turns(
-    conversation_id: int, since: int | None = None, project_id: int | None = None
-) -> list[dict[str, Any]]:
-    """Turns in a group chat, ascending, after the `since` cursor (a turn
-    id — AD-P4 poll read, mirrors the `prototype_comments` refetch
-    posture). Each turn carries `author_name`/`author_job_role` (joined
-    from `profiles`; agent turns get the constant Sprntly label, no job
-    role — build spec §5.3/§5.4).
-
-    Refuses (returns []) when `conversation_id` does not resolve to a
-    `kind='group'` row — the group path can never read an individual
-    chat's turns, even if a caller forgets to resolve the id via
-    `get_group_chat` first (isolation regression, R4/§9).
-
-    Optional `project_id` — when passed, the `conversation_id` must ALSO
-    belong to that project, else `[]`. Belt-and-suspenders cross-project /
-    cross-tenant scoping for callers that accept a CLIENT-supplied
-    conversation_id (e.g. `routes.ask._load_group_history`): even if the
-    caller's own conversation↔project binding is ever bypassed, a foreign
-    project's turns can never be read through this path. Default `None`
-    preserves the exact behavior every pre-existing caller relies on."""
-    client = require_client()
-    conv_q = (
-        client.table("conversations")
-        .select("id")
-        .eq("id", conversation_id)
-        .eq("kind", "group")
-    )
-    if project_id is not None:
-        conv_q = conv_q.eq("project_id", project_id)
-    conv = conv_q.limit(1).execute().data
-    if not conv:
-        return []
-
-    q = client.table("conversation_turns").select("*").eq("conversation_id", conversation_id)
-    if since is not None:
-        q = q.gt("id", since)
-    turns = q.order("id").execute().data or []
-    if not turns:
-        return []
-
-    author_ids = {t["author_user_id"] for t in turns if t.get("author_user_id")}
-    profiles_by_id: dict[str, dict[str, Any]] = {}
-    if author_ids:
-        profiles_by_id = {
-            p["id"]: p
-            for p in (
-                client.table("profiles")
-                .select("id, full_name, first_name, last_name, role")
-                .in_("id", list(author_ids))
-                .execute()
-                .data
-                or []
-            )
-        }
-
-    out = []
-    for t in turns:
-        author_id = t.get("author_user_id")
-        name, job_role = _author_display(author_id, profiles_by_id)
-        out.append(
-            {
-                "id": t["id"],
-                "role": t["role"],
-                "content": t["content"],
-                "author_user_id": author_id,
-                "author_name": name,
-                "author_job_role": job_role,
-                # The send-identity key: on a human turn it is the poster's own
-                # idempotency key; on the agent reply it is the SAME key the
-                # originating ask carried. Exposed (unlike `attachments`) so the
-                # poster can recognise its own turn/reply realtime echo and not
-                # double-render it. Null on turns written before the key existed.
-                "client_message_id": t.get("client_message_id"),
-                "created_at": t["created_at"],
-                # The FULL structured reply (assistant turns persisted after
-                # the `reply` column landed); None renders from `content`.
-                # Still a hard whitelist: internal columns (`attachments`,
-                # `client_message_id`, …) never ride the DTO.
-                "reply": t.get("reply"),
-                # Execution-run status, filled below for the human turn that
-                # triggered a run; None for every other turn.
-                "run_status": None,
-                "error_class": None,
-            }
-        )
-    _attach_group_run_status(client, conversation_id, turns, out)
-    return out
-
-
-# DB status vocabulary (`generating/ready/error/cancelled`) → the FE
-# AgentRunStatus vocabulary, mapped HERE at the DTO edge only. The DB column
-# is never written in the FE vocabulary (see the ask_jobs CHECK constraint).
-_RUN_STATUS_MAP = {
-    "generating": "running",
-    "ready": "done",
-    "error": "failed",
-    "cancelled": "declined",
-}
-
-
-def _attach_group_run_status(
-    client, conversation_id: int, turns: list[dict], out: list[dict]
-) -> None:
-    """Best-effort: join the LATEST (`max(attempt)`) `project_group` run per
-    `source_turn_id` in this conversation and attach `run_status`
-    (DB→FE-mapped) + `error_class` onto the turn whose id == that
-    source_turn_id — so a reload/poll AFTER a failure surfaces the run outcome
-    with no realtime event. One bounded extra query; a failure degrades to
-    `run_status=None` and never breaks the read (AD-P22)."""
-    turn_ids = [t["id"] for t in turns]
-    if not turn_ids:
-        return
-    try:
-        runs = (
-            client.table("ask_jobs")
-            .select("source_turn_id, status, error_class, attempt")
-            .eq("conversation_id", conversation_id)
-            .eq("kind", "project_group")
-            .in_("source_turn_id", turn_ids)
-            .execute()
-            .data
-            or []
-        )
-    except Exception:  # noqa: BLE001 — run-status is additive; never break the read
-        logger.warning(
-            "group_run_status_join_failed conversation_id=%s", conversation_id,
-            exc_info=True,
-        )
-        return
-    latest: dict[int, dict] = {}
-    for r in runs:
-        stid = r.get("source_turn_id")
-        if stid is None:
-            continue
-        prev = latest.get(stid)
-        if prev is None or (r.get("attempt") or 0) >= (prev.get("attempt") or 0):
-            latest[stid] = r
-    by_id = {t["id"]: t for t in out}
-    for stid, r in latest.items():
-        turn = by_id.get(stid)
-        if turn is not None:
-            turn["run_status"] = _RUN_STATUS_MAP.get(r.get("status"))
-            turn["error_class"] = r.get("error_class")
-
-
-def post_group_turn(
-    conversation_id: int,
-    author_user_id: str | None,
-    content: str,
-    *,
-    role: str = "user",
-    reply: dict[str, Any] | None = None,
-    attachments: list[dict[str, Any]] | None = None,
-    client_message_id: str | None = None,
-) -> dict[str, Any] | None:
-    """Insert one turn into a group chat. Human turn: pass the poster's
-    `author_user_id` (role defaults to 'user'). Agent turn (on an
-    `@Sprntly` mention): pass `author_user_id=None, role='assistant'` — the
-    ONLY conversation_turns rows with `author_user_id` set at all are group
-    turns (single-owner individual chats never needed it, build spec §4.5).
-
-    `reply` (assistant turns): the FULL structured response — the engine's
-    answer payload plus any classify-envelope card data — persisted onto
-    `conversation_turns.reply` (jsonb). Best-effort, second statement:
-    the turn's base insert stays exactly the pre-column write, so a
-    missing/failed `reply` column can degrade a turn to content-only but
-    can never lose the turn itself (same posture as
-    `set_group_turn_trigger_kind`).
-
-    `attachments` (human turns): the resolved attachment texts
-    ([{name, content, …}]) riding the send — persisted onto the EXISTING
-    `conversation_turns.attachments` column (no new column) so the agent's
-    reply can fold them into its question. The read DTO's whitelist still
-    strips them from every group read/broadcast.
-
-    `client_message_id` (both roles): the send-identity key.
-      * Human turn — the IDEMPOTENCY key: a double-submit carrying the SAME
-        (conversation_id, role='user', client_message_id) returns the EXISTING
-        turn instead of inserting a second one, with the partial-unique
-        `conversation_turns_client_msg_uidx` as the concurrency backstop (the
-        SAME index individual owned turns use — it is role-partial, so a user
-        turn and the agent reply below can share one key without colliding).
-      * Agent turn — the CORRELATION key: the reply is stamped with the SAME
-        key its originating ask (and user turn) carried, so a member who posted
-        the message can recognise the reply's realtime echo as its own and not
-        double-render it. The read DTO exposes it (unlike `attachments`) so the
-        client can correlate.
-
-    Refuses (returns None, no write) when `conversation_id` does not
-    resolve to a `kind='group'` row — mirrors `list_group_turns`'
-    isolation guard (R4/§9)."""
-    client = require_client()
-    conv = (
-        client.table("conversations")
-        .select("id")
-        .eq("id", conversation_id)
-        .eq("kind", "group")
-        .limit(1)
-        .execute()
-        .data
-    )
-    if not conv:
-        return None
-
-    # Idempotency (human sends): a retry/double-submit with the same key replays
-    # the original turn rather than posting a second one.
-    if client_message_id is not None:
-        existing = _find_owned_turn(
-            conversation_id, role, client_message_id=client_message_id
-        )
-        if existing is not None:
-            return existing
-
-    row_payload: dict[str, Any] = {
-        "conversation_id": conversation_id,
-        "role": role,
-        "content": content,
-        "author_user_id": author_user_id,
-    }
-    if attachments:
-        row_payload["attachments"] = attachments
-    if client_message_id is not None:
-        row_payload["client_message_id"] = client_message_id
-    try:
-        resp = (
-            client.table("conversation_turns")
-            .insert(row_payload)
-            .execute()
-        )
-    except APIError as exc:
-        # A concurrent send with the same key won the race — the partial-unique
-        # backstop refused this insert; replay the row it wrote.
-        if client_message_id is not None and _is_unique_violation(
-            exc, "conversation_turns_client_msg_uidx"
-        ):
-            existing = _find_owned_turn(
-                conversation_id, role, client_message_id=client_message_id
-            )
-            if existing is not None:
-                return existing
-        raise
-    client.table("conversations").update({"updated_at": utc_now()}).eq(
-        "id", conversation_id
-    ).execute()
-    row = resp.data[0] if resp.data else None
-    if row is not None and reply is not None:
-        try:
-            client.table("conversation_turns").update({"reply": reply}).eq(
-                "id", row["id"]
-            ).execute()
-            row["reply"] = reply
-        except Exception:  # noqa: BLE001 — the turn persisted; a reply-column hiccup degrades to content-only
-            logger.warning(
-                "group_turn_reply_persist_failed turn_id=%s", row.get("id"),
-            )
-    return row
-
-
-def get_group_turn_attachments(turn_id: int) -> list[dict[str, Any]] | None:
-    """The raw attachment texts persisted on one turn, or None. A DELIBERATE
-    narrow read outside the DTO whitelist: the group agent's reply folds the
-    trigger turn's attachments into its own question (mirroring the private
-    surface's attachment ride) — the whitelist keeps them off every
-    read/broadcast, so the reply path reads them here, by id, best-effort
-    (a failure degrades the reply to the plain question, never breaks it)."""
-    try:
-        rows = (
-            require_client()
-            .table("conversation_turns")
-            .select("attachments")
-            .eq("id", turn_id)
-            .limit(1)
-            .execute()
-            .data
-        )
-        attachments = rows[0].get("attachments") if rows else None
-        return attachments if isinstance(attachments, list) and attachments else None
-    except Exception:  # noqa: BLE001 — best-effort; the reply degrades to the plain question
-        logger.warning("group_turn_attachments_read_failed turn_id=%s", turn_id)
-        return None
-
-
-def set_group_turn_trigger_kind(turn_id: int, trigger_kind: str) -> None:
-    """Best-effort: record WHY the group agent did/did not reply on the
-    human turn. The turn already persisted, so a failure here must never
-    500 the post — swallow and log identifiers only (AD-P22 shape)."""
-    try:
-        require_client().table("conversation_turns").update(
-            {"trigger_kind": trigger_kind}
-        ).eq("id", turn_id).execute()
-    except Exception:  # noqa: BLE001 — observability must never break the post
-        logger.warning(
-            "group_turn_trigger_kind_persist_failed turn_id=%s trigger_kind=%s",
-            turn_id, trigger_kind,
-        )
-
-
 # ── Individual project chat ("My chat with Sprntly") ─────────────────────
 #
-# ADDITIVE ONLY, mirrors the group-chat pair (`get_group_chat`/
-# `create_group_chat`) one level down: ONE `kind='individual'` conversation
-# per (project_id, user_id), rather than per project. This is what gives
+# ADDITIVE ONLY: ONE `kind='individual'` conversation per (project_id,
+# user_id), rather than per project. This is what gives
 # `ProjectIndividualChat.tsx` a real, reusable `conversation_id` to thread
 # into `/v1/ask` — before this helper existed, every turn from that surface
 # POSTed a fresh, unbound ask, so `ask_job_runner._run_sync`'s memory-
@@ -797,14 +351,14 @@ def set_group_turn_trigger_kind(turn_id: int, trigger_kind: str) -> None:
 # could never fire for it, no matter how durable an insight the turn
 # produced.
 #
-# Unlike `create_group_chat`, this does NOT add a partial unique index as a
-# concurrency backstop: `get_conversation_by_prd`/`get_conversation_by_evidence`
-# above already tolerate this exact same "select the most recent, else
-# create" shape without a DB-level guarantee, and a lost race here
-# self-heals the same way — a rare double-create on two simultaneous first
-# opens just means a later get-or-create (any subsequent mount) converges on
-# the most-recently-created row; the extra row sits unused and is never
-# read again. Flagged for the planner as the durable-vs-per-mount call this
+# This does NOT add a partial unique index as a concurrency backstop:
+# `get_conversation_by_prd`/`get_conversation_by_evidence` above already
+# tolerate this exact same "select the most recent, else create" shape
+# without a DB-level guarantee, and a lost race here self-heals the same
+# way — a rare double-create on two simultaneous first opens just means a
+# later get-or-create (any subsequent mount) converges on the
+# most-recently-created row; the extra row sits unused and is never read
+# again. Flagged for the planner as the durable-vs-per-mount call this
 # ticket made (see the dispatch report), not silently decided.
 
 
@@ -868,13 +422,11 @@ def post_individual_turn(conversation_id: int, role: str, content: str) -> dict[
     updated_at. The cross-user brief is always role='assistant',
     author_user_id=NULL — the agent never writes a 'user' turn as a person.
 
-    Mirrors `post_group_turn` one level down (individual rather than
-    group), minus the author_user_id parameter: an individual project
-    conversation is single-owner (the assignee), so there is no second
-    human author to attribute a turn to — every row this helper writes is
-    the agent's, delivered cross-user (build spec AD-P16/AD-P19). Returns
-    the inserted turn row (incl. `id`) so the caller captures
-    `delivered_turn_id`."""
+    An individual project conversation is single-owner (the assignee), so
+    there is no second human author to attribute a turn to — every row this
+    helper writes is the agent's, delivered cross-user (build spec
+    AD-P16/AD-P19). Returns the inserted turn row (incl. `id`) so the
+    caller captures `delivered_turn_id`."""
     client = require_client()
     resp = (
         client.table("conversation_turns")
@@ -898,14 +450,13 @@ def list_individual_turns(
     conversation_id: int, user_id: str, since: int | None = None
 ) -> list[dict[str, Any]]:
     """Turns in an INDIVIDUAL project chat the CALLER OWNS, ascending, after
-    the `since` id cursor (poll-cursor parity with `list_group_turns`).
-    Returns `[]` (never another user's turns) when the conversation is not
-    `kind='individual'` OR its `user_id` != the caller — the read-side
-    counterpart of the delegation cross-user write gate (`post_individual_turn`
-    is reachable cross-user by design; this reader never is). Single-owner
-    individual chats don't need `author_user_id` in the payload (the owner is
-    implied), so the row shape is `{id, role, content, created_at}` — no
-    `profiles` join, unlike `list_group_turns`."""
+    the `since` id cursor (AD-P4 poll read). Returns `[]` (never another
+    user's turns) when the conversation is not `kind='individual'` OR its
+    `user_id` != the caller — the read-side counterpart of the delegation
+    cross-user write gate (`post_individual_turn` is reachable cross-user by
+    design; this reader never is). Single-owner individual chats don't need
+    `author_user_id` in the payload (the owner is implied), so the row shape
+    is `{id, role, content, created_at}` — no `profiles` join needed."""
     client = require_client()
     conv = (
         client.table("conversations")
@@ -1014,10 +565,9 @@ def post_owned_individual_user_turn(
     `attachments` (optional): the resolved structured attachment texts
     ([{name, content, …}]) riding this send, written to the EXISTING
     `conversation_turns.attachments` column (no new column) when truthy —
-    mirroring `post_group_turn`'s structured-attachment write so
-    `_load_history` folds them onto the answer's context on a follow-up. The
-    default (None) leaves the insert byte-identical to the pre-attachment
-    write, so every existing call site is unaffected."""
+    so `_load_history` folds them onto the answer's context on a follow-up.
+    The default (None) leaves the insert byte-identical to the
+    pre-attachment write, so every existing call site is unaffected."""
     conversation_id = _owned_conversation_id(project_id, user_id)
 
     existing = _find_owned_turn(

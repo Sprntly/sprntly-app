@@ -1,7 +1,10 @@
 """Tests for `app/project_origin_seed.py::seed_project_origin_memory` — the
-best-effort origin-memory writer that seeds a freshly auto-created project
-with a grounded brief (+ any settled decisions) from the originating chat
-and its PRD.
+best-effort origin-memory writer that seeds a freshly created project with a
+grounded "why", generalized across ALL project origins (private-first
+memory wave): `prd_auto` summarizes the originating chat + its PRD (+ any
+settled decisions, unchanged from before this wave); `manual`/`artifact`
+summarize the project's name + whatever grounding text is available at
+creation.
 
 Fast lane: monkeypatches the module's own seams — `call_json` (the LLM),
 `memory_db.add_agent_promoted_entry` / `schedule_regen` (the memory-write
@@ -99,7 +102,7 @@ def test_seed_writes_brief_and_decisions(fake_seed_llm):
         "Decision five.", "Decision six.", "Decision seven — over the cap.",
     ]
     seed_mod.seed_project_origin_memory(
-        project_id=101, prd_id=5, prd_title="Dark mode on mobile", conversation_id=9,
+        project_id=101, origin="prd_auto", prd_id=5, prd_title="Dark mode on mobile", conversation_id=9,
     )
     written = fake_seed_llm["written"]
     # Brief + at most _MAX_DECISIONS decisions — never all seven.
@@ -113,7 +116,7 @@ def test_seed_writes_brief_and_decisions(fake_seed_llm):
 
 def test_seed_schedules_one_regen(fake_seed_llm):
     seed_mod.seed_project_origin_memory(
-        project_id=202, prd_id=6, prd_title="Instant quote flow", conversation_id=11,
+        project_id=202, origin="prd_auto", prd_id=6, prd_title="Instant quote flow", conversation_id=11,
     )
     assert fake_seed_llm["regen_calls"] == [202]
 
@@ -125,7 +128,7 @@ def test_seed_falls_back_on_summarizer_failure(fake_seed_llm, caplog):
     fake_seed_llm["raise_error"] = True
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         seed_mod.seed_project_origin_memory(
-            project_id=303, prd_id=7, prd_title="Bulk export", conversation_id=13,
+            project_id=303, origin="prd_auto", prd_id=7, prd_title="Bulk export", conversation_id=13,
         )
     written = fake_seed_llm["written"]
     # Only the deterministic fallback brief — the summarizer never produced
@@ -146,7 +149,7 @@ def test_seed_no_title_writes_nothing(fake_seed_llm, caplog):
     fake_seed_llm["prd_body"] = ""
     with caplog.at_level(logging.WARNING, logger="app.project_origin_seed"):
         seed_mod.seed_project_origin_memory(
-            project_id=404, prd_id=8, prd_title="", conversation_id=15,
+            project_id=404, origin="prd_auto", prd_id=8, prd_title="", conversation_id=15,
         )
     assert fake_seed_llm["written"] == []
     assert fake_seed_llm["regen_calls"] == []
@@ -162,7 +165,7 @@ def test_seed_never_raises_on_write_error(fake_seed_llm, caplog):
     fake_seed_llm["write_error"] = True
     with caplog.at_level(logging.WARNING, logger="app.project_origin_seed"):
         result = seed_mod.seed_project_origin_memory(
-            project_id=505, prd_id=9, prd_title="Roadmap sync", conversation_id=17,
+            project_id=505, origin="prd_auto", prd_id=9, prd_title="Roadmap sync", conversation_id=17,
         )
     assert result is None  # must not raise
     assert any("project_origin_seed_failed" in r.getMessage() for r in caplog.records)
@@ -189,10 +192,10 @@ def seed_spy(monkeypatch):
 
     calls: list[dict] = []
 
-    def _spy(*, project_id, prd_id, prd_title, conversation_id):
+    def _spy(*, project_id, origin, prd_id, prd_title, conversation_id):
         calls.append(
             {
-                "project_id": project_id, "prd_id": prd_id,
+                "project_id": project_id, "origin": origin, "prd_id": prd_id,
                 "prd_title": prd_title, "conversation_id": conversation_id,
             }
         )
@@ -214,7 +217,7 @@ def test_new_project_branch_seeds_once(tenant_client, isolated_settings, seed_sp
     assert project_id is not None
     assert len(seed_spy) == 1
     assert seed_spy[0] == {
-        "project_id": project_id, "prd_id": 42,
+        "project_id": project_id, "origin": "prd_auto", "prd_id": 42,
         "prd_title": "Dark mode on mobile", "conversation_id": conv_id,
     }
 
@@ -242,6 +245,100 @@ def test_already_bound_path_does_not_seed(tenant_client, isolated_settings, seed
     assert len(seed_spy) == 1, "the already-bound path must never re-seed"
 
 
+# ── manual / artifact origin generalization (AC-5/AC-6) ─────────────────
+
+
+def test_seed_manual_origin_writes_brief_summary(fake_seed_llm):
+    fake_seed_llm["brief_summary"] = "This project stands up a self-serve bulk-close action."
+    seed_mod.seed_project_origin_memory(
+        project_id=701, origin="manual", project_name="Bulk Close",
+        seed_text="We need reps to bulk-close stale tickets after 30 days.",
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == fake_seed_llm["brief_summary"]
+    assert written[0]["source_conversation_id"] is None
+    assert written[0]["promoted_by"] == "agent"
+    assert fake_seed_llm["regen_calls"] == [701]
+
+    # The rendered prompt carries the project name + the grounding text —
+    # never invents anything beyond what was supplied.
+    call = fake_seed_llm["calls"][0]
+    assert "Bulk Close" in call["user"]
+    assert "bulk-close stale tickets" in call["user"]
+
+
+def test_seed_artifact_origin_writes_brief_summary(fake_seed_llm):
+    fake_seed_llm["brief_summary"] = "This project tracks the onboarding-flow redesign artifact."
+    seed_mod.seed_project_origin_memory(
+        project_id=702, origin="artifact", project_name="Onboarding Redesign",
+        seed_text="Seeding artifact: Onboarding flow audit — drop-off is highest at step 3.",
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == fake_seed_llm["brief_summary"]
+    assert written[0]["source_conversation_id"] is None
+    assert fake_seed_llm["regen_calls"] == [702]
+
+
+def test_seed_prd_auto_unchanged(fake_seed_llm):
+    """AC-7: the widened signature does not change the `prd_auto` output —
+    same brief + decisions, same `source_conversation_id`-tagged writes, as
+    `test_seed_writes_brief_and_decisions` already proves for the ORIGINAL
+    (pre-widening) call shape."""
+    seed_mod.seed_project_origin_memory(
+        project_id=703, origin="prd_auto", prd_id=11,
+        prd_title="Instant quote flow", conversation_id=21,
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1 + len(fake_seed_llm["decisions"])
+    assert written[0]["body"] == fake_seed_llm["brief_summary"]
+    for entry in written:
+        assert entry["source_conversation_id"] == 21
+    assert fake_seed_llm["regen_calls"] == [703]
+
+
+def test_seed_best_effort_on_llm_failure(fake_seed_llm, caplog):
+    """AC-8: the seed's LLM call raising never propagates — project
+    creation (the caller) is unaffected, and the generic-origin floor still
+    writes the name-only fallback brief."""
+    fake_seed_llm["raise_error"] = True
+    with caplog.at_level(logging.WARNING, logger="app.project_origin_seed"):
+        result = seed_mod.seed_project_origin_memory(
+            project_id=704, origin="manual", project_name="Bulk Close",
+            seed_text="We need reps to bulk-close stale tickets after 30 days.",
+        )
+    assert result is None  # must not raise
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert 'This project, "Bulk Close", was just created.' == written[0]["body"]
+    assert fake_seed_llm["regen_calls"] == [704]
+
+
+def test_seed_manual_empty_text_uses_fallback_brief(fake_seed_llm):
+    """AC-5 edge: an empty `seed_text` skips the LLM call entirely (nothing
+    to summarize) and writes the deterministic name-only floor — still
+    exactly one entry, never a blank memory."""
+    seed_mod.seed_project_origin_memory(
+        project_id=705, origin="manual", project_name="Bulk Close", seed_text="",
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == 'This project, "Bulk Close", was just created.'
+    assert fake_seed_llm["calls"] == [], "an empty seed_text must not spend an LLM call"
+    assert fake_seed_llm["regen_calls"] == [705]
+
+
+def test_seed_generic_no_name_writes_nothing(fake_seed_llm, caplog):
+    with caplog.at_level(logging.WARNING, logger="app.project_origin_seed"):
+        seed_mod.seed_project_origin_memory(
+            project_id=706, origin="manual", project_name="", seed_text="",
+        )
+    assert fake_seed_llm["written"] == []
+    assert fake_seed_llm["regen_calls"] == []
+    assert any("project_origin_seed_empty" in r.getMessage() for r in caplog.records)
+
+
 # ── Cost line / PII discipline (AC-7) ───────────────────────────────────
 
 
@@ -253,7 +350,7 @@ def test_seed_emits_one_cost_line_no_pii(fake_seed_llm, caplog):
 
     with caplog.at_level(logging.INFO):
         seed_mod.seed_project_origin_memory(
-            project_id=606, prd_id=10, prd_title="Secret project", conversation_id=19,
+            project_id=606, origin="prd_auto", prd_id=10, prd_title="Secret project", conversation_id=19,
         )
 
     cost_lines = [r.getMessage() for r in caplog.records if "projects.memory.origin_seed" in r.getMessage()]
@@ -299,6 +396,23 @@ def test_seed_system_prompt_properties():
     assert set(schema["required"]) == {"brief_summary", "decisions"}
     assert schema["properties"]["brief_summary"]["type"] == "string"
     assert schema["properties"]["decisions"]["type"] == "array"
+
+
+def test_seed_generic_system_prompt_properties():
+    system = seed_mod._SYSTEM_GENERIC
+    lowered = system.lower()
+    assert system.strip() != ""
+    assert "grounded strictly" in lowered
+    assert "never invent" in lowered
+    assert "brief_summary" in system
+
+    weak_prompt = "Summarize the project in a couple of sentences."
+    assert "grounded strictly" not in weak_prompt.lower()
+
+    schema = seed_mod._SCHEMA_GENERIC
+    assert set(schema["required"]) == {"brief_summary"}
+    assert schema["properties"]["brief_summary"]["type"] == "string"
+    assert "decisions" not in schema["properties"], "no decisions list for a bare name + excerpt"
 
 
 # ── DRY — reuses the existing pipeline (AC-13) ──────────────────────────

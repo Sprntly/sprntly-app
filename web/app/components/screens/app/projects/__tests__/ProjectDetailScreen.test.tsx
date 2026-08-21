@@ -21,8 +21,6 @@ const memorySummaryMock = vi.fn()
 const memoryInsightMock = vi.fn()
 const openModalMock = vi.fn()
 const removeMemberMock = vi.fn()
-const individualUnreadMock = vi.fn()
-const markIndividualReadMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
 const emitDelegationEventMock = vi.fn()
@@ -40,7 +38,7 @@ const candidateSearchMock = vi.fn()
 const tagCandidateMock = vi.fn()
 // The settings-gear modal's Instructions tab GET-on-open effect fires
 // whenever `ProjectSettingsModal` mounts (any tab) — give it a safe default
-// up front, same reasoning as `individualUnreadMock` etc. above.
+// up front, same reasoning as `ledgerCountsMock` etc. above.
 const instructionsMock = vi.fn().mockResolvedValue({ instructions: null })
 const setInstructionsMock = vi.fn()
 // Default: a viewer who is neither PROJECT's creator ("u1") nor either
@@ -76,8 +74,6 @@ vi.mock("../../../../../lib/api", () => {
       memorySummary: (...a: unknown[]) => memorySummaryMock(...a),
       memoryInsight: (...a: unknown[]) => memoryInsightMock(...a),
       removeMember: (...a: unknown[]) => removeMemberMock(...a),
-      individualUnread: (...a: unknown[]) => individualUnreadMock(...a),
-      markIndividualRead: (...a: unknown[]) => markIndividualReadMock(...a),
       ledgerCounts: (...a: unknown[]) => ledgerCountsMock(...a),
       ledger: (...a: unknown[]) => ledgerMock(...a),
       emitDelegationEvent: (...a: unknown[]) => emitDelegationEventMock(...a),
@@ -127,29 +123,25 @@ vi.mock("next/link", () => ({
   }: React.PropsWithChildren<{ href: string } & Record<string, unknown>>) =>
     React.createElement("a", { href, ...rest }, children),
 }))
-// `ProjectMainThread` pulls in `ProjectIndividualChat`'s ask/poll wiring on
-// its individual-chat branch plus `ProjectGroupChat`'s network wiring on the
-// group branch. Both drag in a dependency graph (CompanyContext, the shared
-// ask lib, projectsApi network calls…) this file has no reason to boot just
-// to test the SHELL (top bar, rail, cards, state machine) — the same
-// isolation reason `AppLayout`/`NavigationContext` are mocked above. The
-// mount itself (which props it receives) is what THIS file verifies; the
-// real thread/composer/swap behaviour is `ProjectMainThread.test.tsx`,
-// `ProjectGroupChat.test.tsx`, and `ProjectIndividualChat.test.tsx`'s job.
+// `ProjectMainThread` pulls in the shared chat engine's ask/poll wiring — a
+// dependency graph (CompanyContext, the shared ask lib, projectsApi network
+// calls…) this file has no reason to boot just to test the SHELL (top bar,
+// rail, cards, state machine) — the same isolation reason
+// `AppLayout`/`NavigationContext` are mocked above. The mount itself (which
+// props it receives) is what THIS file verifies; the real thread/composer
+// behaviour is `ProjectMainThread.test.tsx`'s job.
 vi.mock("../ProjectMainThread", () => ({
   ProjectMainThread: (props: {
     projectId: number | string
-    activeChat: string
     insightNote?: { by: string; text: string } | null
   }) =>
     React.createElement("div", {
       "data-testid": "main-thread-stub",
       "data-project-id": String(props.projectId),
-      "data-active-chat": props.activeChat,
       // Reflects whether/what insightNote this container passed through —
       // ProjectMainThread's OWN rendering of it is out of this file's scope
-      // (ProjectMainThread.test.tsx/ProjectIndividualChat.test.tsx's job);
-      // this file only proves the container fed the right value in.
+      // (ProjectMainThread.test.tsx's job); this file only proves the
+      // container fed the right value in.
       "data-has-insight": props.insightNote ? "true" : "false",
       "data-insight-text": props.insightNote?.text ?? "",
     }),
@@ -177,7 +169,7 @@ function renderWithContent(node: React.ReactElement) {
 // Regular (non-type-only) import: resolves to the mocked `ApiError` above,
 // the SAME class reference the component's `instanceof` checks compare
 // against — required for the 403/404 container tests below.
-import { ApiError } from "../../../../../lib/api"
+import { ApiError, projectsApi } from "../../../../../lib/api"
 import type { ArtifactItem, ProjectDetail, ProjectMemoryInsight, ProjectMemorySummary } from "../../../../../lib/api"
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
@@ -191,7 +183,6 @@ const PROJECT: ProjectDetail = {
   created_by: "u1",
   created_at: hoursAgo(48),
   updated_at: hoursAgo(2),
-  group_chat_id: 55,
   members: [
     {
       kind: "agent",
@@ -270,9 +261,6 @@ function viewProps(overrides: Partial<ProjectDetailViewProps> = {}): ProjectDeta
     project: PROJECT,
     artifacts: ARTIFACTS,
     memory: MEMORY,
-    activeChat: "group",
-    onSelectChat: noop,
-    individualUnread: false,
     ledgerCounts: { assigned_to_me_open: 0, waiting_on_open: 0 },
     ledgerRows: [],
     onOpenArtifacts: noop,
@@ -297,10 +285,6 @@ afterEach(() => {
   memoryInsightMock.mockReset()
   openModalMock.mockReset()
   removeMemberMock.mockReset()
-  individualUnreadMock.mockReset()
-  individualUnreadMock.mockResolvedValue({ unread: false, latest_turn_id: null, last_read_turn_id: 0 })
-  markIndividualReadMock.mockReset()
-  markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 0 })
   ledgerCountsMock.mockReset()
   ledgerCountsMock.mockResolvedValue({ assigned_to_me_open: 0, waiting_on_open: 0 })
   ledgerMock.mockReset()
@@ -403,15 +387,12 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     expect("onAddExistingArtifact" in props).toBe(false)
   })
 
-  it("test_detail_topbar_chat_toggle_selects_private — topbar-chat-toggle wraps chat-row-group/chat-row-individual as a tablist", () => {
-    const onSelectChat = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
-    const toggle = screen.getByTestId("topbar-chat-toggle")
-    expect(toggle.getAttribute("role")).toBe("tablist")
-    expect(within(toggle).getByTestId("chat-row-group")).toBeTruthy()
-    const indiv = within(toggle).getByTestId("chat-row-individual")
-    fireEvent.click(indiv)
-    expect(onSelectChat).toHaveBeenCalledWith("individual")
+  it("test_detail_no_chat_toggle — no Group⇆Private tablist renders; the private thread is the only mounted surface", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    expect(screen.queryByTestId("topbar-chat-toggle")).toBeNull()
+    expect(screen.queryByTestId("chat-row-group")).toBeNull()
+    expect(screen.queryByTestId("chat-row-individual")).toBeNull()
+    expect(screen.getByTestId("main-thread-stub")).toBeTruthy()
   })
 
   it("test_detail_chat_full_bleed_without_artifact — with openArtifact null, project-main-thread-host renders and no rail column exists", () => {
@@ -486,76 +467,35 @@ describe("ProjectDetailScreen — task-ledger substrate intact after the rail un
 })
 
 describe("ProjectDetailView — state", () => {
-  it("selecting the individual CHATS row sets activeChat and marks it active", () => {
-    const onSelectChat = vi.fn()
-    render(React.createElement(ProjectDetailView, viewProps({ onSelectChat })))
-    const groupRow = screen.getByTestId("chat-row-group")
-    const indivRow = screen.getByTestId("chat-row-individual")
-    // Redesign: the chat switch is a segmented tablist, so active-state is
-    // exposed via aria-selected on role="tab" (not aria-pressed).
-    expect(groupRow.getAttribute("aria-selected")).toBe("true")
-    expect(indivRow.getAttribute("aria-selected")).toBe("false")
-    fireEvent.click(indivRow)
-    expect(onSelectChat).toHaveBeenCalledWith("individual")
-  })
-
-  it("the individual chat row renders active when activeChat='individual'", () => {
-    render(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    expect(screen.getByTestId("chat-row-individual").getAttribute("aria-selected")).toBe("true")
-    expect(screen.getByTestId("chat-row-group").getAttribute("aria-selected")).toBe("false")
-  })
-
-  it("test_rail_badge_shows_and_clears — the individual row renders an unread dot when individualUnread is true, and none when false", () => {
-    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ individualUnread: false })))
+  it("renders no private-unread badge — the badge was removed with the toggle it depended on (no reachable clear path in the single-surface model)", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
     expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ individualUnread: true })))
-    expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy()
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ individualUnread: false })))
-    expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
+    // No `individualUnread` field on the props type any more — a clean
+    // type-check is the proof the prop was fully removed.
+    expect("individualUnread" in viewProps()).toBe(false)
   })
 
-  it("the chat note bar swaps group ⇆ individual copy", () => {
-    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
-    expect(screen.getByTestId("chat-note").textContent).toContain("Open to all members")
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    expect(screen.getByTestId("chat-note").textContent).toContain("feeds project memory")
+  it("the chat note bar always renders the private copy — there is no other surface to swap to", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
+    const note = screen.getByTestId("chat-note")
+    expect(note.textContent).toContain("feeds project memory")
+    expect(note.textContent).not.toContain("Open to all members")
+    expect(note.querySelector('[data-surface="group"]')).toBeNull()
+    expect(note.querySelector('[data-surface="individual"]')).toBeNull()
   })
 
-  it("does not render a per-surface identity badge in the note strip — the toggle above is the sole surface indicator", () => {
-    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
-    const groupNote = screen.getByTestId("chat-note")
-    expect(groupNote.querySelector('[data-surface="group"]')).toBeNull()
-    expect(groupNote.querySelector('[data-surface="individual"]')).toBeNull()
-    // The explanatory copy stays even though the badge is gone.
-    expect(groupNote.textContent).toContain("Open to all members")
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    const indivNote = screen.getByTestId("chat-note")
-    expect(indivNote.querySelector('[data-surface="individual"]')).toBeNull()
-    expect(indivNote.querySelector('[data-surface="group"]')).toBeNull()
-    expect(indivNote.textContent).toContain("feeds project memory")
-  })
-
-  // ProjectMainThread OWNS the composer for whichever chat is active — the
-  // SAME extracted composer on both sides — this shell mounts it once, per
-  // `activeChat`, and stops there (its own composer/thread behaviour is out
-  // of THIS file's scope, per the isolation mock above).
-  it("mounts ProjectMainThread once, keyed on activeChat and the project id", () => {
-    const { rerender } = render(React.createElement(ProjectDetailView, viewProps({ activeChat: "group" })))
+  // ProjectMainThread OWNS the composer for the private chat — the shell
+  // mounts it once, keyed on the project id (its own composer/thread
+  // behaviour is out of THIS file's scope, per the isolation mock above).
+  it("mounts ProjectMainThread once, on the project id", () => {
+    render(React.createElement(ProjectDetailView, viewProps()))
     const host = screen.getByTestId("main-thread-stub")
-    expect(host.getAttribute("data-active-chat")).toBe("group")
     expect(host.getAttribute("data-project-id")).toBe("101")
-
-    rerender(React.createElement(ProjectDetailView, viewProps({ activeChat: "individual" })))
-    expect(screen.getByTestId("main-thread-stub").getAttribute("data-active-chat")).toBe("individual")
   })
 })
 
 describe("ProjectDetailView — accessibility", () => {
-  it("test_topbar_controls_interactive_with_labels — project-settings-gear/topbar-artifacts/topbar-invite/chat-row-* are BUTTONs with accessible names", () => {
+  it("test_topbar_controls_interactive_with_labels — project-settings-gear/topbar-artifacts/topbar-invite are BUTTONs with accessible names", () => {
     render(React.createElement(ProjectDetailView, viewProps()))
     expect(screen.getByTestId("project-settings-gear").tagName).toBe("BUTTON")
     expect(screen.getByLabelText("Project settings")).toBeTruthy()
@@ -564,8 +504,6 @@ describe("ProjectDetailView — accessibility", () => {
     // as the newest labeled top-bar control.
     expect(screen.getByTestId("topbar-invite").tagName).toBe("BUTTON")
     expect(screen.getByLabelText("Invite members")).toBeTruthy()
-    expect(screen.getByTestId("chat-row-group").tagName).toBe("BUTTON")
-    expect(screen.getByTestId("chat-row-individual").tagName).toBe("BUTTON")
   })
 
   it("static markup renders (SSR-safe) with no interactive element disabled by default", () => {
@@ -632,11 +570,18 @@ describe("ProjectDetailScreen — agent working-pill pulse (presentational polis
     // that tab — open-ness is derived, no separate `settingsOpen` boolean).
     // Net 13 − 2 + 1 = 12; the chat rewrite then folds one further state out
     // (the chat surface now owns its own state via the shared controller),
-    // leaving 11. The guard this test protects — no NEW state for the AGENT
-    // STATUS pulse specifically — still holds: `posting` (the ask-composer
-    // wiring this guard was written against) is still absent.
+    // leaving 11. The group-chat removal then folds ONE MORE state out —
+    // `activeChat` (the Group⇆Private toggle's own state; there is no
+    // toggle to hold state for any more, the private surface is the only
+    // one and is always mounted) — leaving 10. The private-unread-badge
+    // removal (the toggle's removal left it with no reachable clear path,
+    // so the planner cut the badge outright rather than leave a dead-end
+    // affordance) folds out `individualUnread` too — leaving 9. The guard
+    // this test protects — no NEW state for the AGENT STATUS pulse
+    // specifically — still holds: `posting` (the ask-composer wiring this
+    // guard was written against) is still absent.
     const useStateDeclarations = src.match(/useState\s*[<(]/g) ?? []
-    expect(useStateDeclarations).toHaveLength(11)
+    expect(useStateDeclarations).toHaveLength(9)
     expect(src).not.toContain("posting")
   })
 })
@@ -927,63 +872,32 @@ describe("ProjectDetailScreen — data fetch", () => {
   })
 })
 
-// ── ProjectDetailScreen — assignee-awareness unread badge (AD-P3/AD-P20) ──
-describe("ProjectDetailScreen — individual chat unread badge", () => {
-  it("test_rail_badge_shows_and_clears — fetches unread on mount, renders the dot, and clears it (via POST /individual/read) once the individual row is selected", async () => {
+// ── ProjectDetailScreen — private-unread badge REMOVED ──────────────────────
+//
+// The badge (AD-P3/AD-P20) is gone entirely — planner decision: with the
+// Group⇆Private toggle removed, the badge's only clear-path trigger (the
+// toggle's Private-tab click) no longer exists, and in the single-surface
+// model the per-project private-unread badge no longer earns its place.
+// `projectsApi.individualUnread`/`markIndividualRead` were removed from
+// `web/app/lib/api.ts` alongside it (the dot was their only FE consumer);
+// the backend `/individual/unread` + `/individual/read` routes are now
+// orphaned server-side (a separate, backend-only follow-up).
+describe("ProjectDetailScreen — private-unread badge removed", () => {
+  it("renders no unread badge, and the container never calls the removed unread endpoints", async () => {
     getMock.mockResolvedValue(PROJECT)
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    individualUnreadMock.mockResolvedValue({ unread: true, latest_turn_id: 7, last_read_turn_id: 0 })
-    markIndividualReadMock.mockResolvedValue({ last_read_turn_id: 7 })
 
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
-    await waitFor(() => expect(individualUnreadMock).toHaveBeenCalledWith("101"))
-    await waitFor(() => expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy())
-    expect(markIndividualReadMock).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByTestId("chat-row-individual"))
-
-    await waitFor(() => expect(markIndividualReadMock).toHaveBeenCalledWith("101"))
-    await waitFor(() => expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull())
-    // Selecting the row still switches the active thread — the badge-clear
-    // is additive to the existing swap, not a replacement for it.
-    expect(screen.getByTestId("main-thread-stub").getAttribute("data-active-chat")).toBe("individual")
-  })
-
-  it("selecting the GROUP row does not call markIndividualRead", async () => {
-    getMock.mockResolvedValue(PROJECT)
-    artifactsMock.mockResolvedValue(ARTIFACTS)
-    memorySummaryMock.mockResolvedValue(MEMORY)
-    memoryInsightMock.mockResolvedValue(null)
-    individualUnreadMock.mockResolvedValue({ unread: true, latest_turn_id: 3, last_read_turn_id: 0 })
-
-    await act(async () => {
-      renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
-    })
-    await waitFor(() => expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy())
-
-    fireEvent.click(screen.getByTestId("chat-row-group"))
-    expect(markIndividualReadMock).not.toHaveBeenCalled()
-    // The badge is untouched by a group-row click.
-    expect(screen.getByTestId("individual-chat-unread-dot")).toBeTruthy()
-  })
-
-  it("a failed unread fetch leaves the badge unset (best-effort), with no error surfaced", async () => {
-    getMock.mockResolvedValue(PROJECT)
-    artifactsMock.mockResolvedValue(ARTIFACTS)
-    memorySummaryMock.mockResolvedValue(MEMORY)
-    memoryInsightMock.mockResolvedValue(null)
-    individualUnreadMock.mockRejectedValue(new ApiError(500, "unread backend down"))
-
-    await act(async () => {
-      renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
-    })
-    await waitFor(() => expect(screen.getByTestId("project-name")).toBeTruthy())
+    await waitFor(() => expect(screen.getByTestId("main-thread-stub")).toBeTruthy())
     expect(screen.queryByTestId("individual-chat-unread-dot")).toBeNull()
-    expect(screen.queryByTestId("project-detail-error")).toBeNull()
+    // Closed-world: the mocked `projectsApi` object has no such methods to
+    // even accidentally call any more.
+    expect("individualUnread" in projectsApi).toBe(false)
+    expect("markIndividualRead" in projectsApi).toBe(false)
   })
 })
 

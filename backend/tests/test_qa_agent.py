@@ -2224,7 +2224,7 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
 
 
 # ── ★ typed scope-driven gate on the connector-lookup interceptors ───────────
-# A project surface (private/group) hands `qa_agent.answer(scope=...)` a
+# A project surface (private) hands `qa_agent.answer(scope=...)` a
 # `SurfaceScope`. `_skip_project_connectors(scope, routing_text, history)`
 # replaces the old `active_project_id()` ContextVar predicate: it SKIPS the
 # tracker / named-source / document interceptors for a project surface UNLESS
@@ -2235,7 +2235,7 @@ def test_skill_path_retrieval_inputs_unchanged(monkeypatch):
 # behave byte-for-byte as before (AC11). All directions are proved.
 from app.surface_scope import Surface, SurfaceScope
 
-_PROJECT_GROUP_SCOPE = SurfaceScope(surface=Surface.project_group, project_id=1)
+_PROJECT_SURFACE_SCOPE = SurfaceScope(surface=Surface.project_private, project_id=1)
 
 
 def _stub_answer_generation(monkeypatch):
@@ -2280,14 +2280,14 @@ def test_project_named_source_admits_connector_but_unnamed_skips(monkeypatch):
     # PROJECT + NAMED source ("jira"): admitted → interceptor fires (AC9).
     out_named = qa.answer(
         enterprise_id="ent", question="what's the status of the jira ticket?",
-        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+        dataset="acme", scope=_PROJECT_SURFACE_SCOPE,
     )
     assert out_named.get("_skill_source") == "connector-lookup", out_named
 
     # PROJECT + UNNAMED PM-noun: skipped → grounds in the project block (AC10).
     out_unnamed = qa.answer(
         enterprise_id="ent", question="what tasks are open?",
-        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+        dataset="acme", scope=_PROJECT_SURFACE_SCOPE,
     )
     assert out_unnamed.get("_skill_source") != "connector-lookup", out_unnamed
     assert out_unnamed.get("answer") == "grounded-from-project-block", out_unnamed
@@ -2316,7 +2316,7 @@ def test_skip_connectors_forced_false_routes_pm_noun_to_tracker_is_red(monkeypat
 
     out = qa.answer(
         enterprise_id="ent", question="what tasks are open?",
-        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+        dataset="acme", scope=_PROJECT_SURFACE_SCOPE,
     )
     # With the gate defeated the unnamed PM-noun is wrongly hijacked to the
     # tracker — this is the RED the named-source decision prevents.
@@ -2351,13 +2351,13 @@ def test_project_named_connector_and_document_admit(monkeypatch):
 
     out_conn = qa.answer(
         enterprise_id="ent", question="what did slack say about pricing?",
-        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+        dataset="acme", scope=_PROJECT_SURFACE_SCOPE,
     )
     assert out_conn.get("_skill_source") == "connector-lookup", out_conn
 
     out_doc = qa.answer(
         enterprise_id="ent", question="what does our onboarding runbook say?",
-        dataset="acme", scope=_PROJECT_GROUP_SCOPE,
+        dataset="acme", scope=_PROJECT_SURFACE_SCOPE,
     )
     assert out_doc.get("_skill_source") == "connector-lookup", out_doc
 
@@ -2411,7 +2411,7 @@ def test_stale_connector_history_does_not_veto_explicit_context_ask():
     vetoed — `_skip_project_connectors` returns True (skip the connector
     interceptors, let the sixth branch claim the turn)."""
     assert qa._skip_project_connectors(
-        _PROJECT_GROUP_SCOPE, "give me the context", _PRIOR_SLACK_MENTION_HISTORY,
+        _PROJECT_SURFACE_SCOPE, "give me the context", _PRIOR_SLACK_MENTION_HISTORY,
     ) is True
 
 
@@ -2421,7 +2421,7 @@ def test_in_message_connector_still_wins_over_project_branch():
     (do NOT skip the connector interceptors — the project branch does not
     steal this turn)."""
     assert qa._skip_project_connectors(
-        _PROJECT_GROUP_SCOPE,
+        _PROJECT_SURFACE_SCOPE,
         "give me the full context from slack",
         _PRIOR_SLACK_MENTION_HISTORY,
     ) is False
@@ -2432,10 +2432,10 @@ def test_context_ask_with_no_connector_anywhere_is_unchanged():
     branch fires exactly as it did before this fix (unrelated history, or
     none at all, never triggers the stale-connector carve-out)."""
     assert qa._skip_project_connectors(
-        _PROJECT_GROUP_SCOPE, "give me the context", [],
+        _PROJECT_SURFACE_SCOPE, "give me the context", [],
     ) is True
     assert qa._skip_project_connectors(
-        _PROJECT_GROUP_SCOPE, "give me the context", None,
+        _PROJECT_SURFACE_SCOPE, "give me the context", None,
     ) is True
 
 
@@ -2445,7 +2445,7 @@ def test_stale_connector_ask_reaches_project_branch_end_to_end(monkeypatch):
     the sixth-branch project tool loop rather than falling through to the
     connector/company-wide path."""
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=1,
+        surface=Surface.project_private, project_id=1,
         extra_tools=({"name": "get_project_memory"},),
     )
 

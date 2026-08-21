@@ -7,11 +7,11 @@ used to POST every turn to `/v1/ask` with `project_id` but no
 `conversation_id`, so `ask_job_runner._run_sync`'s memory-promotion gate
 (`project_id is not None and conversation_id is not None`) could never fire
 for it. This file proves the NEW get-or-create conversation is durable
-(idempotent per project+caller), membership-gated the same way the group
-chat is, and — fed into a real `/v1/ask` call — actually reaches the
-promotion hook with correct provenance.
+(idempotent per project+caller), membership-gated, and — fed into a real
+`/v1/ask` call — actually reaches the promotion hook with correct
+provenance.
 
-Covers (fake-Supabase tier, mirrors `test_group_chat_turns.py`'s own split):
+Covers (fake-Supabase tier):
   - one `kind='individual'` conversation per (project, caller), idempotent
     create, both at the db-helper level and the HTTP route level
   - two different project members each get their OWN row
@@ -29,6 +29,7 @@ see `test_individual_project_chat_live.py`.
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 
 from tests._company_helpers import company_client
@@ -70,9 +71,8 @@ def test_create_individual_chat_idempotent_per_user(isolated_settings, monkeypat
 
 
 def test_create_individual_chat_route_idempotent(isolated_settings, monkeypatch):
-    """The HTTP route is idempotent the same way (mirrors the group chat's
-    own AC1 literal wording, one level down: per-user rather than
-    per-project)."""
+    """The HTTP route is idempotent (AC1): a second call for the same
+    (project, caller) pair returns the SAME row."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
@@ -85,9 +85,8 @@ def test_create_individual_chat_route_idempotent(isolated_settings, monkeypatch)
 
 
 def test_two_members_get_their_own_individual_chat(isolated_settings, monkeypatch):
-    """Isolation: this is a PRIVATE per-caller conversation, not a shared one
-    like the group chat — two different project members must never resolve
-    to the same row."""
+    """Isolation: this is a PRIVATE per-caller conversation — two different
+    project members must never resolve to the same row."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
@@ -119,7 +118,7 @@ def test_get_individual_chat_none_before_creation(isolated_settings, monkeypatch
     assert conversations_db.get_individual_project_chat(project["id"], ctx.user_id) is None
 
 
-# ── Membership gate (AD-P11, mirrors the group chat's own gate) ─────────
+# ── Membership gate (AD-P11) ──────────────────────────────────────────────
 
 
 def test_non_member_individual_chat_forbidden(isolated_settings, monkeypatch):
@@ -257,21 +256,39 @@ def test_non_project_ask_on_the_same_conversation_promotes_nothing(
     assert list_entries(project["id"]) == []
 
 
-# ── Isolation regression (AD-P2/R4, mirrors the group chat's own guard) ──
+# ── Isolation regression (AD-P2/R4) ──────────────────────────────────────
 
 
-def test_individual_chat_helpers_never_touch_group_chat_rows(isolated_settings, monkeypatch):
-    """The new per-user helpers never resolve/return a `kind='group'` row,
-    even for the same project — proven by creating both and confirming
+def test_individual_chat_helpers_never_touch_legacy_group_rows(isolated_settings, monkeypatch):
+    """The per-user helpers never resolve/return a `kind='group'` row, even
+    for the same project. The group-chat WRITE path is removed, but
+    pre-existing `kind='group'` conversation rows are explicitly NOT deleted
+    from the database (this ticket's rollback contract) — proven here by
+    inserting a legacy-shaped group row directly and confirming
     `get_individual_project_chat` only ever surfaces the individual one."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
     from app.db import conversations as conversations_db
+    from app.db.client import require_client
 
-    group = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    legacy_group = (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": project["company_id"],
+                "workspace_id": project["workspace_id"],
+                "user_id": ctx.user_id,
+                "project_id": project["id"],
+                "kind": "group",
+            }
+        )
+        .execute()
+        .data[0]
+    )
     individual = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
-    assert group["id"] != individual["id"]
+    assert legacy_group["id"] != individual["id"]
 
     resolved = conversations_db.get_individual_project_chat(project["id"], ctx.user_id)
     assert resolved["id"] == individual["id"]
@@ -289,3 +306,73 @@ def test_signatures_unchanged():
     assert str(inspect.signature(conversations_db.create_individual_project_chat)) == (
         "(project_id: 'int', user_id: 'str') -> 'dict[str, Any]'"
     )
+
+
+# ── Byte-frozen per-user helpers (ported from the retired group-chat suite) ─
+#
+# Frozen baseline captured at HEAD 07abbe33 via `inspect.getsource(...)` —
+# before the group-chat removal ticket's edits. A byte-for-byte match on
+# both source and signature proves neither per-user helper was touched by
+# the group-removal (grep-equivalent, but mutation-proof: a single
+# reordered line or added default fails this, not just a renamed symbol).
+_LOAD_HISTORY_SHA256 = (
+    "8b97d01beef106845de7ac3ece56eccd9b925bbaec6fd26f4abd112c9eb964e6"
+)
+_CONVERSATION_BELONGS_TO_COMPANY_SHA256 = (
+    "06eab9be7edc449a933eaa69aeb9915a60172db02a11f847b8c42f5e0ff1c2ba"
+)
+
+
+def test_private_path_helpers_unchanged():
+    from app.db.conversations import conversation_belongs_to_company
+    from app.routes.ask import _load_history
+
+    load_history_src = inspect.getsource(_load_history)
+    belongs_src = inspect.getsource(conversation_belongs_to_company)
+
+    assert hashlib.sha256(load_history_src.encode()).hexdigest() == _LOAD_HISTORY_SHA256, (
+        "app.routes.ask._load_history changed — the per-user history path "
+        "must stay byte-for-byte untouched (AD-P2/R4)"
+    )
+    assert (
+        hashlib.sha256(belongs_src.encode()).hexdigest()
+        == _CONVERSATION_BELONGS_TO_COMPANY_SHA256
+    ), (
+        "app.db.conversations.conversation_belongs_to_company changed — the "
+        "per-user ownership check must stay byte-for-byte untouched (AD-P2/R4)"
+    )
+
+    assert str(inspect.signature(_load_history)) == (
+        "(conversation_id: int | None, company_id: str, user_id: str) -> list[dict]"
+    )
+    assert str(inspect.signature(conversation_belongs_to_company)) == (
+        "(conversation_id: 'int', company_id: 'str') -> 'bool'"
+    )
+
+
+def test_teammate_individual_conversation_id_still_private(isolated_settings, monkeypatch):
+    """The regression this ticket must not regress: a teammate's individual
+    `conversation_id` cannot replay another user's private turns through
+    the UNTOUCHED per-user path — proven by calling `_load_history` (the
+    exact function this ticket must not modify) as a second user."""
+    from app.db.client import require_client
+    from app.routes.ask import _load_history
+
+    ctx = company_client(monkeypatch)
+    owner_conv = (
+        require_client()
+        .table("conversations")
+        .insert({"company_id": ctx.company_id, "user_id": ctx.user_id, "title": "Private"})
+        .execute()
+        .data[0]
+    )
+    require_client().table("conversation_turns").insert(
+        {"conversation_id": owner_conv["id"], "role": "user", "content": "owner's secret"}
+    ).execute()
+
+    teammate_id = "teammate-" + ctx.user_id
+    history_as_teammate = _load_history(owner_conv["id"], ctx.company_id, teammate_id)
+    assert history_as_teammate == []
+
+    history_as_owner = _load_history(owner_conv["id"], ctx.company_id, ctx.user_id)
+    assert history_as_owner == [{"role": "user", "content": "owner's secret"}]

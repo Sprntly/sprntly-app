@@ -1,81 +1,48 @@
 "use client"
 
-// ── ProjectMainThread — the group⇆individual swap host ──
+// ── ProjectMainThread — the private-chat mount host ──
 //
-// AD-P14 (flat routes): the swap is REACT STATE ONLY — `activeChat` selects
-// which chat renders, in place, on the one `/projects?id=<id>` route. No route
-// change, no `[id]` segment, ever.
+// AD-P14 (flat routes): mounts in place on the one `/projects?id=<id>` route.
+// No route change, no `[id]` segment, ever.
 //
-// The prior per-surface chat implementations (`ProjectGroupChat` /
-// `ProjectPrivateChat`) were DELETED and rebuilt as a SINGLE configurable mount
-// of main's ACTUAL chat: `useProjectConversation` composes the shared unit
+// `useProjectConversation` composes the shared unit
 // (`useComposer`/`useThreadScroll`/`useMainConversation`) over a
 // single-conversation store bound to a project-scoped `conversations` row, and
 // hands the exact host-bag to the same `ConversationView` main renders per tab.
-// The group/individual switch (react-state-only, AD-P14) selects which surface
-// mounts — each is its own conversation.
 import type { OpenArtifactCandidate } from "../../../../lib/api"
 import { ConversationView } from "../ConversationView"
 import { AttachmentViewer } from "../../../shared/AttachmentViewer"
-import { useProjectConversation, type ProjectChatSurface } from "./useProjectConversation"
-import { MentionPickerOverlay } from "./MentionPickerOverlay"
-import { useMentionNotifications } from "./useMentionNotifications"
+import { useProjectConversation } from "./useProjectConversation"
 import styles from "./ProjectMainThread.module.css"
 
-/** One project chat surface = main's chat, configured for that surface's single
- *  conversation. A distinct component so its hook mounts/unmounts cleanly on the
- *  group⇆individual swap. */
+/** The project's ONE chat surface = main's chat, configured for this
+ *  project's single conversation. A distinct component so its hook mounts/
+ *  unmounts cleanly on a project switch (keyed by the host below). */
 function ProjectChatSurface({
   projectId,
-  surface,
   onOpenArtifact,
-  projectName,
-  humanMemberCount,
-  memberNames,
 }: {
   projectId: number | string
-  surface: ProjectChatSurface
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
-  projectName?: string
-  humanMemberCount?: number
-  memberNames?: readonly string[]
 }) {
   // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
   // pull it off the host-bag and render the SHARED AttachmentViewer here, at the
   // surface root — mirroring how ChatScreen mounts the same component beside its
   // own conversation view. Everything else is the exact `ConversationViewProps`.
-  const { viewerAttachment, setViewerAttachment, mentionPickerNode, mentionPickerOpen, ...viewProps } =
-    useProjectConversation(projectId, surface, onOpenArtifact, projectName, humanMemberCount, memberNames)
+  const { viewerAttachment, setViewerAttachment, ...viewProps } =
+    useProjectConversation(projectId, onOpenArtifact)
   return (
     <>
       <ConversationView {...viewProps} />
       {viewerAttachment ? (
         <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
       ) : null}
-      <MentionPickerOverlay open={mentionPickerOpen} node={mentionPickerNode} anchorRef={viewProps.composerRef} />
     </>
   )
 }
 
-export type ActiveChat = "group" | "individual"
-
 export type ProjectMainThreadProps = {
   projectId: number | string
-  activeChat: ActiveChat
-  /** The project's display name — threaded into the GROUP chat's empty-state
-   *  greeting ("Welcome to the {name} team chat"). Optional: absent falls back
-   *  to a name-less greeting. The individual chat ignores it (keeps default). */
-  projectName?: string
-  /** The project's HUMAN member count — drives the group chat's 2-mode response
-   *  gate (≤1 → Sprntly replies to every message; ≥2 → only on @Sprntly).
-   *  Absent → the client defaults to reply (the server backstop still enforces
-   *  the multi-human rule). The individual chat ignores it. */
-  humanMemberCount?: number
-  /** The project's HUMAN member display names — lets a group `@mention` chip
-   *  wrap a FULL multi-word name ("@Bob Baker") instead of only its first word.
-   *  Absent → the chip renderer falls back to single-token matching. Ignored by
-   *  the individual chat (it renders no mention chips). */
-  memberNames?: readonly string[]
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   /** DEFERRED (dropped with the old chats): the cross-chat insight banner. Kept
    *  in the prop type so callers are unchanged; unused until the rebuilt chat
@@ -88,46 +55,17 @@ export type ProjectMainThreadProps = {
   openPrdId: number | null
 }
 
-/** Swaps the main pane between the group chat and the individual chat per
- *  `activeChat` — in place, no route change (AD-P14). Renders exactly one: main's
- *  chat, mounted on that surface's project-bound conversation.
- *
- *  The surface component is KEYED on project+surface so toggling group⇆private
- *  forces a fresh unmount+remount rather than a re-render in place. Without the
- *  key React reconciles the two branches to the same `ProjectChatSurface`
- *  position and only changes its `surface` prop; the single-conversation store
- *  (thread/dbConvId) then persists and the previous surface's messages stay on
- *  screen (the hydrate guard only fills a still-empty thread). A fresh mount
- *  resets the whole store and re-resolves the conversation, exactly like a page
- *  load — which was already showing the correct thread. */
-export function ProjectMainThread({ projectId, activeChat, onOpenArtifact, projectName, humanMemberCount, memberNames }: ProjectMainThreadProps) {
-  // Recipient side of @-mention tagging — mounted HERE (above the keyed surface)
-  // so it survives the group⇆individual swap and notifies wherever the viewer
-  // is in the project.
-  const mentions = useMentionNotifications(projectId)
-  const unreadPill = mentions.unreadCount > 0 ? (
-    <button
-      type="button"
-      className={styles.mentionUnread}
-      data-testid="gc-mention-unread"
-      onClick={mentions.clear}
-    >
-      {mentions.unreadCount} new mention{mentions.unreadCount > 1 ? "s" : ""}
-    </button>
-  ) : null
-
-  if (activeChat === "group") {
-    return (
-      <div className={styles.host} data-testid="main-thread-group" data-project-id={String(projectId)}>
-        {unreadPill}
-        <ProjectChatSurface key={`${String(projectId)}:group`} projectId={projectId} surface="group" onOpenArtifact={onOpenArtifact} projectName={projectName} humanMemberCount={humanMemberCount} memberNames={memberNames} />
-      </div>
-    )
-  }
+/** Mounts the private project chat — in place, no route change (AD-P14).
+ *  Renders exactly one surface: main's chat, mounted on this project's
+ *  bound conversation. Keyed on `projectId` so a flat-route A→B project
+ *  switch (`?id=` change with no unmount) resets the engine + store
+ *  together rather than reconciling in place — latent/defensive, no
+ *  current nav path does a direct A→B without an unmount, but it makes the
+ *  asserted flat-route premise hold rather than patching a live bug. */
+export function ProjectMainThread({ projectId, onOpenArtifact }: ProjectMainThreadProps) {
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      {unreadPill}
-      <ProjectChatSurface key={`${String(projectId)}:individual`} projectId={projectId} surface="individual" onOpenArtifact={onOpenArtifact} />
+      <ProjectChatSurface key={String(projectId)} projectId={projectId} onOpenArtifact={onOpenArtifact} />
     </div>
   )
 }

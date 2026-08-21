@@ -169,7 +169,7 @@ def test_seed_lands_memory_and_summary_regenerates_live(sb, live_seed):
     from app.project_origin_seed import seed_project_origin_memory
 
     seed_project_origin_memory(
-        project_id=live_seed["project_id"], prd_id=live_seed["prd_id"],
+        project_id=live_seed["project_id"], origin="prd_auto", prd_id=live_seed["prd_id"],
         prd_title=live_seed["prd_title"], conversation_id=live_seed["conversation_id"],
     )
 
@@ -196,3 +196,69 @@ def test_seed_lands_memory_and_summary_regenerates_live(sb, live_seed):
     assert summary, "the scheduled regen must have produced a summary row"
     assert summary[0]["stale"] is False
     assert summary[0]["summary_md"], "regen must produce a non-blank summary_md"
+
+
+@pytest.fixture
+def live_manual_project(sb, fixture_ids):
+    """A real `manual`-origin project — no conversation, no PRD — the
+    minimum `seed_project_origin_memory`'s generic branch needs. Restores
+    the DB afterward."""
+    company_id = fixture_ids["company_id"]
+    workspace_id = fixture_ids["workspace_id"]
+    user_id = fixture_ids["user_id"]
+
+    project = sb.table("projects").insert(
+        {
+            "company_id": company_id, "workspace_id": workspace_id,
+            "name": f"Live manual origin seed {uuid.uuid4().hex[:8]}", "origin": "manual",
+            "created_by": user_id,
+        }
+    ).execute().data[0]
+
+    yield {"project_id": project["id"], "project_name": project["name"]}
+
+    sb.table("project_memory_summary").delete().eq("project_id", project["id"]).execute()
+    sb.table("project_memory_entries").delete().eq("project_id", project["id"]).execute()
+    sb.table("projects").delete().eq("id", project["id"]).execute()
+
+
+@pytest.mark.integration
+@pytest.mark.real_origin_seed_synthesis  # opt OUT of conftest's autouse call_json
+# stub for the seed's own summarizer call — this test needs the real thing.
+@pytest.mark.real_memory_synthesis  # opt OUT of conftest's autouse call_md stub —
+# the seed's `schedule_regen` triggers the REAL `regenerate_summary` loop too.
+@pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
+def test_manual_origin_seed_live(sb, live_manual_project):
+    """AC-5: a real `manual`-origin create with a first-message/instructions
+    `seed_text` writes a `brief_summary` entry and leaves
+    `get_summary(project_id)["summary_md"]` non-empty, reflecting the
+    "why" — empty before this ticket (the pre-ticket regression this
+    generalization fixes)."""
+    from app.db.project_memory_entries import get_summary
+    from app.project_origin_seed import seed_project_origin_memory
+
+    seed_project_origin_memory(
+        project_id=live_manual_project["project_id"],
+        origin="manual",
+        project_name=live_manual_project["project_name"],
+        seed_text=(
+            "We need a way for support reps to bulk-close tickets that have "
+            "been untouched for 30+ days, gated behind a manager approval step."
+        ),
+    )
+
+    entries = (
+        sb.table("project_memory_entries")
+        .select("*")
+        .eq("project_id", live_manual_project["project_id"])
+        .execute()
+        .data
+    )
+    assert len(entries) >= 1, "the real manual-origin seed must write at least the brief entry"
+    for entry in entries:
+        assert entry["promoted_by"] == "agent"
+        assert entry["source_conversation_id"] is None
+        assert entry["body"].strip() != ""
+
+    summary = get_summary(live_manual_project["project_id"])
+    assert summary.get("summary_md"), "regen must leave a non-blank summary_md for a manual origin"

@@ -75,7 +75,6 @@ const PROJECT: ProjectDetail = {
   created_by: "u1",
   created_at: hoursAgo(48),
   updated_at: hoursAgo(2),
-  group_chat_id: 55,
   members: [
     { kind: "agent", user_id: null, name: "Sprntly", role_label: "Agent coworker · dispatches tasks", status: "working" },
     { kind: "human", user_id: "u1", name: "David M.", email: "david@example.com", avatar_url: null, job_role: "PM", added_at: hoursAgo(48) },

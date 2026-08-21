@@ -1,8 +1,7 @@
-"""Private + group project-chat unified-path routing, the four-invariant
-mutation proofs, the backgrounding mechanics, and the queue-ready seams —
-the deterministic collapse suite (fake-LLM/monkeypatched throughout; the
-real-DB + real-LLM arm is `test_project_answer_collapse_live.py`,
-DEFERRED-TO-STAGING).
+"""Private project-chat unified-path routing, the mutation proofs, the
+backgrounding mechanics, and the queue-ready seams — the deterministic
+collapse suite (fake-LLM/monkeypatched throughout; the real-DB + real-LLM
+arm is `test_project_answer_collapse_live.py`, DEFERRED-TO-STAGING).
 """
 from __future__ import annotations
 
@@ -558,7 +557,7 @@ def test_read_gate_removed_read_question_routes_to_composer_is_red(monkeypatch):
 # ── Invariant 2 — task-awareness + delegation survival ─────────────────────
 
 
-def test_delegate_execute_callable_both_surfaces(monkeypatch):
+def test_delegate_execute_callable_private_surface(monkeypatch):
     def _fake_loop(*, dispatch, **kw):
         dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"})
         dispatch("execute_task", {"task_type": "prd", "task_summary": "Z"})
@@ -577,19 +576,13 @@ def test_delegate_execute_callable_both_surfaces(monkeypatch):
     )
 
     private_scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u1")
-    group_scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_task_execution.EXECUTE_TASK_TOOL),
-        assigner_identity={"assigner_user_id": "u2", "source_turn_id": 4},
+    qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Fortune",
+        dataset="d", scope=private_scope,
     )
-    for scope in (private_scope, group_scope):
-        qa.answer(
-            enterprise_id="c1", question="please delegate the export review to Fortune",
-            dataset="d", scope=scope,
-        )
 
-    assert len(delegate_calls) == 2
-    assert len(execute_calls) == 2
+    assert len(delegate_calls) == 1
+    assert len(execute_calls) == 1
 
 
 def test_private_delegate_identity_threaded(monkeypatch):
@@ -611,29 +604,6 @@ def test_private_delegate_identity_threaded(monkeypatch):
     assert captured["source_conversation_id"] == 5
 
 
-def test_group_delegate_identity_threaded(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
-    )
-    monkeypatch.setattr(
-        "app.project_delegation.handle_delegate_task",
-        lambda **kw: captured.update(kw) or "sent",
-    )
-    scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
-        assigner_identity={"assigner_user_id": "u-asker", "source_turn_id": 42},
-    )
-    qa.answer(
-        enterprise_id="c1", question="please delegate the export review to Fortune",
-        dataset="d", scope=scope,
-    )
-    assert captured["assigner_user_id"] == "u-asker"
-    assert captured["source_turn_id"] == 42
-
-
 def test_private_delegate_source_content_threaded(monkeypatch):
     """The transcript `_try_scoped_tool_answer` builds for the model (the
     SAME text the private surface's own question is rendered into) reaches
@@ -653,37 +623,6 @@ def test_private_delegate_source_content_threaded(monkeypatch):
     qa.answer(
         enterprise_id="c1",
         question="Here's the feedback: users want dark mode. Send this to Fortune to prioritize.",
-        dataset="d", scope=scope,
-    )
-    assert "users want dark mode" in captured["source_content"]
-
-
-def test_group_delegate_source_content_uses_prerendered_transcript(monkeypatch):
-    """Group's `source_content` comes from the full attributed transcript
-    (`prerendered_transcript`) — the model's own preceding turn (e.g. the
-    themes it just produced) rides into the brief, not only the latest
-    trigger message."""
-    captured = {}
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda *, dispatch, **kw: dispatch("delegate_task", {"assignee": "X", "task_summary": "Y"}),
-    )
-    monkeypatch.setattr(
-        "app.project_delegation.handle_delegate_task",
-        lambda **kw: captured.update(kw) or "sent",
-    )
-    scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
-        assigner_identity={"assigner_user_id": "u-asker", "source_turn_id": 42},
-        prerendered_transcript=(
-            "Alex (PM): here's the feedback\n"
-            "Sprntly: THEMES: users want dark mode; onboarding is too slow.\n"
-            "Alex (PM): send this to Fortune to prioritize"
-        ),
-    )
-    qa.answer(
-        enterprise_id="c1", question="send this to Fortune to prioritize",
         dataset="d", scope=scope,
     )
     assert "users want dark mode" in captured["source_content"]
@@ -753,18 +692,6 @@ def test_execute_task_post_turn_fires(_offline_db, monkeypatch):
         dataset="d", scope=private_scope,
     )
     assert private_posts == [(5, "assistant", "progress update")]
-
-    group_posts = []
-    group_scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(project_task_execution.EXECUTE_TASK_TOOL,),
-        post_turn=lambda content: group_posts.append(content),
-    )
-    qa.answer(
-        enterprise_id="c1", question="please draft a PRD for the onboarding flow",
-        dataset="d", scope=group_scope,
-    )
-    assert group_posts == ["progress update"]
 
 
 def test_delegate_writes_delegations_row(monkeypatch):
@@ -836,20 +763,123 @@ def test_delegate_unregistered_is_red(monkeypatch):
     assert len(recorded) == 1
 
 
-# ── Invariant 3 — group when-to-respond gate ────────────────────────────────
+# ── The promise-forcing split (delegate_task survives, complete_task removed) ──
 
 
-# ── Invariant 4 — group multi-party context ─────────────────────────────────
+def test_private_delegate_promise_without_call_forces_and_writes_ledger(monkeypatch, caplog):
+    """AC13. The model's first turn PROMISES a delegation ("On it — I'll
+    delegate this now") but never calls `delegate_task`. The kept forcing
+    pass (the `if` that survived the group-only `complete_task` `elif`'s
+    removal) re-runs the loop with `force_tool="delegate_task"`, which DOES
+    call the tool, and the real handler actually writes a
+    `project_delegations` ledger row. The reworded log line carries no
+    `group_` prefix — this event now fires for private too."""
+    import logging
+
+    import app.project_delegation as pd
+
+    recorded = []
+    monkeypatch.setattr(pd, "record_delegation", lambda **kw: recorded.append(kw) or {"id": 1})
+    monkeypatch.setattr(
+        pd, "resolve_member",
+        lambda pid, needle: {"status": "found", "member": {"user_id": "u-assignee", "name": "Assignee"}},
+    )
+    monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+    monkeypatch.setattr(pd, "_build_brief", lambda *a, **kw: "Brief text")
+    monkeypatch.setattr(pd, "create_individual_project_chat", lambda pid, uid: {"id": 77})
+    monkeypatch.setattr(pd, "post_individual_turn", lambda conv_id, role, content: {"id": 1})
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        if force_tool == "delegate_task":
+            return dispatch("delegate_task", {"assignee": "Assignee", "task_summary": "Draft it"})
+        return "On it — I'll delegate this to Assignee now."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
+    with caplog.at_level(logging.WARNING):
+        qa.answer(
+            enterprise_id="c1", question="please delegate this to Assignee",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 2  # the initial pass + one forced delegate_task re-run
+    assert len(recorded) == 1  # the ledger write actually happened
+    forcing_lines = [
+        r.getMessage() for r in caplog.records
+        if "delegation_promise_without_tool_call" in r.getMessage()
+    ]
+    assert forcing_lines, "expected the forcing-pass log line to fire"
+    assert not any("group_" in line for line in forcing_lines)
 
 
-# ── Gated routing — group context-fold + accept-with-nudge (AC5b/AC5c) ─────
+def test_delegate_forcing_removal_makes_private_delegation_red(monkeypatch):
+    """AC13 mutation proof. Simulating deletion of the kept `delegate_task`
+    forcing `if` (forcing the promise regex to never match, the same
+    observable effect as removing the block) means a promise-only turn
+    NEVER re-runs the loop and NO ledger row is written — RED. Restoring
+    the real regex writes the row — GREEN. Proves the `complete_task`
+    `elif`'s deletion did NOT take the shared `delegate_task` `if` with
+    it."""
+    import re
+
+    import app.project_delegation as pd
+
+    def _patch_delegation_seams(recorded):
+        monkeypatch.setattr(pd, "record_delegation", lambda **kw: recorded.append(kw) or {"id": 1})
+        monkeypatch.setattr(
+            pd, "resolve_member",
+            lambda pid, needle: {"status": "found", "member": {"user_id": "u-assignee", "name": "Assignee"}},
+        )
+        monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+        monkeypatch.setattr(pd, "_build_brief", lambda *a, **kw: "Brief text")
+        monkeypatch.setattr(pd, "create_individual_project_chat", lambda pid, uid: {"id": 77})
+        monkeypatch.setattr(pd, "post_individual_turn", lambda conv_id, role, content: {"id": 1})
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        if force_tool == "delegate_task":
+            return dispatch("delegate_task", {"assignee": "Assignee", "task_summary": "Draft it"})
+        return "On it — I'll delegate this to Assignee now."
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
+
+    # RED: the forcing `if` deleted — simulated by making the promise regex
+    # never match (a promise-only turn is then indistinguishable from an
+    # ordinary plain-text answer, exactly the observable effect of removing
+    # the `if`).
+    recorded_red: list = []
+    _patch_delegation_seams(recorded_red)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(qa, "_DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE", re.compile(r"(?!)"))
+    qa.answer(
+        enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=scope,
+    )
+    assert recorded_red == []  # RED — no forcing pass, no ledger write
+
+    # GREEN: restore the real regex — the forcing `if` fires again.
+    monkeypatch.undo()
+    recorded_green: list = []
+    _patch_delegation_seams(recorded_green)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    qa.answer(
+        enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=scope,
+    )
+    assert len(recorded_green) == 1  # GREEN — the real forcing pass restores the write
 
 
-def test_group_plainqa_context_fold_reaches_composer(monkeypatch):
-    """AC5b: a GROUP plain-Q&A turn (the gate declines) still reaches the
-    composer WITH `scope.system_addendum` + `scope.context_payload` folded
-    into `history` as a synthetic context row — it does NOT answer "as a
-    stranger" with no roster/ledger/memory."""
+# ── Gated routing — project context-fold + accept-with-nudge (AC5b/AC5c) ────
+
+
+def test_project_plainqa_context_fold_reaches_composer(monkeypatch):
+    """AC5b: a project-surface plain-Q&A turn (the gate declines) still
+    reaches the composer WITH `scope.system_addendum` + `scope.
+    context_payload` folded into `history` as a synthetic context row — it
+    does NOT answer "as a stranger" with no roster/ledger/memory."""
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
     captured = {}
 
@@ -859,7 +889,7 @@ def test_group_plainqa_context_fold_reaches_composer(monkeypatch):
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
+        surface=Surface.project_private, project_id=9,
         extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_task_execution.EXECUTE_TASK_TOOL),
         system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
         context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
@@ -872,7 +902,7 @@ def test_group_plainqa_context_fold_reaches_composer(monkeypatch):
     assert "Fortune — Draft the export review" in history[0]["content"]
 
 
-def test_group_context_fold_dropped_is_red(monkeypatch):
+def test_project_context_fold_dropped_is_red(monkeypatch):
     """AC5b MUTATION: dropping the fold seam (`_fold_project_context`
     forced to a no-op — the exact effect of deleting the seam) makes the
     roster-present assertion RED; restoring it makes it GREEN."""
@@ -885,7 +915,7 @@ def test_group_context_fold_dropped_is_red(monkeypatch):
 
     monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
+        surface=Surface.project_private, project_id=9,
         extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
         system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
         context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
@@ -911,14 +941,14 @@ def test_group_context_fold_dropped_is_red(monkeypatch):
 # ── Authoritative preamble single-source (AC9 mechanism, AC10, AC11) ───────
 
 
-def test_group_fold_prepends_authoritative_preamble():
-    """A group scope with a non-empty `context_payload` folds it with the
-    SAME "answer from THIS block, don't deflect" header the private surface
-    already uses — the group composer fall-through no longer frames its
-    ledger/roster/memory facts as a passive, deflectable row. On the
-    UNFIXED code the fold has no preamble (the red)."""
+def test_project_fold_prepends_authoritative_preamble():
+    """A project scope with a non-empty `context_payload` folds it with the
+    "answer from THIS block, don't deflect" header — the composer
+    fall-through frames its ledger/roster/memory facts as an authoritative
+    block, never a passive, deflectable row. On the UNFIXED code the fold
+    has no preamble (the red)."""
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
+        surface=Surface.project_private, project_id=9,
         system_addendum="PROJECT ROSTER:\n- Fortune — Designer",
         context_payload="Task ledger:\n- Fortune — Draft the export review (open)",
     )
@@ -1090,21 +1120,19 @@ def test_sixth_branch_declines_named_source_project_surface(monkeypatch):
 
 def test_sixth_branch_still_claims_unnamed_project_noun(monkeypatch):
     """AC5 regression. An UNNAMED project-noun ("what tasks are open?", "who's
-    on this project?") on BOTH group and private still satisfies the gate
+    on this project?") on the private surface still satisfies the gate
     (`_skip_project_connectors` → True, no source named) → the project tool
     loop claims it → project-ledger facts, NOT a connector deflection."""
     private = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
-    group = dataclasses.replace(private, surface=Surface.project_group)
 
     def _spy_scoped(**kw):
         return {"answer": "project ledger facts", "citations": []}
 
     monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
 
-    for scope in (private, group):
-        for q in ("what tasks are open?", "who's on this project?"):
-            out = qa.answer(enterprise_id="c1", question=q, dataset="d", scope=scope)
-            assert out["answer"] == "project ledger facts", (scope.surface, q)
+    for q in ("what tasks are open?", "who's on this project?"):
+        out = qa.answer(enterprise_id="c1", question=q, dataset="d", scope=private)
+        assert out["answer"] == "project ledger facts", (private.surface, q)
 
 
 def test_sixth_branch_gate_and_connector_skip_use_same_predicate():
@@ -1154,25 +1182,22 @@ def test_main_scope_none_gate_unchanged(monkeypatch):
     assert out["answer"] == "ok"
 
 
-# ── Group edit-narration grounding — the "narrates Done, never writes" fix ──
+# ── edit_prd-narration grounding — the "narrates Done, never writes" fix ────
 #
 # Root cause: `run_tool_loop`'s returned text is the MODEL's own free-form
 # final turn, composed AFTER it sees the `edit_prd` tool_result — it is not
 # guaranteed to equal, or even agree with, what the tool actually returned.
-# Two failure shapes:
-#   (a) the model calls `edit_prd`, gets back a refusal/no-op narration, but
-#       composes its own "Done — it's live" final answer anyway;
-#   (b) the model never calls `edit_prd` at all, and just narrates success.
-# `_try_scoped_tool_answer` now grounds the final answer in the tool's real
-# outcome for (a) (an unconditional override whenever edit_prd was called at
-# all) and detects+corrects the free-text fabrication for (b).
+# No surface currently populates `edit_prd_handler` (kept dead-but-required —
+# see `SurfaceScope.edit_prd_handler`), so these tests construct one
+# synthetically to prove the grounding override survives: whenever `edit_prd`
+# WAS called this turn, the handler's own real outcome overrides the model's
+# free text.
 
 
-def test_group_edit_prd_grounds_narration_on_refusal_not_model_claim(monkeypatch):
-    """(a) — the model calls edit_prd, the handler refuses (no PRD open),
-    but the model's OWN final text still claims success. The final answer
-    must be the handler's real refusal, never the model's fabricated
-    "Done"."""
+def test_edit_prd_grounds_narration_on_refusal_not_model_claim(monkeypatch):
+    """The model calls edit_prd, the handler refuses (no PRD open), but the
+    model's OWN final text still claims success. The final answer must be
+    the handler's real refusal, never the model's fabricated "Done"."""
     def _fake_loop(*, dispatch, **kw):
         dispatch("edit_prd", {"instruction": "tighten the scope"})
         # The model's own free-text turn, composed AFTER seeing the
@@ -1185,12 +1210,12 @@ def test_group_edit_prd_grounds_narration_on_refusal_not_model_claim(monkeypatch
         return ("Open a PRD beside this chat and I'll edit it.", None)
 
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
         edit_prd_handler=_refusing_handler,
     )
     out = qa.answer(
-        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        enterprise_id="c1", question="tighten the scope of the PRD",
         dataset="d", scope=scope,
     )
     assert out["answer"] == "Open a PRD beside this chat and I'll edit it."
@@ -1198,10 +1223,10 @@ def test_group_edit_prd_grounds_narration_on_refusal_not_model_claim(monkeypatch
     assert "live" not in out["answer"]
 
 
-def test_group_edit_prd_grounds_narration_on_success(monkeypatch):
-    """(a), success arm — the handler applied the edit; the grounded
-    narration IS the handler's own "Done — ..." text (never a DIFFERENT
-    model paraphrase of it)."""
+def test_edit_prd_grounds_narration_on_success(monkeypatch):
+    """Success arm — the handler applied the edit; the grounded narration IS
+    the handler's own "Done — ..." text (never a DIFFERENT model
+    paraphrase of it)."""
     def _fake_loop(*, dispatch, **kw):
         dispatch("edit_prd", {"instruction": "tighten the scope"})
         return "Sure thing, I made that change for you!"  # model paraphrase
@@ -1212,65 +1237,22 @@ def test_group_edit_prd_grounds_narration_on_success(monkeypatch):
         return ("Done — I've updated the PRD. Tightened the Scope section.", None)
 
     scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(qa_project_group_context_edit_prd_tool(),),
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
         edit_prd_handler=_applying_handler,
     )
     out = qa.answer(
-        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
+        enterprise_id="c1", question="tighten the scope of the PRD",
         dataset="d", scope=scope,
     )
     assert out["answer"] == "Done — I've updated the PRD. Tightened the Scope section."
 
 
-def test_group_edit_prd_corrects_fabricated_success_without_tool_call(monkeypatch):
-    """(b) — the model never calls edit_prd at all, yet its own final text
-    claims the PRD was updated. There is no tool result to ground on; the
-    only honest answer is the corrective clarify, never the model's unearned
-    claim."""
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda **kw: "Done — I've updated the PRD, it's live now.",
-    )
-    scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(qa_project_group_context_edit_prd_tool(),),
-        edit_prd_handler=lambda tool_input: ("unused", None),  # noqa: ARG005
-    )
-    out = qa.answer(
-        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
-        dataset="d", scope=scope,
-    )
-    assert out["answer"] != "Done — I've updated the PRD, it's live now."
-    assert "didn't actually make that change" in out["answer"]
-
-
-def test_group_fabrication_guard_does_not_fire_on_unrelated_done_reply(monkeypatch):
-    """The (b) guard is scoped to PRD-edit-claim language — an unrelated
-    "Done" (e.g. a delegate_task confirmation) must pass through unchanged,
-    never gets corrected, even on a turn that DID reach the tool loop (via
-    the edit-intent gate) but ended up narrating something else entirely."""
-    monkeypatch.setattr(
-        "app.llm.run_tool_loop",
-        lambda **kw: "Done — I've asked Ada to help with that.",
-    )
-    scope = SurfaceScope(
-        surface=Surface.project_group, project_id=9,
-        extra_tools=(qa_project_group_context_edit_prd_tool(),),
-        edit_prd_handler=lambda tool_input: ("unused", None),  # noqa: ARG005
-    )
-    out = qa.answer(
-        enterprise_id="c1", question="@Sprntly tighten the scope of the PRD",
-        dataset="d", scope=scope,
-    )
-    assert out["answer"] == "Done — I've asked Ada to help with that."
-
-
 def test_private_scope_unaffected_by_edit_prd_grounding(monkeypatch):
-    """Private/main never register an `edit_prd_handler` — the grounding
-    override and the fabrication guard are BOTH no-ops there, so a private
-    turn's free text (even one that happens to mention "PRD" + "done")
-    passes through completely unchanged."""
+    """The real private-scope assembler never populates `edit_prd_handler`
+    — the grounding override is a no-op there, so a private turn's free
+    text (even one that happens to mention "PRD" + "done") passes through
+    completely unchanged."""
     monkeypatch.setattr(
         "app.llm.run_tool_loop",
         lambda **kw: "Done — I've updated the PRD summary in my notes.",
@@ -1281,13 +1263,3 @@ def test_private_scope_unaffected_by_edit_prd_grounding(monkeypatch):
         scope=private_scope,
     )
     assert out["answer"] == "Done — I've updated the PRD summary in my notes."
-
-
-def qa_project_group_context_edit_prd_tool() -> dict:
-    """The real `edit_prd` tool schema — imported lazily so this file's
-    module-level imports stay unchanged; every test above registers it on
-    `extra_tools` so the tool-loop branch is actually reached (an empty
-    `extra_tools` never routes here)."""
-    from app.project_group_context import EDIT_PRD_TOOL
-
-    return EDIT_PRD_TOOL
