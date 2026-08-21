@@ -105,10 +105,17 @@ def test_generate_from_task_returns_project_id_existing_prd(tenant_client, isola
     # consecutive heads with `assert 'ready' == 'generating'` while passing
     # every time locally, which is the signature of exactly that race.
     #
-    # The transition is one-way, so the honest assertion is that the response
-    # reports a legal status of the SAME row rather than a remembered one. The
-    # ordering this used to fail in is now covered deterministically below.
-    assert body["status"] in {"generating", "ready"}
+    # The honest assertion is the sentence this whole fix is arguing: the
+    # response reports THE ROW, not a memory. So read the row.
+    #
+    # Deliberately not `in {"generating", "ready"}`, which review showed is
+    # tautological here — `find_existing_prd_for_theme` already filters
+    # `.in_("status", ["ready", "generating"])`, so that form restates the
+    # finder's own filter and cannot fail. It would read as a guard while
+    # guarding nothing, which is the failure mode this file just suffered.
+    row = (require_client().table("prds").select("status")
+           .eq("id", first["prd_id"]).execute()).data[0]
+    assert body["status"] == row["status"]
     assert body["title"] == first["title"]
     assert body["variant"] == "v3"
     assert len(calls) == 1
