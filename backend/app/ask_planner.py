@@ -161,6 +161,21 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     the best available outcome was prose describing how to share it by hand.
 #     Widening on v4's rule: a v9 row answers a question no v8 row was asked
 #     (where does this document GO), so the two must not be pooled.
+# v10: the menu gained `include_team` — the company's own member list (names,
+#     emails, jobs, access levels). "do you know my team members and their
+#     roles" used to reach a model holding the knowledge graph and the
+#     connected sources and NOTHING that records who works here, so the honest
+#     answer was "I don't have that" and the likely one was a roster built out
+#     of Slack authors and Jira assignees. Exclusive on v7's rule, for the same
+#     reason: the block is the whole grounding. Widening on v4's rule — a v10
+#     row answers a question no v9 row was asked — so the two must not be
+#     pooled.
+# v11: the menu gained `create_project` plus `include_projects` — the product's
+#     PROJECTS, which no earlier version could name or make. "create a project
+#     for the billing revamp" used to land on `answer` or on create_artifact
+#     (a document instead of a container), and "what is a project" was answered
+#     with the English word or with the connected tracker's version. Widening
+#     on v4's rule both ways, so v10 and v11 rows must not be pooled.
 # COSMETIC EDITS DO NOT BUMP THIS, and that is a deliberate reading of the rule
 # above rather than an oversight. The 2026-08-18 privacy scrub changed example
 # company names inside the prompt text: the examples illustrate SHAPE ("a named
@@ -168,7 +183,7 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 # pooling them is still correct. A bump would fragment the decision log for a
 # change that cannot move a routing decision. Anything that alters what the
 # prompt ASKS still bumps.
-_PROMPT_VERSION = "ask-planner-v9"
+_PROMPT_VERSION = "ask-planner-v11"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -277,6 +292,20 @@ _ACTIONS: frozenset[str] = frozenset({
     # the message and the user confirms, so a misread channel costs a glance
     # rather than a message in front of the wrong audience.
     "share_to_slack",
+    # Create a PROJECT — the shared container for one topic (its artifacts,
+    # its members, its group chat, its own memory). Its own action rather than
+    # a shading of `create_artifact`, because the two produce different things
+    # and the confusion runs one way: a project is a CONTAINER and an artifact
+    # is a DOCUMENT, so "create a project for the billing revamp" answered as
+    # create_artifact writes a document nobody asked for and leaves the
+    # Projects screen empty.
+    #
+    # Before this the chat had no action at all here, and the failure was the
+    # one `create_artifact`'s note records for its own absence: the model knew
+    # the product had projects and replied in prose as though it had made one.
+    # Its argument is `task` — what the project is ABOUT, in the user's words,
+    # which becomes its name.
+    "create_project",
 })
 
 #: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
@@ -307,6 +336,10 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     # cover?" and waits — there is no such prompt for an arbitrary document
     # kind, so an empty task here would produce a generation about nothing.
     "create_artifact",
+    # A project with no subject is an untitled container. Unlike
+    # `generate_prd` there is no surface that asks "what should it cover?" and
+    # waits, so an empty task degrades to `answer` — which can ask.
+    "create_project",
 })
 _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     "edit_prd", "update_ticket",
@@ -546,6 +579,22 @@ _PLANNER_SCHEMA: dict = {
                 "library, false for everything else."
             ),
         },
+        "include_team": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs the list of PEOPLE in this company's "
+                "workspace — their names, emails, jobs and access levels — true "
+                "when the question is ABOUT the team, false for everything else."
+            ),
+        },
+        "include_projects": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs this workspace's PROJECTS — what a "
+                "project is and which ones the caller belongs to — true when "
+                "the question is ABOUT projects, false for everything else."
+            ),
+        },
         "web_search": {
             "type": "boolean",
             "description": "Whether the public web should be searched.",
@@ -599,7 +648,8 @@ _PLANNER_SCHEMA: dict = {
         "reason", "action", "action_confidence",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "sources",
-        "include_knowledge_graph", "include_library", "web_search", "in_scope",
+        "include_knowledge_graph", "include_library", "include_team",
+        "include_projects", "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -705,6 +755,18 @@ or wants an answer.
   a postmortem?" and "what goes in a launch plan?" all want prose in the chat,
   not a document filed in the shared library. When you are unsure, choose
   `answer` — the assistant can offer to write it, and the user can say yes.
+- create_project — create a PROJECT: the shared container for one topic, which
+  holds that topic's artifacts, its members, its group chat and its own memory.
+  "create a project for the billing revamp", "make a project for onboarding",
+  "start a project called Pricing 2027", "set up a project for this work". Set
+  `task` to what the project is ABOUT, in the user's own words and short — it
+  becomes the project's name ("Billing revamp", "Pricing 2027"), so give a
+  NAME, not a brief.
+  A PROJECT IS A CONTAINER, NOT A DOCUMENT. If they asked for something
+  WRITTEN — a plan, a spec, an update — that is create_artifact or
+  generate_prd, whichever fits. Only the container is this action, and a
+  question about projects ("what is a project", "what projects do I have") is
+  `answer` with include_projects=true.
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -1153,6 +1215,63 @@ question about the library.
 The action stays `answer` for these — a question about the library is still a
 question.
 
+=== QUESTIONS ABOUT THE TEAM ===
+
+Sprntly knows who is in this company's workspace — every member's name, email,
+job (Founder / PM / Engineer / Designer / …) and access level (owner / admin /
+member / viewer). That list is the ONLY record of who works here.
+
+Set include_team=true for any question about the PEOPLE in this workspace:
+"who's on my team", "do you know my team members and their roles", "who are our
+engineers", "what's Dave's email", "what does Priya do", "who can invite
+people", "how many people are in this workspace", "who should I ask about
+design".
+
+For these, also set include_knowledge_graph=false, pick NO sources and name NO
+documents — the team block is the WHOLE grounding, and the execution layer
+treats that combination as "answer from our own records alone". Every connected
+source is full of people (Slack authors, Jira assignees, call speakers) and not
+one of them is evidence of membership; a roster assembled from them is the
+exact wrong answer. A question that genuinely needs both — "what has Dave been
+working on this week" — is about the WORK, so it keeps the knowledge graph and
+its sources and sets include_team only if the person still has to be identified.
+
+ALSO SET IT WHEN THE QUESTION CROSSES THE TEAM WITH SOMETHING ELSE: "a table
+of each member and the number of PRDs they created", "which engineer owns the
+most tickets", "how many documents has each person written". Sprntly records no
+author on what it generates, so those tables cannot be built — and the roster
+block is what SAYS so. Without it the answer goes hunting for the documents in
+the connected sources and reports that none were found, to a workspace holding
+a dozen of its own. Keep those narrowed like any other team question.
+
+It is false for everything else, including a message that merely NAMES a
+teammate ("assign this to Dave", "share it with Priya"). Those are actions, and
+their own executors resolve the person.
+
+The action stays `answer` for these — a question about the team is still a
+question.
+
+=== QUESTIONS ABOUT PROJECTS ===
+
+A PROJECT is a Sprntly container for one topic: its artifacts, its members, its
+group chat, its own memory. It is NOT a Jira project, a Confluence space, or
+anything in a connected tool, and a question about "my projects" is about these.
+
+Set include_projects=true for: "what projects do I have", "what is a project",
+"how do projects work", "which project is the billing work in", "what's in the
+Pricing project", "how many projects are there". Also set it on a message that
+asks to CREATE one — the answer or confirmation should be able to say what
+already exists.
+
+For these, set include_knowledge_graph=false, pick NO sources and name NO
+documents, on the same rule as the library and the team: the block is the whole
+grounding, and a connected tracker full of "projects" is the exact wrong answer.
+The exception is a question that names the connected tool itself ("what Jira
+projects can we push to") — that is the tracker, not this.
+
+It is false for everything else, including a message that merely mentions work
+happening on something.
+
 === KEYWORD PRIOR ===
 
 The input may carry a "Keyword match:" line naming a pipeline a keyword rule
@@ -1191,6 +1310,8 @@ class Plan:
     sources: list[str] = field(default_factory=list)
     include_knowledge_graph: bool = False
     include_library: bool = False
+    include_team: bool = False
+    include_projects: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1254,6 +1375,8 @@ class Plan:
             "sources": self.sources,
             "kg": self.include_knowledge_graph,
             "library": self.include_library,
+            "team": self.include_team,
+            "projects": self.include_projects,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -1899,6 +2022,8 @@ def apply_gates(
         sources=sources,
         include_knowledge_graph=bool(out.get("include_knowledge_graph")),
         include_library=include_library,
+        include_team=bool(out.get("include_team")),
+        include_projects=bool(out.get("include_projects")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
@@ -2738,6 +2863,8 @@ def _log_comparison(
             "sources": planned.sources,
             "include_knowledge_graph": planned.include_knowledge_graph,
             "include_library": planned.include_library,
+            "include_team": planned.include_team,
+            "include_projects": planned.include_projects,
             "artifact_template_id": planned.artifact_template_id,
             "template_query": planned.template_query,
             "web_search": planned.web_search,

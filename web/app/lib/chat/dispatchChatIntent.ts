@@ -83,6 +83,11 @@ export interface ChatIntentExecutors {
    *  Needs no target PRD — a leadership update stands alone — so unlike
    *  edit_prd/change_prd_template this has no guard beyond the intent match. */
   onCreateArtifact: (envelope: ChatIntentEnvelope) => void
+  /** create_project: make the CONTAINER (not a document) and let the surface
+   *  decide where the user lands. Optional like `onShareToSlack` — a surface
+   *  with no project affordance falls through to its grounded ask, which is
+   *  the honest outcome: it must never reply as though it made one. */
+  onCreateProject?: (envelope: ChatIntentEnvelope) => void
   /** assign_tickets: change who OWNS one or more tickets. `prdId` mirrors
    *  `onEditPrd`'s resolved-target parameter — the SAME `ctx.editTargetPrdId`
    *  a caller resolved for edit_prd, reused here rather than a second
@@ -210,6 +215,17 @@ export function dispatchChatIntent(
     case "create_artifact":
       executors.onCreateArtifact(envelope)
       return { handled: true }
+
+    case "create_project":
+      // The name is the whole argument. The backend downgrades a task-less
+      // create to `answer`, so an envelope arriving here without one is an
+      // older backend — fall through rather than mint "(untitled)".
+      if (executors.onCreateProject && envelope.task) {
+        executors.onCreateProject(envelope)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
 
     case "assign_tickets":
       if (ctx.hasEditTarget && envelope.instruction) {

@@ -86,6 +86,11 @@ export interface ActionConfig {
   /** Raise a dock question for a turn (main → set its `pendingShare` /
    *  `pendingAssign`). Only reached when `canAskInDock` is true. */
   onDockQuestion?(turnId: string, question: DockQuestion): void
+  /** A project was just created from this chat — the surface decides what that
+   *  means on screen (main navigates into it). A field rather than a branch,
+   *  per this layer's hard rule: a surface that supplies nothing simply stays
+   *  put and keeps the confirmation turn. */
+  onProjectCreated?(project: { id: number; name: string }): void
 }
 
 /** Mint a turn id (crypto when available). */
@@ -352,4 +357,69 @@ export function runListArtifactsAction(
     ...(items.length ? { artifactList: items } : {}),
   }
   config.emitTurn(turn)
+}
+
+/** One settled turn carrying nothing but prose — the shape both create-project
+ *  outcomes take. */
+function proseTurn(seedQuery: string, answer: string): ThreadTurn {
+  return {
+    id: newTurnId(),
+    query: seedQuery,
+    reply: {
+      answer,
+      sources: [],
+      follow_ups: [],
+      key_points: [],
+      citations: [],
+      confidence: 1,
+      unanswered: "",
+    } as AskResponse,
+  }
+}
+
+/**
+ * "Create a project for the billing revamp" — make the CONTAINER (POST
+ * /v1/projects, `origin: "manual"` like the create modal's blank tab), confirm
+ * it in the thread, and hand the new project to the surface, which decides
+ * where the user lands.
+ *
+ * `envelope.task` is the name the planner extracted, in the user's own words.
+ * The backend already downgrades a task-less create to `answer` (an untitled
+ * container is worse than a question back), so the guard here is the belt to
+ * that braces: an older backend, or a surface dispatching by hand, must not be
+ * able to mint "(untitled)".
+ *
+ * NOTHING IS CLAIMED THAT DID NOT HAPPEN. The confirmation turn is written
+ * AFTER the create returns, and a failure says plainly that no project exists
+ * — the failure mode `create_artifact`'s own note records is the chat
+ * announcing a thing it never made.
+ */
+export async function runCreateProjectAction(
+  seedQuery: string,
+  envelope: ChatIntentEnvelope,
+  config: ActionConfig,
+): Promise<void> {
+  const name = (envelope.task ?? "").trim()
+  if (!name) {
+    config.emitTurn(proseTurn(
+      seedQuery,
+      "I can create a project — what should it be called? A project is a shared container for one topic: its PRDs, evidence, prototypes and tickets in one place, with its own members, group chat and memory.",
+    ))
+    return
+  }
+  try {
+    const { projectsApi } = await import("../../../../lib/api")
+    const project = await projectsApi.create({ name, origin: "manual" })
+    config.emitTurn(proseTurn(
+      seedQuery,
+      `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own group chat and memory.`,
+    ))
+    config.onProjectCreated?.({ id: project.id, name: project.name })
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "something went wrong"
+    config.emitTurn(proseTurn(
+      seedQuery,
+      `I couldn't create the project — ${msg}. Nothing was created, so nothing is half-made; you can try again, or create it on the Projects screen.`,
+    ))
+  }
 }

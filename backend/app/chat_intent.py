@@ -655,6 +655,13 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # it had shared the document. Nothing would reach Slack, and unlike an
     # empty library nobody can check a channel they were never told about.
     "share_to_slack",
+    # Create a PROJECT — the container, not a document. The client calls
+    # POST /v1/projects with the envelope's `task` as the name and opens the
+    # new project. Listed here for exactly the reason create_artifact's
+    # comment records: this set is the wire, and an action missing from it
+    # falls through to `answer` — where the chat, knowing the product has
+    # projects, replies that it made one and nothing exists.
+    "create_project",
 }
 
 
@@ -695,6 +702,11 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     # acts on, so every condition that must hold before a build starts is
     # enforced where the build is dispatched from.
     if intent == "create_artifact" and not (plan.task or "").strip():
+        intent = "answer"
+    # A project with no subject is an untitled container. Same re-application,
+    # same reason: this envelope is what the CLIENT acts on, so the condition
+    # is enforced where the create is dispatched from.
+    if intent == "create_project" and not (plan.task or "").strip():
         intent = "answer"
     if intent not in _CLIENT_INTENTS:
         return _fallback("unknown action")

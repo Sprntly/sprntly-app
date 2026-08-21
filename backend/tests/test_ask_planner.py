@@ -588,12 +588,12 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    # v8 since the action menu gained `assign_tickets` ("assign this ticket to
-    # Dave" used to land on update_ticket, whose executor rewrites content, not
-    # ownership). The version is pinned here rather than merely compared to
+    # v11 since the menu gained the product's PROJECTS — `include_projects`
+    # and the `create_project` action, neither of which any earlier version
+    # could name. The version is pinned here rather than merely compared to
     # itself because pooling rows across versions would pool two different
     # menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v9"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v11"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -647,8 +647,11 @@ def test_the_schema_property_order_is_load_bearing():
         "list_kind", "list_mode",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence",
-        "sources", "include_knowledge_graph", "include_library",
-        "web_search", "documents",
+        # The team roster sits with the other own-records flag it behaves
+        # like: both are exhaustive reads of Sprntly's own tables, and both
+        # are decided after the skill/pipeline choice they cannot influence.
+        "sources", "include_knowledge_graph", "include_library", "include_team",
+        "include_projects", "web_search", "documents",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
@@ -675,8 +678,10 @@ def test_the_schema_property_order_is_load_bearing():
     # both are booleans with a real default answer, and an omitted boolean is
     # indistinguishable from a considered `false`.
     assert "include_library" in ap._PLANNER_SCHEMA["required"]
+    assert "include_team" in ap._PLANNER_SCHEMA["required"]
+    assert "include_projects" in ap._PLANNER_SCHEMA["required"]
     assert "action_confidence" in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 12
+    assert len(ap._PLANNER_SCHEMA["required"]) == 14
 
 
 # ── the action fork (v3) ─────────────────────────────────────────────────────
