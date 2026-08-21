@@ -262,6 +262,25 @@ def ingest_report(
         "report_label": report_label,
         "report_period": period,
         "report_id": report_id,
+        # OVERRIDES the extractor's `source: "extractor"`, and that override is
+        # the whole point. `graph.retrieval.render_context_section` builds its
+        # provenance line as
+        # `prov.get("source") or prov.get("doc") or prov.get("connector")`, so
+        # "extractor" won and every report finding reached the model as
+        # "[pm_manual/competitor_move] · provenance: extractor: ...". The five
+        # keys above are precise and none of them is read there — the model saw
+        # a machine-typed note with no source, not a finding from a paid sweep.
+        #
+        # Observed, not theorised: asked for a competitor review in chat, the
+        # answer disclaimed its own evidence — "I'm answering from your synced
+        # sources only" — cited every finding as "[Source: pm_manual]", and
+        # recommended running the very review those findings came from.
+        #
+        # Safe to override: `provenance_extra` is merged last by the extractor,
+        # and the only readers of `provenance["source"]` in the app are that
+        # render call and its sibling. Nothing branches on the literal
+        # "extractor".
+        "source": f"{report_label} · {period}",
     }
 
     totals = {"signals": 0, "themes": 0, "duplicates": 0}
