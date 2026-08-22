@@ -509,14 +509,25 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
         // command renders its own turn and manages its own busy state, exactly as
         // it did before any optimistic render existed).
         setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+        // Mirror the removal into `tabsRef` SYNCHRONOUSLY. The command flow is
+        // dispatched on the same tick right after this (see the `wouldHandle`
+        // branch below), and it grounds the PRD/ticket set on `tabsRef.current`
+        // (threadContextFor / prdGroundingDocs read it directly). `setTabs` has
+        // not committed yet at that point, so without this the command grounds on
+        // the very optimistic turn we are removing — folding the user's own
+        // command text in as a "Conversation (this chat)" source doc. Mirrors the
+        // synchronous `activeTabIdRef.current` restore already done just below.
         if (spawnedNewTab) {
+          if (tabsRef.current) tabsRef.current = tabsRef.current.filter((t) => t.id !== targetTabId)
           setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
           setActiveTabId(prevActiveTabId)
           activeTabIdRef.current = prevActiveTabId
         } else {
-          setTabs((prev) => prev.map((t) => t.id === targetTabId
+          const rollTab = (t: ChatTab): ChatTab => t.id === targetTabId
             ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
-            : t))
+            : t
+          if (tabsRef.current) tabsRef.current = tabsRef.current.map(rollTab)
+          setTabs((prev) => prev.map(rollTab))
         }
       }
 
