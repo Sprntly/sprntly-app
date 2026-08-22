@@ -26,6 +26,7 @@ from app.auth import CompanyContext, require_company
 from app.config import settings
 from app.db.multi_agent_docs import get_docs_by_run, get_run_status
 from app.db.prds import find_existing_prd, start_prd
+from app.billing import enforce
 from app.deps.ownership import require_owned_brief
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,10 @@ async def generate(
                 "insight_index": body.insight_index,
                 "reused": True,
             }
+
+    # Billable action — charged here, AFTER the reuse checks above, so
+    # returning an existing document costs nothing.
+    enforce.bill(company.company_id, "multi_agent", actor_user_id=company.user_id)
 
     run_id = str(uuid.uuid4())
     dataset = brief.get("dataset", "")

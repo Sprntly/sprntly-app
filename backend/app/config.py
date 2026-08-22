@@ -143,6 +143,22 @@ class Settings(BaseSettings):
     # INERT without a secret key: routes 503 with "billing is not configured"
     # rather than half-working, which keeps local dev and CI from needing
     # credentials at all (see app/billing/stripe_client.py::configured).
+    # The paywall's master switch, OFF by default and deliberately separate
+    # from having Stripe credentials.
+    #
+    # Two reasons it is not simply `bool(stripe_secret_key)`. First, staging
+    # shares the PROD Supabase project, so a paywall that switched itself on
+    # the moment this merged would start refusing real customers' generations
+    # before anyone had looked at it. Second, an env var going missing in prod
+    # would silently make everything free — a fail-open on a money path — and
+    # an explicit flag makes the enforced state a decision rather than a side
+    # effect.
+    #
+    # OFF means `app.billing.enforce` is a no-op: nothing is gated and nothing
+    # is debited. Subscriptions, top-ups and referrals all still work, so the
+    # rollout is: ship, subscribe a test company, watch the webhooks land, then
+    # flip this on.
+    billing_enforced: bool = False
     stripe_secret_key: str = ""
     # From the Stripe dashboard's webhook endpoint. Signature verification is
     # skipped-and-rejected without it — an unverified webhook body is attacker

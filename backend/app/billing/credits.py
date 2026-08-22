@@ -278,14 +278,14 @@ def spend(
     ref_id: str | None = None,
     actor_user_id: str | None = None,
 ) -> int:
-    """Charge for one completed action. Returns the new balance.
+    """Charge for one action. Returns the new balance.
 
-    Called on COMPLETION, not on start: a generation that fails should not bill
-    the user for output they never received. Pair it with `check_affordable` at
-    the start so a doomed job is refused up front rather than after the wait.
+    Callers charge at the START of the work (see `app.billing.enforce` for why),
+    paired with `check_affordable` so an unaffordable action is refused before
+    the user waits rather than after.
 
-    `ref_id` should be the job/run id, which makes a retried completion
-    handler charge once.
+    `ref_id` should be the job/run id where one exists, which makes a
+    double-submitted request charge once.
     """
     return _apply(
         company_id,

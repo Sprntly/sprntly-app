@@ -33,6 +33,7 @@ from app.deps.ownership import (
     require_owned_evidence,
     require_owned_prd,
 )
+from app.billing import enforce
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 # The SAME structured-attachment model the persisted `conversation_turns`
@@ -381,6 +382,9 @@ async def ask(
     # corpus/dataset half. 404 on mismatch.
     require_owned_dataset(body.dataset, company.company_id, company.workspace_id)
     enterprise_id = company.company_id
+    # Billable action. Refused before any work starts so the user is told
+    # up front rather than after waiting on a generation they cannot pay for.
+    enforce.bill(enterprise_id, "ask", actor_user_id=company.user_id)
     # PRD-tab ask: the prd must belong to the caller's company/workspace, or a
     # crafted prd_id would seed a FOREIGN tenant's PRD (+ evidence/tickets)
     # into the answer context. 404 on mismatch, same as the dataset gate.
