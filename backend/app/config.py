@@ -174,7 +174,7 @@ class Settings(BaseSettings):
     # Where Checkout and the customer portal send the browser back to. The web
     # app is a static export, so these are plain page URLs with no server-side
     # callback handler behind them.
-    billing_return_url: str = "http://localhost:3000/settings?pane=billing"
+    billing_return_url: str = "http://localhost:3000/settings?section=billing"
 
     demo_password: str = ""
     jwt_secret: str = "dev-only-change-me"
