@@ -99,6 +99,21 @@ export function entryLabel(entry: BillingLedgerEntry): string {
   return REASON_LABELS[entry.reason] ?? entry.reason
 }
 
+/** The link a referrer shares. Built client-side from the current origin so it
+ *  is correct in dev, staging and prod without another config value.
+ *
+ *  A LINK, NOT AN EMAIL, deliberately. The obvious move was to reuse
+ *  `send_invite_email`, and that would have been wrong: it creates a Supabase
+ *  user and lands them as a MEMBER of the referrer's company, which is the
+ *  precise confusion a referral must avoid — the friend is signing up for their
+ *  own workspace. People share referral links in DMs anyway, and this way the
+ *  pane does not claim to send mail it never sends. */
+export function referralLink(code: string, origin?: string): string {
+  const base =
+    origin ?? (typeof window === "undefined" ? "" : window.location.origin)
+  return `${base}/sign-up?ref=${encodeURIComponent(code)}`
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "—"
   const d = new Date(iso)
@@ -439,7 +454,8 @@ export function BillingSettingsView(p: BillingView) {
       >
         <p className="bill-referral-copy">
           Invite up to {d.referrals.length + d.referral_invites_remaining} people.
-          When one of them starts a paid plan, we add{" "}
+          Each invite gives you a link to send them yourself. When one of them
+          starts a paid plan, we add{" "}
           {d.referral_reward_credits.toLocaleString()} credits to your balance —
           once their first payment goes through.
         </p>
@@ -459,7 +475,7 @@ export function BillingSettingsView(p: BillingView) {
               disabled={p.busy !== null || !p.inviteEmail.trim()}
               onClick={p.onInvite}
             >
-              {p.busy === "invite" ? "Sending…" : "Send invite"}
+              {p.busy === "invite" ? "Creating…" : "Create invite link"}
             </button>
             <span className="bill-invite-left">
               {d.referral_invites_remaining} left
@@ -476,6 +492,15 @@ export function BillingSettingsView(p: BillingView) {
             {d.referrals.map((r) => (
               <li key={r.id} className="bill-referral">
                 <span className="bill-referral-email">{r.invitee_email}</span>
+                {r.status === "pending" && (
+                  <input
+                    className="bill-referral-link"
+                    readOnly
+                    value={referralLink(r.code)}
+                    aria-label={`Invite link for ${r.invitee_email}`}
+                    onFocus={(e) => e.currentTarget.select()}
+                  />
+                )}
                 <span className={`bill-referral-status s-${r.status}`}>
                   {r.status === "rewarded"
                     ? `+${(r.reward_credits ?? 0).toLocaleString()} credits`
@@ -606,7 +631,7 @@ export function BillingSettings() {
     try {
       const created = await billingApi.invite(email)
       setInviteEmail("")
-      setNotice(`Invite sent to ${created.invitee_email}.`)
+      setNotice(`Invite link ready for ${created.invitee_email} — copy it below.`)
       setData((prev) =>
         prev
           ? {

@@ -6,6 +6,7 @@ import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
 import { validatePassword, validateShareDomainEmail, validateWorkEmail } from "../lib/auth-validation"
 import { signupApi } from "../lib/api"
+import { captureReferralCode } from "../lib/referral"
 import { publicPath } from "../lib/public-path"
 import { artifactShareApi, type ArtifactShareMetadata } from "../lib/artifactShareApi"
 import { prdAccessApi } from "../lib/prdAccessApi"
@@ -52,6 +53,14 @@ function SignUpForm() {
   // token or unresolvable prd_id here just means no strip renders — sign-up
   // itself is never blocked by it (ArtifactShareGate/postLoginPath own the
   // actual deny after account creation).
+  // Stash a friend's referral code before anything can navigate away. The
+  // company it credits is not created until several onboarding steps later —
+  // and a Google sign-up leaves the page entirely — so the code has to outlive
+  // this URL. Read back once, in the onboarding store, at company creation.
+  useEffect(() => {
+    captureReferralCode()
+  }, [])
+
   useEffect(() => {
     if (!shareToken) return
     let cancelled = false

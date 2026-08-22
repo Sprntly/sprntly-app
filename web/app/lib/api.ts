@@ -5093,7 +5093,16 @@ export const billingApi = {
       "/v1/billing/referrals",
       { email },
     ),
+  /** Attach a newly created company to the referral that brought it. Called
+   *  once during onboarding, right after the company row is created — the same
+   *  moment `orgInviteApi.claim()` runs, and for the same reason: companies are
+   *  created client-side through Supabase, so this is the backend's only
+   *  chance to learn a new tenant exists. Grants nothing; the reward fires on
+   *  the company's first paid invoice. */
+  claimReferral: (code: string) =>
+    api.post<{ claimed: boolean }>("/v1/billing/referrals/claim", { code }),
 }
+
 
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the

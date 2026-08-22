@@ -273,6 +273,39 @@ def invite_friend(
     }
 
 
+class ReferralClaim(BaseModel):
+    code: str
+
+
+@router.post("/referrals/claim", dependencies=[Depends(require_same_origin)])
+def claim_referral(
+    body: ReferralClaim, company: CompanyContext = Depends(require_company)
+) -> dict:
+    """Attach a newly created company to the referral that brought it.
+
+    Called once by the onboarding client straight after it creates the company
+    row, mirroring `/v1/org-invites/claim` next door — companies are created
+    client-side through Supabase, so this is the only moment the backend learns
+    a new tenant exists.
+
+    NO CREDIT IS GRANTED HERE. This only records who to pay; the reward fires
+    on this company's first paid invoice, in the `invoice.paid` webhook. That
+    ordering is the anti-abuse story: signing up is free and infinitely
+    repeatable, paying is not.
+
+    Owner-only, and a bad or spent code is a quiet `{claimed: false}` rather
+    than an error — the caller runs this best-effort inside onboarding, and a
+    stale link must never block someone creating their workspace.
+    """
+    if company.role != "owner":
+        raise HTTPException(403, "Only the workspace owner can claim a referral")
+
+    claimed = referrals.claim_on_signup(
+        code=body.code.strip(), invitee_company_id=company.company_id
+    )
+    return {"claimed": bool(claimed)}
+
+
 # ---------------------------------------------------------------------------
 # Webhook
 # ---------------------------------------------------------------------------

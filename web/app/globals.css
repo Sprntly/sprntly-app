@@ -25555,3 +25555,15 @@
 .bill-history-delta.out {
   color: var(--ink-3);
 }
+
+.bill-referral-link {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}

@@ -1,4 +1,5 @@
-import { onboardingApi, orgInviteApi } from "../api"
+import { billingApi, onboardingApi, orgInviteApi } from "../api"
+import { takeReferralCode } from "../referral"
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
@@ -468,6 +469,20 @@ export async function createWorkspace(input: {
         await orgInviteApi.claim()
       } catch {
         /* no pending invite, or transient — onboarding proceeds regardless */
+      }
+      // Referral attribution: if this person arrived on a friend's `?ref=`
+      // link, record who to pay. Nothing is granted here — the referrer is
+      // credited on THIS company's first paid invoice, so signing up (free and
+      // repeatable) never pays out. Best-effort for the same reason as the
+      // org-invite claim above: a stale or spent code must not block someone
+      // creating their workspace.
+      const referralCode = takeReferralCode()
+      if (referralCode) {
+        try {
+          await billingApi.claimReferral(referralCode)
+        } catch {
+          /* unknown or already-claimed code — onboarding proceeds regardless */
+        }
       }
       // No name yet (import-first) → no product row. `products_name_nonempty`
       // rejects a blank one, and the company/product steps both upsert it.

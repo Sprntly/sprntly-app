@@ -32,6 +32,7 @@ import {
   BillingSettingsView,
   entryLabel,
   featureLabel,
+  referralLink,
   refundWindowRemaining,
   statusNotice,
   type BillingView,
@@ -238,16 +239,67 @@ describe("BillingSettings — referrals", () => {
     expect(screen.getByText(/first payment goes through/i)).toBeTruthy()
   })
 
-  it("sends an invite", async () => {
+  it("creates an invite link", async () => {
     const { props } = view({ inviteEmail: "friend@example.com" })
-    await userEvent.click(screen.getByRole("button", { name: /send invite/i }))
+    await userEvent.click(screen.getByRole("button", { name: /create invite link/i }))
     expect(props.onInvite).toHaveBeenCalled()
   })
 
   it("replaces the form once the invites are used up", () => {
     view({}, { referral_invites_remaining: 0 })
-    expect(screen.queryByRole("button", { name: /send invite/i })).toBeNull()
+    expect(screen.queryByRole("button", { name: /create invite link/i })).toBeNull()
     expect(screen.getByText(/used all your invites/i)).toBeTruthy()
+  })
+
+  it("shows a shareable link on a pending invite", () => {
+    // A link, not an email: reusing the team-invite mailer would land the
+    // friend as a MEMBER of the referrer's company, which is the exact
+    // confusion a referral has to avoid.
+    view(
+      {},
+      {
+        referrals: [
+          {
+            id: "r0",
+            invitee_email: "pending@example.com",
+            status: "pending",
+            code: "abc123",
+            reward_credits: null,
+            created_at: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+    )
+    const link = screen.getByLabelText(
+      /invite link for pending@example.com/i,
+    ) as HTMLInputElement
+    expect(link.value).toContain("/sign-up?ref=abc123")
+    expect(link.readOnly).toBe(true)
+  })
+
+  it("does not offer a link once the referral has converted", () => {
+    view(
+      {},
+      {
+        referrals: [
+          {
+            id: "r1",
+            invitee_email: "paid@example.com",
+            status: "rewarded",
+            code: "spent",
+            reward_credits: 140,
+            created_at: "2026-08-01T00:00:00Z",
+          },
+        ],
+      },
+    )
+    expect(screen.queryByLabelText(/invite link/i)).toBeNull()
+  })
+
+  it("builds the link against the current origin and escapes the code", () => {
+    expect(referralLink("a b/c", "https://app.sprntly.ai")).toBe(
+      "https://app.sprntly.ai/sign-up?ref=a%20b%2Fc",
+    )
   })
 
   it("shows the credits earned on a converted referral", () => {
