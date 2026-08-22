@@ -216,10 +216,15 @@ describe("ChatScreen — sending from up the thread jumps to the newest message"
     const release = deferIntent()
     await typeAndSend(".cx-input", "and what did they ask for exactly?")
 
-    // The intent call is STILL in flight — no new turn, so nothing but the send
-    // itself could have moved the viewport. The message is on screen and the
-    // viewport is under it.
-    expect(document.querySelector('[data-testid="pending-send"]')).toBeTruthy()
+    // The intent call is STILL in flight — the second ask has NOT started, so
+    // nothing but the send itself could have moved the viewport. The message is
+    // on screen (now as the real optimistic turn seeded before the classify await,
+    // superseding the earlier pending-send placeholder) and the viewport is under it.
+    expect(
+      Array.from(document.querySelectorAll(".bc-user-bubble")).some(
+        (el) => el.textContent === "and what did they ask for exactly?",
+      ),
+    ).toBe(true)
     expect(runAskGeneration).toHaveBeenCalledTimes(1) // the first ask only
     expect(el.scrollTop).toBe(THREAD_PX)
 
