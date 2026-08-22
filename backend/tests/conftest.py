@@ -624,6 +624,18 @@ CREATE TABLE companies (
     feature_flags       TEXT NOT NULL DEFAULT '{}',
     seat_limit          INTEGER,
     prototype_enabled   INTEGER NOT NULL DEFAULT 1,
+    -- Billing: plan, action-credit balance, Stripe handles (mirrors
+    -- 20260822120000_billing_plans_and_credits.sql). `plan` defaults to
+    -- 'starter' exactly as the real column does, so a fabricated company in a
+    -- test starts on the same plan a real one would.
+    plan                TEXT NOT NULL DEFAULT 'starter',
+    credit_balance      INTEGER NOT NULL DEFAULT 0,
+    credits_granted_for TEXT,
+    stripe_customer_id  TEXT,
+    stripe_subscription_id TEXT,
+    subscription_status TEXT,
+    current_period_end  TEXT,
+    first_paid_at       TEXT,
     -- Registration-spec v5 columns (mirrors
     -- 20260716120000_account_type_onboarding_v5.sql).
     account_type        TEXT,
@@ -1699,6 +1711,51 @@ CREATE TABLE llm_usage_events (
     created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
+
+-- Billing ledger + referrals + webhook replay guard (mirrors
+-- 20260822120000_billing_plans_and_credits.sql). `bigint generated always as
+-- identity` is INTEGER PRIMARY KEY AUTOINCREMENT here and timestamptz is TEXT,
+-- matching the SQLite-ization used by every table above.
+CREATE TABLE credit_ledger (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id    TEXT NOT NULL,
+    delta         INTEGER NOT NULL,
+    reason        TEXT NOT NULL,
+    feature       TEXT,
+    ref_id        TEXT,
+    balance_after INTEGER NOT NULL,
+    actor_user_id TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_credit_ledger_co ON credit_ledger (company_id, created_at);
+-- The idempotency guarantee the spend/grant paths rely on. Partial, so
+-- ref_id-less staff adjustments stay unconstrained.
+CREATE UNIQUE INDEX credit_ledger_idem_uidx
+    ON credit_ledger (company_id, reason, ref_id)
+    WHERE ref_id IS NOT NULL;
+
+CREATE TABLE referrals (
+    id                  TEXT PRIMARY KEY,
+    referrer_company_id TEXT NOT NULL,
+    referrer_user_id    TEXT,
+    invitee_email       TEXT NOT NULL,
+    code                TEXT NOT NULL UNIQUE,
+    status              TEXT NOT NULL DEFAULT 'pending',
+    invitee_company_id  TEXT,
+    reward_credits      INTEGER,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    signed_up_at        TEXT,
+    rewarded_at         TEXT
+);
+CREATE INDEX idx_referrals_referrer ON referrals (referrer_company_id, created_at);
+CREATE UNIQUE INDEX referrals_referrer_email_uidx
+    ON referrals (referrer_company_id, lower(invitee_email));
+
+CREATE TABLE stripe_events (
+    id           TEXT PRIMARY KEY,
+    type         TEXT NOT NULL,
+    processed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 
 -- Artifact share-grant primitive (mirrors
 -- 20260801130000_artifact_share_links.sql, SQLite-ized: bigint identity /
