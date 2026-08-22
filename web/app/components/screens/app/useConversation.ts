@@ -487,12 +487,28 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       askStartRef.current?.set(id, askStartedAt)
       // A fresh ask clears any leftover Stop flag from a prior ask.
       stoppedTabsRef.current?.delete(targetTabId)
+      // Mark the target tab busy on THIS SAME commit as the optimistic turn. The
+      // classify await below is a ~5–9s round-trip; the busy flag is what drives
+      // the turn's derived `isGenerating` (mapMainTurns) → the "thinking" wait
+      // state. Without it, the optimistically-rendered turn has no reply and no
+      // in-flight signal, so ChatBubble falls through to the "No response was
+      // generated for this message." failure copy for the whole classify window.
+      // Mirrors the baseline `pendingSend` placeholder, which showed a busy state
+      // immediately. `runTabAsk` re-adds this idempotently once the ask starts and
+      // clears it in its `finally`; the command branch clears it in
+      // `rollbackOptimistic`; the attachment-failure branch clears it too.
+      setBusyTabs((prev) => addToSet(prev, targetTabId))
       // Undo the optimistic turn/tab so a COMMAND branch (which renders its own
       // turn) is not doubled. Restores the pre-send active-tab identity — incl.
       // `activeTabIdRef`, which the command executors read to resolve their
       // target — so command routing is byte-identical to dispatching before any
       // optimistic render happened.
       const rollbackOptimistic = () => {
+        // Clear the busy flag set on the optimistic commit so the command branch
+        // leaves no stranded "thinking"/composer-disabled state on the tab (the
+        // command renders its own turn and manages its own busy state, exactly as
+        // it did before any optimistic render existed).
+        setBusyTabs((prev) => removeFromSet(prev, targetTabId))
         if (spawnedNewTab) {
           setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
           setActiveTabId(prevActiveTabId)
