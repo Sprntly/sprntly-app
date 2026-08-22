@@ -1846,34 +1846,59 @@ def answer(
         from app.ask_runner import _ASK_RESPONSE_SCHEMA
         from app.graph.gateway import llm_call
 
-        result = llm_call(
-            enterprise_id=enterprise_id,
-            agent="qa",
-            purpose="voc_report",
-            model=ANSWER_MODEL,
-            system=_REPORT_SYSTEM,
-            input=(
-                _render_history(history)
-                + f"Question: {question}\n\n{source_line}\n\n{merged_text}"
-            ),
-            # v3: the pinned HTML template and its filling schema are gone; this
-            # is a prose answer over the same corpus. A v3 row is not comparable
-            # to the v2 structured extraction.
-            prompt_version="qa-voc-report-v3",
-            json_schema=_ASK_RESPONSE_SCHEMA,
-            skill=_VOC_SKILL,
-            max_tokens=12000,
-            # A full-window corpus (100+ calls, ~70k input tokens) plus a long
-            # answer exceeds the default per-request timeout — stream on the
-            # long read timeout, as the template build did.
-            long_output=True,
-            # This call ALREADY streams from the transport (`long_output=True`);
-            # until now nothing forwarded the fragments to the client, so the
-            # slowest answer in the product was also the only one with no live
-            # preview. Measured on staging 2026-08-11: 76.8s of an 83.6s turn
-            # spent here with the UI showing a static spinner throughout.
-            on_delta=on_delta,
+        _report_input = (
+            _render_history(history)
+            + f"Question: {question}\n\n{source_line}\n\n{merged_text}"
         )
+        from app import answer_first
+
+        if answer_first.enabled():
+            # Answer-first: stream the report prose FIRST, derive the structured
+            # fields after. This is the slowest answer in the product (measured
+            # 76.8s on staging), so first-token latency is where it helps most.
+            # Terminal streamed call — the fall-through above (query-mode ->
+            # report) declines BEFORE streaming, so no reset is needed here.
+            payload = answer_first.gateway(
+                question=question,
+                forced_system=_REPORT_SYSTEM,
+                forced_user=_report_input,
+                on_delta=on_delta,
+                default_confidence=0.6,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="voc_report",
+                prompt_version="qa-voc-report-v3",
+                model=ANSWER_MODEL,
+                skill=_VOC_SKILL,
+                max_tokens=12000,
+            )
+            result = None
+        else:
+            result = llm_call(
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="voc_report",
+                model=ANSWER_MODEL,
+                system=_REPORT_SYSTEM,
+                input=_report_input,
+                # v3: the pinned HTML template and its filling schema are gone; this
+                # is a prose answer over the same corpus. A v3 row is not comparable
+                # to the v2 structured extraction.
+                prompt_version="qa-voc-report-v3",
+                json_schema=_ASK_RESPONSE_SCHEMA,
+                skill=_VOC_SKILL,
+                max_tokens=12000,
+                # A full-window corpus (100+ calls, ~70k input tokens) plus a long
+                # answer exceeds the default per-request timeout — stream on the
+                # long read timeout, as the template build did.
+                long_output=True,
+                # This call ALREADY streams from the transport (`long_output=True`);
+                # until now nothing forwarded the fragments to the client, so the
+                # slowest answer in the product was also the only one with no live
+                # preview. Measured on staging 2026-08-11: 76.8s of an 83.6s turn
+                # spent here with the UI showing a static spinner throughout.
+                on_delta=on_delta,
+            )
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("call-digest: VoC run failed for %s", enterprise_id)
         return _plain_payload(
@@ -1911,10 +1936,13 @@ def answer(
         sources = (f"{sources} + {kg_label}"
                    if (corpus.count or corpus.doc_count or voc.present)
                    else kg_label)
-    payload = result.output if isinstance(result.output, dict) else {
-        "answer": str(result.output), "key_points": [], "citations": [],
-        "confidence": 0.6, "unanswered": "",
-    }
+    if result is not None:
+        # Forced-JSON path. (Answer-first set `payload` directly above and left
+        # `result` None — its payload is already the canonical shape.)
+        payload = result.output if isinstance(result.output, dict) else {
+            "answer": str(result.output), "key_points": [], "citations": [],
+            "confidence": 0.6, "unanswered": "",
+        }
     # DELIBERATELY NOT `_ensure_answer`'d, unlike the query pass. This call
     # STREAMS: by the time an empty synthesis is visible here the client has
     # already received the fragments through `on_delta`, so replacing the text

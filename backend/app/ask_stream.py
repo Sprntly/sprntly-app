@@ -89,6 +89,24 @@ class AnswerFieldExtractor:
     def __call__(self, fragment: str) -> None:
         self.feed(fragment)
 
+    def emit_text(self, text: str) -> None:
+        """Forward raw markdown straight to the sink, bypassing JSON decoding.
+
+        The answer-first path (app.answer_first) streams the answer as PLAIN
+        text, not as partial-JSON tool input, so its deltas must reach the same
+        downstream token_stream sink WITHOUT going through `feed()`'s
+        `{"answer":"..."` decoder (which would find no key and emit nothing).
+        Same sink, same transport, same `reset()`/`on_restart` restart contract
+        — only the parse step is skipped. Failures are swallowed: display only,
+        never break the answer.
+        """
+        if not text:
+            return
+        try:
+            self._sink(text)
+        except Exception:  # noqa: BLE001 — display only, never break the answer
+            pass
+
     def feed(self, fragment: str) -> None:
         if not fragment or self._state == "done":
             return

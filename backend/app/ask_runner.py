@@ -2227,20 +2227,39 @@ def compose_ask_answer(
     # `{}` (and every counter below defaults to 0) if the provider returns
     # none.
     meta_out: dict = {}
-    with company_llm_key(enterprise_id):
-        payload = call_json(
-            system=system,
-            user=user,
-            user_cacheable_prefix=cacheable,
-            schema=_ASK_RESPONSE_SCHEMA,
+    from app import answer_first
+
+    if answer_first.enabled():
+        # Answer-first: stream the answer as plain markdown FIRST (dedicated
+        # answer-only prompt), then derive the structured fields with a cheap
+        # follow-up. Same corpus (the cacheable prefix), same display transport,
+        # same returned payload shape — only WHEN the answer text streams changes.
+        payload = answer_first.direct(
+            question=question,
+            forced_system=system,
+            forced_user=user,
+            cacheable=cacheable,
+            enterprise_id=enterprise_id,
+            on_delta=on_delta,
+            default_confidence=None,
             max_tokens=12000,
             meta_out=meta_out,
-            # Token-streaming a chat answer implies the streaming transport
-            # (and its long read timeout) — same pattern as the gateway.
-            stream=on_delta is not None,
-            timeout=LONG_REQUEST_TIMEOUT_S if on_delta is not None else None,
-            on_json_delta=on_delta,
         )
+    else:
+        with company_llm_key(enterprise_id):
+            payload = call_json(
+                system=system,
+                user=user,
+                user_cacheable_prefix=cacheable,
+                schema=_ASK_RESPONSE_SCHEMA,
+                max_tokens=12000,
+                meta_out=meta_out,
+                # Token-streaming a chat answer implies the streaming transport
+                # (and its long read timeout) — same pattern as the gateway.
+                stream=on_delta is not None,
+                timeout=LONG_REQUEST_TIMEOUT_S if on_delta is not None else None,
+                on_json_delta=on_delta,
+            )
 
     # Server-derived, never model-authored — the model attributes a loaded
     # document by filename inline; this is what lets the client resolve that
