@@ -5013,6 +5013,88 @@ export const usageApi = {
     ),
 }
 
+// ── Billing: plan, credits, top-ups, referrals ──
+// Every figure here is COMPANY-level. A Team plan's credits are described as
+// "pooled" and a company-level balance is exactly that, so nothing on this
+// surface is per-user or per-workspace.
+//
+// Owner/admin only (the backend 403s otherwise) — what the company pays is
+// commercially sensitive, same posture as the Claude-key and usage panes.
+
+export type BillingLedgerEntry = {
+  id: number
+  /** Negative on a spend, positive on a grant. */
+  delta: number
+  reason: "monthly_grant" | "spend" | "referral" | "topup" | "refund" | "adjustment"
+  /** Which surface a spend went to; null on grants. */
+  feature: string | null
+  balance_after: number
+  actor_user_id: string | null
+  created_at: string
+}
+
+export type BillingReferral = {
+  id: string
+  invitee_email: string
+  status: "pending" | "signed_up" | "rewarded" | "void"
+  code: string
+  reward_credits: number | null
+  created_at: string
+}
+
+export type BillingSummary = {
+  plan: string
+  plan_label: string
+  /** Legacy and Enterprise have no ceiling. */
+  unlimited: boolean
+  /** Null when `unlimited` — the backend never sends the internal -1 sentinel,
+   *  which would otherwise render as "-1 credits". */
+  credit_balance: number | null
+  monthly_credits: number | null
+  subscription_status: string | null
+  /** False when the subscription is canceled/unpaid. `past_due` stays true —
+   *  Stripe is still retrying the card. */
+  has_access: boolean
+  current_period_end: string | null
+  first_paid_at: string | null
+  refund_window_days: number
+  /** False in any environment without Stripe credentials (local dev, CI).
+   *  The pane renders read-only rather than offering buttons that 503. */
+  billing_configured: boolean
+  has_subscription: boolean
+  /** Credit price per action, keyed by the backend's feature slug. */
+  action_costs: Record<string, number>
+  topup_presets: number[]
+  topup_min_usd: number
+  topup_max_usd: number
+  credits_per_topup_usd: number
+  history: BillingLedgerEntry[]
+  referrals: BillingReferral[]
+  referral_invites_remaining: number
+  referral_reward_credits: number
+}
+
+export type BillingInterval = "monthly" | "annual"
+
+export const billingApi = {
+  summary: () => api.get<BillingSummary>("/v1/billing/summary"),
+  /** Returns a hosted Stripe Checkout URL to redirect to. `web/` is a static
+   *  export with no server, so the redirect is a plain `location.assign`. */
+  checkout: (plan: string, interval: BillingInterval = "monthly") =>
+    api.post<{ url: string }>("/v1/billing/checkout", { plan, interval }),
+  /** The hosted customer portal: card, invoices, receipts, cancellation. */
+  portal: () => api.post<{ url: string }>("/v1/billing/portal"),
+  topup: (amountUsd: number) =>
+    api.post<{ url: string; credits: number }>("/v1/billing/topup", {
+      amount_usd: amountUsd,
+    }),
+  invite: (email: string) =>
+    api.post<BillingReferral & { invites_remaining: number }>(
+      "/v1/billing/referrals",
+      { email },
+    ),
+}
+
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the
 // normal app session: POST /v1/staff/login (id + password from env on the
