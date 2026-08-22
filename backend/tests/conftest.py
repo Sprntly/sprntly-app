@@ -1956,6 +1956,17 @@ create table if not exists call_transcripts (
     fetched_at    text not null default '',
     unique (company_id, provider, external_id)
 );
+
+-- Public whitelist signups (mirrors 20260822140000_whitelist.sql). No tenant
+-- column by design — the submitter has no account yet. `email` carries the
+-- UNIQUE that makes the route's on_conflict-do-nothing upsert idempotent, so it
+-- has to exist here or a repeat signup inserts a second row in tests only.
+create table if not exists whitelist (
+    id         text primary key,
+    email      text not null unique,
+    source     text,
+    created_at text not null default ''
+);
 """
 
 
