@@ -1,0 +1,381 @@
+"""Billing HTTP surface — gating, validation, and the webhook's exemptions.
+
+The webhook is the interesting one. It is the only route in the app with no
+tenant dependency and no Origin gate, because Stripe sends neither a session
+nor an Origin header. Those absences are deliberate, so they are pinned here:
+if someone later "tidies up" by adding `require_same_origin` to every mutating
+route, these tests fail rather than production silently rejecting every Stripe
+delivery.
+"""
+from __future__ import annotations
+
+import pytest
+
+from app.billing import plans, stripe_client
+from app.db import billing as billing_db
+from app.db.client import require_client
+
+from ._company_helpers import seed_company, setup_supabase_auth, supabase_bearer
+
+
+@pytest.fixture(autouse=True)
+def _db(isolated_settings):
+    return isolated_settings
+
+
+@pytest.fixture
+def ctx(monkeypatch, isolated_settings):
+    """An owner-authenticated client with Stripe fully stubbed.
+
+    Builds the client here rather than reusing conftest's `company_client`,
+    which composes on an `env` fixture each suite defines for itself.
+    """
+    import uuid
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+
+    from tests.conftest import reload_app_layer
+
+    setup_supabase_auth(monkeypatch)
+    reload_app_layer()
+
+    import app.main as main_mod
+
+    user_id = "billing-user-" + uuid.uuid4().hex[:8]
+    company_id = seed_company(user_id=user_id, slug="billing-co")
+    client = TestClient(main_mod.app, headers=supabase_bearer(user_id))
+
+    monkeypatch.setattr(stripe_client, "configured", lambda: True)
+    monkeypatch.setattr(
+        stripe_client, "ensure_customer", lambda **kw: "cus_test"
+    )
+    monkeypatch.setattr(
+        stripe_client,
+        "price_id",
+        lambda plan, interval: f"price_{plan}_{interval}",
+    )
+    monkeypatch.setattr(
+        stripe_client,
+        "create_subscription_checkout",
+        lambda **kw: "https://checkout.stripe.test/sub",
+    )
+    monkeypatch.setattr(
+        stripe_client,
+        "create_topup_checkout",
+        lambda **kw: "https://checkout.stripe.test/topup",
+    )
+    monkeypatch.setattr(
+        stripe_client,
+        "create_portal_session",
+        lambda **kw: "https://portal.stripe.test",
+    )
+    return SimpleNamespace(client=client, company_id=company_id, user_id=user_id)
+
+
+def _set_role(company_id: str, user_id: str, role: str) -> None:
+    require_client().table("company_members").update({"role": role}).eq(
+        "company_id", company_id
+    ).eq("user_id", user_id).execute()
+
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+
+def test_summary_reports_the_launch_default_plan_for_a_fresh_company(ctx):
+    body = ctx.client.get("/v1/billing/summary").json()
+
+    assert body["plan"] == plans.LAUNCH_DEFAULT_PLAN
+    assert body["monthly_credits"] == plans.PLAN_CREDITS[plans.LAUNCH_DEFAULT_PLAN]
+    assert body["credit_balance"] == 0
+    assert body["refund_window_days"] == plans.REFUND_WINDOW_DAYS
+    assert body["referral_invites_remaining"] == plans.MAX_REFERRAL_INVITES
+
+
+def test_summary_renders_unlimited_as_null_not_as_the_sentinel(ctx):
+    """`UNLIMITED` is -1 internally. Leaking that to the client would put
+    "-1 credits" on the Billing screen."""
+    billing_db.set_billing(ctx.company_id, {"plan": plans.ENTERPRISE})
+
+    body = ctx.client.get("/v1/billing/summary").json()
+
+    assert body["unlimited"] is True
+    assert body["credit_balance"] is None
+    assert body["monthly_credits"] is None
+
+
+def test_summary_is_owner_or_admin_only(ctx):
+    """What the company pays is commercially sensitive, same as the usage and
+    Claude-key pages."""
+    _set_role(ctx.company_id, ctx.user_id, "viewer")
+    assert ctx.client.get("/v1/billing/summary").status_code == 403
+
+
+def test_summary_needs_a_session():
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    anon = TestClient(main_mod.app)
+    assert anon.get("/v1/billing/summary").status_code in (401, 403)
+
+
+# ---------------------------------------------------------------------------
+# Checkout
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_returns_a_hosted_url(ctx):
+    res = ctx.client.post(
+        "/v1/billing/checkout", json={"plan": plans.STARTER, "interval": "monthly"}
+    )
+
+    assert res.status_code == 200
+    assert res.json()["url"] == "https://checkout.stripe.test/sub"
+
+
+def test_checkout_refuses_the_invoiced_tiers(ctx):
+    """Team is invoiced and Enterprise goes through sales. Refusing loudly beats
+    silently selling someone a Starter plan they did not choose."""
+    for plan in (plans.TEAM, plans.ENTERPRISE):
+        res = ctx.client.post("/v1/billing/checkout", json={"plan": plan})
+        assert res.status_code == 400
+
+
+def test_checkout_rejects_an_unknown_interval(ctx):
+    res = ctx.client.post(
+        "/v1/billing/checkout", json={"plan": plans.STARTER, "interval": "weekly"}
+    )
+    assert res.status_code == 400
+
+
+def test_checkout_reports_a_missing_price_as_configuration_not_a_bad_request(
+    ctx, monkeypatch
+):
+    monkeypatch.setattr(stripe_client, "price_id", lambda plan, interval: "")
+    res = ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    assert res.status_code == 503
+
+
+def test_checkout_is_owner_or_admin_only(ctx):
+    _set_role(ctx.company_id, ctx.user_id, "viewer")
+    res = ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    assert res.status_code == 403
+
+
+def test_checkout_persists_the_stripe_customer(ctx):
+    ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    assert (billing_db.get_billing(ctx.company_id) or {})["stripe_customer_id"] == (
+        "cus_test"
+    )
+
+
+def test_billing_routes_are_inert_without_stripe(ctx, monkeypatch):
+    """Local dev and CI have no Stripe credentials. Routes must say so rather
+    than raise."""
+    monkeypatch.setattr(stripe_client, "configured", lambda: False)
+
+    assert ctx.client.post(
+        "/v1/billing/checkout", json={"plan": plans.STARTER}
+    ).status_code == 503
+    assert ctx.client.post("/v1/billing/portal").status_code == 503
+    # The read-only summary still works — it reports billing_configured=false.
+    body = ctx.client.get("/v1/billing/summary").json()
+    assert body["billing_configured"] is False
+
+
+def test_checkout_is_origin_gated(ctx):
+    """Authed mutating routes carry the CSRF backstop."""
+    res = ctx.client.post(
+        "/v1/billing/checkout",
+        json={"plan": plans.STARTER},
+        headers={"origin": "https://evil.example"},
+    )
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Portal
+# ---------------------------------------------------------------------------
+
+
+def test_portal_needs_an_existing_customer(ctx):
+    assert ctx.client.post("/v1/billing/portal").status_code == 400
+
+
+def test_portal_returns_a_url_once_a_customer_exists(ctx):
+    billing_db.set_billing(ctx.company_id, {"stripe_customer_id": "cus_test"})
+    res = ctx.client.post("/v1/billing/portal")
+    assert res.json()["url"] == "https://portal.stripe.test"
+
+
+# ---------------------------------------------------------------------------
+# Top-ups
+# ---------------------------------------------------------------------------
+
+
+def test_topup_quotes_the_credits_it_will_buy(ctx):
+    res = ctx.client.post("/v1/billing/topup", json={"amount_usd": 50})
+
+    assert res.status_code == 200
+    assert res.json()["credits"] == plans.topup_credits_for_usd(50)
+
+
+@pytest.mark.parametrize("amount", [0, -20, plans.TOPUP_MIN_USD - 1, plans.TOPUP_MAX_USD + 1])
+def test_topup_bounds_are_enforced(ctx, amount):
+    """The floor stops the Stripe fee eating the purchase; the ceiling is a
+    typo guard — a mis-typed 100000 is a chargeback, not a good day."""
+    res = ctx.client.post("/v1/billing/topup", json={"amount_usd": amount})
+    assert res.status_code == 422
+
+
+def test_topup_is_owner_or_admin_only(ctx):
+    _set_role(ctx.company_id, ctx.user_id, "viewer")
+    res = ctx.client.post("/v1/billing/topup", json={"amount_usd": 20})
+    assert res.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Referrals
+# ---------------------------------------------------------------------------
+
+
+def test_referral_invite_returns_a_code(ctx):
+    res = ctx.client.post("/v1/billing/referrals", json={"email": "Friend@Example.com"})
+
+    assert res.status_code == 200
+    body = res.json()
+    assert body["invitee_email"] == "friend@example.com"  # normalised
+    assert body["code"]
+    assert body["invites_remaining"] == plans.MAX_REFERRAL_INVITES - 1
+
+
+def test_referral_cap_is_enforced(ctx):
+    for i in range(plans.MAX_REFERRAL_INVITES):
+        assert (
+            ctx.client.post(
+                "/v1/billing/referrals", json={"email": f"f{i}@example.com"}
+            ).status_code
+            == 200
+        )
+
+    res = ctx.client.post("/v1/billing/referrals", json={"email": "one-too-many@x.com"})
+    assert res.status_code == 400
+
+
+def test_the_same_address_cannot_be_invited_twice(ctx):
+    ctx.client.post("/v1/billing/referrals", json={"email": "dup@example.com"})
+    res = ctx.client.post("/v1/billing/referrals", json={"email": "dup@example.com"})
+    assert res.status_code == 400
+
+
+def test_a_malformed_address_is_rejected(ctx):
+    res = ctx.client.post("/v1/billing/referrals", json={"email": "not-an-email"})
+    assert res.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Webhook — the deliberate exemptions
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_takes_no_session_and_no_allowed_origin(ctx, monkeypatch):
+    """Stripe sends neither a JWT nor a browser Origin. A foreign Origin proves
+    `require_same_origin` is not attached — if someone adds it to every mutating
+    route, this fails here instead of in production."""
+    monkeypatch.setattr(
+        stripe_client,
+        "verify_webhook",
+        lambda payload, sig: {"id": "evt_1", "type": "customer.created", "data": {"object": {}}},
+    )
+
+    from fastapi.testclient import TestClient
+
+    import app.main as main_mod
+
+    anon = TestClient(main_mod.app)  # no Authorization header
+    res = anon.post(
+        "/v1/billing/webhook",
+        content=b"{}",
+        headers={"stripe-signature": "t=1,v1=x", "origin": "https://stripe.example"},
+    )
+
+    assert res.status_code == 200
+    assert res.json()["received"] is True
+
+
+def test_webhook_rejects_an_unverifiable_signature(ctx, monkeypatch):
+    def _boom(payload, sig):
+        raise ValueError("bad signature")
+
+    monkeypatch.setattr(stripe_client, "verify_webhook", _boom)
+
+    res = ctx.client.post(
+        "/v1/billing/webhook", content=b"{}", headers={"stripe-signature": "nope"}
+    )
+
+    assert res.status_code == 400
+
+
+def test_webhook_is_503_without_configuration(ctx, monkeypatch):
+    """No key means nothing can be verified. Accepting an unverified body would
+    be a self-serve credit-granting endpoint."""
+    monkeypatch.setattr(stripe_client, "configured", lambda: False)
+    res = ctx.client.post("/v1/billing/webhook", content=b"{}")
+    assert res.status_code == 503
+
+
+def test_a_replayed_event_is_acknowledged_without_reprocessing(ctx, monkeypatch):
+    event = {
+        "id": "evt_dup",
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_1",
+                "customer": "cus_x",
+                "metadata": {
+                    "company_id": ctx.company_id,
+                    "purpose": "topup",
+                    "credits": "100",
+                },
+            }
+        },
+    }
+    monkeypatch.setattr(stripe_client, "verify_webhook", lambda p, s: event)
+
+    first = ctx.client.post(
+        "/v1/billing/webhook", content=b"{}", headers={"stripe-signature": "x"}
+    )
+    second = ctx.client.post(
+        "/v1/billing/webhook", content=b"{}", headers={"stripe-signature": "x"}
+    )
+
+    assert first.json()["result"] != "duplicate"
+    assert second.json()["result"] == "duplicate"
+    assert (billing_db.get_billing(ctx.company_id) or {})["credit_balance"] == 100
+
+
+def test_a_failing_handler_still_returns_200(ctx, monkeypatch):
+    """Stripe retries non-2xx for three days and disables endpoints that keep
+    failing. One broken handler must not stall the whole event stream."""
+    monkeypatch.setattr(
+        stripe_client,
+        "verify_webhook",
+        lambda p, s: {"id": "evt_boom", "type": "invoice.paid", "data": {"object": {}}},
+    )
+
+    import app.routes.billing as billing_routes
+
+    def _explode(event):
+        raise RuntimeError("handler bug")
+
+    monkeypatch.setattr(billing_routes.billing_webhooks, "handle_event", _explode)
+
+    res = ctx.client.post(
+        "/v1/billing/webhook", content=b"{}", headers={"stripe-signature": "x"}
+    )
+
+    assert res.status_code == 200
+    assert res.json()["result"] == "error"

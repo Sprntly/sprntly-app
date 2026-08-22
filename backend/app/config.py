@@ -138,6 +138,28 @@ class Settings(BaseSettings):
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
+    # ── Stripe ────────────────────────────────────────────────────────────
+    # Unset everywhere except the environments that actually sell. Billing is
+    # INERT without a secret key: routes 503 with "billing is not configured"
+    # rather than half-working, which keeps local dev and CI from needing
+    # credentials at all (see app/billing/stripe_client.py::configured).
+    stripe_secret_key: str = ""
+    # From the Stripe dashboard's webhook endpoint. Signature verification is
+    # skipped-and-rejected without it — an unverified webhook body is attacker
+    # input that grants credits, so a missing secret must fail closed.
+    stripe_webhook_secret: str = ""
+    # Price ids, created in the Stripe dashboard rather than in code so pricing
+    # can change without a deploy. One per (plan x interval); an empty one
+    # makes that specific plan unbuyable and is reported as such.
+    stripe_price_starter_monthly: str = ""
+    stripe_price_starter_annual: str = ""
+    stripe_price_product_builder_monthly: str = ""
+    stripe_price_product_builder_annual: str = ""
+    # Where Checkout and the customer portal send the browser back to. The web
+    # app is a static export, so these are plain page URLs with no server-side
+    # callback handler behind them.
+    billing_return_url: str = "http://localhost:3000/settings?pane=billing"
+
     demo_password: str = ""
     jwt_secret: str = "dev-only-change-me"
     session_ttl_hours: int = 720
