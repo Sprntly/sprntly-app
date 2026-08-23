@@ -1309,6 +1309,103 @@ _REPORT_SYSTEM = (
 )
 
 
+# VoC map-reduce gating now lives in the shared
+# `answer_first.report_mapreduce_enabled("voc")` helper (global master +
+# `VOC_MAPREDUCE_ENABLED` per-report gate, both default OFF, and answer-first must
+# be on). VoC's per-report gate stays `VOC_MAPREDUCE_ENABLED`.
+
+
+# The 2-way section split for the concurrent map-reduce. Both halves answer from
+# the SAME corpus alone with NO cross-section dependency, so they can decode in two
+# concurrent calls and merge in fixed order (A then B). The base `_REPORT_SYSTEM`
+# still governs every discipline rule (denominators, accounts-not-mentions,
+# verbatim quotes, analyst-assigned frustration); each directive only SCOPES
+# which parts of the report that section emits.
+#
+# A = the evidence-sizing half (scope, themes, sentiment, churn-risk): the parts
+#     that read the whole corpus and size it. B = the actioning/illustrative half
+#     (recommendations, representative quotes, bottom line): the parts that select
+#     FROM the same corpus. The split is along "size the evidence" vs "act on and
+#     illustrate the evidence" — each is answerable from the corpus without the
+#     other's output.
+#
+# The directives are shaped by three measured requirements: (1) each is framed as
+# "write your HALF tightly" so combined output ≈ the single-pass total (an untuned
+# per-section prompt produces two near-full reports and gives back the parallelism
+# win), backed by a hard per-section max_tokens ceiling (`_VOC_SECTION_MAX_TOKENS`);
+# (2) the directives forbid any document title / "Part N of M" split marker (which
+# the model otherwise leaks into the title), backed by a deterministic post-strip
+# in `answer_first._strip_split_markers`; (3) verbatim QUOTES belong to B ALONE —
+# A references themes in its own words — and B does not restate A's aggregate
+# counts, removing the two shared-fact drift classes (duplicated quotes, disagreeing
+# totals) at the source without a reduce pass.
+
+# Hard per-section output ceiling. Single-pass VoC output measured 5.2-6.5k tokens;
+# half is ~2.6-3.2k, so this caps a runaway section near its fair share while
+# leaving headroom above the ~3k the tightened prompt targets, so a normal section
+# finishes rather than truncates. A cap is a ceiling, not a target — the lighter
+# section stops early on its own.
+_VOC_SECTION_MAX_TOKENS = 3600
+
+_VOC_SECTION_A = (
+    "You are writing ONE HALF of a combined voice-of-customer report; a separate "
+    "pass writes the other half and the two halves are concatenated into the final "
+    "report the user reads. Write YOUR half TIGHTLY — aim for roughly half the "
+    "length of a complete report; do not pad, do not restate the other half, and "
+    "do NOT write a standalone full report. CRITICAL: do NOT write a document "
+    "title, and NEVER write any 'Part 1 of 2', 'Section A', or similar split "
+    "marker anywhere — begin directly at your first section heading. Write ONLY "
+    "these parts, in this order, as plain markdown:\n"
+    "1. SCOPE & COVERAGE: state the window as explicit dates, restate the ask, "
+    "say which filters you applied (or none), and which sources the evidence was "
+    "read from.\n"
+    "2. KEY THEMES: the themes, each sized in ACCOUNTS (deduplicated, with its "
+    "denominator), saying which sources each theme was heard on, and separating "
+    "how many mentions you read from how many you counted.\n"
+    "3. SENTIMENT / FRUSTRATION: per-theme frustration rated 1-5 from observable "
+    "language only, stated as analyst-assigned.\n"
+    "4. CHURN-RISK & SIGNALS: silent killers and vocal minorities where the data "
+    "shows them, and say when the run rests on volume/frustration alone.\n"
+    "Reference what customers said IN YOUR OWN WORDS — do NOT include any verbatim "
+    "quotes; ALL verbatim quotes belong to the other half. Do NOT write "
+    "feature-requests/recommendations, a quotes section, or an executive summary. "
+    "Do NOT emit a `key_points` list or any JSON; write the section body only."
+)
+_VOC_SECTION_B = (
+    "You are writing the OTHER HALF of a combined voice-of-customer report; the "
+    "first half (scope, the sized themes, sentiment, and churn-risk) is written by "
+    "a separate pass over the same corpus and placed BEFORE yours. Write YOUR half "
+    "TIGHTLY — aim for roughly half the length of a complete report; do not pad, "
+    "do NOT reproduce the theme sizing, scope, or coverage, and do NOT write a "
+    "standalone full report. CRITICAL: do NOT write a document title, and NEVER "
+    "write any 'Part 2 of 2', 'Section B', or similar split marker anywhere — "
+    "begin directly at your first section heading. Write ONLY these parts, in this "
+    "order, as plain markdown:\n"
+    "1. RECOMMENDATIONS: the most important handful, selected by goal fit, each "
+    "naming the one tracked metric it moves (or 'none identified') and what you "
+    "passed over to get there; mark any customer-claimed metric link as asserted, "
+    "not measured.\n"
+    "2. REPRESENTATIVE QUOTES: you own ALL verbatim quotes for the entire report — "
+    "two or three strong VERBATIM quotes per major theme, with attribution, drawn "
+    "from the corpus; flag a quote gap rather than manufacture one.\n"
+    "3. BOTTOM LINE: a short executive summary of what matters most and what to do "
+    "next, grounded only in the corpus below.\n"
+    "CRITICAL: the first half OWNS the sizing — the theme sizes in accounts, their "
+    "denominators, and every aggregate total. Do NOT independently recompute or "
+    "restate any of those numbers; you and the first half count from the same "
+    "corpus separately and will drift by an account or two, contradicting each "
+    "other in one report. Refer to them QUALITATIVELY instead (\"as sized above\", "
+    "\"the largest theme\", \"the majority of accounts\") or defer to the first "
+    "half's sizing — NEVER emit your own hard number for a total the first half "
+    "already stated.\n"
+    "Do NOT emit a `key_points` list or any JSON; write the section body only."
+)
+_VOC_SECTIONS: list[tuple[str, str]] = [
+    ("scope-themes-sentiment-churn", _VOC_SECTION_A),
+    ("recommendations-quotes-summary", _VOC_SECTION_B),
+]
+
+
 def _render_history_tail(history: list[dict] | None) -> str:
     if not history:
         return ""
@@ -1852,7 +1949,46 @@ def answer(
         )
         from app import answer_first
 
-        if answer_first.enabled():
+        if answer_first.report_mapreduce_enabled("voc"):
+            # Map-reduce (gated): split the one ~128s synthesis into two section
+            # calls that decode CONCURRENTLY over the same corpus, then merge
+            # A-then-B. The corpus moves onto `user_cacheable_prefix`
+            # (from the inline user turn it rides on the single-call paths) so
+            # section B is a cache-READ of the ~70k-token bundle section A just
+            # warmed, not a second prefill. The per-turn header (history +
+            # question + coverage line) stays on the user turn. Answer-first must
+            # be on too — this reuses its streaming/metadata contracts.
+            _report_header = (
+                _render_history(history)
+                + f"Question: {question}\n\n{source_line}"
+            )
+            payload = answer_first.gateway_sections(
+                question=question,
+                forced_system=_REPORT_SYSTEM,
+                forced_user=_report_header,
+                user_cacheable_prefix=merged_text,
+                sections=_VOC_SECTIONS,
+                on_delta=on_delta,
+                default_confidence=0.6,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="voc_report",
+                prompt_version="qa-voc-report-v3",
+                model=ANSWER_MODEL,
+                skill=_VOC_SKILL,
+                # Hard backstop at ~half the single-pass output so a runaway
+                # section can't blow past its share and give the speedup back.
+                max_tokens=_VOC_SECTION_MAX_TOKENS,
+                # The report prose IS the deliverable; nothing report-facing reads
+                # the derived metadata (citations stripped pre-storage; key_points
+                # / unanswered are analytics-only; confidence never gates the
+                # answer). The structured pass runs AFTER the report is on screen
+                # but blocks the terminal `done`, so skipping it recovers ~25-37s
+                # of tail latency with the same degrade-shape payload.
+                derive_metadata=False,
+            )
+            result = None
+        elif answer_first.enabled():
             # Answer-first: stream the report prose FIRST, derive the structured
             # fields after. This is the slowest answer in the product (measured
             # 76.8s on staging), so first-token latency is where it helps most.
