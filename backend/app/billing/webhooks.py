@@ -166,9 +166,33 @@ def _on_subscription_event(sub: dict, *, deleted: bool) -> str:
         return "ignored: no company"
 
     if deleted:
-        # A deleted subscription cannot be re-fetched for status, and the
-        # meaning is unambiguous. Plan is left alone on purpose: it is the
-        # record of what they had, and access is gated on status.
+        # ONLY if the dead subscription is the one this company is actually on.
+        #
+        # A customer can hold several subscriptions over time — cancel, then
+        # resubscribe, and the old one's `deleted` event is still in flight.
+        # Stripe does not order deliveries, so that event routinely lands AFTER
+        # the new subscription's `created`/`invoice.paid`. Writing "canceled"
+        # unconditionally then revokes access for a customer who has just paid,
+        # which is exactly what happened in testing: four events for the new
+        # subscription set it active, and a stale delete two seconds later
+        # turned it off.
+        #
+        # This is the same ordering hazard the update path solves by re-fetching
+        # from the API. A deleted subscription cannot be re-fetched, so the
+        # guard is an identity check instead.
+        row = billing_db.get_billing(company_id) or {}
+        current = row.get("stripe_subscription_id")
+        if current and current != sub.get("id"):
+            logger.info(
+                "billing_stale_cancel_ignored company=%s dead=%s current=%s",
+                company_id,
+                sub.get("id"),
+                current,
+            )
+            return "ignored: cancel for a superseded subscription"
+
+        # Plan is left alone on purpose: it is the record of what they had, and
+        # access is gated on status.
         billing_db.set_billing(company_id, {"subscription_status": "canceled"})
         logger.info("billing_subscription_canceled company=%s", company_id)
         return "subscription canceled"

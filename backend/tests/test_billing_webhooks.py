@@ -454,3 +454,66 @@ def test_signing_up_does_not_consume_a_further_invite():
     referrals.claim_on_signup(code=invite["code"], invitee_company_id=invitee)
 
     assert referrals.remaining_invites(referrer) == plans.MAX_REFERRAL_INVITES - 1
+
+
+# ---------------------------------------------------------------------------
+# A stale cancellation must not revoke a live subscription
+# ---------------------------------------------------------------------------
+
+
+def test_a_cancel_for_a_superseded_subscription_is_ignored(company):
+    """Cancel, resubscribe, and the OLD subscription's `deleted` event is still
+    in flight. Stripe does not order deliveries, so it routinely lands after the
+    new subscription's events.
+
+    Observed in testing: four events put the company on an active plan, then a
+    stale delete two seconds later turned it off — revoking access for someone
+    who had just paid.
+    """
+    # The company is on the NEW subscription.
+    billing_db.set_billing(
+        company.id,
+        {"stripe_subscription_id": "sub_NEW", "subscription_status": "active"},
+    )
+
+    # The OLD one's cancellation arrives late.
+    billing_webhooks.handle_event(
+        _event(
+            "customer.subscription.deleted",
+            {"id": "sub_OLD", "customer": "cus_live"},
+        )
+    )
+
+    row = _row(company.id)
+    assert row["subscription_status"] == "active"
+    assert row["stripe_subscription_id"] == "sub_NEW"
+
+
+def test_a_cancel_for_the_current_subscription_still_revokes(company):
+    """The guard must not swallow the case it exists to permit."""
+    billing_db.set_billing(
+        company.id,
+        {"stripe_subscription_id": "sub_NEW", "subscription_status": "active"},
+    )
+
+    billing_webhooks.handle_event(
+        _event(
+            "customer.subscription.deleted",
+            {"id": "sub_NEW", "customer": "cus_live"},
+        )
+    )
+
+    assert _row(company.id)["subscription_status"] == "canceled"
+
+
+def test_a_cancel_before_any_subscription_is_recorded_still_applies(company):
+    """No stored id means nothing to compare against — a company that never
+    completed checkout but has a dead subscription should still read as
+    cancelled rather than silently staying blank."""
+    billing_db.set_billing(company.id, {"stripe_subscription_id": None})
+
+    billing_webhooks.handle_event(
+        _event("customer.subscription.deleted", {"id": "sub_X", "customer": "cus_live"})
+    )
+
+    assert _row(company.id)["subscription_status"] == "canceled"

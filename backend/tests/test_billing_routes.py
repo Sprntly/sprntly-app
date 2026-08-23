@@ -464,3 +464,78 @@ def test_a_stripe_failure_on_the_portal_is_also_reported(ctx, monkeypatch):
 
     assert res.status_code == 502
     assert "customer portal" in res.json()["detail"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# Stripe SDK objects are not dicts
+# ---------------------------------------------------------------------------
+#
+# These exist because every earlier test in this file mocked the SDK with plain
+# dicts, so `dict(stripe_object)` looked fine under test and raised TypeError
+# against the real API. The symptom in production was the worst possible shape:
+# every webhook logged "stripe_webhook_rejected reason=TypeError", which reads
+# as a signature problem, while the signature was perfectly valid — the
+# exception came from the line AFTER the check.
+
+
+class _FakeStripeObject:
+    """Mimics the one behaviour that matters: subscript access works, but it is
+    NOT a Mapping, so `dict()` and `.get()` both fail exactly as the real SDK's
+    objects do."""
+
+    def __init__(self, data: dict):
+        self._data = data
+
+    def __getitem__(self, k):
+        return self._data[k]
+
+    def __iter__(self):  # what makes dict() fail the way the SDK does
+        raise TypeError("StripeObject is not iterable as a mapping")
+
+    def __getattr__(self, name):
+        if name == "to_dict":
+            return lambda: {
+                k: (v.to_dict() if isinstance(v, _FakeStripeObject) else v)
+                for k, v in self._data.items()
+            }
+        raise AttributeError(name)
+
+
+def test_verify_webhook_converts_the_sdk_event_rather_than_calling_dict(monkeypatch):
+    """The regression that broke every delivery."""
+    event = _FakeStripeObject(
+        {"id": "evt_1", "type": "invoice.paid", "data": _FakeStripeObject({"object": {}})}
+    )
+
+    class _FakeWebhook:
+        @staticmethod
+        def construct_event(payload, sig, secret, **kw):
+            return event
+
+    fake_sdk = type("SDK", (), {"Webhook": _FakeWebhook})()
+    monkeypatch.setattr(stripe_client, "_stripe", lambda: fake_sdk)
+    monkeypatch.setattr(stripe_client.settings, "stripe_webhook_secret", "whsec_x")
+
+    out = stripe_client.verify_webhook(b"{}", "t=1,v1=abc")
+
+    assert isinstance(out, dict)
+    assert out["type"] == "invoice.paid"
+    # Nested objects must be plain dicts too — the handlers walk
+    # data.object.parent.subscription_details with ordinary .get() chains.
+    assert out["data"].get("object") == {}
+
+
+def test_get_subscription_converts_the_sdk_object(monkeypatch):
+    sub = _FakeStripeObject({"id": "sub_1", "status": "active"})
+    fake_sdk = type("SDK", (), {"Subscription": type("S", (), {"retrieve": staticmethod(lambda _id: sub)})})()
+    monkeypatch.setattr(stripe_client, "_stripe", lambda: fake_sdk)
+
+    out = stripe_client.get_subscription("sub_1")
+
+    assert out == {"id": "sub_1", "status": "active"}
+
+
+def test_as_dict_still_accepts_a_plain_dict():
+    """Belt and braces: the helper must not break if given something that is
+    already a mapping."""
+    assert stripe_client._as_dict({"a": 1}) == {"a": 1}

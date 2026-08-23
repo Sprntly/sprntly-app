@@ -248,6 +248,23 @@ def create_portal_session(*, customer_id: str, return_url: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _as_dict(obj: Any) -> dict[str, Any]:
+    """A Stripe SDK object as a plain nested dict.
+
+    `dict(obj)` LOOKS right and raises TypeError: a StripeObject is not a
+    Mapping, it only mimics subscript access. That mistake shipped once already
+    and cost every webhook delivery — verification appeared to fail with
+    "TypeError" while the signature was perfectly valid, because the exception
+    came from the line AFTER the check.
+
+    `to_dict()` converts nested objects to plain dicts too, so the handlers can
+    use ordinary `.get()` chains all the way down. It is the only supported
+    public converter in stripe 15.x — `to_dict_recursive` is private there.
+    """
+    to_dict = getattr(obj, "to_dict", None)
+    return to_dict() if callable(to_dict) else dict(obj)
+
+
 def get_subscription(subscription_id: str) -> dict[str, Any]:
     """Fetch a subscription's CURRENT state.
 
@@ -257,7 +274,7 @@ def get_subscription(subscription_id: str) -> dict[str, Any]:
     removes the entire class of ordering bugs — cheaper than reasoning about
     event timestamps.
     """
-    return dict(_stripe().Subscription.retrieve(subscription_id))
+    return _as_dict(_stripe().Subscription.retrieve(subscription_id))
 
 
 def refund_latest_payment(*, subscription_id: str, reason: str = "requested_by_customer") -> str:
@@ -269,12 +286,12 @@ def refund_latest_payment(*, subscription_id: str, reason: str = "requested_by_c
     service.
     """
     stripe = _stripe()
-    sub = stripe.Subscription.retrieve(subscription_id)
+    sub = _as_dict(stripe.Subscription.retrieve(subscription_id))
     invoice_id = sub.get("latest_invoice")
     if not invoice_id:
         raise RuntimeError(f"subscription {subscription_id} has no invoice to refund")
 
-    invoice = stripe.Invoice.retrieve(invoice_id)
+    invoice = _as_dict(stripe.Invoice.retrieve(invoice_id))
     payment_intent = invoice.get("payment_intent")
     if not payment_intent:
         raise RuntimeError(f"invoice {invoice_id} has no payment to refund")
@@ -291,7 +308,7 @@ def refund_latest_payment(*, subscription_id: str, reason: str = "requested_by_c
 def cancel_subscription(subscription_id: str) -> dict[str, Any]:
     """Cancel immediately. Used by the staff refund flow, which refunds the
     money and therefore must also stop the service."""
-    return dict(_stripe().Subscription.delete(subscription_id))
+    return _as_dict(_stripe().Subscription.delete(subscription_id))
 
 
 # ---------------------------------------------------------------------------
@@ -318,4 +335,4 @@ def verify_webhook(payload: bytes, signature: str | None) -> dict[str, Any]:
     # Verifies the HMAC with a timing-safe compare AND enforces a timestamp
     # tolerance, which is what stops a captured payload being replayed later.
     event = stripe.Webhook.construct_event(payload, signature, secret)
-    return dict(event)
+    return _as_dict(event)
