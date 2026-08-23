@@ -66,6 +66,49 @@ const SELF_SERVE = [
   },
 ]
 
+/** Plans sold by conversation rather than by checkout.
+ *
+ *  Team is ANNUAL-ONLY. $20,000/yr is not a monthly product, and putting it
+ *  beside $59 and $99 monthly prices invites a comparison that makes no sense
+ *  — so it appears only once the reader has switched to annual and is already
+ *  thinking in yearly figures. Enterprise has no interval at all and is always
+ *  shown.
+ *
+ *  Neither has a checkout button: `plans.SELF_SERVE_PLANS` excludes both and
+ *  the backend rejects a checkout naming either, so a button here would be a
+ *  400 waiting to happen. */
+const CONTACT_PLANS: {
+  id: string
+  label: string
+  price: string
+  per?: string
+  blurb: string
+  credits: string
+  annualOnly?: boolean
+}[] = [
+  {
+    id: "team",
+    label: "Team",
+    price: "$20,000",
+    per: "/yr",
+    blurb: "For a whole product org sharing one pool of credits.",
+    credits: "15,000 credits/mo, pooled",
+    annualOnly: true,
+  },
+  {
+    id: "enterprise",
+    label: "Enterprise",
+    price: "Custom",
+    blurb: "Custom volume, SSO, security review, and a contract.",
+    credits: "Credits to fit your usage",
+  },
+]
+
+/** The contact plans visible at a given interval. */
+export function contactPlansFor(interval: BillingInterval) {
+  return CONTACT_PLANS.filter((p) => !p.annualOnly || interval === "annual")
+}
+
 /** Human labels for the backend's feature slugs. An unknown slug falls through
  *  de-slugified rather than being dropped, so a newly priced surface reads
  *  sensibly before anyone updates this map. */
@@ -468,19 +511,30 @@ export function BillingSettingsView(p: BillingView) {
             )
           })}
 
-          <div className="bill-plan bill-plan-contact">
-            <h4 className="bill-plan-name">Team &amp; Enterprise</h4>
-            <div className="bill-plan-price">
-              <span className="amt">Custom</span>
+          {contactPlansFor(p.interval).map((plan) => (
+            <div
+              key={plan.id}
+              className={`bill-plan bill-plan-contact${
+                d.plan === plan.id ? " current" : ""
+              }`}
+            >
+              <h4 className="bill-plan-name">{plan.label}</h4>
+              <div className="bill-plan-price">
+                <span className="amt">{plan.price}</span>
+                {plan.per && <span className="per">{plan.per}</span>}
+              </div>
+              <p className="bill-plan-blurb">{plan.blurb}</p>
+              <p className="bill-plan-credits">{plan.credits}</p>
+              <a
+                className="btn btn-secondary"
+                href={`mailto:sales@sprntly.ai?subject=${encodeURIComponent(
+                  `${plan.label} plan enquiry`,
+                )}`}
+              >
+                {d.plan === plan.id ? "Contact us" : "Talk to sales"}
+              </a>
             </div>
-            <p className="bill-plan-blurb">
-              Pooled credits across your whole team, SSO, and a contract.
-            </p>
-            <p className="bill-plan-credits">15,000+ credits/mo, pooled</p>
-            <a className="btn btn-secondary" href="mailto:sales@sprntly.ai">
-              Talk to sales
-            </a>
-          </div>
+          ))}
         </div>
 
         {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}

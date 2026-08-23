@@ -65,6 +65,7 @@ import {
   entryLabel,
   featureLabel,
   billingTabs,
+  contactPlansFor,
   referralLink,
   refundWindowRemaining,
   resolveBillingTab,
@@ -240,10 +241,39 @@ describe("BillingSettings — plans", () => {
     expect(screen.getByText("$990")).toBeTruthy()
   })
 
-  it("routes Team and Enterprise to sales rather than checkout", () => {
+  it("routes the contact plans to sales rather than checkout", () => {
+    // Neither is in SELF_SERVE_PLANS and the backend rejects a checkout naming
+    // either, so a Choose button here would be a 400 waiting to happen.
     view({ tab: "plans" })
     const link = screen.getByRole("link", { name: /talk to sales/i })
-    expect(link.getAttribute("href")).toBe("mailto:sales@sprntly.ai")
+    expect(link.getAttribute("href")).toContain("mailto:sales@sprntly.ai")
+  })
+
+  it("hides Team on monthly — $20,000/yr is not a monthly product", () => {
+    view({ tab: "plans", interval: "monthly" })
+    expect(screen.queryByRole("heading", { name: "Team" })).toBeNull()
+    // Enterprise has no interval, so it is always there.
+    expect(screen.getByRole("heading", { name: "Enterprise" })).toBeTruthy()
+  })
+
+  it("shows Team with its real price once you switch to annual", () => {
+    view({ tab: "plans", interval: "annual" })
+    expect(screen.getByRole("heading", { name: "Team" })).toBeTruthy()
+    expect(screen.getByText("$20,000")).toBeTruthy()
+    expect(screen.getByText(/15,000 credits\/mo, pooled/)).toBeTruthy()
+  })
+
+  it("contactPlansFor is the single rule for that", () => {
+    expect(contactPlansFor("monthly").map((c) => c.id)).toEqual(["enterprise"])
+    expect(contactPlansFor("annual").map((c) => c.id)).toEqual([
+      "team",
+      "enterprise",
+    ])
+  })
+
+  it("marks a company already on Team without offering to sell it again", () => {
+    view({ tab: "plans", interval: "annual" }, { plan: "team" })
+    expect(screen.getByRole("link", { name: /contact us/i })).toBeTruthy()
   })
 })
 
