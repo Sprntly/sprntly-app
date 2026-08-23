@@ -254,6 +254,20 @@ def _tool_msg(payload=None):
     )
 
 
+def _system_text(system) -> str:
+    """What the model actually reads, whether `system` is a str or a block list.
+
+    `call_with_web_search` sends TWO system blocks so the stable method text can
+    carry a cache breakpoint (app.llm — the module and the caller's layer move
+    per pass, the SKILL.md does not). Both shapes are legitimate, so tests that
+    care about prompt CONTENT flatten first; the tests that care about the split
+    itself assert on the blocks directly.
+    """
+    if isinstance(system, str):
+        return system
+    return "".join(b["text"] for b in system)
+
+
 def _capture_client(captured: dict):
     """A fake Anthropic client that records the kwargs of messages.create AND
     messages.stream (call_with_web_search streams on the long timeout).
@@ -584,8 +598,10 @@ def test_market_research_binds_the_public_feedback_method(isolated_settings, mon
     # it. Pinned explicitly because the change is silent: vendoring a skill
     # re-methods every call site that names it, including ones that are not
     # the report engine it was written for.
-    assert "## METHOD (skill: public-feedback-report" in captured["system"]
-    assert captured["system"]
+    assert "## METHOD (skill: public-feedback-report" in _system_text(captured["system"])
+    # The method is its own cache-controlled block; the caller's layer is not.
+    assert captured["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in captured["system"][1]
 
 
 def test_competitor_research_binds_the_cir_method(isolated_settings, monkeypatch):
@@ -611,8 +627,10 @@ def test_competitor_research_binds_the_cir_method(isolated_settings, monkeypatch
     # tolerates an unknown module; `graph.gateway._build_method_prefix` raises
     # KeyError for one. Pinned here so a future move of these calls onto the
     # gateway fails loudly in a test rather than at runtime.
-    assert "## METHOD (skill: competitive-intelligence-review" in captured["system"]
-    assert captured["system"]
+    assert "## METHOD (skill: competitive-intelligence-review" in _system_text(captured["system"])
+    # The method is its own cache-controlled block; the caller's layer is not.
+    assert captured["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in captured["system"][1]
 
 
 # ---------- ported scoring ----------

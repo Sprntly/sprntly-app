@@ -22,6 +22,7 @@ import re
 import threading
 import time as _time
 from functools import lru_cache
+from typing import Any
 
 import anthropic
 from anthropic import Anthropic
@@ -840,8 +841,12 @@ def call_with_web_search(
     When `skill` is set, the bound skill's method text (and the named
     `skill_module`, if any) is PREPENDED to the system prompt under a
     "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
-    prompt stays as the agent-specific layer after it. The web-search path has
-    no cacheable-prefix mechanism, so the method rides the system prompt here.
+    prompt stays as the agent-specific layer after it. On this path the method
+    rides the SYSTEM prompt rather than the user-message prefix
+    `_build_base_kwargs` uses, and it carries its own cache breakpoint --
+    the method block is sent as its own cache-controlled system block, with the
+    module and the caller's system layer in a second, uncached block after it
+    (see the comment at the split for why the boundary is where it is).
 
     TOLERANT of a `skill` that names no vendored directory, for the same reason
     `graph.gateway._build_method_prefix` is: every research pass on this path
@@ -862,6 +867,10 @@ def call_with_web_search(
     accumulated final Message keeps `_capture_meta` and content extraction
     unchanged.
     """
+    # `system_param` is what actually goes on the wire: a plain string for the
+    # method-less callers (byte-identical to before), or a TWO-BLOCK list that
+    # puts a cache breakpoint after the stable method text. See below.
+    system_param: Any = system
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
         from app.skills.loader import UnknownSkillError, get_skill
@@ -872,18 +881,55 @@ def call_with_web_search(
             spec = None  # not vendored -> run method-less; see the docstring
         if spec is not None:
             method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
+            # Everything AFTER the stable method: the optional module, then the
+            # caller's own system layer. Kept in exactly the order the single
+            # concatenated string used to have, so the model reads the same
+            # prompt it always did.
+            tail = ""
             if skill_module:
                 module_text = spec.modules[skill_module]
-                method += f"\n\n### MODULE: {skill_module}\n{module_text}"
-            system = f"{method}\n{system}"
+                tail += f"\n\n### MODULE: {skill_module}\n{module_text}"
+            tail += f"\n{system}"
+            # WHY THE SPLIT. This path used to send one concatenated string with
+            # no `cache_control` at all -- the docstring's "no cacheable-prefix
+            # mechanism". The whole string is unusable as a cache key because two
+            # of its three parts move on EVERY call: `skill_module` and the
+            # caller's `system` (competitive_intel appends a per-pass
+            # "### THIS PASS" focus). The skill's own SKILL.md does not move --
+            # it is byte-stable across every pass of a run, across runs, and
+            # across tenants -- so the breakpoint goes right after it.
+            #
+            # Anthropic renders the prefix as tools -> system -> messages, so a
+            # breakpoint here also caches the tool definition ahead of it (the
+            # web_search block is ~2.2k tokens on its own, and `max_searches` is
+            # read once per run, so it is stable for the run too).
+            #
+            # Guarded on `_is_cacheable` for the same reason `_build_base_kwargs`
+            # is: a block under the model's minimum cacheable prefix silently
+            # produces no cache entry while still burning one of the four
+            # breakpoints a request is allowed.
+            if _is_cacheable(method, model):
+                system_param = [
+                    {"type": "text", "text": method,
+                     "cache_control": _cache_control(None)},
+                    {"type": "text", "text": tail},
+                ]
+            else:
+                system_param = f"{method}{tail}"
     msg = _create_with_retries(
         get_client(),
         stream=True,
         model=model,
         max_tokens=max_tokens,
-        system=system,
+        system=system_param,
         messages=[{"role": "user", "content": user}],
         tools=[{
+            # DELIBERATELY the 2025 tool. The 20260209 variant adds dynamic
+            # filtering that runs code execution under the hood; measured on a
+            # 4-search competitive-intel-shaped query against sonnet-4-6 it cost
+            # 291,691 input tokens in 319s versus 38,691 in 46s here -- 7.5x the
+            # tokens and 7x the latency. Do not "upgrade" this without re-running
+            # that comparison.
             "type": "web_search_20250305",
             "name": "web_search",
             "max_uses": max_searches,
