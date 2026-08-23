@@ -234,8 +234,11 @@ function signalLineFromInsight(insight: Insight): string {
 }
 
 function findingBodyDesc(insight: Insight): string {
-  const parts = [insight.subtitle?.trim(), insight.recommendation?.trim()].filter(Boolean)
-  let t = parts.join(" ")
+  // The skill's own body (what's happening → what's at stake → what it rests
+  // on) when the backend attached `_card`; subtitle-only for legacy briefs.
+  // `recommendation` is intentionally not appended — see bodyFor() in
+  // brief-v2-adapter.ts for why the brief stopped ending on an imperative.
+  let t = insight._card?.body?.trim() || insight.subtitle?.trim() || ""
   if (!t.trim()) t = insight.headline?.trim() || insight.title
   if (t.length > 560) return `${t.slice(0, 557)}…`
   return t
@@ -243,7 +246,7 @@ function findingBodyDesc(insight: Insight): string {
 
 function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string {
   const m0 = insight.metrics?.[0]
-  if (!m0) return accent === "fix" ? "Impact · scale · effort" : "Opportunity signal"
+  if (!m0) return accent === "fix" ? "Impact · scale · effort" : "Signal · scale · basis"
   const v = String(m0.value).trim()
   const lab = String(m0.label).trim()
   if (accent === "fix") return `${v} ${lab}`.trim()

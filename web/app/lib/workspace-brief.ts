@@ -101,7 +101,9 @@ export function briefPreviewInsight(brief: Brief): {
     [...brief.insights].sort((a, b) => b.confidence - a.confidence)[0]
   return {
     headline: top.headline || top.title,
-    subtitle: top.subtitle || top.recommendation?.slice(0, 160) || "",
+    // Falls back to the skill's card body, not `recommendation` — the preview
+    // teases the finding, never the prescription.
+    subtitle: top.subtitle || top._card?.body?.slice(0, 160) || "",
     tag: top.tag.replace(/_/g, " "),
   }
 }

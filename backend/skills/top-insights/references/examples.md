@@ -37,7 +37,7 @@ Patterns: finding (3 deals lost) + stake (~$1.6M raising the same gap). The figu
 - **Sources:** Billing · Analytics · CRM
 - **CTAs:** View the evidence (primary) · Generate PRD (ghost)
 
-Patterns: every card has a clear bold title — even an opportunity card. The stake is stated as a fact about the present ("is sitting unclaimed"), not a promise about a fix. Accent = growth green (a gain, so a gain color).
+Patterns: every card has a clear bold title — even a growth card. The stake is stated as a fact about the present ("is sitting unclaimed"), not a promise about a fix. Accent = growth green (a gain, so a gain color).
 
 ### Card 4 — Engagement
 
@@ -164,15 +164,15 @@ Why it fails: "It's" has no referent without the title, and the sentence catalog
 
 **2. A card with no clear title (fails "every card has a title").**
 ✗ Opening a card with a sentence of context and a standalone number line, with no bold headline.
-Why it fails: the reader has nothing to scan. Every card — opportunity or problem — gets a bold pain-plus-value title.
+Why it fails: the reader has nothing to scan. Every card — a gain or a problem — gets a bold pain-plus-value title.
 
 **3. Title with pain but no value (fails the title formula).**
 ✗ *Title:* "A rival's new search is already in your lost-deal notes — 3 deals gone this quarter."
 Why it fails: states the finding, never sizes it. Fix: add the stake clause ("— with ~$1.6M in renewals raising the same gap").
 
-**4. Defensive greeting (fails offensive framing).**
-✗ "This week leans defense over offense. About $52M is exposed across reliability, churn, and competitive gaps…"
-Why it fails: frames everything as loss to prevent. Fix: lead with upside to capture ("…roughly $60M is within reach").
+**4. Greeting that sells a payoff (fails report-don't-pitch).**
+✗ "There's real upside on the table this week — roughly $60M within reach."
+Why it fails: "within reach" is a projection about a fix the reader has not agreed to, asserted before a single card has made its case. The greeting reports; the cards argue; the PM decides. Fix: state what surfaced and what it carries ("…five findings stand out this week, carrying roughly $60M between them").
 
 **5. Meta-widgets at the top (fails "the top must tell the story").**
 ✗ A "3 signals agree" tag or a 91%-confidence bar as the most prominent element.
@@ -203,7 +203,7 @@ Why it fails: its source hasn't refreshed since the last brief, so it cannot hol
 Why it fails: the default is a ceiling, not a quota. Two cards is a correct brief. At most one carried item may be promoted, and only when there would otherwise be none.
 
 **12. Cadence-blind greeting (fails cadence framing).**
-✗ "There's real upside on the table this week" at the top of a daily brief.
+✗ "Five findings stand out this week" at the top of a daily brief.
 Why it fails: the framing contradicts the cadence and quietly signals the brief was written once and reused. Daily leads with what moved since yesterday; monthly leads with the month's picture.
 
 **13. Public forum stat presented as your customer base (fails channel discipline).**

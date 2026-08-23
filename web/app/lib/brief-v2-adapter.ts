@@ -235,25 +235,31 @@ function convergenceRows(insight: Insight): BriefV2Convergence[] {
     }))
 }
 
-// Generous safety cap — well above the typical subtitle+recommendation length.
-// Only engaged to avoid pathological strings; the common case renders in full.
+// Generous safety cap — well above the typical card-body length. Only engaged
+// to avoid pathological strings; the common case renders in full.
 const BODY_MAX = 900
 
+/**
+ * The card body, in the top-insights skill's own words.
+ *
+ * The skill composes `_card.body` to a specific three-beat shape — what's
+ * happening → what's at stake → what the finding rests on (SKILL.md step 8) —
+ * and deliberately ends on the evidence basis rather than on a call to act.
+ * That is the body we render.
+ *
+ * We used to discard it and rebuild the body as `subtitle + recommendation`,
+ * which ended every card on an imperative ("Ship one MCP integration…") and
+ * made the brief read as a pitch instead of a finding. `recommendation` is not
+ * dropped from the payload — it still seeds the PRD goal in AIBar — it just no
+ * longer speaks in the brief.
+ *
+ * Legacy briefs (composed before `_card`) have no skill body; they fall back to
+ * `subtitle`, then `headline`/`title`. The fallback stays subtitle-ONLY so an
+ * old brief loses the prescription too rather than rendering both voices.
+ */
 function bodyFor(insight: Insight): string {
-  const subtitle = insight.subtitle?.trim() || ""
-  const recommendation = insight.recommendation?.trim() || ""
-
-  let t: string
-  if (subtitle && recommendation) {
-    // Clean join: if the subtitle already closes a sentence, a space reads fine;
-    // otherwise use an em-dash so a metrics teaser flows into an imperative
-    // ("…$15k deal stalled — Ship the two…") instead of a bare-space run-on.
-    const endsSentence = /[.!?…:]$/.test(subtitle)
-    const sep = endsSentence ? " " : " — "
-    t = `${subtitle}${sep}${recommendation}`
-  } else {
-    t = subtitle || recommendation
-  }
+  const skillBody = insight._card?.body?.trim() || ""
+  let t = skillBody || insight.subtitle?.trim() || ""
 
   if (!t.trim()) t = insight.headline?.trim() || insight.title
 
@@ -278,7 +284,7 @@ function bodyFor(insight: Insight): string {
 
 function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string {
   const m0 = insight.metrics?.[0]
-  if (!m0) return accent === "fix" ? "Impact · scale · effort" : "Opportunity signal"
+  if (!m0) return accent === "fix" ? "Impact · scale · effort" : "Signal · scale · basis"
   const v = String(m0.value).trim()
   const lab = String(m0.label).trim()
   if (accent === "fix") return `${v} ${lab}`.trim()

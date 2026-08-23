@@ -233,13 +233,13 @@ priority = 0.32·impact_norm + 0.20·confidence + 0.18·urgency + 0.12·reach_no
 
 ### 7. Write the greeting
 
-Address the recipient by name. Lead with the work done and the upside on the table, roll up the totals, name the top plays. Frame it as money to go capture, not fires to put out. **The time framing must match the cadence** — never say "this week" in a daily brief.
+Address the recipient by name. Say what you looked across, name what surfaced, and roll up the totals. **The greeting is the same posture as the cards: it reports what you found, it does not pitch a payoff.** Sum what is at stake or unresolved — the scale of the findings — never "money to go capture," "upside on the table," or "within reach." Those phrase a projection about a fix the reader has not agreed to yet, at the top of the page, before a single card has made its case. **The time framing must match the cadence** — never say "this week" in a daily brief.
 
 - *Daily* — what moved since yesterday: "Good morning, David — two things moved overnight. The larger one is a checkout failure now costing about **$2.2M a year**."
-- *Weekly* — the week's upside: "Good day, David — I've scouted everything across your tools, and there's real upside on the table this week: roughly **$60M within reach**. The clearest signals are a gap a competitor just opened, **$8.4M** sitting with accounts that have outgrown their plan, and friction costing your highest-spend users. Five ranked below; the top three carry the most."
+- *Weekly* — what the week's evidence surfaced: "Good day, David — I've been through everything across your tools, and five findings stand out this week, carrying roughly **$60M** between them. The sharpest three: a gap a competitor just opened, **$8.4M** sitting with accounts that have outgrown their plan, and friction on your highest-spend users. Five ranked below; the top three carry the most."
 - *Monthly* — the month's picture, with the competitive report as an anchor.
 
-Maximum three lines. Totals must equal the sum of figures in the cards. On a quiet cycle, say so plainly and keep it to one line: "Quiet day, David — nothing new crossed the line since yesterday." Never manufacture urgency.
+Maximum three lines. Totals must equal the sum of figures in the cards, and the total is described as what the findings *carry* or what is *at stake*, not as what acting would return. On a quiet cycle, say so plainly and keep it to one line: "Quiet day, David — nothing new crossed the line since yesterday." Never manufacture urgency, and never manufacture optimism either.
 
 ### 8. Write each card
 
