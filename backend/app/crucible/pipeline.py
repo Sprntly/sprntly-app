@@ -266,6 +266,9 @@ def build_findings(
     drops: defaultdict[str, int] = defaultdict(int)
     for _code in NARRATED_DROPS:
         drops[_code] = 0
+    #: Ungroupable CLUSTERS, as distinct from the ungroupable CLAIMS in
+    #: `drops`. The theme count is `clusters - this`.
+    ungroupable_groups = 0
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)
@@ -280,6 +283,13 @@ def build_findings(
             # rejection under it and makes the considered list unreadable.
             ungroupable.extend(ids)
             drops["ungroupable"] += len(ids)
+            # COUNTED SEPARATELY FROM THE CLAIMS, because the theme count is
+            # derived by subtracting it and the two are only equal by an
+            # assumption: `_cluster` lowercases its key, so two claim ids
+            # differing only in case would share one ungroupable cluster and
+            # the subtraction would quietly under-report. Counting the groups
+            # themselves removes the assumption instead of relying on it.
+            ungroupable_groups += 1
             continue
 
         if len(group) < MIN_CLAIMS_PER_FINDING:
@@ -407,6 +417,11 @@ def build_findings(
             # distinguishes "this rule dropped nothing" from "this rule did not
             # run", and a missing key cannot carry that difference.
             "dropped": dict(drops),
+            # `clusters` counts one pseudo-group per ungroupable claim, so a
+            # reader's "themes" is `clusters - ungroupable_groups`. Published
+            # rather than derived at the call site, so the subtraction cannot
+            # drift from how the clustering actually keyed.
+            "ungroupable_groups": ungroupable_groups,
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },

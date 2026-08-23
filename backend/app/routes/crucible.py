@@ -862,11 +862,14 @@ def execute_run(
         # directly above "2,410 claims never grouped at all" — one screen
         # asserting both. `themes` is what a reader means by a theme, and
         # `groups == themes + ungroupable` keeps the funnel checkable.
-        ungroupable_claims = (result.stats.get("dropped") or {}).get("ungroupable", 0)
+        # THE GROUP COUNT, not the claim count. They are equal in practice but
+        # only by an assumption about how `_cluster` keys ungroupable claims,
+        # and the theme count must not rest on it.
+        ungroupable_groups = result.stats.get("ungroupable_groups") or 0
         _progress(
             run_id, company_id, step="done",
             groups=total_groups,
-            themes=total_groups - ungroupable_claims,
+            themes=total_groups - ungroupable_groups,
             findings=len(result.findings),
             conflicts=result.stats.get("conflicts") or 0,
             deep=result.deep_count,

@@ -17,6 +17,7 @@ import pytest
 from app.crucible.pipeline import (
     ECHO_WINDOW,
     MIN_CLAIMS_PER_FINDING,
+    NARRATED_DROPS,
     build_findings,
 )
 from app.crucible.types import Claim, PopulationFilter
@@ -436,3 +437,56 @@ def test_conflicts_are_counted_for_the_funnel():
     assert out.stats["conflicts"] == sum(
         1 for f in out.findings if f.adjudication == "conflict"
     )
+
+
+def test_ungroupable_groups_is_counted_not_assumed():
+    """The theme count is `clusters - ungroupable_groups`, so that number has
+    to be measured rather than inferred from the ungroupable CLAIM count.
+
+    `_cluster` lowercases its key, so two claim ids differing only in case
+    share one cluster — the two counts would then disagree and a derived
+    subtraction would silently under-report the themes."""
+    # Two claims, no embedding => each gets its own ungroupable cluster.
+    from app.crucible.cluster import UNGROUPABLE_PREFIX
+    from dataclasses import replace
+
+    a = replace(claim("u1"), subject_cluster_id=f"{UNGROUPABLE_PREFIX}u1")
+    b = replace(claim("u2"), subject_cluster_id=f"{UNGROUPABLE_PREFIX}u2")
+    # A real theme alongside them, so `clusters` is not purely ungroupable.
+    c1 = claim("g1", subject="exports", accounts=("Northwind",))
+    c2 = claim("g2", subject="exports", accounts=("Initech",), days_ago=40)
+
+    out = run([a, b, c1, c2])
+    assert out.stats["dropped"]["ungroupable"] == 2      # claims
+    assert out.stats["ungroupable_groups"] == 2          # groups
+    # The identity the panel's headline rests on.
+    themes = out.stats["clusters"] - out.stats["ungroupable_groups"]
+    group_drops = sum(
+        out.stats["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    assert themes == len(out.findings) + group_drops
+
+
+def test_two_claims_sharing_one_ungroupable_cluster_do_not_break_the_theme_count():
+    """The case the derived subtraction got wrong: one cluster, two claims.
+    `ungroupable` counts 2 and `ungroupable_groups` counts 1, and only the
+    latter keeps `themes` correct."""
+    from app.crucible.cluster import UNGROUPABLE_PREFIX
+    from dataclasses import replace
+
+    shared = f"{UNGROUPABLE_PREFIX}same"
+    a = replace(claim("s1"), subject_cluster_id=shared)
+    b = replace(claim("s2"), subject_cluster_id=shared)
+    c1 = claim("g1", subject="exports", accounts=("Northwind",))
+    c2 = claim("g2", subject="exports", accounts=("Initech",), days_ago=40)
+
+    out = run([a, b, c1, c2])
+    assert out.stats["dropped"]["ungroupable"] == 2, "claims"
+    assert out.stats["ungroupable_groups"] == 1, "groups — the whole point"
+    themes = out.stats["clusters"] - out.stats["ungroupable_groups"]
+    group_drops = sum(
+        out.stats["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    assert themes == len(out.findings) + group_drops
+    # And the old, derived arithmetic would have been wrong here.
+    assert out.stats["clusters"] - out.stats["dropped"]["ungroupable"] != themes
