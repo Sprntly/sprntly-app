@@ -281,6 +281,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       waitResumed,
       partial: turn.partial,
       streamDropped: turn.streamDropped,
+      livePhase: turn.livePhase,
       error: turn.error,
       onAskAgain: () => handleAskAgain(turn),
       stopped: turn.stopped,

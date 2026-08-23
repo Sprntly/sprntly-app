@@ -36,6 +36,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { SprntlyThinkingMark } from "./SprntlyMark"
+import { GROUNDED_PROGRESS_ENABLED } from "../../lib/friendlyPhase"
 
 // ── Copy ────────────────────────────────────────────────────────────────────
 export const WAIT_PHASE_WORKING = "Working on your question"
@@ -73,6 +74,41 @@ function shuffledCycle(): string[] {
     ;[rest[i], rest[j]] = [rest[j], rest[i]]
   }
   return [opener, ...rest]
+}
+
+// ── Grounded progress (flagged) ─────────────────────────────────────────────
+// GROUNDED_PROGRESS_ENABLED is the build-time flag, OFF by default (imported from
+// lib/friendlyPhase so the ask runner and this component share one source). OFF
+// is byte-identical to the whimsy cycle above.
+//
+// ON, the wait line is driven by, in order of preference:
+//   1. a fixed real signal (streaming / dropped / resumed / caller phase),
+//   2. `livePhase` — the REAL backend pipeline-leg phase event, curated to
+//      user-facing copy (e.g. "Looking through your connected sources…"),
+//   3. the TIME-BASED grounded beats below, the fallback for the ~6.5s planner
+//      preamble which emits no event at all.
+// So a real signal always wins over the timed beat once one has arrived.
+
+/** The time-based fallback beats, timed to the measured pipeline: an ask spends
+ *  ~6.5s in the planner preamble (one Sonnet call that classifies the question
+ *  and picks the approach) BEFORE any phase event fires, so these narrate that
+ *  window. Past ~12s with still no real phase, it settles on the claim-free
+ *  generic line rather than falsely holding "Pulling in your data…" for a
+ *  minute. None of these claims a step that isn't happening; the boundary times
+ *  are the honest soft part — the known AVERAGE, not a per-request event. */
+const GROUNDED_PROGRESS_STAGES: readonly { untilMs: number; label: string }[] = [
+  { untilMs: 3000, label: "Understanding your question…" },
+  { untilMs: 6500, label: "Planning the best approach…" },
+  { untilMs: 12000, label: "Pulling in your data…" },
+  { untilMs: Number.POSITIVE_INFINITY, label: "Working on your answer…" },
+]
+
+/** The grounded beat for `elapsedMs` — the first stage whose window it's in. */
+function groundedStageLabel(elapsedMs: number): string {
+  for (const stage of GROUNDED_PROGRESS_STAGES) {
+    if (elapsedMs < stage.untilMs) return stage.label
+  }
+  return GROUNDED_PROGRESS_STAGES[GROUNDED_PROGRESS_STAGES.length - 1].label
 }
 
 export const WAIT_NOTE_GENERIC = "This one usually takes under a minute."
@@ -206,6 +242,11 @@ type Props = {
   streamDropped?: boolean
   /** Rung 6 — this ask was re-attached rather than POSTed. */
   resumed?: boolean
+  /** The real backend pipeline-leg phase, ALREADY curated to user-facing copy
+   *  ("Looking through your connected sources…"). Consulted ONLY when the
+   *  grounded-progress flag is on, where it outranks the time-based beat but not
+   *  a fixed signal (streaming/dropped/resumed/phase). Ignored flag-off. */
+  livePhase?: string
   /** Deterministic slash-pinned skill label, e.g. "Competitive intelligence
    *  report". Never a guess: only set when the draft began with a known trigger. */
   skillLabel?: string | null
@@ -225,6 +266,7 @@ export function AssistantWaitState({
   streaming,
   streamDropped,
   resumed,
+  livePhase,
   skillLabel,
   longSkill,
   onStop,
@@ -264,14 +306,29 @@ export function AssistantWaitState({
           : null
   const [cyclePool] = useState(shuffledCycle)
   const [cycleIdx, setCycleIdx] = useState(0)
-  const targetPhrase = fixedPhrase ?? cyclePool[cycleIdx % cyclePool.length]
+  // Flag ON: the wait line is a REAL curated phase (`livePhase`) the moment one
+  // has arrived, else a grounded, time-driven beat — either way replacing the
+  // whimsy cycle until a fixed signal (streaming) takes over. `now` ticks every
+  // second, so the timed beat advances at the stage boundaries on its own — no
+  // self-advancing cycle. Flag OFF: `groundedLabel` is null and everything below
+  // is byte-identical to the shuffled cycle.
+  const groundedLabel = GROUNDED_PROGRESS_ENABLED
+    ? (livePhase ?? groundedStageLabel(Math.max(0, now - start)))
+    : null
+  const targetPhrase =
+    fixedPhrase ?? groundedLabel ?? cyclePool[cycleIdx % cyclePool.length]
+  // The typewriter only self-advances for the whimsy cycle; the grounded beat is
+  // clocked by `now`, and a fixed phrase never advances.
+  const cycleActive = fixedPhrase === null && groundedLabel === null
   const { typed, settled } = useTypedPhrase(
     targetPhrase,
-    fixedPhrase === null,
+    cycleActive,
     () => setCycleIdx((i) => i + 1),
   )
-  // What the live region (and the tests) read: the STATE, not the animation.
-  const srLine = fixedPhrase ?? WAIT_PHASE_WORKING
+  // What the live region (and the tests) read: the STATE, not the animation. The
+  // grounded beat IS a state change worth announcing (real progress), so it is
+  // the announced line when the flag is on.
+  const srLine = fixedPhrase ?? groundedLabel ?? WAIT_PHASE_WORKING
 
   const elapsed = Math.max(0, now - start)
 

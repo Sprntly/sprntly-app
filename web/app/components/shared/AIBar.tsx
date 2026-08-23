@@ -9,6 +9,7 @@ import { prototypePath } from "../../lib/routes"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, briefApi, chatIntentApi, prdApi, type AskResponse } from "../../lib/api"
 import { runAskGeneration } from "../../lib/runAskGeneration"
+import { GROUNDED_PROGRESS_ENABLED } from "../../lib/friendlyPhase"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { runPrdGenerationFromTask } from "../../lib/runPrdGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
@@ -47,6 +48,10 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wasPanelCollapsed = useRef(aiPanelCollapsed)
   const [submitting, setSubmitting] = useState(false)
+  // Grounded progress (flag-gated): the curated pipeline-leg label to show in
+  // place of the generic "thinking…" status while an ask generates. Null flag-off
+  // or before any phase arrives — the status then reads "thinking…" as before.
+  const [askLivePhase, setAskLivePhase] = useState<string | null>(null)
   const [lastReply, setLastReply] = useState<AskResponse | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
   const [lastSubmittedQuestion, setLastSubmittedQuestion] = useState<string | null>(null)
@@ -376,6 +381,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     setAskError(null)
     setLastReply(null)
     setAgentAction(null)
+    setAskLivePhase(null)
     setLastSubmittedQuestion(q)
     try {
       // Fire-and-forget + visibility-aware poll (blur/remount-safe): the answer
@@ -384,7 +390,13 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
         typeof crypto !== "undefined" && crypto.randomUUID
           ? crypto.randomUUID()
           : `aibar-${Date.now()}`
-      const res = await runAskGeneration(q, activeCompany, scopeId)
+      // Minimal grounded-progress wire (flag-gated): curated pipeline-leg labels
+      // drive the status text. No live token preview here — AIBar awaits the
+      // final reply — so only the phase seam is passed. Flag-off keeps the call
+      // BYTE-IDENTICAL (exactly the original three args, no opts object).
+      const res = GROUNDED_PROGRESS_ENABLED
+        ? await runAskGeneration(q, activeCompany, scopeId, { onPhase: (label) => setAskLivePhase(label) })
+        : await runAskGeneration(q, activeCompany, scopeId)
       setLastReply(res)
       setAIBarValue("")
       const ta = textareaRef.current
@@ -432,6 +444,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       showToast("Ask failed", msg.slice(0, 120))
     } finally {
       setSubmitting(false)
+      setAskLivePhase(null)
     }
   }, [
     activeCompany,
@@ -496,7 +509,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                     <IconSparkle size={14} />
                     <span>{AGENT_NAME}</span>
                     <span className="ai-bar-agent-badge">PM AGENT</span>
-                    <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
+                    <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : (askLivePhase ?? "thinking…")}</span>
                   </div>
                   <AssistantThinkingSkeleton compact />
                 </div>
@@ -672,7 +685,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                         <IconSparkle size={14} />
                         <span>{AGENT_NAME}</span>
                         <span className="ai-bar-agent-badge">PM AGENT</span>
-                        <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : "thinking…"}</span>
+                        <span className="ai-bar-agent-status">{agentWorking ? "generating PRD…" : (askLivePhase ?? "thinking…")}</span>
                       </div>
                       <AssistantThinkingSkeleton compact />
                     </div>
