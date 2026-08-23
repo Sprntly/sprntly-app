@@ -369,3 +369,35 @@ describe("the error is visible without destroying the panel", () => {
     await waitFor(() => expect(screen.getByTestId("goal-running")).toBeTruthy())
   })
 })
+
+describe("the running view narrates instead of spinning", () => {
+  it("renders the funnel once the run has published one", async () => {
+    get.mockResolvedValue({
+      ...RUN,
+      status: "running",
+      prioritisation: {
+        progress: {
+          step: "done", claims: 2410, sources: 4, groups: 1744,
+          findings: 168, conflicts: 3, deep: 5,
+          dropped: { anecdote: 1576, echo: 9, single_account: 0,
+                     no_authority: 0, uncausal: 0, ungroupable: 0 },
+        },
+      },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-narration")
+    expect(screen.getByTestId("goal-running").textContent).toContain("1,576")
+  })
+
+  it("falls back to the old line when there is no funnel yet", async () => {
+    // A run that has only just started, and EVERY run that finished before
+    // narration shipped. The fallback is the honest shape — a funnel of
+    // zeroes would state that this run dropped nothing.
+    get.mockResolvedValue({ ...RUN, status: "running", claim_count: 42,
+                            prioritisation: {} })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    expect(screen.queryByTestId("goal-narration")).toBeNull()
+    expect(screen.getByTestId("goal-running").textContent).toContain("42")
+  })
+})

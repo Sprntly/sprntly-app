@@ -696,6 +696,30 @@ export type GoalRunPlan = {
   hypotheses?: string[]
 }
 
+/** What the run has decided so far, written as it goes.
+ *
+ *  EVERY FIELD OPTIONAL, and the reason is not defensiveness. A run publishes
+ *  this in three writes, so a poll can land between any two of them; and runs
+ *  that finished before this shipped have no `progress` at all. The panel
+ *  renders whatever is present and says nothing about what is not. */
+export type GoalRunProgress = {
+  step?: "grouping" | "analysing" | "done"
+  signals_read?: number
+  claims?: number
+  sources?: number
+  themed?: number
+  unthemed?: number
+  groups?: number
+  findings?: number
+  conflicts?: number
+  deep?: number
+  /** Per rule, every key present even at zero. */
+  dropped?: Record<string, number>
+  /** TRUE means the echo rule never ran, which is NOT the same as dropping
+   *  nothing — the panel must say so rather than render a zero. */
+  echo_check_skipped?: boolean
+}
+
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
@@ -710,6 +734,7 @@ export type GoalRunDetail = GoalRun & {
     proposed_source?: string | null
     conflicts?: unknown[]
     plan?: GoalRunPlan
+    progress?: GoalRunProgress
   }
 }
 

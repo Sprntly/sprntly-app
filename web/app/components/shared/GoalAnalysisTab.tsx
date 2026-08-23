@@ -40,6 +40,7 @@ import {
 } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
+import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
@@ -411,13 +412,23 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   }
 
   if (run.status !== "ready") {
+    // THE RUN NARRATES ITSELF WHERE IT CAN. `progress` is written as the run
+    // decides, so this fills in over the minutes rather than sitting on one
+    // sentence. It is absent on a run that has only just started and on every
+    // run that finished before narration shipped, and the old line is the
+    // honest fallback for both — never a funnel of zeroes.
+    const progress = run.prioritisation?.progress
     return (
       <div className="ga" data-testid="goal-running">
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
-        <p className="ga-loading">
-          Reading {run.claim_count || 0} claims…
-        </p>
+        {progress ? (
+          <GoalRunNarration progress={progress} />
+        ) : (
+          <p className="ga-loading">
+            Reading {run.claim_count || 0} claims…
+          </p>
+        )}
       </div>
     )
   }

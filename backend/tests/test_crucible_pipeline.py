@@ -358,3 +358,81 @@ def test_evidence_from_one_document_in_one_window_still_is():
     out = run(claims)
     assert out.findings == ()
     assert "one source document" in out.rejected[0].reason
+
+
+# ── The funnel the running view narrates ─────────────────────────────────────
+#
+# The panel renders `stats["dropped"]` as "N set aside because X". Two ways
+# that number can be a lie, and both are guarded here:
+#
+#   1. Counting `rejected` instead of counting drops. Over MAX_LISTED_REJECTIONS
+#      the ledger collapses into one summary row, so a run that dropped 1,576
+#      anecdotes would narrate 100.
+#   2. Attributing a drop to the wrong rule. `_refute` has THREE kill reasons,
+#      not one, and matching on its prose to tell them apart breaks the first
+#      time someone improves a sentence — hence the codes.
+
+def test_every_drop_reason_is_counted_under_its_own_rule():
+    claims = [
+        # An anecdote: one claim, so it never reaches refutation.
+        claim("lonely", subject="billing"),
+        # Two claims, one account -> the single-account rule.
+        claim("s1", subject="exports", accounts=("Northwind",)),
+        claim("s2", subject="exports", accounts=("Northwind",), days_ago=40),
+        # Two claims, two accounts, neither authoritative -> the authority rule.
+        claim("a1", subject="mobile", accounts=("Initech",), authoritative=False),
+        claim("a2", subject="mobile", accounts=("Globex",), authoritative=False,
+              days_ago=40),
+    ]
+    out = run(claims)
+    dropped = out.stats["dropped"]
+
+    assert dropped["anecdote"] == 1
+    assert dropped["single_account"] == 1
+    assert dropped["no_authority"] == 1
+    # PRESENT AT ZERO, not absent. The panel distinguishes "this rule dropped
+    # nothing" from "this rule did not run", and a missing key cannot carry
+    # that difference.
+    assert dropped["echo"] == 0
+    assert dropped["uncausal"] == 0
+    assert dropped["ungroupable"] == 0
+
+
+def test_the_echo_rule_is_counted_separately_from_the_other_refutations():
+    # One document, one window, two accounts -> echo, NOT single-account.
+    claims = [
+        claim("e1", subject="latency", accounts=("Northwind",), days_ago=1),
+        claim("e2", subject="latency", accounts=("Initech",), days_ago=2),
+    ]
+    out = run(claims)
+    assert out.stats["dropped"]["echo"] == 1
+    assert out.stats["dropped"]["single_account"] == 0
+
+
+def test_the_funnel_counts_real_drops_not_the_truncated_ledger():
+    """The bug this exists to stop: narrating the ledger's length.
+
+    Over `MAX_LISTED_REJECTIONS` the ledger collapses to a summary row, so
+    `len(rejected)` stops being the number of things that were dropped. The
+    funnel has to be the truth, not the excerpt."""
+    from app.crucible.pipeline import MAX_LISTED_REJECTIONS
+
+    n = MAX_LISTED_REJECTIONS + 40
+    # Each is its own subject, so each is its own one-claim cluster.
+    out = run([claim(f"c{i}", subject=f"subject {i}") for i in range(n)])
+
+    assert out.stats["dropped"]["anecdote"] == n
+    # The ledger DID truncate — otherwise this test proves nothing.
+    assert len(out.rejected) <= MAX_LISTED_REJECTIONS + 1
+    assert out.stats["dropped"]["anecdote"] > len(out.rejected)
+
+
+def test_conflicts_are_counted_for_the_funnel():
+    out = run([
+        claim("c1", subject="pricing", accounts=("Northwind",), direction="up"),
+        claim("c2", subject="pricing", accounts=("Initech",), direction="down",
+              days_ago=40),
+    ])
+    assert out.stats["conflicts"] == sum(
+        1 for f in out.findings if f.adjudication == "conflict"
+    )

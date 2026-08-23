@@ -992,3 +992,128 @@ def test_the_panel_and_the_api_agree_on_the_hypothesis_cap():
         f"the panel refuses at {panel_cap} but the API refuses at {api_cap} — "
         f"whichever is larger produces the unrecoverable 422 this guards"
     )
+
+
+# ─── The run narrates itself ─────────────────────────────────────────────────
+#
+# `running` used to be one state showing "Reading N claims…" for minutes. The
+# funnel is now published as the run decides, and two things can go wrong in
+# ways a reader would feel:
+#
+#   1. CLOBBERING THE PLAN. Progress rides in `prioritisation`, the same blob
+#      that holds Stage 0's ask and the approved plan. A write that replaces
+#      instead of merging erases the record the report has to reprint.
+#   2. NARRATING A CHECK THAT DID NOT RUN. When the corpus is dated by ingest
+#      the echo rule is skipped; publishing "0 dropped" would claim a check
+#      passed that could not see.
+
+def test_a_finished_run_publishes_the_funnel_it_actually_applied(ctx):
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    progress = meta.get("progress")
+    assert progress, "a finished run published no funnel"
+
+    assert progress["step"] == "done"
+    assert progress["claims"] > 0
+    assert progress["sources"] >= 1
+    # Every rule present, even at zero — the panel distinguishes "dropped
+    # nothing" from "did not run", and a missing key cannot carry that.
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    assert set(progress["dropped"]) == set(NARRATED_DROPS)
+    # The funnel has to ADD UP against what the run stored, or it is decoration.
+    findings = ctx.client.get(f"/v1/crucible/{run_id}").json()["findings"]
+    assert progress["findings"] == len(findings)
+
+
+def test_publishing_progress_never_erases_the_approved_plan(ctx):
+    """The blob is shared. `_progress` read-modify-writes for the same reason
+    `_meta_of` exists — a replacing write would lose the plan mid-run, and the
+    report would then be unable to say what it read."""
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"hypotheses": ["onboarding is where they drop off"]},
+    )
+
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    assert meta.get("progress"), "no progress written"
+    assert meta.get("plan"), "the plan was erased by a progress write"
+    assert meta["plan"]["hypotheses"] == ["onboarding is where they drop off"]
+
+
+def test_a_skipped_echo_check_is_published_as_skipped_not_as_zero(ctx):
+    """`valid_at == created_at` means the corpus is dated by when we read it,
+    so the one-conversation rule cannot see and is skipped. Publishing a zero
+    there would state that a check ran and found nothing."""
+    from app.db.client import require_client
+
+    for i in range(4):
+        require_client().table("kg_signal").insert({
+            "id": f"sig-ing-{i}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {"customer": f"Acct{i}"},
+            "provenance": {"doc": "doc-a"},
+            # The ingest clock: identical to created_at, which is what the
+            # detector keys on.
+            "valid_at": "2026-08-19T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+            "embedding": str([0.1 * (i + 1)] * 4),
+        }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    progress = (
+        ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    )
+    assert progress["echo_check_skipped"] is True
+    assert progress["dropped"]["echo"] == 0, (
+        "a skipped check must not also report drops"
+    )
+
+
+def test_a_progress_write_failure_never_fails_a_good_run(ctx, monkeypatch):
+    """Narration is display. A run that produced real findings must not die
+    because a progress write did.
+
+    THE STORE IS BROKEN ONLY FOR PROGRESS, not for every meta write. Patching
+    `_meta_of` wholesale also breaks the plan-record write — which is a
+    different, unguarded path — and the test then passes for the wrong reason
+    while proving nothing about this guard."""
+    import app.routes.crucible as mod
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    real_update = mod.runs_db.update
+
+    def update(run_id, company_id, **fields):
+        meta = fields.get("prioritisation")
+        if isinstance(meta, dict) and "progress" in meta:
+            raise RuntimeError("progress store unavailable")
+        return real_update(run_id, company_id, **fields)
+
+    monkeypatch.setattr(mod.runs_db, "update", update)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready", f"run died on a display write: {row}"
+    # And the guard is what saved it, not a progress write that never happened.
+    assert not row["prioritisation"].get("progress")
+    assert row["prioritisation"].get("plan"), "the plan write was collateral"

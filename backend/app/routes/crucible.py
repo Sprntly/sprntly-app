@@ -756,6 +756,12 @@ def execute_run(
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
+        _progress(
+            run_id, company_id, step="grouping",
+            signals_read=stats.get("seen") or 0,
+            claims=stats.get("projected") or 0,
+            sources=len({r.get("source_type") for r in signals if r.get("source_type")}),
+        )
 
         # GROUPING: the graph's own themes first, embeddings only for whatever
         # it left unthemed.
@@ -793,6 +799,16 @@ def execute_run(
             cluster_stats.update(embed_stats)
 
         runs_db.update(run_id, company_id, claim_count=len(claims))
+        # EXACT COUNTS ONLY. `themed`/`unthemed` are measured; the number of
+        # GROUPS is not known until `build_findings` clusters, so it is not
+        # reported here rather than estimated and silently corrected later — a
+        # narration that revises its own numbers teaches a reader to distrust
+        # all of them.
+        _progress(
+            run_id, company_id, step="analysing",
+            themed=cluster_stats.get("themed") or 0,
+            unthemed=cluster_stats.get("unthemed") or 0,
+        )
 
         if not claims:
             runs_db.fail(run_id, company_id, code="no_evidence",
@@ -805,6 +821,20 @@ def execute_run(
                                 dates_are_ingest_clock=ingest_clock)
         result.stats.update(cluster_stats)
         runs_db.heartbeat(run_id, company_id)
+        # THE FUNNEL, and it outlives the run: the report reprints it, so how a
+        # ranking was narrowed stays answerable after the spinner is gone.
+        _progress(
+            run_id, company_id, step="done",
+            groups=result.stats.get("clusters") or 0,
+            findings=len(result.findings),
+            conflicts=result.stats.get("conflicts") or 0,
+            deep=result.deep_count,
+            dropped=result.stats.get("dropped") or {},
+            # NOT a zero. When the corpus is dated by ingest the echo rule
+            # never ran, and rendering "0 dropped" would claim a check passed
+            # that could not see. The panel reads this and says so.
+            echo_check_skipped=bool(result.stats.get("echo_check_skipped")),
+        )
 
         rows = []
         for rank, (finding, impact, confidence) in enumerate(zip(
@@ -946,6 +976,36 @@ def _meta_of(run_id: int, company_id: str) -> dict:
         except Exception:  # noqa: BLE001
             meta = {}
     return meta if isinstance(meta, dict) else {}
+
+
+def _progress(run_id: int, company_id: str, **fields) -> None:
+    """Publish what the run has decided SO FAR, for the panel to render.
+
+    WHY A RUN NARRATES ITSELF. Until now `running` was one state and the panel
+    showed "Reading N claims…" for minutes, so the first thing a user learned
+    about how the answer was reached was the finished report. But this pipeline
+    is deterministic and every number in its funnel is already computed — the
+    only reason they were invisible is that nothing wrote them down. A reader
+    who watched 1,744 groups become 168 findings knows what the ranking IS; a
+    reader handed 168 findings has to take them on faith.
+
+    RIDES IN `prioritisation`, so this needs no migration. Read-modify-written
+    for the same reason `_meta_of` exists: the blob already holds Stage 0's ask
+    and the approved plan, and replacing it would erase the plan the report has
+    to reprint.
+
+    TOTAL, like its caller. A run that produced real findings must not fail
+    because a progress write did — the narration is display, and display never
+    outranks the answer.
+    """
+    try:
+        meta = dict(_meta_of(run_id, company_id))
+        progress = dict(meta.get("progress") or {})
+        progress.update(fields)
+        meta["progress"] = progress
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — see the docstring; display only.
+        logger.warning("crucible: could not write progress for run %s", run_id)
 
 
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
