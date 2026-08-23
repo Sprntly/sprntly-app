@@ -3,11 +3,13 @@
 // ChatScreen PERSIST-FOLD regression (R2) — what a page reload restores from the
 // sessionStorage snapshot (distinct from the live pending-send overlay).
 //
-//   (a) PRE-ASK-ID window: between the optimistic send and the real awaiting
-//       turn (the multi-second intent-classify gap), the just-sent question
-//       lives ONLY in the transient `pendingSend` overlay. The persist effect
-//       folds it into the SAVED snapshot (marked `interrupted`, id `pending-…`)
-//       so a reload in that window restores the question instead of a blank.
+//   (a) PRE-DISPATCH window: with the classifier still in flight, the just-sent
+//       question must already be in the SAVED snapshot so a reload restores it
+//       instead of a blank. `resolveSendTarget` now seeds the REAL awaiting turn
+//       BEFORE the intent-classify await, so the question is persisted as that
+//       awaiting turn (saved exactly once, NOT a throwaway `pending-…` fold).
+//       (The transient `pendingSend`-only fold still bridges the sub-millisecond
+//       gap before resolveSendTarget, but the real turn supersedes it here.)
 //   (b) Once `resolveSendTarget` seeds the REAL awaiting turn, the fold is
 //       SKIPPED — the snapshot carries the question exactly once (the awaiting/
 //       settled turn), never a duplicate.
@@ -152,7 +154,7 @@ afterEach(() => {
 })
 
 describe("ChatScreen — persist-fold: what a reload restores from the snapshot", () => {
-  it("(a) a pre-ask-id reload restores the in-flight question (folded into the saved snapshot)", async () => {
+  it("(a) a pre-dispatch reload restores the in-flight question — seeded as the real awaiting turn", async () => {
     seedActiveTab([])
     renderChat()
     await screen.findByLabelText("Send")
@@ -160,16 +162,17 @@ describe("ChatScreen — persist-fold: what a reload restores from the snapshot"
     const release = deferIntent()
     await typeAndSend("why are enterprise users asking for this?")
 
-    // The intent call is parked: no awaiting turn exists yet (the pre-dispatch
-    // window). The question lives only in `pendingSend` — but the SAVED snapshot
-    // folds it in so a reload here restores it.
+    // The intent call is parked (the pre-dispatch window). The optimistic real
+    // turn is now seeded BEFORE the classify await, so the question is already in
+    // the SAVED snapshot as that awaiting turn — a reload here restores it (the
+    // guarantee this case protects). It is saved exactly ONCE, and NOT as a
+    // throwaway `pending-…` interrupted fold on top of a placeholder.
     expect(runAskGeneration).not.toHaveBeenCalled()
     await waitFor(() => {
       const t = savedThread()
-      const pending = t.find((x) => x.query === "why are enterprise users asking for this?")
-      expect(pending).toBeTruthy()
-      expect(pending?.interrupted).toBe(true)
-      expect(pending?.id.startsWith("pending-")).toBe(true)
+      const matching = t.filter((x) => x.query === "why are enterprise users asking for this?")
+      expect(matching.length).toBe(1)
+      expect(matching[0].id.startsWith("pending-")).toBe(false)
     })
 
     void release // parked intentionally; afterEach settles

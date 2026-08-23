@@ -44,6 +44,7 @@ from app.db.prds import get_prd
 from app.graph.gateway import llm_call
 from app.llm import strip_code_fence
 from app.prompts import VOICE_GUARD
+from app import targeted_edit
 
 logger = logging.getLogger(__name__)
 
@@ -305,22 +306,28 @@ PRD (HTML — edit and return the full document):
 """
 
 
-def apply_chat_edit(prd_html: str, instruction: str, enterprise_id: str) -> dict:
-    """Run the scoped editor for a free-form chat instruction.
+# ── Shared full-emit + targeted-edit dispatch ────────────────────────────────
+#
+# Both scoped editors below run the SAME LLM call shape (`_EDIT_SCHEMA`,
+# max_tokens=32000, long_output). `_full_emit` is today's behavior verbatim,
+# factored out so it is BOTH the flag-off path AND the fallback when a targeted
+# splice is rejected. `_targeted_or_fallback` runs the changed-sections-only
+# contract behind `TARGETED_EDIT_ENABLED` and falls back to `_full_emit` on any
+# validation gate failure — fail-to-slow, never fail-to-corrupt.
 
-    Same contract as `apply_answer` — `{"html", "sections_changed", "summary"}`,
-    RuntimeError when the model returns no usable HTML — but driven by the
-    user's own edit instruction instead of a resolved input-question. This is
-    the chat "make changes to the PRD" path: a targeted rewrite of the affected
-    sections, never a full prd-author regeneration.
-    """
+
+def _full_emit(
+    *, system: str, user: str, enterprise_id: str, purpose: str, prompt_version: str
+) -> dict:
+    """Today's full-document re-emit editor call. The return shape
+    (`{html, sections_changed, summary}`) is the contract every caller consumes."""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent=_AGENT,
-        purpose="apply_prd_chat_edit",
-        prompt_version=CHAT_EDIT_PROMPT_VERSION,
-        system=_CHAT_EDIT_SYSTEM,
-        input=_CHAT_EDIT_USER.format(instruction=instruction, prd_html=prd_html),
+        purpose=purpose,
+        prompt_version=prompt_version,
+        system=system,
+        input=user,
         json_schema=_EDIT_SCHEMA,
         max_tokens=32000,
         long_output=True,
@@ -335,6 +342,83 @@ def apply_chat_edit(prd_html: str, instruction: str, enterprise_id: str) -> dict
         "sections_changed": [s for s in sections if isinstance(s, str)],
         "summary": (out.get("summary") or "").strip(),
     }
+
+
+def _targeted_or_fallback(
+    *,
+    prd_html: str,
+    system: str,
+    user: str,
+    enterprise_id: str,
+    purpose: str,
+    prompt_version: str,
+) -> dict:
+    """Run the targeted-ops editor; splice+validate; fall back to `_full_emit`
+    (the proven path) on ANY gate failure. Only reached when the flag is ON."""
+    t_result = llm_call(
+        enterprise_id=enterprise_id,
+        agent=_AGENT,
+        purpose=purpose,
+        prompt_version=f"{prompt_version}-targeted",
+        system=targeted_edit.targeted_system(system, targeted_edit.PRD_SECTION_MODEL),
+        input=user,
+        json_schema=targeted_edit.TARGETED_EDIT_SCHEMA,
+        max_tokens=32000,
+        long_output=True,
+    )
+    out = t_result.output if isinstance(t_result.output, dict) else {}
+    summary = (out.get("summary") or "").strip()
+    try:
+        html, sections = targeted_edit.interpret(
+            out,
+            stored_doc=prd_html,
+            model=targeted_edit.PRD_SECTION_MODEL,
+            strip_fence=strip_code_fence,
+        )
+    except targeted_edit.FallbackNeeded as exc:
+        logger.warning(
+            "targeted PRD edit (%s) falling back to full-emit: %s", purpose, exc
+        )
+        return _full_emit(
+            system=system,
+            user=user,
+            enterprise_id=enterprise_id,
+            purpose=purpose,
+            prompt_version=prompt_version,
+        )
+    return {
+        "html": html,
+        "sections_changed": [s for s in sections if isinstance(s, str)],
+        "summary": summary,
+    }
+
+
+def apply_chat_edit(prd_html: str, instruction: str, enterprise_id: str) -> dict:
+    """Run the scoped editor for a free-form chat instruction.
+
+    Same contract as `apply_answer` — `{"html", "sections_changed", "summary"}`,
+    RuntimeError when the model returns no usable HTML — but driven by the
+    user's own edit instruction instead of a resolved input-question. This is
+    the chat "make changes to the PRD" path: a targeted rewrite of the affected
+    sections, never a full prd-author regeneration.
+    """
+    user = _CHAT_EDIT_USER.format(instruction=instruction, prd_html=prd_html)
+    if not targeted_edit.enabled():
+        return _full_emit(
+            system=_CHAT_EDIT_SYSTEM,
+            user=user,
+            enterprise_id=enterprise_id,
+            purpose="apply_prd_chat_edit",
+            prompt_version=CHAT_EDIT_PROMPT_VERSION,
+        )
+    return _targeted_or_fallback(
+        prd_html=prd_html,
+        system=_CHAT_EDIT_SYSTEM,
+        user=user,
+        enterprise_id=enterprise_id,
+        purpose="apply_prd_chat_edit",
+        prompt_version=CHAT_EDIT_PROMPT_VERSION,
+    )
 
 
 def apply_answer(prd_html: str, question: str, answer: str, enterprise_id: str) -> dict:
@@ -359,24 +443,20 @@ def apply_answers(
     block = "\n\n".join(
         f"QUESTION: {q}\nANSWER: {a}" for q, a in decisions
     )
-    result = llm_call(
+    user = _EDIT_USER.format(decisions=block, prd_html=prd_html)
+    if not targeted_edit.enabled():
+        return _full_emit(
+            system=_EDIT_SYSTEM,
+            user=user,
+            enterprise_id=enterprise_id,
+            purpose="apply_prd_input_answer",
+            prompt_version=EDIT_PROMPT_VERSION,
+        )
+    return _targeted_or_fallback(
+        prd_html=prd_html,
+        system=_EDIT_SYSTEM,
+        user=user,
         enterprise_id=enterprise_id,
-        agent=_AGENT,
         purpose="apply_prd_input_answer",
         prompt_version=EDIT_PROMPT_VERSION,
-        system=_EDIT_SYSTEM,
-        input=_EDIT_USER.format(decisions=block, prd_html=prd_html),
-        json_schema=_EDIT_SCHEMA,
-        max_tokens=32000,
-        long_output=True,
     )
-    out = result.output if isinstance(result.output, dict) else {}
-    html = strip_code_fence((out.get("html") or "").strip())
-    if not html:
-        raise RuntimeError("scoped PRD edit returned no HTML")
-    sections = out.get("sections_changed") or []
-    return {
-        "html": html,
-        "sections_changed": [s for s in sections if isinstance(s, str)],
-        "summary": (out.get("summary") or "").strip(),
-    }

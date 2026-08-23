@@ -48,7 +48,7 @@ import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 // blockquote (AFTER the pinned-skill splice, so the slash trigger stays the
 // query's first token). One definition of that, shared with the mapper.
 import { buildQuotedMessage } from "../../../lib/chatQuote"
-import { dispatchChatIntent } from "../../../lib/chat/dispatchChatIntent"
+import { dispatchChatIntent, type ChatIntentExecutors } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import {
   runEditPrdAction, runShareToSlackAction, runAssignTicketsAction,
@@ -450,6 +450,87 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
         )
       }
 
+      // ── OPTIMISTIC RENDER, BEFORE the intent-classify await ─────────────────
+      // The user's message turn AND the tab title must land on THIS commit — the
+      // `chatIntentApi.resolve` classify below is a ~5–9s round-trip, and both
+      // used to render only AFTER it, so a Send sat visibly frozen until the
+      // classifier returned. The classification promise now stays in flight
+      // while the bubble is already on screen. A send that classifies as a
+      // command (which renders its OWN turn) reconciles this optimistic turn
+      // away first — see `rollbackOptimistic` at the dispatch site below.
+      const displayQuery = trimmed
+      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
+      // before we render or classify. (Authoritative per-tab guard happens once
+      // targetTabId is resolved below — needed for the no-active-tab case.)
+      if (activeTabId != null && askingTabsRef.current?.has(activeTabId)) {
+        settlePendingSend()
+        return
+      }
+      const id =
+        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      const hasAttachments = attachments.length > 0
+      // Chips render from NAMES here; each attachment's content is folded on
+      // AFTER extraction resolves (below). The folded text still rides `sendQuery`.
+      const newTurn: ThreadTurn = {
+        id,
+        query: displayQuery,
+        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
+      }
+      const handle = displayQuery || attachments[0]?.name || "New chat"
+      // Resolve (and, on a fresh/brief surface, spawn) the tab this send lands on.
+      const { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle } =
+        resolveSendTarget(newTurn, handle)
+      // The real turn is on the tab now, so the placeholder has been handed off —
+      // same tick as resolveSendTarget's setTabs → React batches into ONE commit.
+      settlePendingSend()
+      // Hand the placeholder's clock over so the wait ladder measures one wait.
+      askStartRef.current?.set(id, askStartedAt)
+      // A fresh ask clears any leftover Stop flag from a prior ask.
+      stoppedTabsRef.current?.delete(targetTabId)
+      // Mark the target tab busy on THIS SAME commit as the optimistic turn. The
+      // classify await below is a ~5–9s round-trip; the busy flag is what drives
+      // the turn's derived `isGenerating` (mapMainTurns) → the "thinking" wait
+      // state. Without it, the optimistically-rendered turn has no reply and no
+      // in-flight signal, so ChatBubble falls through to the "No response was
+      // generated for this message." failure copy for the whole classify window.
+      // Mirrors the baseline `pendingSend` placeholder, which showed a busy state
+      // immediately. `runTabAsk` re-adds this idempotently once the ask starts and
+      // clears it in its `finally`; the command branch clears it in
+      // `rollbackOptimistic`; the attachment-failure branch clears it too.
+      setBusyTabs((prev) => addToSet(prev, targetTabId))
+      // Undo the optimistic turn/tab so a COMMAND branch (which renders its own
+      // turn) is not doubled. Restores the pre-send active-tab identity — incl.
+      // `activeTabIdRef`, which the command executors read to resolve their
+      // target — so command routing is byte-identical to dispatching before any
+      // optimistic render happened.
+      const rollbackOptimistic = () => {
+        // Clear the busy flag set on the optimistic commit so the command branch
+        // leaves no stranded "thinking"/composer-disabled state on the tab (the
+        // command renders its own turn and manages its own busy state, exactly as
+        // it did before any optimistic render existed).
+        setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+        // Mirror the removal into `tabsRef` SYNCHRONOUSLY. The command flow is
+        // dispatched on the same tick right after this (see the `wouldHandle`
+        // branch below), and it grounds the PRD/ticket set on `tabsRef.current`
+        // (threadContextFor / prdGroundingDocs read it directly). `setTabs` has
+        // not committed yet at that point, so without this the command grounds on
+        // the very optimistic turn we are removing — folding the user's own
+        // command text in as a "Conversation (this chat)" source doc. Mirrors the
+        // synchronous `activeTabIdRef.current` restore already done just below.
+        if (spawnedNewTab) {
+          if (tabsRef.current) tabsRef.current = tabsRef.current.filter((t) => t.id !== targetTabId)
+          setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
+          setActiveTabId(prevActiveTabId)
+          activeTabIdRef.current = prevActiveTabId
+        } else {
+          const rollTab = (t: ChatTab): ChatTab => t.id === targetTabId
+            ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
+            : t
+          if (tabsRef.current) tabsRef.current = tabsRef.current.map(rollTab)
+          setTabs((prev) => prev.map(rollTab))
+        }
+      }
+
       if (!trimmed.startsWith("/")) {
         const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
         // The planner sees what the answer path will see — same `[Attached files]`
@@ -495,14 +576,12 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 ? { ticketSetId: activeTab.ticketSetId } as const
                 : targetPrdId != null ? { prdId: targetPrdId } as const : null
               : null
-          const result = dispatchChatIntent(
-            envelope,
-            {
-              hasEditTarget: targetPrdId != null,
-              editTargetPrdId: targetPrdId,
-              ticketsTarget,
-            },
-            useChatIntentExecutors({
+          const dispatchCtx = {
+            hasEditTarget: targetPrdId != null,
+            editTargetPrdId: targetPrdId,
+            ticketsTarget,
+          }
+          const executors = useChatIntentExecutors({
               onGenerateTickets: (env) => {
                 if (docFile) {
                   setAttachments([])
@@ -621,46 +700,32 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 settlePendingSend()
               },
               onAnswer: () => {},
-            }),
-          )
-          if (result.handled) return
+            })
+          // Peek whether a structured command will own the tab: a PURE routing
+          // check with no side effects — every executor body swapped for a no-op,
+          // optional-slot presence preserved (so `share_to_slack`/`create_project`
+          // fall-throughs match the real run). If it will be handled, reconcile
+          // the optimistic turn away FIRST, then run the real command flow so its
+          // own turn is the one that renders. If not (an `answer`), the optimistic
+          // turn stays and we fall through to the grounded ask below.
+          const wouldHandle = dispatchChatIntent(
+            envelope,
+            dispatchCtx,
+            Object.fromEntries(
+              Object.entries(executors).map(([k, v]) => [k, typeof v === "function" ? () => {} : v]),
+            ) as ChatIntentExecutors,
+          ).handled
+          if (wouldHandle) {
+            rollbackOptimistic()
+            dispatchChatIntent(envelope, dispatchCtx, executors)
+            return
+          }
         }
       }
-      // Attached file content is folded into the ask as context. `displayQuery` is
-      // what the thread shows (the ask + a chip per attachment); `sendQuery` is
-      // what the agent receives (the same text with the parsed content folded in).
-      const displayQuery = trimmed
-      // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
-      // before work. (Authoritative per-tab guard happens once targetTabId is
-      // resolved below — needed for the no-active-tab case.)
-      if (activeTabId != null && askingTabsRef.current?.has(activeTabId)) {
-        settlePendingSend()
-        return
-      }
-      const id =
-        typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-      const hasAttachments = attachments.length > 0
-      // OPTIMISTIC RENDER FIRST: the thread turn appears on THIS commit, BEFORE the
-      // extractFile network call, so the composer never clears into a void. Chips
-      // render from NAMES here; each attachment's content is folded on AFTER
-      // extraction resolves (below). The folded text still rides `sendQuery`.
-      const newTurn: ThreadTurn = {
-        id,
-        query: displayQuery,
-        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
-      }
-      const handle = displayQuery || attachments[0]?.name || "New chat"
-      // Resolve (and, on a fresh/brief surface, spawn) the tab this send lands on.
-      const { targetTabId, spawnedNewTab, prevActiveTabId, prevTitle } =
-        resolveSendTarget(newTurn, handle)
-      // The real turn is on the tab now, so the placeholder has been handed off —
-      // same tick as resolveSendTarget's setTabs → React batches into ONE commit.
-      settlePendingSend()
-      // Hand the placeholder's clock over so the wait ladder measures one wait.
-      askStartRef.current?.set(id, askStartedAt)
-      // A fresh ask clears any leftover Stop flag from a prior ask.
-      stoppedTabsRef.current?.delete(targetTabId)
 
+      // Attached file content is folded into the ask as context. `sendQuery` is
+      // what the agent receives (the display text with the parsed content folded
+      // in); the optimistic `newTurn` above already put `displayQuery` on screen.
       let sendQuery = displayQuery
       let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
       if (hasAttachments) {

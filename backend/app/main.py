@@ -85,6 +85,7 @@ from app.routes import (
     tickets,
     transcripts,
     usage as usage_routes,
+    whitelist as whitelist_routes,
     workspaces as workspaces_routes,
     evidence,
     health,
@@ -449,6 +450,10 @@ app.include_router(crucible_routes.router)
 # No-auth share viewer for reports (`/r/<token>`). Registered separately from
 # reports.router so the unauthenticated surface stays visible in this list.
 app.include_router(reports_public.router)
+# No-auth signup form on the marketing site. Same reason as above: an
+# unauthenticated surface stays visible in this list rather than hiding among
+# the authed routers.
+app.include_router(whitelist_routes.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(chat.router)

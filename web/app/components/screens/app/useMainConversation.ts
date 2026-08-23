@@ -30,6 +30,7 @@ import {
   AskTimeoutError,
 } from "../../../lib/runAskGeneration"
 import { ApiError, askApi, type AskResponse } from "../../../lib/api"
+import { GROUNDED_PROGRESS_ENABLED } from "../../../lib/friendlyPhase"
 import { providerNoticeTitle, type ProviderNotice } from "../../../lib/providerLimitNotice"
 import { WAIT_FAILED_TITLE } from "../../shared/AssistantWaitState"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
@@ -200,6 +201,17 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
               conv.patchTurns((thread) => thread.map((turn) =>
                 turn.id === id && !turn.reply && !turn.stopped ? { ...turn, streamDropped: true } : turn))
             },
+            // Curated (already user-facing) progress copy per pipeline leg — the
+            // real backend phase signal, gated by the same build-time flag as the
+            // grounded wait UI so flag-off does no work and is byte-identical.
+            onPhase: GROUNDED_PROGRESS_ENABLED
+              ? (label) => {
+                  conv.patchTurns((thread) => thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped
+                      ? { ...turn, livePhase: label }
+                      : turn))
+                }
+              : undefined,
             // conversation_id (history replay), prd_id / evidence_id /
             // ticket_set_id grounding — resolved by the surface via
             // resolveAskParams and spread in verbatim.
@@ -215,7 +227,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           askStartRef.current.delete(id)
           resumedTurnsRef.current.delete(id)
           conv.patchTurns((thread) => thread.map((turn) => turn.id === id
-            ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+            ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }
             : turn))
           const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
           // Suggestions are fetched HERE — after the answer is on screen — and
@@ -268,7 +280,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // reload will pick it up, which the resume effect then does.
           if (e instanceof AskTimeoutError) {
             conv.patchTurns((thread) => thread.map((turn) => turn.id === id
-              ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+              ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined, livePhase: undefined }
               : turn))
             return
           }
@@ -315,7 +327,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // Drop any streamed partial too: a half-answer above an error
           // bubble would read as the reply having (partly) succeeded.
           conv.patchTurns((thread) => thread.map((turn) => turn.id === id
-            ? { ...turn, error: msg, partial: undefined, streamDropped: undefined }
+            ? { ...turn, error: msg, partial: undefined, streamDropped: undefined, livePhase: undefined }
             : turn))
           // `msg` is kept on the turn and in the persisted conversation row as
           // the RECORD of what failed. It is not what the user reads: the failed
@@ -365,7 +377,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
         if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
       }
       if (idx === -1) return thread
-      return thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined } : turn)
+      return thread.map((turn, i) => i === idx ? { ...turn, stopped: true, partial: turn.partial, streamDropped: undefined, livePhase: undefined } : turn)
     })
   }, [activeKey, makeHandle])
 

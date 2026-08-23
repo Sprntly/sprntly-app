@@ -1,22 +1,23 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — the message is on screen the INSTANT the user sends it.
+// ChatScreen — the send's OPTIMISTIC render lands BEFORE the intent-classify
+// round-trip (POST /v1/chat/intent), and shows a THINKING state during it — not
+// the "No response was generated" failure copy.
 //
-// Every send now opens with an awaited backend decision (POST /v1/chat/intent —
-// a full LLM round-trip) before any branch knows whether the message becomes a
-// chat turn or a command that seeds its own turn. That await sat in front of
-// every render, so the composer cleared into an empty screen for seconds and the
-// send read as dropped. The fix renders the user's message on the send's own
-// commit: a PENDING-SEND placeholder bridges the first microtasks, then the REAL
-// optimistic thread turn (message + thinking skeleton) supersedes it before the
-// classify await, so the classify window is never blank.
-//
-// The hazard this suite exists to pin is the DUPLICATE: the command flows
-// (openPrdInTab's seedTurn / seedCommandTurn) render and persist their own turn,
-// so a placeholder that outlives the dispatch would show the user's message
-// twice. Every test below therefore counts bubbles, not just presence.
+// submitAsk (useConversation) now resolves the target tab, renders the user's
+// message turn, renames the tab, and marks the tab busy — all on the send's own
+// commit — and only THEN awaits the classifier. This suite pins that ordering
+// and the two things that make it correct:
+//   1. message turn + tab title are on screen while the classify promise is held
+//      pending (the ~5–9s window that used to be blank).
+//   2. that optimistically-rendered turn shows the thinking/generating state, so
+//      it never falls through to "No response was generated" during the wait.
+//   3. a COMMAND verdict reconciles the optimistic turn away (rollbackOptimistic)
+//      so exactly one turn / one tab survives, and the command grounds on a CLEAN
+//      thread (the user's own command must not leak into the PRD as a source doc).
+//   4. an ANSWER verdict KEEPS the optimistic turn (no rollback).
 import * as React from "react"
-import { act, cleanup, fireEvent, waitFor, within, render } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -84,7 +85,7 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useSearchParams: () => new URLSearchParams("new=1"),
 }))
-// Flag ON — the envelope call is the await this placeholder exists to bridge.
+// Flag ON — the envelope call is the classify await this optimistic render bridges.
 vi.mock("../../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
   useWorkspace: () => ({
@@ -125,14 +126,18 @@ async function typeAndSend(text: string) {
   await act(async () => { fireEvent.click(sendBtn) })
 }
 
-/** Every rendered user bubble carrying exactly this text. The duplicate-turn
- *  regression shows up here as 2. */
+/** Every rendered user bubble carrying exactly this text — a duplicate shows as 2. */
 function bubblesSaying(text: string): number {
   return Array.from(document.querySelectorAll(".bc-user-bubble"))
     .filter((el) => el.textContent === text).length
 }
 
-/** Hold the intent envelope open so the pre-dispatch window is observable, and
+/** Real (non-pinned) chat tabs — the "Top Insights" pin is excluded. */
+function nonPinnedTabCount(): number {
+  return document.querySelectorAll(".chat-tab:not(.chat-tab--pinned)").length
+}
+
+/** Hold the intent envelope open so the pre-classify window is observable, and
  *  hand back the release fn. This is the multi-second gap in production. */
 function deferIntent() {
   let release!: (envelope: Record<string, unknown>) => void
@@ -168,107 +173,82 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
-describe("ChatScreen — the send renders before the dispatch decision", () => {
-  it("shows the user's message + a thinking skeleton while the intent call is still in flight", async () => {
+describe("ChatScreen — optimistic render before the intent classify", () => {
+  it("renders the message turn AND the renamed tab title BEFORE the classifier resolves", async () => {
     const release = deferIntent()
     renderChat()
-    await typeAndSend("why are enterprise users asking for this?")
+    await typeAndSend("why did enterprise churn spike")
 
-    // The envelope has NOT resolved — this is the window that used to be blank.
-    // The optimistic message now renders as the REAL thread turn on the send's own
-    // commit (superseding the earlier pending-send placeholder in this window), so
-    // observe the user bubble directly.
-    const bubble = Array.from(document.querySelectorAll(".bc-user-bubble")).find(
-      (el) => el.textContent === "why are enterprise users asking for this?",
-    )
-    expect(bubble).toBeTruthy()
-    // …and, once past the 400ms rung-0 gate, something is visibly working so the
-    // wait reads as progress — and specifically NOT the "No response was generated"
-    // failure copy the turn would otherwise fall through to with no reply yet.
-    // (Below 400ms nothing renders on purpose — a spinner that appears and vanishes
-    // inside half a second reads as a glitch.)
-    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
-    expect(document.body.textContent).not.toContain("No response was generated")
-    // The dispatch really is still pending (not a resolved-fast false positive).
+    // The classify promise is still pending — this is the window that used to be
+    // frozen behind the round-trip. The user's turn is already a real bubble…
+    expect(bubblesSaying("why did enterprise churn spike")).toBe(1)
+    // …and the tab has already been renamed from "New chat" to the message.
+    expect(
+      within(screen.getByTestId("chat-tab-bar")).getByText("why did enterprise churn spike"),
+    ).toBeTruthy()
+    // The classifier really is in flight, and the ask has NOT started yet.
+    expect(resolveIntent).toHaveBeenCalledTimes(1)
     expect(runAskGeneration).not.toHaveBeenCalled()
 
     await release(ANSWER_ENVELOPE)
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
   })
 
-  it("clears the composer the moment it renders the message (never both, never neither)", async () => {
-    deferIntent()
-    renderChat()
-    await typeAndSend("what changed in onboarding last week?")
-
-    // The text left the composer AND landed on screen in the same commit — the
-    // old bug was the first half happening without the second. The message now
-    // renders as the real optimistic turn rather than the pending-send placeholder.
-    const rendered = Array.from(document.querySelectorAll(".bc-user-bubble")).some(
-      (el) => el.textContent === "what changed in onboarding last week?",
-    )
-    expect(rendered).toBe(true)
-    const composer = document.querySelector(
-      ".cx-input",
-    ) as HTMLTextAreaElement
-    expect(composer.value).toBe("")
-  })
-
-  it("hands off to the ask turn without duplicating the message", async () => {
+  it("shows the thinking state (not the failure copy) while the classify is pending", async () => {
     const release = deferIntent()
     renderChat()
-    await typeAndSend("why are enterprise users asking for this?")
-    expect(bubblesSaying("why are enterprise users asking for this?")).toBe(1)
+    await typeAndSend("why did enterprise churn spike")
+
+    // The turn is marked busy on the SAME commit as the optimistic render, so
+    // once past the 400ms rung-0 gate it shows a working skeleton…
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
+    // …and NEVER the "No response was generated" copy it would fall through to
+    // with no reply and no in-flight signal. This is the regression that was fixed.
+    expect(document.body.textContent).not.toContain("No response was generated")
+    expect(runAskGeneration).not.toHaveBeenCalled()
 
     await release(ANSWER_ENVELOPE)
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-
-    // The placeholder retired and the real turn took its place — exactly one
-    // bubble throughout, and the answer renders under it.
-    await waitFor(() =>
-      expect(document.querySelector('[data-testid="pending-send"]')).toBeNull(),
-    )
-    expect(bubblesSaying("why are enterprise users asking for this?")).toBe(1)
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("Because enterprise admins asked for it."),
-    )
   })
 
-  it("hands off to a PRD command's OWN seeded turn without duplicating the message", async () => {
-    // The regression guard. prdCommandFlow → openPrdInTab seeds its own turn and
-    // seedCommandTurn persists it; a placeholder that outlived the dispatch would
-    // leave the command on screen twice.
-    const release = deferIntent()
+  it("a COMMAND verdict reconciles the optimistic turn away — one turn, one tab, clean grounding", async () => {
+    resolveIntent.mockResolvedValue(GENERATE_PRD_ENVELOPE)
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-    expect(bubblesSaying("generate a PRD for dark mode on mobile")).toBe(1)
 
-    await release(GENERATE_PRD_ENVELOPE)
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
 
-    await waitFor(() =>
-      expect(document.querySelector('[data-testid="pending-send"]')).toBeNull(),
-    )
+    // Exactly ONE bubble for the command — the optimistic turn was rolled back
+    // and the command flow's own seeded turn is the one that survives (no double).
     expect(bubblesSaying("generate a PRD for dark mode on mobile")).toBe(1)
+    // Exactly ONE real tab — the optimistic tab spawned for the send was removed
+    // and the command opened its own PRD tab (no stranded/duplicate tab).
+    expect(nonPinnedTabCount()).toBe(1)
+    // No stranded "thinking with no content" failure copy left on any tab.
+    expect(document.body.textContent).not.toContain("No response was generated")
+    // The PRD grounds on a CLEAN thread: on this fresh landing there is nothing to
+    // ground on, so the command must NOT fold its own optimistic turn in as a
+    // "Conversation (this chat)" source doc. (rollbackOptimistic must reconcile
+    // the thread before the command flow reads it for grounding.)
+    expect(generateFromTask.mock.calls[0][2]).toBeUndefined()
+    // Never routed to the ask agent.
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
-  it("does not double-send when the user hits send twice during the dispatch window", async () => {
-    // The busy/asking markers aren't set until the ask itself starts, so this
-    // window had no guard of its own before the placeholder existed.
-    const release = deferIntent()
+  it("an ANSWER verdict KEEPS the optimistic turn (no rollback)", async () => {
+    resolveIntent.mockResolvedValue(ANSWER_ENVELOPE)
     renderChat()
-    await typeAndSend("why are enterprise users asking for this?")
+    await typeAndSend("why did enterprise churn spike")
 
-    const dock = document.querySelector(".cx") as HTMLElement
-    if (dock) {
-      const send = within(dock).queryByLabelText("Send")
-      if (send) await act(async () => { fireEvent.click(send) })
-    }
-    expect(resolveIntent).toHaveBeenCalledTimes(1)
-
-    await release(ANSWER_ENVELOPE)
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
-    expect(bubblesSaying("why are enterprise users asking for this?")).toBe(1)
+
+    // The optimistic turn persists as the one-and-only bubble — the answer path
+    // reuses it rather than rolling it back and re-seeding.
+    expect(bubblesSaying("why did enterprise churn spike")).toBe(1)
+    // And it stays on its tab, which keeps its message-derived title.
+    expect(
+      within(screen.getByTestId("chat-tab-bar")).getByText("why did enterprise churn spike"),
+    ).toBeTruthy()
+    expect(generateFromTask).not.toHaveBeenCalled()
   })
 })

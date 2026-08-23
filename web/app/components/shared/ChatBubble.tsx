@@ -165,6 +165,10 @@ export interface ChatBubbleProps {
   waitResumed?: boolean
   partial?: string | null
   streamDropped?: boolean
+  /** Curated, user-facing progress copy for the pipeline leg currently running,
+   *  from the real backend `phase` signal. Passed to the wait state, which only
+   *  consults it when the grounded-progress flag is on. */
+  livePhase?: string
 
   error?: string | null
   onAskAgain?: () => void
@@ -417,6 +421,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     waitResumed,
     partial,
     streamDropped,
+    livePhase,
     error,
     onAskAgain,
     stopped,
@@ -713,6 +718,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                           startedAt={waitStartedAt}
                           streamDropped={streamDropped}
                           resumed={waitResumed}
+                          livePhase={livePhase}
                           skillLabel={waitSkill?.label ?? null}
                           longSkill={isLongRunningSkill(waitSkill?.id)}
                           onStop={onStop}

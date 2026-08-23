@@ -107,6 +107,15 @@ class AskCancelled(Exception):
     call actually save that call, rather than only discarding the result."""
 
 
+class EmptyScopedToolAnswer(RuntimeError):
+    """Raised by `_try_scoped_tool_answer` on a NON-private (group) surface when
+    the bounded tool loop produced no text — the empty-loop failure mode. It
+    mirrors the function's existing re-raise-on-failure contract for group
+    (which has no single-shot composer fallback): the caller's best-effort
+    wrapper turns it into an honest error, never a blank turn. The PRIVATE
+    surface never raises this — it returns `None` and degrades to the composer."""
+
+
 def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
     """Abort the answer pipeline if the Ask was stopped. A no-op when no
     canceller is wired (e.g. direct/test callers) or it returns False."""
@@ -1020,32 +1029,56 @@ def _answer_single_shot(
     # built from has been assembled by now, so the label is true at the moment
     # it is published.
     emit_phase(on_phase, "Writing the answer…")
-    result = llm_call(
-        enterprise_id=enterprise_id,
-        agent="qa",
-        purpose="skill_answer",
-        model=model,
-        system=system,
-        input=_render_history(history) + kg_block + f"Question: {question}",
-        user_cacheable_prefix=(
-            "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p)
-            or None
-        ),
-        prompt_version="qa-skill-v1",
-        json_schema=_ASK_RESPONSE_SCHEMA,
-        skill=decision.skill_id,
-        skill_spec=skill_spec,
-        max_tokens=12000,
-        # Structured-call streaming: on_delta receives partial-JSON fragments
-        # of the tool input; the Ask worker's extractor turns them into text.
-        on_delta=on_delta,
+    _input = _render_history(history) + kg_block + f"Question: {question}"
+    _prefix = (
+        "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p) or None
     )
-    payload = (
-        result.output
-        if isinstance(result.output, dict)
-        else {"answer": str(result.output), "key_points": [], "citations": [],
-              "confidence": decision.confidence, "unanswered": ""}
-    )
+    from app import answer_first
+
+    if answer_first.enabled():
+        # Answer-first: stream the answer as plain markdown first, derive the
+        # structured fields after. Keeps this site's skill/method grounding and
+        # telemetry attribution; returns the same payload shape.
+        payload = answer_first.gateway(
+            question=question,
+            forced_system=system,
+            forced_user=_input,
+            on_delta=on_delta,
+            default_confidence=decision.confidence,
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="skill_answer",
+            prompt_version="qa-skill-v1",
+            model=model,
+            skill=decision.skill_id,
+            skill_spec=skill_spec,
+            user_cacheable_prefix=_prefix,
+            max_tokens=12000,
+        )
+    else:
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="skill_answer",
+            model=model,
+            system=system,
+            input=_input,
+            user_cacheable_prefix=_prefix,
+            prompt_version="qa-skill-v1",
+            json_schema=_ASK_RESPONSE_SCHEMA,
+            skill=decision.skill_id,
+            skill_spec=skill_spec,
+            max_tokens=12000,
+            # Structured-call streaming: on_delta receives partial-JSON fragments
+            # of the tool input; the Ask worker's extractor turns them into text.
+            on_delta=on_delta,
+        )
+        payload = (
+            result.output
+            if isinstance(result.output, dict)
+            else {"answer": str(result.output), "key_points": [], "citations": [],
+                  "confidence": decision.confidence, "unanswered": ""}
+        )
     payload["documents"] = documents
     return _tag(payload, decision)
 
@@ -1070,7 +1103,9 @@ _VOC_KG_SYSTEM = (
 )
 
 
-def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
+def _answer_voc_report(
+    decision: RouteDecision, enterprise_id, question, history, on_delta=None
+) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
@@ -1103,6 +1138,42 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     if not bundle:
         return None
     corpus_text = render_context_section(bundle)
+    _voc_system = (
+        ASK_SYSTEM
+        + today_line()
+        + connected_sources_line(enterprise_id)
+        + "\n\n"
+        + _VOC_KG_SYSTEM
+    )
+    _voc_input = (
+        _render_history(history)
+        + f"Question: {question}\n\n"
+        "=== KNOWLEDGE GRAPH — customer signal ===\n"
+        + corpus_text
+    )
+    _voc_model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    from app import answer_first
+
+    if answer_first.enabled():
+        try:
+            payload = answer_first.gateway(
+                question=question,
+                forced_system=_voc_system,
+                forced_user=_voc_input,
+                on_delta=on_delta,
+                default_confidence=decision.confidence,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="voc_from_kg",
+                prompt_version="qa-voc-kg-v1",
+                model=_voc_model,
+                skill=decision.skill_id,
+                max_tokens=12000,
+            )
+        except Exception:  # noqa: BLE001 — fall back to the generic answer
+            logger.exception("voc answer from KG failed for %s", enterprise_id)
+            return None
+        return _tag(payload, decision)
     try:
         result = llm_call(
             enterprise_id=enterprise_id,
@@ -2146,6 +2217,31 @@ def _try_scoped_tool_answer(
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
 
+    # Empty-text guard (the primary empty-loop fix). Reached only when NO
+    # terminal-tool narration override fired above (a delegate/complete/edit_prd
+    # turn always sets `text` to its handler's non-empty confirmation, so those
+    # legit-but-short answers never land here) — i.e. this is a genuine
+    # no-answer: `run_tool_loop` burned all its iterations on tool calls and
+    # returned "" (or whitespace). Surfacing that verbatim stores `{"answer":
+    # ""}` and the client renders a blank bubble. Treat it EXACTLY like the
+    # failure path above (`except` at the top of this function): the PRIVATE
+    # surface returns `None` so the caller falls through to the ordinary
+    # composer — which can actually answer — mirroring the AD-P7 single-shot
+    # degrade; any other (group) surface re-raises, matching the group
+    # no-single-shot-fallback contract. No telemetry line is logged on the
+    # degrade, same as the failure path (which returns before the log below).
+    if not (text or "").strip():
+        logger.warning(
+            "scoped_tool_reply_empty project_id=%s surface=%s — tool loop "
+            "produced no text; degrading instead of answering blank",
+            scope.project_id, scope.surface.value,
+        )
+        if scope.surface == Surface.project_private:
+            return None
+        raise EmptyScopedToolAnswer(
+            f"scoped tool loop produced no text (project_id={scope.project_id})"
+        )
+
     # Exactly one structured cost line per scoped reply — identifiers only,
     # never the body/question (Rule #24). Relocated from `respond_individual`
     # into this shared branch.
@@ -3183,6 +3279,10 @@ def answer(
                 or _projects_only_plan(plan)
             ),
             on_delta=on_delta,
+            # Real pipeline-leg phases on the COMMON direct-answer path — the
+            # sink is already wired for the skill-routed path; this hands it to
+            # the direct path too, which previously emitted none.
+            on_phase=on_phase,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic
@@ -3221,7 +3321,10 @@ def answer(
         from app import public_feedback
 
         pf = public_feedback.answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id, question=question, history=history,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC/MI dispatch); ignored while that gate is off.
+            on_delta=on_delta,
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3301,6 +3404,9 @@ def answer(
             # document-scale call; the boundary between them is a cancellation
             # checkpoint, so a Stop actually stops the second spend.
             is_cancelled=is_cancelled,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC dispatch below); ignored while that gate is off.
+            on_delta=on_delta,
         )
         if mi is not None:
             return _maybe_verify(mi, enterprise_id)
@@ -3356,7 +3462,22 @@ def answer(
         # The unpinned VoC route — `call_digest.answer` just above — is the
         # common one and DOES stream: it swallows its own exception and returns
         # a payload, so it is terminal and cannot fall through.
-        voc = _answer_voc_report(decision, enterprise_id, question, history)
+        #
+        # Under answer-first the pinned VoC path DOES stream (its answer text is
+        # the terminal streamed call). It can still decline (None) on failure and
+        # fall through to `_answer_single_shot` below — a second generation into
+        # the SAME sink. `reset_stream` rewinds the sink so the restart frame
+        # supersedes the abandoned attempt rather than gluing onto it.
+        from app import answer_first
+
+        if answer_first.enabled():
+            voc = _answer_voc_report(
+                decision, enterprise_id, question, history, on_delta=on_delta
+            )
+            if voc is None:
+                answer_first.reset_stream(on_delta)
+        else:
+            voc = _answer_voc_report(decision, enterprise_id, question, history)
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 
