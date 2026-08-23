@@ -92,6 +92,8 @@ const SUMMARY: BillingSummary = {
   subscription_status: "active",
   has_access: true,
   current_period_end: "2026-09-21T00:00:00Z",
+  cancel_at_period_end: false,
+  cancels_at: null,
   first_paid_at: "2026-08-20T00:00:00Z",
   refund_window_days: 7,
   billing_configured: true,
@@ -141,6 +143,10 @@ function view(over: Partial<BillingView> = {}, data: Partial<BillingSummary> = {
     customTopup: "",
     tab: "billing",
     onTab: vi.fn(),
+    confirmingCancel: false,
+    onConfirmCancel: vi.fn(),
+    onCancelSubscription: vi.fn(),
+    onResumeSubscription: vi.fn(),
     onInterval: vi.fn(),
     onSubscribe: vi.fn(),
     onPortal: vi.fn(),
@@ -572,5 +578,74 @@ describe("BillingSettings — one card at a time", () => {
     expect(
       billingTabs({ ...SUMMARY, unlimited: true }).map((i) => i.id),
     ).not.toContain("topup")
+  })
+})
+
+describe("BillingSettings — cancelling", () => {
+  it("does not cancel on a single click", async () => {
+    const { props } = view()
+    await userEvent.click(
+      screen.getByRole("button", { name: /cancel subscription/i }),
+    )
+    expect(props.onCancelSubscription).not.toHaveBeenCalled()
+    expect(props.onConfirmCancel).toHaveBeenCalledWith(true)
+  })
+
+  it("leads the confirm with what the customer KEEPS", () => {
+    // They paid for this period. The copy must not read as though cancelling
+    // takes it away, or every cancellation becomes a refund request.
+    view({ confirmingCancel: true })
+    expect(screen.getByText(/you will keep your plan/i)).toBeTruthy()
+    expect(screen.getByText(/320 credits/)).toBeTruthy()
+    expect(screen.getByText(/undo this any time/i)).toBeTruthy()
+  })
+
+  it("cancels on the second click", async () => {
+    const { props } = view({ confirmingCancel: true })
+    const buttons = screen.getAllByRole("button", { name: /cancel subscription/i })
+    await userEvent.click(buttons[buttons.length - 1])
+    expect(props.onCancelSubscription).toHaveBeenCalled()
+  })
+
+  it("backs out without cancelling", async () => {
+    const { props } = view({ confirmingCancel: true })
+    await userEvent.click(screen.getByRole("button", { name: /keep my plan/i }))
+    expect(props.onConfirmCancel).toHaveBeenCalledWith(false)
+    expect(props.onCancelSubscription).not.toHaveBeenCalled()
+  })
+
+  it("says when the plan ends, and that nothing more is charged", () => {
+    view({}, { cancel_at_period_end: true, cancels_at: "2026-09-21T00:00:00Z" })
+    expect(screen.getByText(/your plan ends/i)).toBeTruthy()
+    expect(screen.getByText(/nothing more will be charged/i)).toBeTruthy()
+  })
+
+  it("stops promising a renewal that is not coming", () => {
+    view({}, { cancel_at_period_end: true, cancels_at: "2026-09-21T00:00:00Z" })
+    expect(screen.queryByText(/^Renews/)).toBeNull()
+    expect(screen.getByText(/^Ends /)).toBeTruthy()
+  })
+
+  it("offers to undo while the cancellation is still pending", async () => {
+    const { props } = view(
+      {},
+      { cancel_at_period_end: true, cancels_at: "2026-09-21T00:00:00Z" },
+    )
+    await userEvent.click(screen.getByRole("button", { name: /keep my plan/i }))
+    expect(props.onResumeSubscription).toHaveBeenCalled()
+  })
+
+  it("shows no cancel affordance without a subscription", () => {
+    view({}, { has_subscription: false })
+    expect(
+      screen.queryByRole("button", { name: /cancel subscription/i }),
+    ).toBeNull()
+  })
+
+  it("still shows the balance while a cancellation is pending", () => {
+    // Access continues until the period ends — the screen must not look as
+    // though the credits are already gone.
+    view({}, { cancel_at_period_end: true, cancels_at: "2026-09-21T00:00:00Z" })
+    expect(screen.getByText("320")).toBeTruthy()
   })
 })

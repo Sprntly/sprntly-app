@@ -539,3 +539,121 @@ def test_as_dict_still_accepts_a_plain_dict():
     """Belt and braces: the helper must not break if given something that is
     already a mapping."""
     assert stripe_client._as_dict({"a": 1}) == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# Cancel at period end
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def subscribed(ctx, monkeypatch):
+    billing_db.set_billing(
+        ctx.company_id,
+        {
+            "stripe_customer_id": "cus_test",
+            "stripe_subscription_id": "sub_1",
+            "subscription_status": "active",
+            "current_period_end": "2026-09-23T00:00:00+00:00",
+        },
+    )
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        stripe_client,
+        "schedule_cancellation",
+        lambda sid: calls.append(("schedule", sid)) or {"cancel_at": 1_790_000_000},
+    )
+    monkeypatch.setattr(
+        stripe_client,
+        "resume_subscription",
+        lambda sid: calls.append(("resume", sid)) or {"cancel_at": None},
+    )
+    ctx.calls = calls
+    return ctx
+
+
+def test_cancelling_schedules_it_for_the_period_end_not_now(subscribed):
+    """The customer paid for this period. Taking it away the moment they click
+    Cancel removes something already bought and turns every cancellation into a
+    refund request."""
+    res = subscribed.client.post("/v1/billing/cancel")
+
+    assert res.status_code == 200
+    assert res.json()["cancel_at_period_end"] is True
+    assert subscribed.calls == [("schedule", "sub_1")]
+
+
+def test_access_is_untouched_by_a_pending_cancellation(subscribed):
+    """Stripe keeps status `active` with cancel_at_period_end set, so the
+    access rule needs no special case — the customer keeps generating until the
+    period actually ends."""
+    subscribed.client.post("/v1/billing/cancel")
+
+    row = billing_db.get_billing(subscribed.company_id) or {}
+    assert row["subscription_status"] == "active"
+    assert plans.subscription_grants_access(row["plan"], row["subscription_status"])
+
+
+def test_cancelling_without_a_subscription_is_refused(ctx):
+    assert ctx.client.post("/v1/billing/cancel").status_code == 400
+
+
+def test_resume_reverses_a_pending_cancellation(subscribed):
+    subscribed.client.post("/v1/billing/cancel")
+    res = subscribed.client.post("/v1/billing/resume")
+
+    assert res.status_code == 200
+    assert res.json()["cancel_at_period_end"] is False
+    assert subscribed.calls[-1] == ("resume", "sub_1")
+
+
+def test_resuming_an_already_ended_subscription_says_so(subscribed):
+    """Stripe cannot reactivate a subscription it has already cancelled. Saying
+    that plainly beats appearing to work."""
+    billing_db.set_billing(subscribed.company_id, {"subscription_status": "canceled"})
+
+    res = subscribed.client.post("/v1/billing/resume")
+
+    assert res.status_code == 400
+    assert res.json()["detail"]["error"] == "subscription_ended"
+
+
+def test_cancel_is_owner_or_admin_only(subscribed):
+    _set_role(subscribed.company_id, subscribed.user_id, "viewer")
+    assert subscribed.client.post("/v1/billing/cancel").status_code == 403
+
+
+def test_cancel_is_origin_gated(subscribed):
+    res = subscribed.client.post(
+        "/v1/billing/cancel", headers={"origin": "https://evil.example"}
+    )
+    assert res.status_code == 403
+
+
+def test_summary_reports_a_pending_cancellation(subscribed, monkeypatch):
+    monkeypatch.setattr(
+        stripe_client,
+        "get_subscription",
+        lambda sid: {"cancel_at_period_end": True, "cancel_at": 1_790_000_000},
+    )
+
+    body = subscribed.client.get("/v1/billing/summary").json()
+
+    assert body["cancel_at_period_end"] is True
+    assert body["cancels_at"].startswith("2026-")
+
+
+def test_summary_survives_an_unreadable_subscription(subscribed, monkeypatch):
+    """A Stripe hiccup must not blank the whole pane — the rest of the screen
+    still renders and the cancellation flag simply reads false."""
+
+    def _boom(sid):
+        raise RuntimeError("stripe down")
+
+    monkeypatch.setattr(stripe_client, "get_subscription", _boom)
+
+    body = subscribed.client.get("/v1/billing/summary").json()
+
+    assert body["cancel_at_period_end"] is False
+    assert body["plan"] == plans.STARTER
+    assert body["credit_balance"] == 0

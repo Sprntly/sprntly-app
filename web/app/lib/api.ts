@@ -5065,6 +5065,13 @@ export type BillingSummary = {
    *  Stripe is still retrying the card. */
   has_access: boolean
   current_period_end: string | null
+  /** A cancellation is scheduled: access continues until `cancels_at`. Stripe
+   *  keeps `subscription_status` at "active" throughout, which is why the
+   *  access rule needs no special case. */
+  cancel_at_period_end: boolean
+  /** When access actually stops — the end of the period already paid for.
+   *  Null unless a cancellation is pending. */
+  cancels_at: string | null
   first_paid_at: string | null
   refund_window_days: number
   /** False in any environment without Stripe credentials (local dev, CI).
@@ -5091,8 +5098,17 @@ export const billingApi = {
    *  export with no server, so the redirect is a plain `location.assign`. */
   checkout: (plan: string, interval: BillingInterval = "monthly") =>
     api.post<{ url: string }>("/v1/billing/checkout", { plan, interval }),
-  /** The hosted customer portal: card, invoices, receipts, cancellation. */
+  /** The hosted customer portal: card, invoices and receipts. Cancellation is
+   *  in-app (below) so the user never leaves the pane to leave. */
   portal: () => api.post<{ url: string }>("/v1/billing/portal"),
+  /** Cancel at the END of the paid period — the plan, credits and access all
+   *  continue until then. Reversible with `resume` up to that moment. */
+  cancel: () =>
+    api.post<{ cancel_at_period_end: boolean; cancels_at: string | null }>(
+      "/v1/billing/cancel",
+    ),
+  resume: () =>
+    api.post<{ cancel_at_period_end: boolean }>("/v1/billing/resume"),
   topup: (amountUsd: number) =>
     api.post<{ url: string; credits: number }>("/v1/billing/topup", {
       amount_usd: amountUsd,

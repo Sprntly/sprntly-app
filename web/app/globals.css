@@ -25682,3 +25682,80 @@
     display: none;
   }
 }
+
+/* Cancellation lives on the Billing card, not behind the Stripe portal — the
+   user should not have to leave the product to leave the product. */
+
+/* Deliberately quiet: a destructive action people rarely want should not
+   compete with the plan buttons above it. */
+.bill-cancel-link {
+  margin-top: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.bill-cancel-link:hover:not(:disabled) {
+  color: var(--urgent, #c63f35);
+}
+
+.bill-ending {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.03));
+}
+
+.bill-ending-copy {
+  flex: 1;
+  min-width: 240px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.bill-ending-copy strong {
+  color: var(--ink);
+}
+
+.bill-ending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The confirm itself is the only red thing on the pane. */
+.bill-cancel-confirm {
+  padding: 7px 14px;
+  border: 1px solid var(--urgent-br, #f2cfc9);
+  border-radius: var(--radius-sm);
+  background: var(--urgent-b, #fcebe8);
+  color: var(--urgent, #c63f35);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bill-cancel-confirm:hover:not(:disabled) {
+  background: var(--urgent, #c63f35);
+  border-color: var(--urgent, #c63f35);
+  color: #fff;
+}
+
+.bill-cancel-confirm:disabled,
+.bill-cancel-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

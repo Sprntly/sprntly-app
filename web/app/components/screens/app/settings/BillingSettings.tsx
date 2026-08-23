@@ -305,6 +305,13 @@ export type BillingView = {
   customTopup: string
   tab: BillingTab
   onTab: (t: BillingTab) => void
+  /** Two-step confirm: the first click arms, the second cancels. A
+   *  destructive action should not fire on a single click, and an inline
+   *  confirm beats a modal for one button. */
+  confirmingCancel: boolean
+  onConfirmCancel: (v: boolean) => void
+  onCancelSubscription: () => void
+  onResumeSubscription: () => void
   onInterval: (i: BillingInterval) => void
   onSubscribe: (plan: string) => void
   onPortal: () => void
@@ -384,7 +391,9 @@ export function BillingSettingsView(p: BillingView) {
             <strong className="bill-hero-name">{d.plan_label}</strong>
             {d.current_period_end && (
               <span className="bill-hero-meta">
-                Renews {formatDate(d.current_period_end)}
+                {d.cancel_at_period_end
+                  ? `Ends ${formatDate(d.cancels_at ?? d.current_period_end)}`
+                  : `Renews ${formatDate(d.current_period_end)}`}
               </span>
             )}
           </div>
@@ -427,19 +436,81 @@ export function BillingSettingsView(p: BillingView) {
         </div>
 
         {d.has_subscription && d.billing_configured && (
-          <div className="bill-actions">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={p.onPortal}
-              disabled={p.busy !== null}
-            >
-              {p.busy === "portal" ? "Opening…" : "Manage payment & invoices"}
-            </button>
-            <span className="bill-actions-hint">
-              Update your card, download invoices, or cancel.
-            </span>
-          </div>
+          <>
+            <div className="bill-actions">
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={p.onPortal}
+                disabled={p.busy !== null}
+              >
+                {p.busy === "portal" ? "Opening…" : "Manage payment & invoices"}
+              </button>
+              <span className="bill-actions-hint">
+                Update your card or download invoices.
+              </span>
+            </div>
+
+            {d.cancel_at_period_end ? (
+              // Pending cancellation. The message leads with what they KEEP —
+              // they paid for this period and none of it is being taken away.
+              <div className="bill-ending">
+                <div className="bill-ending-copy">
+                  <strong>Your plan ends {formatDate(d.cancels_at)}.</strong>{" "}
+                  You keep {d.unlimited ? "full access" : "your credits"} and
+                  everything on your plan until then. Nothing more will be
+                  charged.
+                </div>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={p.onResumeSubscription}
+                  disabled={p.busy !== null}
+                >
+                  {p.busy === "resume" ? "Resuming…" : "Keep my plan"}
+                </button>
+              </div>
+            ) : p.confirmingCancel ? (
+              <div className="bill-ending">
+                <div className="bill-ending-copy">
+                  <strong>Cancel your subscription?</strong> You will keep your
+                  plan and{" "}
+                  {d.unlimited
+                    ? "access"
+                    : `${(d.credit_balance ?? 0).toLocaleString()} credits`}{" "}
+                  until {formatDate(d.current_period_end)}, then it ends. You
+                  can undo this any time before then.
+                </div>
+                <div className="bill-ending-actions">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    onClick={() => p.onConfirmCancel(false)}
+                    disabled={p.busy !== null}
+                  >
+                    Keep my plan
+                  </button>
+                  <button
+                    type="button"
+                    className="bill-cancel-confirm"
+                    onClick={p.onCancelSubscription}
+                    disabled={p.busy !== null}
+                  >
+                    {p.busy === "cancel" ? "Cancelling…" : "Cancel subscription"}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="bill-cancel-link"
+                onClick={() => p.onConfirmCancel(true)}
+                disabled={p.busy !== null}
+              >
+                Cancel subscription
+              </button>
+            )}
+          </>
         )}
 
         {refundDays !== null && (
@@ -726,6 +797,7 @@ export function BillingSettings() {
   // after checkout and the overview — where the new plan and balance are — is
   // the right place to land, not wherever you were standing before.
   const [tab, setTab] = useState<BillingTab>("billing")
+  const [confirmingCancel, setConfirmingCancel] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -773,6 +845,37 @@ export function BillingSettings() {
           ? apiErrorMessage(e.status, e.body)
           : "Could not reach Stripe. Try again.",
       )
+      setBusy(null)
+    }
+  }
+
+  /** Cancel and resume both refresh from the server rather than guessing:
+   *  the end date comes from Stripe's own period boundary, and a stale local
+   *  guess on a billing screen is worse than a second of latency. */
+  const mutate = async (
+    key: string,
+    run: () => Promise<unknown>,
+    done: (s: BillingSummary) => BillingSummary,
+  ) => {
+    setBusy(key)
+    setError(null)
+    try {
+      await run()
+      setConfirmingCancel(false)
+      setData((prev) => (prev ? done(prev) : prev))
+      // Re-read so `cancels_at` is Stripe's date, not one we inferred.
+      try {
+        setData(await billingApi.summary())
+      } catch {
+        /* the optimistic shape above is close enough to render */
+      }
+    } catch (e) {
+      setError(
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : "Could not update your subscription.",
+      )
+    } finally {
       setBusy(null)
     }
   }
@@ -829,6 +932,22 @@ export function BillingSettings() {
       customTopup={customTopup}
       tab={tab}
       onTab={setTab}
+      confirmingCancel={confirmingCancel}
+      onConfirmCancel={setConfirmingCancel}
+      onCancelSubscription={() =>
+        mutate("cancel", () => billingApi.cancel(), (s) => ({
+          ...s,
+          cancel_at_period_end: true,
+          cancels_at: s.current_period_end,
+        }))
+      }
+      onResumeSubscription={() =>
+        mutate("resume", () => billingApi.resume(), (s) => ({
+          ...s,
+          cancel_at_period_end: false,
+          cancels_at: null,
+        }))
+      }
       onInterval={setInterval}
       onSubscribe={(plan) => go(plan, () => billingApi.checkout(plan, interval))}
       onPortal={() => go("portal", () => billingApi.portal())}

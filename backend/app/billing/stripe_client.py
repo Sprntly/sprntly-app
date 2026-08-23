@@ -277,6 +277,38 @@ def get_subscription(subscription_id: str) -> dict[str, Any]:
     return _as_dict(_stripe().Subscription.retrieve(subscription_id))
 
 
+def schedule_cancellation(subscription_id: str) -> dict[str, Any]:
+    """Cancel at the END of the paid period, not now.
+
+    The customer has already paid for this month or year, so they keep their
+    plan, their credits and their access until it runs out — cancelling
+    immediately would take away something already bought and turn every
+    cancellation into a refund request.
+
+    Stripe keeps `status` at `active` with `cancel_at_period_end=true`, which
+    means `plans.subscription_grants_access` needs no special case: access
+    simply continues until `customer.subscription.deleted` arrives at the
+    period boundary.
+
+    Reversible until that moment — see `resume_subscription`.
+    """
+    return _as_dict(
+        _stripe().Subscription.modify(subscription_id, cancel_at_period_end=True)
+    )
+
+
+def resume_subscription(subscription_id: str) -> dict[str, Any]:
+    """Undo a pending cancellation.
+
+    Only works before the period ends; once Stripe has actually cancelled it,
+    a subscription cannot be reactivated and the customer must buy a new one.
+    The route surfaces that difference rather than silently failing.
+    """
+    return _as_dict(
+        _stripe().Subscription.modify(subscription_id, cancel_at_period_end=False)
+    )
+
+
 def refund_latest_payment(*, subscription_id: str, reason: str = "requested_by_customer") -> str:
     """Refund the most recent paid invoice on a subscription. Returns refund id.
 

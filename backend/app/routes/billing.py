@@ -36,6 +36,7 @@ handlers are idempotent so a manual replay from the dashboard is safe.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -102,6 +103,12 @@ def _stripe_call(what: str, fn):
         ) from None
 
 
+def _iso_or_none(epoch) -> str | None:
+    if not epoch:
+        return None
+    return datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat()
+
+
 def _return_url(status: str) -> str:
     sep = "&" if "?" in settings.billing_return_url else "?"
     return f"{settings.billing_return_url}{sep}checkout={status}"
@@ -128,6 +135,27 @@ def get_summary(company: CompanyContext = Depends(require_company)) -> dict:
 
     invites = referrals.list_for_company(company.company_id)
 
+    # Pending cancellation is read LIVE rather than stored. It changes rarely
+    # and only from this screen, so a column plus a sync path would be three
+    # moving parts to keep in step with Stripe when one call cannot drift at
+    # all. Fail-soft: a Stripe hiccup must not blank the whole Billing pane, so
+    # an unreadable subscription reports "not cancelling" and the rest of the
+    # screen still renders.
+    cancel_at_period_end = False
+    cancels_at = None
+    if row.get("stripe_subscription_id") and stripe_client.configured():
+        try:
+            sub = stripe_client.get_subscription(row["stripe_subscription_id"])
+            cancel_at_period_end = bool(sub.get("cancel_at_period_end"))
+            cancels_at = _iso_or_none(sub.get("cancel_at")) or row.get(
+                "current_period_end"
+            )
+        except Exception:  # noqa: BLE001 — informational only
+            logger.warning(
+                "billing_summary_subscription_unreadable company=%s",
+                company.company_id,
+            )
+
     return {
         "plan": plan,
         "plan_label": plans.plan_label(plan),
@@ -142,6 +170,10 @@ def get_summary(company: CompanyContext = Depends(require_company)) -> dict:
             plan, row.get("subscription_status")
         ),
         "current_period_end": row.get("current_period_end"),
+        "cancel_at_period_end": cancel_at_period_end,
+        # When access actually stops. The paid period's end, which is the whole
+        # point: they keep what they bought.
+        "cancels_at": cancels_at if cancel_at_period_end else None,
         "first_paid_at": row.get("first_paid_at"),
         "refund_window_days": plans.REFUND_WINDOW_DAYS,
         "billing_configured": stripe_client.configured(),
@@ -240,6 +272,69 @@ def open_portal(company: CompanyContext = Depends(require_company)) -> dict:
         ),
     )
     return {"url": url}
+
+
+@router.post("/cancel", dependencies=[Depends(require_same_origin)])
+def cancel_subscription(company: CompanyContext = Depends(require_company)) -> dict:
+    """Cancel at the end of the paid period.
+
+    Not immediately: the customer has already paid for this month or year, so
+    they keep the plan, the credits and the access until it runs out. Taking
+    that away the moment they click Cancel would be removing something they
+    already bought, and would turn every cancellation into a refund request.
+
+    Reversible via /resume right up to the period boundary.
+    """
+    _require_admin(company)
+    _require_stripe()
+
+    row = billing_db.get_billing(company.company_id) or {}
+    subscription_id = row.get("stripe_subscription_id")
+    if not subscription_id:
+        raise HTTPException(400, "There is no subscription to cancel")
+
+    sub = _stripe_call(
+        "cancel", lambda: stripe_client.schedule_cancellation(subscription_id)
+    )
+    logger.info("billing_cancellation_scheduled company=%s", company.company_id)
+    return {
+        "cancel_at_period_end": True,
+        "cancels_at": _iso_or_none(sub.get("cancel_at"))
+        or row.get("current_period_end"),
+    }
+
+
+@router.post("/resume", dependencies=[Depends(require_same_origin)])
+def resume_subscription(company: CompanyContext = Depends(require_company)) -> dict:
+    """Undo a pending cancellation, before the period ends.
+
+    A subscription Stripe has already cancelled cannot be reactivated, so that
+    case is reported as its own message rather than appearing to work — the
+    customer needs to know they must choose a plan again, not wonder why
+    nothing happened.
+    """
+    _require_admin(company)
+    _require_stripe()
+
+    row = billing_db.get_billing(company.company_id) or {}
+    subscription_id = row.get("stripe_subscription_id")
+    if not subscription_id:
+        raise HTTPException(400, "There is no subscription to resume")
+    if row.get("subscription_status") == "canceled":
+        raise HTTPException(
+            400,
+            detail={
+                "error": "subscription_ended",
+                "message": (
+                    "This subscription has already ended and cannot be "
+                    "resumed. Choose a plan to start again."
+                ),
+            },
+        )
+
+    _stripe_call("resume", lambda: stripe_client.resume_subscription(subscription_id))
+    logger.info("billing_cancellation_reversed company=%s", company.company_id)
+    return {"cancel_at_period_end": False}
 
 
 class TopupRequest(BaseModel):
