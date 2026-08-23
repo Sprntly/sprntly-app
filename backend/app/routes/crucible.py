@@ -756,11 +756,21 @@ def execute_run(
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
+        # SOURCES OF THE CLAIMS, not of the rows. Counting `signals` says "read
+        # from 4 sources" on a tenant whose entire `docs` corpus was retired —
+        # so a PM defending the ranking believes their documents are in it when
+        # no claim came from one.
+        # BOTH DROP REASONS, separately. `seen - projected` is retired PLUS
+        # undated, and attributing all of it to a missing date is the same
+        # "confidently stated false reason" the coverage note already avoids —
+        # the two would print different numbers for one fact on one run.
         _progress(
             run_id, company_id, step="grouping",
             signals_read=stats.get("seen") or 0,
             claims=stats.get("projected") or 0,
-            sources=len({r.get("source_type") for r in signals if r.get("source_type")}),
+            retired=stats.get("retired") or 0,
+            undated=stats.get("no_timestamp") or 0,
+            sources=len({c.source_id for c in claims if c.source_id}),
         )
 
         # GROUPING: the graph's own themes first, embeddings only for whatever
@@ -804,10 +814,14 @@ def execute_run(
         # reported here rather than estimated and silently corrected later — a
         # narration that revises its own numbers teaches a reader to distrust
         # all of them.
+        # CLAIM counts, named as claim counts. `assign_themes` returns
+        # `themed + unthemed == len(claims)`, so rendering them as the parts of
+        # a THEME count invites an arithmetic that can never hold — the same
+        # unit error this feature already guards at the ungroupable row.
         _progress(
             run_id, company_id, step="analysing",
-            themed=cluster_stats.get("themed") or 0,
-            unthemed=cluster_stats.get("unthemed") or 0,
+            claims_themed=cluster_stats.get("themed") or 0,
+            claims_unthemed=cluster_stats.get("unthemed") or 0,
         )
 
         if not claims:
@@ -819,13 +833,30 @@ def execute_run(
         ingest_clock = _dates_are_ingest_clock(signals)
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock)
-        result.stats.update(cluster_stats)
+        # CAPTURED BEFORE THE MERGE, and this is not a style preference.
+        # `assign_clusters` returns its OWN `"clusters"` key counting only the
+        # groups formed among the graph-unthemed leftovers, and the merge below
+        # lands it on top of `build_findings`' total. Read afterwards, the
+        # funnel's headline becomes the leftover count — smaller than numbers
+        # printed beneath it, and 0 outright on a tenant whose embeddings are
+        # unusable. Worse, `ungroupable` can ONLY be produced by
+        # `assign_clusters`, so the wrong headline and the ungroupable row are
+        # exactly co-incident: whenever the panel shows one, the other is wrong.
+        total_groups = result.stats.get("clusters") or 0
+        # Namespaced on the way in so the collision cannot come back.
+        result.stats.update({
+            ("embed_clusters" if k == "clusters" else k): v
+            for k, v in cluster_stats.items()
+        })
         runs_db.heartbeat(run_id, company_id)
-        # THE FUNNEL, and it outlives the run: the report reprints it, so how a
-        # ranking was narrowed stays answerable after the spinner is gone.
+        # THE FUNNEL. It is also rendered after the run finishes — `progress` is
+        # durable in `prioritisation` and the ready view reads it — because the
+        # drop rows ARE the feature and the window between this write and
+        # `status="ready"` is about a second against a 3s poll, so a reader who
+        # only saw it live would usually see nothing at all.
         _progress(
             run_id, company_id, step="done",
-            groups=result.stats.get("clusters") or 0,
+            groups=total_groups,
             findings=len(result.findings),
             conflicts=result.stats.get("conflicts") or 0,
             deep=result.deep_count,

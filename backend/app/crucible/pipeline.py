@@ -258,7 +258,14 @@ def build_findings(
     # LISTED set: over `MAX_LISTED_REJECTIONS` it collapses into one summary
     # row, so counting it would report 100 anecdotes on a run that dropped
     # 1,576. The funnel has to be the truth, not the excerpt.
-    drops: dict[str, int] = {code: 0 for code in NARRATED_DROPS}
+    # `defaultdict`, PRE-SEEDED. Pre-seeded so every rule is present at zero
+    # (the panel distinguishes "dropped nothing" from "did not run"); a
+    # defaultdict so a rule added to `_refute` without its constant cannot
+    # raise KeyError here — that escapes into `execute_run`'s catch-all and
+    # fails the run for every tenant. Narration must never outrank the answer.
+    drops: defaultdict[str, int] = defaultdict(int)
+    for _code in NARRATED_DROPS:
+        drops[_code] = 0
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)

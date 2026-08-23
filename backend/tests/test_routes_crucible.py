@@ -1117,3 +1117,107 @@ def test_a_progress_write_failure_never_fails_a_good_run(ctx, monkeypatch):
     # And the guard is what saved it, not a progress write that never happened.
     assert not row["prioritisation"].get("progress")
     assert row["prioritisation"].get("plan"), "the plan write was collateral"
+
+
+# ─── The funnel has to BALANCE, and on a MIXED tenant ────────────────────────
+#
+# Both review passes found the same defect and neither test in this file could
+# have: `assign_clusters` returns its own `"clusters"` key counting only the
+# graph-unthemed leftovers, and merging it clobbered `build_findings`' total,
+# so the panel's headline became the leftover count. It is invisible in exactly
+# two states — the graph themes everything, or it themes nothing — and every
+# fixture here was the second one (`grep theme` in this file was zero hits).
+#
+# So this seeds a MIXED corpus, which is the production shape, and asserts the
+# identity a PM would check on screen:
+#
+#     groups == findings + group-level drops + ungroupable
+#
+# One line, and it fails on the old code.
+
+def _theme(company_id: str, entity_id: str, label: str, signal_ids: list[str]) -> None:
+    """Join signals to a graph theme, the way the extractor does."""
+    from app.db.client import require_client
+
+    c = require_client()
+    stamp = "2026-08-19T00:00:00+00:00"
+    c.table("kg_entity").insert({
+        "id": entity_id, "enterprise_id": company_id, "type": "theme",
+        "canonical_label": label,
+        "valid_at": stamp, "transaction_at": stamp,
+    }).execute()
+    for sid in signal_ids:
+        # `id` is autoincrement here, so it is left to the table.
+        c.table("kg_relationship").insert({
+            "enterprise_id": company_id,
+            "source_id": sid, "source_kind": "signal",
+            "target_id": entity_id, "target_kind": "entity", "type": "about",
+            "valid_at": stamp, "transaction_at": stamp,
+        }).execute()
+
+
+def test_the_published_funnel_balances_on_a_mixed_tenant(ctx):
+    """THE ONE BOTH REVIEWERS ASKED FOR. Some claims themed by the graph, some
+    left to embeddings — the shape where the headline used to be the leftover
+    count instead of the total."""
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    # Six signals the graph themes into two themes, plus four it does not.
+    for i in range(10):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001", "sig-0002"])
+    _theme(ctx.company_id, "ent-b", "Billing", ["sig-0003", "sig-0004", "sig-0005"])
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    progress = row["prioritisation"]["progress"]
+
+    # The corpus really was mixed, or this test proves nothing.
+    assert progress["claims_themed"] > 0, "no claim was themed by the graph"
+    assert progress["claims_unthemed"] > 0, "nothing was left for embeddings"
+
+    group_drops = sum(
+        progress["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    # `_cluster` keys each ungroupable claim as its own cluster, so it counts
+    # once here despite being a claim count elsewhere.
+    assert progress["groups"] == (
+        progress["findings"] + group_drops + progress["dropped"]["ungroupable"]
+    ), f"funnel does not balance: {progress}"
+
+    # And the headline is the TOTAL, never the leftovers-only count.
+    assert progress["groups"] >= progress["findings"]
+
+
+def test_the_claim_split_sums_to_claims_not_to_groups(ctx):
+    """`claims_themed`/`claims_unthemed` are CLAIM counts. Publishing them as
+    the parts of a THEME count invited an arithmetic that can never hold."""
+    for i in range(8):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001"])
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    assert p["claims_themed"] + p["claims_unthemed"] == p["claims"]
+
+
+def test_signals_dropped_before_projection_are_attributed_per_reason(ctx):
+    """`seen - claims` is retired PLUS undated. Publishing one number under the
+    date rule made the panel contradict the run's own coverage note."""
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    # Both keys published, so the panel never has to guess which rule applied.
+    assert "retired" in p and "undated" in p
+    assert p["signals_read"] - p["claims"] == p["retired"] + p["undated"]

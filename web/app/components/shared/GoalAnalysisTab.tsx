@@ -433,6 +433,21 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     )
   }
 
+  // THE FUNNEL SURVIVES THE RUN. The gap between the final progress write and
+  // `status="ready"` is about a second against a 3s poll, so a reader who could
+  // only see this live would usually see nothing — the drop rows are the whole
+  // feature. `progress` is durable in `prioritisation`, so the finished report
+  // can say how its ranking was narrowed instead of asking to be taken on
+  // faith, which is the post-hoc-disclosure problem this work exists to end.
+  const readyProgress = run.prioritisation?.progress
+  const howItNarrowed =
+    readyProgress && readyProgress.step === "done" ? (
+      <details className="ga-narration-recap" data-testid="goal-narration-recap">
+        <summary>How this was narrowed</summary>
+        <GoalRunNarration progress={readyProgress} />
+      </details>
+    ) : null
+
   const note = docNote ? (
     <p className="ga-doc-note" role="status" data-testid="goal-doc-note">
       {docNote}
@@ -482,6 +497,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         onSaveCopy={saveCopy}
         busy={docBusy}
       />
+      {howItNarrowed}
     </div>
   )
 }

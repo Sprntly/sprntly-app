@@ -14,7 +14,13 @@
  * findings has to take them on authority, and the first wrong call costs all of
  * it. Watching the funnel is how the mechanism gets learned.
  *
- * TWO RULES IT MUST NOT BREAK.
+ * IT IS ALSO RENDERED AFTER THE RUN FINISHES, and that is not a nicety. The
+ * gap between the final progress write and `status="ready"` is about a second
+ * against a 3s poll, so a reader who could only see it live would usually see
+ * nothing at all — the drop rows, which are the entire feature, would render on
+ * a minority of runs and never once the report was on screen.
+ *
+ * FOUR RULES IT MUST NOT BREAK.
  *
  *  1. NEVER RENDER A NUMBER THE RUN HAS NOT MEASURED. The fields arrive in
  *     three writes and a poll can land between any two, so everything is
@@ -23,28 +29,40 @@
  *  2. A CHECK THAT DID NOT RUN IS NOT A CHECK THAT FOUND NOTHING. When the
  *     corpus is dated by ingest, the one-conversation rule is skipped
  *     entirely; rendering "0 set aside" there would claim a check passed that
- *     could not see. `echo_check_skipped` gets a sentence, not a zero.
+ *     could not see.
+ *  3. EVERY NUMBER CARRIES ITS UNIT. `claims_themed`/`claims_unthemed` are
+ *     CLAIM counts that sum to `claims`; `groups` is a THEME count; the drop
+ *     rules count GROUPS except `ungroupable`, which counts CLAIMS. Printing
+ *     any two of those as parts of one whole is a quietly wrong number, and it
+ *     is the defect this screen exists to avoid committing.
+ *  4. DRIFT MUST BE VISIBLE. If the engine adds a drop rule this file does not
+ *     know, the row renders with its raw code rather than vanishing — a funnel
+ *     that silently omits a rule stops adding up with nothing going red.
  */
 import type { GoalRunProgress } from "../../lib/api"
 
 /** What each rule is, in a reader's words rather than the engine's.
  *
- *  ORDER IS THE ORDER THE RUN APPLIES THEM, so the list reads as a funnel
- *  rather than a bag of reasons. Mirrors `NARRATED_DROPS` in
- *  `backend/app/crucible/pipeline.py` — one place it can drift, named here. */
-const DROP_COPY: { code: string; label: string }[] = [
-  { code: "anecdote", label: "a single supporting claim each — anecdotes, not findings" },
-  { code: "echo", label: "all their evidence from one document in one window — one conversation, not a pattern" },
-  { code: "single_account", label: "every supporting claim from one account — that account's situation, not a pattern across the book" },
-  { code: "no_authority", label: "no source allowed to speak to that kind of claim reported it" },
-  { code: "uncausal", label: "could not be stated without asserting a cause the evidence does not support" },
-]
+ *  ORDER IS THE ORDER THE RUN APPLIES THEM, so the list reads as a funnel.
+ *  `ungroupable` leads because those claims never entered the funnel at all.
+ *  Mirrors `NARRATED_DROPS` in `backend/app/crucible/pipeline.py`; a code
+ *  missing from here still renders (see rule 4), so drift degrades to ugly
+ *  rather than to invisible. */
+const DROP_COPY: Record<string, string> = {
+  ungroupable:
+    "claims never grouped at all — no usable embedding, so whether they corroborate anything is unknown rather than false",
+  anecdote: "a single supporting claim each — anecdotes, not findings",
+  echo: "all their evidence from one document in one window — one conversation, not a pattern",
+  single_account:
+    "every supporting claim from one account — that account's situation, not a pattern across the book",
+  no_authority: "no source allowed to speak to that kind of claim reported it",
+  uncausal:
+    "could not be stated without asserting a cause the evidence does not support",
+}
 
-/** THE UNIT DIFFERS AND THE COPY HAS TO SAY SO. Every rule above sets aside a
- *  GROUP; ungroupable counts individual CLAIMS, because they never reached a
- *  group at all. Listing them in one column under one noun would be a quietly
- *  wrong number, which is the failure this whole screen exists to stop. */
-const UNGROUPABLE = "ungroupable"
+const DROP_ORDER = [
+  "ungroupable", "anecdote", "echo", "single_account", "no_authority", "uncausal",
+]
 
 const n = (v: number) => v.toLocaleString()
 
@@ -54,29 +72,45 @@ export function GoalRunNarration({ progress }: { progress: GoalRunProgress }) {
 
   // ── what was read ──────────────────────────────────────────────────────
   if (typeof p.claims === "number") {
+    // EACH DROP REASON NAMED. `signals_read - claims` is retired PLUS undated,
+    // and calling all of it "undated" prints a number the run's own coverage
+    // note contradicts.
+    const skipped: string[] = []
+    if (p.retired) skipped.push(`${n(p.retired)} superseded`)
+    if (p.undated) skipped.push(`${n(p.undated)} undated`)
     lines.push(
       <li key="read">
         Read <b>{n(p.claims)}</b> claims
         {typeof p.sources === "number" && p.sources > 0
           ? ` from ${n(p.sources)} source${p.sources === 1 ? "" : "s"}`
           : ""}
-        {typeof p.signals_read === "number" && p.signals_read > p.claims
-          ? ` (of ${n(p.signals_read)} signals — the rest carried no usable date)`
+        {skipped.length && typeof p.signals_read === "number"
+          ? ` (of ${n(p.signals_read)} signals — ${skipped.join(", ")})`
           : ""}
       </li>,
     )
   }
 
   // ── how they were grouped ──────────────────────────────────────────────
-  if (typeof p.themed === "number" || typeof p.unthemed === "number") {
-    const themed = p.themed ?? 0
-    const unthemed = p.unthemed ?? 0
+  //
+  // BOTH HALVES SAY "claims". They sum to the claim count, never to `groups`,
+  // so the sentence must not invite the reader to add them up to the headline.
+  if (typeof p.claims_themed === "number" || typeof p.claims_unthemed === "number") {
+    const themed = p.claims_themed ?? 0
+    const unthemed = p.claims_unthemed ?? 0
     lines.push(
       <li key="grouped">
-        Grouped {typeof p.groups === "number" ? <>into <b>{n(p.groups)}</b> themes </> : null}
+        {typeof p.groups === "number" ? (
+          <>Grouped into <b>{n(p.groups)}</b> themes — from </>
+        ) : (
+          <>Grouping </>
+        )}
         <span className="ga-plan-witness">
-          {n(themed)} by your knowledge graph&rsquo;s own themes
-          {unthemed ? ` · ${n(unthemed)} by meaning` : ""}
+          {n(themed)} claim{themed === 1 ? "" : "s"} your knowledge graph had
+          already themed
+          {unthemed
+            ? `, plus ${n(unthemed)} it had not`
+            : ""}
         </span>
       </li>,
     )
@@ -84,26 +118,27 @@ export function GoalRunNarration({ progress }: { progress: GoalRunProgress }) {
 
   // ── what was set aside, per rule ───────────────────────────────────────
   const dropped = p.dropped || {}
-  const shown = DROP_COPY.filter((d) => (dropped[d.code] || 0) > 0)
-  const ungroupable = dropped[UNGROUPABLE] || 0
+  // Known rules in funnel order, then anything the engine sent that this file
+  // does not recognise — visible rather than silently discarded (rule 4).
+  const codes = [
+    ...DROP_ORDER.filter((c) => (dropped[c] || 0) > 0),
+    ...Object.keys(dropped).filter(
+      (c) => !DROP_ORDER.includes(c) && (dropped[c] || 0) > 0,
+    ),
+  ]
 
-  if (shown.length || ungroupable || p.echo_check_skipped) {
+  if (codes.length || p.echo_check_skipped) {
     lines.push(
       <li key="dropped">
         Set aside
         <ul className="ga-narration-drops" data-testid="goal-narration-drops">
-          {shown.map((d) => (
-            <li key={d.code}>
-              <b>{n(dropped[d.code])}</b> {d.label}
+          {codes.map((code) => (
+            <li key={code}>
+              {/* `ungroupable`'s copy names its own unit (CLAIMS) because
+                  every other rule here counts GROUPS. */}
+              <b>{n(dropped[code])}</b> {DROP_COPY[code] ?? code}
             </li>
           ))}
-          {ungroupable ? (
-            <li key={UNGROUPABLE}>
-              <b>{n(ungroupable)}</b> claims never grouped at all — no usable
-              embedding, so whether they corroborate anything is unknown rather
-              than false
-            </li>
-          ) : null}
         </ul>
         {p.echo_check_skipped ? (
           <p className="ga-doc-note" data-testid="goal-narration-echo-skipped">

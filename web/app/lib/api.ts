@@ -706,9 +706,18 @@ export type GoalRunProgress = {
   step?: "grouping" | "analysing" | "done"
   signals_read?: number
   claims?: number
+  /** Signals dropped before projection, by REASON — they are two different
+   *  rules and attributing both to a missing date prints a number that
+   *  contradicts the run's own coverage note. */
+  retired?: number
+  undated?: number
+  /** Distinct source types among the CLAIMS, not among the rows read. */
   sources?: number
-  themed?: number
-  unthemed?: number
+  /** CLAIM counts, and named so. `claims_themed + claims_unthemed === claims`,
+   *  never `groups` — rendering them as the parts of a theme count invites an
+   *  arithmetic that can never hold. */
+  claims_themed?: number
+  claims_unthemed?: number
   groups?: number
   findings?: number
   conflicts?: number
