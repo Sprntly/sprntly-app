@@ -81,6 +81,35 @@ describe("brief-adapter (v1) — finding body", () => {
     )
   })
 
+  it("does NOT truncate a real-length card body, and keeps its evidence sentence", () => {
+    // Real card bodies from a production brief run ~600-630 chars. The old
+    // 560-char mid-word slice truncated every one of them, and because the
+    // evidence basis is the body's LAST sentence, it was always the part cut.
+    const real =
+      "ChatPRD has run an MCP server across five IDEs since early 2026, " +
+      "Dovetail added Claude, Copilot, Slack, and Linear connectors in July, " +
+      "and BuildBetter hit its B2B MCP milestone in 2025 — Sprntly has " +
+      "announced none. PMs already operating with ChatPRD embedded in Cursor " +
+      "or Claude face a workflow switching cost that neutralizes the " +
+      "evidence-layer pitch, and the intelligence report calls the " +
+      "accumulation active and compounding. Drawn from eight competitive " +
+      "findings covering three named rivals' MCP releases, a documented " +
+      "deal-blocker mechanic, and an explicit product recommendation to ship " +
+      "at minimum one MCP integration in beta."
+    expect(real.length).toBeGreaterThan(560) // the old cap
+    const desc = descOf({ _card: { body: real } })
+    expect(desc).toBe(real)
+    expect(desc).not.toContain("…")
+    expect(desc).toContain("Drawn from eight competitive findings")
+  })
+
+  it("never cuts mid-word when a body IS pathologically long", () => {
+    const sentence = "The deductible step is the single biggest drop-off point. "
+    const desc = descOf({ _card: { body: sentence.repeat(20).trim() } })
+    expect(desc.endsWith("…")).toBe(true)
+    expect(desc.replace(/\s*…$/, "").endsWith("point.")).toBe(true)
+  })
+
   it("falls back to headline then title when body and subtitle are both empty", () => {
     expect(descOf({ _card: undefined, subtitle: "", headline: "Hero line" })).toBe(
       "Hero line",

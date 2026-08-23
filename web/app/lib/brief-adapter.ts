@@ -12,7 +12,7 @@ import type {
   DetailState,
 } from "../types/content"
 import type { Brief, ChartHint, ConvergenceItem, Insight } from "./api"
-import { briefToBriefV2State, companyLabel } from "./brief-v2-adapter"
+import { briefToBriefV2State, clampBody, companyLabel } from "./brief-v2-adapter"
 import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
 
 type TagMeta = {
@@ -240,8 +240,11 @@ function findingBodyDesc(insight: Insight): string {
   // brief-v2-adapter.ts for why the brief stopped ending on an imperative.
   let t = insight._card?.body?.trim() || insight.subtitle?.trim() || ""
   if (!t.trim()) t = insight.headline?.trim() || insight.title
-  if (t.length > 560) return `${t.slice(0, 557)}…`
-  return t
+  // Was a hard 560-char mid-word slice. Every real card body runs ~600-630
+  // chars, so that cap truncated all of them — and it cut the evidence-basis
+  // sentence, the one this body exists to end on. Same budget and same
+  // boundary-aware clamp as the v2 render.
+  return clampBody(t)
 }
 
 function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string {

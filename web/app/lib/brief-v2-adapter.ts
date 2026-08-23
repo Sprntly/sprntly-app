@@ -257,29 +257,38 @@ const BODY_MAX = 900
  * `subtitle`, then `headline`/`title`. The fallback stays subtitle-ONLY so an
  * old brief loses the prescription too rather than rendering both voices.
  */
+/**
+ * Truncate a card body without ever cutting mid-word.
+ *
+ * Only engaged on pathologically long text: it cuts at the last sentence
+ * boundary when one sits reasonably deep into the budget, else at the last
+ * whole word. Exported because BOTH brief adapters render the same
+ * `_card.body`, and a tighter or blunter cap on one of them silently eats the
+ * body's third beat — the evidence basis, which is the last sentence and
+ * therefore the first casualty of any truncation.
+ */
+export function clampBody(text: string, max: number = BODY_MAX): string {
+  if (text.length <= max) return text
+  const head = text.slice(0, max)
+  const lastSentence = Math.max(
+    head.lastIndexOf(". "),
+    head.lastIndexOf("! "),
+    head.lastIndexOf("? "),
+  )
+  if (lastSentence > max * 0.6) {
+    return `${head.slice(0, lastSentence + 1)} …`
+  }
+  const lastSpace = head.lastIndexOf(" ")
+  return `${(lastSpace > 0 ? head.slice(0, lastSpace) : head).trimEnd()}…`
+}
+
 function bodyFor(insight: Insight): string {
   const skillBody = insight._card?.body?.trim() || ""
   let t = skillBody || insight.subtitle?.trim() || ""
 
   if (!t.trim()) t = insight.headline?.trim() || insight.title
 
-  // Never cut mid-word: only truncate pathologically long text, and do so at the
-  // last sentence boundary (preferred) or last whole word under the cap.
-  if (t.length > BODY_MAX) {
-    const head = t.slice(0, BODY_MAX)
-    const lastSentence = Math.max(
-      head.lastIndexOf(". "),
-      head.lastIndexOf("! "),
-      head.lastIndexOf("? "),
-    )
-    if (lastSentence > BODY_MAX * 0.6) {
-      return `${head.slice(0, lastSentence + 1)} …`
-    }
-    const lastSpace = head.lastIndexOf(" ")
-    return `${(lastSpace > 0 ? head.slice(0, lastSpace) : head).trimEnd()}…`
-  }
-
-  return t
+  return clampBody(t)
 }
 
 function metricHighlightFor(insight: Insight, accent: BriefActionAccent): string {
