@@ -107,6 +107,15 @@ class AskCancelled(Exception):
     call actually save that call, rather than only discarding the result."""
 
 
+class EmptyScopedToolAnswer(RuntimeError):
+    """Raised by `_try_scoped_tool_answer` on a NON-private (group) surface when
+    the bounded tool loop produced no text — the empty-loop failure mode. It
+    mirrors the function's existing re-raise-on-failure contract for group
+    (which has no single-shot composer fallback): the caller's best-effort
+    wrapper turns it into an honest error, never a blank turn. The PRIVATE
+    surface never raises this — it returns `None` and degrades to the composer."""
+
+
 def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
     """Abort the answer pipeline if the Ask was stopped. A no-op when no
     canceller is wired (e.g. direct/test callers) or it returns False."""
@@ -2207,6 +2216,31 @@ def _try_scoped_tool_answer(
         # `edit_prd` call's actual result. Last call wins — mirrors "the
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
+
+    # Empty-text guard (the primary empty-loop fix). Reached only when NO
+    # terminal-tool narration override fired above (a delegate/complete/edit_prd
+    # turn always sets `text` to its handler's non-empty confirmation, so those
+    # legit-but-short answers never land here) — i.e. this is a genuine
+    # no-answer: `run_tool_loop` burned all its iterations on tool calls and
+    # returned "" (or whitespace). Surfacing that verbatim stores `{"answer":
+    # ""}` and the client renders a blank bubble. Treat it EXACTLY like the
+    # failure path above (`except` at the top of this function): the PRIVATE
+    # surface returns `None` so the caller falls through to the ordinary
+    # composer — which can actually answer — mirroring the AD-P7 single-shot
+    # degrade; any other (group) surface re-raises, matching the group
+    # no-single-shot-fallback contract. No telemetry line is logged on the
+    # degrade, same as the failure path (which returns before the log below).
+    if not (text or "").strip():
+        logger.warning(
+            "scoped_tool_reply_empty project_id=%s surface=%s — tool loop "
+            "produced no text; degrading instead of answering blank",
+            scope.project_id, scope.surface.value,
+        )
+        if scope.surface == Surface.project_private:
+            return None
+        raise EmptyScopedToolAnswer(
+            f"scoped tool loop produced no text (project_id={scope.project_id})"
+        )
 
     # Exactly one structured cost line per scoped reply — identifiers only,
     # never the body/question (Rule #24). Relocated from `respond_individual`
