@@ -14,7 +14,12 @@ import {
   type BillingLedgerEntry,
   type BillingSummary,
 } from "../../../../lib/api"
-import { SettingsSection, SettingsMessage } from "./SettingsLayout"
+import {
+  SettingsSection,
+  SettingsMessage,
+  SettingsPaneNav,
+  type SettingsPaneNavItem,
+} from "./SettingsLayout"
 
 /**
  * Billing — plan, credits, top-ups, and referrals.
@@ -176,6 +181,75 @@ export function statusNotice(
   }
 }
 
+/** The pane's sections, in nav order. "billing" is the landing view because
+ *  it answers the two questions people actually open this screen for: what am
+ *  I on, and how much is left. */
+export type BillingTab =
+  | "billing"
+  | "plans"
+  | "topup"
+  | "referrals"
+  | "costs"
+  | "history"
+
+export const BILLING_TAB_LABELS: Record<BillingTab, string> = {
+  billing: "Billing",
+  plans: "Plans",
+  topup: "Buy more credits",
+  referrals: "Invite a friend",
+  costs: "What things cost",
+  history: "Credit history",
+}
+
+/** Nav items for a given account state.
+ *
+ *  Built from the data rather than hardcoded so the list never offers a view
+ *  that cannot exist: an unlimited plan has no balance to top up, so the
+ *  top-up entry is absent rather than present-and-empty. The hints carry the
+ *  one number each section is about, which is most of the value of the nav —
+ *  you can read your balance and invites left without opening anything. */
+export function billingTabs(d: BillingSummary): SettingsPaneNavItem[] {
+  const items: SettingsPaneNavItem[] = [
+    {
+      id: "billing",
+      label: BILLING_TAB_LABELS.billing,
+      hint: d.unlimited ? "Unlimited" : (d.credit_balance ?? 0).toLocaleString(),
+    },
+    { id: "plans", label: BILLING_TAB_LABELS.plans, hint: d.plan_label },
+  ]
+  if (!d.unlimited) {
+    items.push({ id: "topup", label: BILLING_TAB_LABELS.topup })
+  }
+  items.push(
+    {
+      id: "referrals",
+      label: BILLING_TAB_LABELS.referrals,
+      hint: d.referral_invites_remaining
+        ? `${d.referral_invites_remaining} left`
+        : undefined,
+    },
+    { id: "costs", label: BILLING_TAB_LABELS.costs },
+    {
+      id: "history",
+      label: BILLING_TAB_LABELS.history,
+      hint: d.history.length ? String(d.history.length) : undefined,
+    },
+  )
+  return items
+}
+
+/** Resolve the tab actually shown.
+ *
+ *  Guards the case where the selected tab stops existing under the current
+ *  account state — switching to an Enterprise plan removes "Buy more credits"
+ *  while you are standing on it, which would otherwise render a blank pane. */
+export function resolveBillingTab(
+  requested: BillingTab,
+  items: SettingsPaneNavItem[],
+): BillingTab {
+  return items.some((i) => i.id === requested) ? requested : "billing"
+}
+
 export type BillingView = {
   data: BillingSummary | null
   loading: boolean
@@ -186,6 +260,8 @@ export type BillingView = {
   busy: string | null
   inviteEmail: string
   customTopup: string
+  tab: BillingTab
+  onTab: (t: BillingTab) => void
   onInterval: (i: BillingInterval) => void
   onSubscribe: (plan: string) => void
   onPortal: () => void
@@ -234,8 +310,19 @@ export function BillingSettingsView(p: BillingView) {
       ? Math.max(0, Math.min(100, (d.credit_balance / d.monthly_credits) * 100))
       : 100
 
+  const items = billingTabs(d)
+  // Guarded rather than trusted: switching to an unlimited plan removes the
+  // top-up view while you are standing on it.
+  const tab = resolveBillingTab(p.tab, items)
+
   return (
-    <>
+    <SettingsPaneNav
+      items={items}
+      active={tab}
+      onSelect={(id) => p.onTab(id as BillingTab)}
+      label="Billing sections"
+    >
+      {tab === "billing" && (
       <SettingsSection title="Billing" sub="Plan, credits, and invoices.">
         {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
         {p.notice && <SettingsMessage kind="success">{p.notice}</SettingsMessage>}
@@ -320,8 +407,9 @@ export function BillingSettingsView(p: BillingView) {
           </p>
         )}
       </SettingsSection>
+      )}
 
-      {/* ── Plans ─────────────────────────────────────────────────── */}
+      {tab === "plans" && (
       <SettingsSection
         title="Plans"
         sub="Change plan at any time — Stripe prorates the difference."
@@ -401,9 +489,9 @@ export function BillingSettingsView(p: BillingView) {
           Have a discount code? Enter it at checkout.
         </p>
       </SettingsSection>
+      )}
 
-      {/* ── Top up ────────────────────────────────────────────────── */}
-      {!d.unlimited && (
+      {tab === "topup" && !d.unlimited && (
         <SettingsSection
           title="Buy more credits"
           sub="Purchased credits are added on top of your monthly allowance."
@@ -451,7 +539,7 @@ export function BillingSettingsView(p: BillingView) {
         </SettingsSection>
       )}
 
-      {/* ── Referrals ─────────────────────────────────────────────── */}
+      {tab === "referrals" && (
       <SettingsSection
         title="Invite a friend"
         sub={`Earn ${d.referral_reward_credits.toLocaleString()} credits when they subscribe.`}
@@ -519,8 +607,9 @@ export function BillingSettingsView(p: BillingView) {
           </ul>
         )}
       </SettingsSection>
+      )}
 
-      {/* ── Costs + history ───────────────────────────────────────── */}
+      {tab === "costs" && (
       <SettingsSection title="What things cost" sub="In credits, per action.">
         <ul className="bill-costs">
           {Object.entries(d.action_costs)
@@ -539,7 +628,9 @@ export function BillingSettingsView(p: BillingView) {
           the knowledge graph current — does not use credits.
         </p>
       </SettingsSection>
+      )}
 
+      {tab === "history" && (
       <SettingsSection title="Credit history" sub="Most recent first.">
         {d.history.length === 0 ? (
           <p className="settings-placeholder">Nothing yet.</p>
@@ -562,7 +653,8 @@ export function BillingSettingsView(p: BillingView) {
           </ul>
         )}
       </SettingsSection>
-    </>
+      )}
+    </SettingsPaneNav>
   )
 }
 
@@ -576,6 +668,10 @@ export function BillingSettings() {
   const [busy, setBusy] = useState<string | null>(null)
   const [inviteEmail, setInviteEmail] = useState("")
   const [customTopup, setCustomTopup] = useState("")
+  // Local, not a query param, on purpose: Stripe returns the browser here
+  // after checkout and the overview — where the new plan and balance are — is
+  // the right place to land, not wherever you were standing before.
+  const [tab, setTab] = useState<BillingTab>("billing")
 
   useEffect(() => {
     let cancelled = false
@@ -677,6 +773,8 @@ export function BillingSettings() {
       busy={busy}
       inviteEmail={inviteEmail}
       customTopup={customTopup}
+      tab={tab}
+      onTab={setTab}
       onInterval={setInterval}
       onSubscribe={(plan) => go(plan, () => billingApi.checkout(plan, interval))}
       onPortal={() => go("portal", () => billingApi.portal())}

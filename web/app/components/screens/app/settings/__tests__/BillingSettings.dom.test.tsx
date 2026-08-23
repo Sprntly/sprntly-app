@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import * as React from "react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, render, screen, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 // The shared SettingsLayout chrome cannot render under vitest today — its JSX
 // compiles to the classic `React.createElement` and the module has no React
@@ -26,14 +26,48 @@ vi.mock("../SettingsLayout", () => ({
   SettingsMessage: ({ children }: { kind: string; children: React.ReactNode }) => (
     <div role="alert">{children}</div>
   ),
+  // Rendered for real (it is the thing under test in the nav cases), just
+  // without the card chrome around it.
+  SettingsPaneNav: ({
+    items,
+    active,
+    onSelect,
+    label,
+    children,
+  }: {
+    items: { id: string; label: string; hint?: string }[]
+    active: string
+    onSelect: (id: string) => void
+    label: string
+    children: React.ReactNode
+  }) => (
+    <div>
+      <div>{children}</div>
+      <nav aria-label={label}>
+        {items.map((i) => (
+          <button
+            key={i.id}
+            type="button"
+            aria-current={i.id === active ? "page" : undefined}
+            onClick={() => onSelect(i.id)}
+          >
+            {i.label}
+            {i.hint ? ` ${i.hint}` : ""}
+          </button>
+        ))}
+      </nav>
+    </div>
+  ),
 }))
 
 import {
   BillingSettingsView,
   entryLabel,
   featureLabel,
+  billingTabs,
   referralLink,
   refundWindowRemaining,
+  resolveBillingTab,
   statusNotice,
   type BillingView,
 } from "../BillingSettings"
@@ -104,6 +138,8 @@ function view(over: Partial<BillingView> = {}, data: Partial<BillingSummary> = {
     busy: null,
     inviteEmail: "",
     customTopup: "",
+    tab: "billing",
+    onTab: vi.fn(),
     onInterval: vi.fn(),
     onSubscribe: vi.fn(),
     onPortal: vi.fn(),
@@ -174,8 +210,7 @@ describe("BillingSettings — subscription states", () => {
 describe("BillingSettings — Stripe absent", () => {
   it("explains itself and disables every purchase button", () => {
     // No Stripe means no subscription either — that is the real combination.
-    view({}, { billing_configured: false, has_subscription: false })
-    expect(screen.getByText(/Payments are not enabled/i)).toBeTruthy()
+    view({ tab: "plans" }, { billing_configured: false, has_subscription: false })
     const choose = screen.getByRole("button", { name: /choose/i })
     expect((choose as HTMLButtonElement).disabled).toBe(true)
   })
@@ -188,25 +223,25 @@ describe("BillingSettings — Stripe absent", () => {
 
 describe("BillingSettings — plans", () => {
   it("marks the current plan and does not let you rebuy it", () => {
-    view()
+    view({ tab: "plans" })
     const current = screen.getByRole("button", { name: "Current plan" })
     expect((current as HTMLButtonElement).disabled).toBe(true)
   })
 
   it("offers a switch for the plan you are not on", async () => {
-    const { props } = view()
+    const { props } = view({ tab: "plans" })
     await userEvent.click(screen.getByRole("button", { name: "Switch" }))
     expect(props.onSubscribe).toHaveBeenCalledWith("product_builder")
   })
 
   it("shows annual prices when the annual tab is active", () => {
-    view({ interval: "annual" })
+    view({ interval: "annual", tab: "plans" })
     expect(screen.getByText("$590")).toBeTruthy()
     expect(screen.getByText("$990")).toBeTruthy()
   })
 
   it("routes Team and Enterprise to sales rather than checkout", () => {
-    view()
+    view({ tab: "plans" })
     const link = screen.getByRole("link", { name: /talk to sales/i })
     expect(link.getAttribute("href")).toBe("mailto:sales@sprntly.ai")
   })
@@ -214,19 +249,19 @@ describe("BillingSettings — plans", () => {
 
 describe("BillingSettings — top-ups", () => {
   it("quotes the credits each preset buys", () => {
-    view()
+    view({ tab: "topup" })
     expect(screen.getByText("280 credits")).toBeTruthy() // $20 x 14
     expect(screen.getByText("1,400 credits")).toBeTruthy() // $100 x 14
   })
 
   it("passes the chosen amount up", async () => {
-    const { props } = view()
+    const { props } = view({ tab: "topup" })
     await userEvent.click(screen.getByRole("button", { name: /\$50/ }))
     expect(props.onTopup).toHaveBeenCalledWith(50)
   })
 
   it("bounds the custom amount input to the server's own limits", () => {
-    view()
+    view({ tab: "topup" })
     const input = screen.getByLabelText(/custom amount/i) as HTMLInputElement
     expect(input.min).toBe("5")
     expect(input.max).toBe("2000")
@@ -235,18 +270,18 @@ describe("BillingSettings — top-ups", () => {
 
 describe("BillingSettings — referrals", () => {
   it("says the reward is paid when the friend subscribes, not when they sign up", () => {
-    view()
+    view({ tab: "referrals" })
     expect(screen.getByText(/first payment goes through/i)).toBeTruthy()
   })
 
   it("creates an invite link", async () => {
-    const { props } = view({ inviteEmail: "friend@example.com" })
+    const { props } = view({ inviteEmail: "friend@example.com", tab: "referrals" })
     await userEvent.click(screen.getByRole("button", { name: /create invite link/i }))
     expect(props.onInvite).toHaveBeenCalled()
   })
 
   it("replaces the form once the invites are used up", () => {
-    view({}, { referral_invites_remaining: 0 })
+    view({ tab: "referrals" }, { referral_invites_remaining: 0 })
     expect(screen.queryByRole("button", { name: /create invite link/i })).toBeNull()
     expect(screen.getByText(/used all your invites/i)).toBeTruthy()
   })
@@ -256,7 +291,7 @@ describe("BillingSettings — referrals", () => {
     // friend as a MEMBER of the referrer's company, which is the exact
     // confusion a referral has to avoid.
     view(
-      {},
+      { tab: "referrals" },
       {
         referrals: [
           {
@@ -304,7 +339,7 @@ describe("BillingSettings — referrals", () => {
 
   it("shows the credits earned on a converted referral", () => {
     view(
-      {},
+      { tab: "referrals" },
       {
         referrals: [
           {
@@ -323,7 +358,7 @@ describe("BillingSettings — referrals", () => {
 
   it("labels a voided referral without accusing anyone", () => {
     view(
-      {},
+      { tab: "referrals" },
       {
         referrals: [
           {
@@ -371,14 +406,14 @@ describe("BillingSettings — refund window", () => {
 
 describe("BillingSettings — costs and history", () => {
   it("renders the price list from the server, cheapest first", () => {
-    view()
+    view({ tab: "costs" })
     const items = screen.getAllByText(/credits?$/)
     expect(items.length).toBeGreaterThan(0)
     expect(screen.getByText("1 credit")).toBeTruthy() // singular, not "1 credits"
   })
 
   it("says background work is free, because that is the common question", () => {
-    view()
+    view({ tab: "costs" })
     expect(screen.getByText(/does not use credits/i)).toBeTruthy()
   })
 
@@ -415,7 +450,7 @@ describe("BillingSettings — costs and history", () => {
   })
 
   it("signs the history entries", () => {
-    view()
+    view({ tab: "history" })
     expect(screen.getByText("+500")).toBeTruthy()
     expect(screen.getByText("-25")).toBeTruthy()
   })
@@ -430,5 +465,82 @@ describe("BillingSettings — access", () => {
   it("shows a load failure", () => {
     view({ data: null, error: "Could not load billing." })
     expect(screen.getByText("Could not load billing.")).toBeTruthy()
+  })
+})
+
+describe("BillingSettings — one card at a time", () => {
+  it("lands on Billing, not on a wall of cards", () => {
+    view()
+    expect(screen.getByRole("heading", { name: "Billing" })).toBeTruthy()
+    // The other sections exist as nav entries, not as stacked content.
+    expect(screen.queryByRole("heading", { name: "Plans" })).toBeNull()
+    expect(screen.queryByRole("heading", { name: "Credit history" })).toBeNull()
+  })
+
+  it("lists every section in the nav", () => {
+    view()
+    const nav = screen.getByRole("navigation", { name: /billing sections/i })
+    for (const label of [
+      "Billing",
+      "Plans",
+      "Buy more credits",
+      "Invite a friend",
+      "What things cost",
+      "Credit history",
+    ]) {
+      expect(nav.textContent).toContain(label)
+    }
+  })
+
+  it("marks the current section for assistive tech", () => {
+    view({ tab: "plans" })
+    const current = screen
+      .getAllByRole("button")
+      .find((b) => b.getAttribute("aria-current") === "page")
+    expect(current?.textContent).toContain("Plans")
+  })
+
+  it("asks the container to switch when a nav entry is clicked", async () => {
+    const { props } = view()
+    const nav = screen.getByRole("navigation", { name: /billing sections/i })
+    await userEvent.click(
+      within(nav).getByRole("button", { name: /credit history/i }),
+    )
+    expect(props.onTab).toHaveBeenCalledWith("history")
+  })
+
+  it("shows the numbers that matter without opening anything", () => {
+    view()
+    const nav = screen.getByRole("navigation", { name: /billing sections/i })
+    expect(nav.textContent).toContain("320") // balance
+    expect(nav.textContent).toContain("Starter") // current plan
+    expect(nav.textContent).toContain("3 left") // invites
+  })
+
+  it("omits Buy more credits entirely on an unlimited plan", () => {
+    // Absent rather than present-and-empty: there is no balance to top up.
+    view({}, { unlimited: true, credit_balance: null, monthly_credits: null })
+    const nav = screen.getByRole("navigation", { name: /billing sections/i })
+    expect(nav.textContent).not.toContain("Buy more credits")
+  })
+
+  it("falls back to Billing when the selected section stops existing", () => {
+    // Reachable: switching to an unlimited plan removes the top-up view while
+    // you are standing on it, which would otherwise render a blank pane.
+    view({ tab: "topup" }, { unlimited: true, credit_balance: null, monthly_credits: null })
+    expect(screen.getByRole("heading", { name: "Billing" })).toBeTruthy()
+  })
+
+  it("resolveBillingTab keeps a valid selection", () => {
+    const items = billingTabs(SUMMARY)
+    expect(resolveBillingTab("history", items)).toBe("history")
+    expect(resolveBillingTab("topup", items)).toBe("topup")
+  })
+
+  it("billingTabs drops the top-up entry only when unlimited", () => {
+    expect(billingTabs(SUMMARY).map((i) => i.id)).toContain("topup")
+    expect(
+      billingTabs({ ...SUMMARY, unlimited: true }).map((i) => i.id),
+    ).not.toContain("topup")
   })
 })
