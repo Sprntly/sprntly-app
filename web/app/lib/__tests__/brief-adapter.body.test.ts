@@ -49,7 +49,7 @@ function makeInsight(overrides: Partial<Insight> = {}): Insight {
 function makeBrief(insights: Insight[]): Brief {
   return {
     id: 1,
-    company: "asurion",
+    company: "acme",
     generated_at: "2026-08-20T00:00:00Z",
     week_label: "Week of August 20, 2026",
     summary_headline: "headline",
