@@ -60,6 +60,7 @@ import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, lo
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
 import { resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../lib/runAskGeneration"
+import { GROUNDED_PROGRESS_ENABLED } from "../../../lib/friendlyPhase"
 // The ONE owner of a standalone ticket-set run and of `content.ticketSet`.
 // Nothing in this file may call `storiesApi.generateFromInsight` directly —
 // see the module header for why a second caller is a second LLM bill.
@@ -184,6 +185,12 @@ export type ThreadTurn = {
    *  explanation. Never an error: the poll still delivers the real answer.
    *  Transient, like `partial`. */
   streamDropped?: boolean
+  /** Curated, user-facing progress copy for the pipeline leg currently running
+   *  (e.g. "Looking through your connected sources…"), from the real backend
+   *  `phase` SSE signal. Only set when the grounded-progress flag is on; drives
+   *  the wait line ahead of the answer. Transient, cleared on every terminal
+   *  transition, like `partial`. */
+  livePhase?: string
   /** "Open the PRD for X" matched SEVERAL documents — the candidates, rendered
    *  as chips under this turn's reply. Each chip carries its artifact's ids and
    *  opens the panel on click; it does NOT re-send its label as a message,
@@ -4473,6 +4480,22 @@ export function ChatScreen() {
                 }
               ))
             },
+            // Grounded progress on a re-attached generation — same curated,
+            // flag-gated `livePhase` seam as the POST path. (Phase frames are not
+            // replayed on a mid-generation join, so a resumed turn shows only the
+            // leg that starts next; that is honest, not a gap.)
+            GROUNDED_PROGRESS_ENABLED
+              ? (label) => {
+                  setTabs((prev) => prev.map((t) =>
+                    t.id !== targetTabId ? t : {
+                      ...t, thread: t.thread.map((turn) =>
+                        turn.id === turnId && !turn.reply && !turn.stopped
+                          ? { ...turn, livePhase: label }
+                          : turn),
+                    }
+                  ))
+                }
+              : undefined,
           )
           // Same reason as the onResult path above, on the route a user reaches
           // by reloading mid-answer: if this turn streamed, mark it animated
@@ -4491,7 +4514,7 @@ export function ChatScreen() {
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId
-                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }
                 : turn),
             }
           ))
@@ -4509,7 +4532,7 @@ export function ChatScreen() {
             setTabs((prev) => prev.map((t) =>
               t.id !== targetTabId ? t : {
                 ...t, thread: t.thread.map((turn) => turn.id === turnId
-                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined, livePhase: undefined }
                   : turn),
               }
             ))
@@ -4519,7 +4542,7 @@ export function ChatScreen() {
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId
-                ? { ...turn, error: msg, streamDropped: undefined }
+                ? { ...turn, error: msg, streamDropped: undefined, livePhase: undefined }
                 : turn),
             }
           ))

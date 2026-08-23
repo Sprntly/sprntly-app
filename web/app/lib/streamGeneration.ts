@@ -1,11 +1,17 @@
 import { getAccessToken } from "./api"
 
-export type StreamFrame = { kind?: string; text?: string }
+export type StreamFrame = { kind?: string; text?: string; label?: string }
 
 export type StreamHandlers = {
   /** Called on each delta with the FULL accumulated text so far (and the raw
    *  delta). Render `full` — it's the progressive document. */
   onDelta: (full: string, delta: string) => void
+  /** Called on each `{"kind":"phase","label":…}` frame — a real "which leg of
+   *  the pipeline is running" signal the backend publishes ahead of, and during,
+   *  the answer (retrieval, writing, report legs). The RAW backend label; the
+   *  caller is responsible for curating it before display (see `friendlyPhase`).
+   *  Pre-answer only in effect: once deltas start the answer body takes over. */
+  onPhase?: (label: string) => void
   /** Terminal: generation finished cleanly. The caller's poll carries the
    *  authoritative persisted result; this just ends the live preview. */
   onDone?: () => void
@@ -62,6 +68,11 @@ export function subscribeToGenerationStream(
           if (restart > 0) acc = acc.slice(restart)
           handlers.onDelta(acc, frame.text)
         }
+      } else if (frame.kind === "phase" && frame.label) {
+        // A real pipeline-leg marker (retrieval / writing / report legs). Not
+        // part of the answer text — it never touches `acc` — so it can't corrupt
+        // the streamed document. Display-only, like every other frame here.
+        handlers.onPhase?.(frame.label)
       } else if (frame.kind === "restart") {
         // The backend retried mid-generation and is about to re-emit from
         // zero: everything accumulated so far is superseded. Drop it, but do

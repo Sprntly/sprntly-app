@@ -3245,6 +3245,10 @@ def answer(
                 or _projects_only_plan(plan)
             ),
             on_delta=on_delta,
+            # Real pipeline-leg phases on the COMMON direct-answer path — the
+            # sink is already wired for the skill-routed path; this hands it to
+            # the direct path too, which previously emitted none.
+            on_phase=on_phase,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic

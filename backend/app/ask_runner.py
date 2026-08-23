@@ -1868,6 +1868,24 @@ def _gather(tasks: dict, deadline_s: float = _GATHER_DEADLINE_S) -> dict:
 
 
 @timed_def("qa:compose")
+def _emit_ask_phase(on_phase, label: str) -> None:
+    """Publish a user-facing pipeline-leg phase for the chat wait surface, when a
+    sink is wired. Kept LOCAL (rather than reusing qa_agent.emit_phase) to avoid
+    an import cycle — qa_agent imports compose_ask_answer from this module.
+
+    Best-effort: the sink is display-only SSE transport (token_stream.phase_sink),
+    so a failure here must never take the answer down with it. A no-op when no
+    sink is wired (tests, direct callers). The raw label is curated to
+    user-facing copy on the frontend (web/app/lib/friendlyPhase.ts) before it is
+    ever shown — the egress contract lives there."""
+    if on_phase is None:
+        return
+    try:
+        on_phase(label)
+    except Exception:  # noqa: BLE001 — display only, never break the answer
+        logger.debug("ask phase publish failed for %r", label, exc_info=True)
+
+
 def compose_ask_answer(
     dataset: str,
     question: str,
@@ -1882,6 +1900,7 @@ def compose_ask_answer(
     projects_context_fn=None,
     library_only: bool = False,
     on_delta=None,
+    on_phase=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
     graph (#18 — chat answers from the brain, not only the markdown corpus).
@@ -1970,6 +1989,12 @@ def compose_ask_answer(
     token-stream just the answer text to the client — progressive display only;
     the returned payload stays the authoritative answer.
 
+    `on_phase`, when given, receives a short user-facing label at each real
+    pipeline boundary (retrieval start, answer dispatch) so the chat wait surface
+    shows grounded progress instead of a stale timed beat on this — the COMMON —
+    direct-answer path. Mirrors `qa_agent._answer_single_shot`, which already
+    instruments its own path; display-only and best-effort (see `_emit_ask_phase`).
+
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
     try:
@@ -2010,6 +2035,14 @@ def compose_ask_answer(
     # sitting beside it in the same prompt kept winning; not composing the
     # index for these asks is what settles it.
     wants_corpus_and_kg = not prd_context and not library_only
+
+    # Boundary 1 — retrieval starts. Announced only on the path that actually
+    # reads connected sources (the common direct-answer ask); the PRD-grounded
+    # and library-only branches skip corpus/KG, so claiming a source search there
+    # would be a phase we don't back. Same label family as
+    # `qa_agent._answer_single_shot`, so the frontend's curator already maps it.
+    if wants_corpus_and_kg:
+        _emit_ask_phase(on_phase, "Searching your connected sources…")
 
     # WAVE 1 — everything that needs nothing.
     #
@@ -2228,6 +2261,16 @@ def compose_ask_answer(
     # none.
     meta_out: dict = {}
     from app import answer_first
+
+    # Boundary 2 — the answer generation call is about to dispatch. On this path
+    # the gap before the first token is the model's own prefill / cache-write
+    # (measured ~24s on a cold prefix), during which the old surface sat on a
+    # stale timed beat. This is a REAL boundary — everything the answer is built
+    # from is assembled by now — so the label is true the moment it publishes,
+    # and it honestly covers the prefill window until the first delta flips the
+    # line to "Writing the answer". It does NOT shorten that prefill; that is the
+    # separate cache-warmth lever.
+    _emit_ask_phase(on_phase, "Putting your answer together…")
 
     if answer_first.enabled():
         # Answer-first: stream the answer as plain markdown FIRST (dedicated

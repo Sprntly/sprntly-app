@@ -51,6 +51,7 @@ import { useAssignCompletion } from "../../../shared/chat-shell/conversation/use
 import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
 import { runClarifiedGeneration } from "../../../shared/chat-shell/conversation/clarifiedGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
+import { GROUNDED_PROGRESS_ENABLED } from "../../../../lib/friendlyPhase"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
@@ -516,12 +517,17 @@ export function useProjectConversation(
           // preview up with everything already written, then live deltas.
           (text) => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, partial: text, streamDropped: false } : t)),
           () => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, streamDropped: true } : t)),
+          // Grounded progress on a re-attached private-project generation — same
+          // curated, flag-gated `livePhase` seam the shared POST engine uses.
+          GROUNDED_PROGRESS_ENABLED
+            ? (label) => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, livePhase: label } : t))
+            : undefined,
         )
         // If it streamed, mark animated BEFORE the reply lands so the typewriter
         // doesn't re-reveal text already read (main's `hasFreshReply` reasoning).
         const streamed = threadRef.current.find((t) => t.id === turnId)
         if (streamed?.partial) animatedTurnIds.current.add(turnId)
-        patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }))
+        patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }))
         void finalizeConversationTurn(turnId, { reply: res }, convKey)
       } catch (e) {
         // Unmounted again mid-resume: leave the persisted ask so the NEXT mount
@@ -530,11 +536,11 @@ export function useProjectConversation(
         // User stopped the resumed ask: rendered by handleStopAsk, not a failure.
         if (e instanceof AskStoppedError) return
         if (e instanceof AskTimeoutError) {
-          patchTurn((t) => ({ ...t, timedOut: true, partial: undefined, streamDropped: undefined }))
+          patchTurn((t) => ({ ...t, timedOut: true, partial: undefined, streamDropped: undefined, livePhase: undefined }))
           return
         }
         const msg = e instanceof Error ? e.message : "Something went wrong"
-        patchTurn((t) => ({ ...t, error: msg, streamDropped: undefined }))
+        patchTurn((t) => ({ ...t, error: msg, streamDropped: undefined, livePhase: undefined }))
         void finalizeConversationTurn(turnId, { error: msg }, convKey)
       } finally {
         askStartRef.current.delete(turnId)
