@@ -3287,7 +3287,10 @@ def answer(
         from app import public_feedback
 
         pf = public_feedback.answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id, question=question, history=history,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC/MI dispatch); ignored while that gate is off.
+            on_delta=on_delta,
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3367,6 +3370,9 @@ def answer(
             # document-scale call; the boundary between them is a cancellation
             # checkpoint, so a Stop actually stops the second spend.
             is_cancelled=is_cancelled,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC dispatch below); ignored while that gate is off.
+            on_delta=on_delta,
         )
         if mi is not None:
             return _maybe_verify(mi, enterprise_id)

@@ -126,6 +126,32 @@ def enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_true(name: str) -> bool:
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def report_mapreduce_enabled(report: str) -> bool:
+    """Whether the concurrent report map-reduce is active for `report`.
+
+    Three gates, all read at CALL time, all default OFF:
+      1. `enabled()` — map-reduce reuses the answer-first streaming/metadata
+         contracts, so it never runs unless answer-first streaming is on.
+      2. `REPORT_MAPREDUCE_ENABLED` — a global master switch across every report.
+      3. `{REPORT}_MAPREDUCE_ENABLED` — the per-report gate (`VOC_MAPREDUCE_ENABLED`,
+         `MARKET_INTEL_MAPREDUCE_ENABLED`, …), so a half-validated report can't
+         ride a shared flag with a validated one.
+
+    `report` is the lowercase report key ("voc", "market_intel"); the per-report
+    env var is its upper-case form. Any gate off ⇒ False ⇒ the caller stays on its
+    single-call path, byte-identical to today.
+    """
+    return (
+        enabled()
+        and _env_true("REPORT_MAPREDUCE_ENABLED")
+        and _env_true(f"{report.upper()}_MAPREDUCE_ENABLED")
+    )
+
+
 def reset_stream(on_delta) -> None:
     """Rewind a streaming answer sink so a re-generation supersedes what a prior
     streamed attempt emitted, rather than gluing onto (or being swallowed by) it.
@@ -247,6 +273,105 @@ def _text_sink(on_delta):
     if callable(emit):
         return emit
     return on_delta
+
+
+# Split-plumbing markers a section pass may prepend despite the directive — the
+# observed leak was a "Part 1 of 2" report title. Matched as a phrase
+# (numeric or spelled-out N-of-M) plus the "Section A/B of N" label form; a line
+# that is ONLY such a marker (optionally wrapped in a heading / bold) is dropped
+# whole, an inline occurrence is excised in place. Deliberately narrow: it never
+# touches a bare "Section A" or any real report heading, only explicit split
+# plumbing.
+_SPLIT_MARKER_RE = re.compile(
+    r"[\(\[\{]?\s*"
+    r"(?:part|section)\s+"
+    r"(?:one|two|three|four|[a-d]|\d+)"
+    r"\s+of\s+"
+    r"(?:one|two|three|four|\d+)"
+    r"\s*[\)\]\}]?"
+    r"\s*[:\-–—]?",  # also consume a trailing separator ("Part 1 of 2: <title>")
+    re.IGNORECASE,
+)
+
+
+def _strip_split_markers(text: str) -> str:
+    """Deterministically remove split-plumbing markers ("Part 1 of 2", "Section A
+    of 2", a split-label title) so the user-facing merged report never exposes
+    that it was generated in halves.
+
+    Conservative and idempotent: only explicit N-of-M split labels are touched,
+    never report content. A line that is nothing but the marker (with optional
+    `#`/`*` heading wrappers and punctuation) is dropped entirely rather than left
+    as an empty heading; an inline marker is cut out and the surrounding text kept,
+    with the immediate punctuation/heading residue tidied.
+    """
+    if not text:
+        return text
+    kept: list[str] = []
+    for line in text.splitlines():
+        if not _SPLIT_MARKER_RE.search(line):
+            kept.append(line)
+            continue
+        cleaned = _SPLIT_MARKER_RE.sub(" ", line)
+        # Was the whole line just the marker (maybe inside a heading / bold)?
+        residue = cleaned.strip().strip("#*:–—-• ").strip()
+        if not residue:
+            continue
+        # Tidy the excision residue: heading hashes left dangling before a title,
+        # and a space stranded before punctuation.
+        cleaned = re.sub(r"^(\s*#{1,6})\s*[:\-–—]?\s*", r"\1 ", cleaned)
+        cleaned = re.sub(r"\s+([,.;:])", r"\1", cleaned)
+        kept.append(re.sub(r"\s{2,}", " ", cleaned).rstrip())
+    return "\n".join(kept).strip()
+
+
+# A machine-readable metadata/structured DUMP fenced as a code block. Some report
+# conventions (market-intel's single-pass path) close with a structured metadata
+# block; under map-reduce each concurrent section inherited that instinct and
+# emitted its OWN block, and the two CONTRADICTED each other (different window
+# labels, key names and counts) in the merged report. Reports on the map-reduce
+# path are PROSE ONLY — the structured half is derived separately or discarded —
+# so a fenced metadata dump is never wanted. `_strip_split_markers` does not catch
+# fenced blocks, so this is a separate, deliberately narrow backstop.
+#
+# Generic (not MI-specific): it lives in `gateway_sections` and benefits every
+# report. Safe for VoC and any prose report because it targets ONLY (1) a fence
+# whose info-string is `metadata`/`json`/`yaml` — a structured dump, never prose —
+# anywhere, and (2) an UNTAGGED fence at the very END of a section whose body reads
+# as a key:value / JSON metadata dump. A tagged code example (```python, ```bash)
+# and any prose fence are left untouched.
+_TAGGED_META_FENCE_RE = re.compile(
+    r"(?im)^[ \t]*```[ \t]*(?:metadata|json|yaml)\b[^\n]*\n.*?^[ \t]*```[ \t]*$\n?",
+    re.DOTALL,
+)
+_TRAILING_FENCE_RE = re.compile(
+    r"(?is)\n[ \t]*```(?P<info>[^\n]*)\n(?P<body>.*?)\n[ \t]*```[ \t]*\s*\Z",
+)
+# A body line that looks like structured metadata: a bare brace, or a
+# `key:` / `"key":` lead-in (JSON or YAML-style).
+_META_KV_LINE_RE = re.compile(r"""(?m)^[ \t]*(?:[{}\[\]]|["']?[\w .-]+["']?[ \t]*:)""")
+
+
+def _strip_metadata_blocks(text: str) -> str:
+    """Remove a stray fenced metadata/structured dump from a prose report section.
+
+    Conservative and idempotent: only structured-dump fences are touched, never
+    prose. Tagged `metadata`/`json`/`yaml` fences go anywhere; an untagged fence is
+    removed only when it is the LAST thing in the text AND its body reads as a
+    key:value / JSON dump (nearly every non-blank line matches a brace or `key:`).
+    """
+    if not text:
+        return text
+    trailing_nl = text.endswith("\n")
+    out = _TAGGED_META_FENCE_RE.sub("", text)
+    m = _TRAILING_FENCE_RE.search(out)
+    if m and not m.group("info").strip():
+        lines = [ln for ln in m.group("body").splitlines() if ln.strip()]
+        kv = sum(1 for ln in lines if _META_KV_LINE_RE.search(ln))
+        if lines and kv >= max(2, len(lines) - 1):
+            out = out[: m.start()]
+    out = out.rstrip()
+    return out + "\n" if (trailing_nl and out) else out
 
 
 def _assemble(answer_text: str, meta: dict, default_confidence) -> dict:
@@ -442,3 +567,194 @@ def gateway(
         stream_text_fn=stream_text_fn,
         structured_fn=structured_fn,
     )
+
+
+def gateway_sections(
+    *,
+    question: str,
+    forced_system: str,
+    forced_user: str,
+    sections: list[tuple[str, str]],
+    on_delta,
+    default_confidence,
+    enterprise_id: str,
+    agent: str,
+    purpose: str,
+    prompt_version: str,
+    model: str | None = None,
+    skill: str | None = None,
+    skill_spec=None,
+    user_cacheable_prefix: str | None = None,
+    max_tokens: int = 8000,
+    derive_metadata: bool = True,
+) -> dict:
+    """Map-reduce variant of `gateway`: split ONE synthesis into N section calls
+    that decode CONCURRENTLY over the SAME corpus, then merge deterministically.
+
+    Gated per report by `report_mapreduce_enabled(report)`. Every report's
+    wall-clock is
+    output-token-decode-bound (~44-55 tok/s, serial within one Anthropic call).
+    Decoding two disjoint halves of the report in two concurrent calls cuts
+    wall-clock ~2x. Each `sections[i]` is `(label, directive)`; the `directive`
+    is appended to the (answer-only) base system so section i writes ONLY its
+    part of the report. All sections share one corpus, carried on
+    `user_cacheable_prefix`: section 0's call warms the prompt cache and sections
+    1..N-1 read it back rather than re-prefilling the ~70k-token corpus.
+
+    Reuse template: competitive_intel's concurrent capture leg — N isolated
+    `asyncio.to_thread` tasks fanned out with `asyncio.gather`, merged in FIXED
+    input order (section 0, then 1, …), never completion order. `answer()` runs
+    on a worker thread with no running loop (dispatched via `asyncio.to_thread`
+    from ask_job_runner), so `asyncio.run` here is the same no-running-loop
+    pattern competitive_intel's `_run_capture_scan_gather` uses.
+
+    Streaming — concurrent-compute + live-stream-section-0 + ordered block-flush:
+    `token_stream` is ONE linear channel with a single accumulating replay buffer
+    (interleaving N live streams would garble it). So section 0 streams LIVE to
+    the real sink as it decodes (progressive output for the user), while sections
+    1..N-1 compute concurrently WITHOUT touching the display sink; once all
+    complete, their text is appended to the sink in fixed order via `emit_text`.
+    Net effect: the user watches section 0 stream, then the later sections land
+    as blocks — no interleave, and wall-clock is still ~the slowest section.
+
+    Preserves the answer-first metadata pass: ONE structured pass runs over the
+    MERGED prose after the reduce, exactly as `gateway`'s does over its single
+    answer.
+
+    `derive_metadata=False` SKIPS that structured pass and returns the merged
+    prose with default/empty metadata. On the report path the metadata pass runs
+    AFTER the report is fully on screen but blocks the return (and thus the
+    ready-write + terminal `done`), so the user waits ~25-37s on fields nothing
+    report-facing consumes (citations are stripped before storage; key_points /
+    unanswered are analytics-log only; confidence gates routing/planner/suggestion
+    flows, never the answer; the renderer ignores all three). The returned shape
+    is IDENTICAL to the metadata-throws graceful-degrade path below, so the
+    response contract is unchanged. Default True keeps every other caller as-is.
+    """
+    import asyncio
+
+    from app.graph.gateway import llm_call
+
+    ao_system = answer_only_system(forced_system)
+    ao_user = answer_only_user(forced_user)
+    real_sink = _text_sink(on_delta)
+
+    def run_section(idx: int, directive: str, sink) -> tuple[str, str | None]:
+        # Isolated task: builds its own section system, runs its own attributed
+        # streamed call, returns ONLY its own text plus its stop_reason (for
+        # truncation detection below). Touches nothing shared — that isolation is
+        # what makes the concurrent dispatch race-free (the corpus prefix is
+        # read-only shared input, not mutated state).
+        section_system = ao_system + "\n\n" + directive
+        res = llm_call(
+            enterprise_id=enterprise_id,
+            agent=agent,
+            purpose=f"{purpose}_s{idx}",
+            system=section_system,
+            input=ao_user,
+            prompt_version=f"{prompt_version}-s{idx}",
+            model=model,
+            json_schema=None,  # plain-markdown streaming leg (call_md)
+            max_tokens=max_tokens,
+            user_cacheable_prefix=user_cacheable_prefix,
+            skill=skill,
+            skill_spec=skill_spec,
+            long_output=True,
+            on_delta=sink,
+        )
+        text = res.output if isinstance(res.output, str) else str(res.output)
+        return text, getattr(res, "stop_reason", None)
+
+    async def gather_sections() -> list[tuple[str, str | None]]:
+        # Section 0 gets the live display sink; the rest run dark and are flushed
+        # in order after all complete, so the one linear channel never interleaves.
+        return await asyncio.gather(*[
+            asyncio.to_thread(run_section, idx, directive,
+                              real_sink if idx == 0 else None)
+            for idx, (_label, directive) in enumerate(sections)
+        ])
+
+    results = asyncio.run(gather_sections())
+
+    # Generic truncation detection (every report). A section that stopped on
+    # `max_tokens` is INCOMPLETE — it ran out of budget mid-generation and is
+    # missing its tail (e.g. MI Section B losing its Bottom Line). This must never
+    # ship silently: log a loud WARNING naming the section + purpose, and surface a
+    # marker on the returned payload (`_truncated` / `_truncated_purposes`) so the
+    # caller can see it too. Fail-loud / auto-retry-at-a-higher-cap is a follow-up;
+    # SILENT truncation ends here.
+    truncated_purposes: list[str] = []
+    for idx, (_text, stop_reason) in enumerate(results):
+        if stop_reason == "max_tokens":
+            section_purpose = f"{purpose}_s{idx}"
+            truncated_purposes.append(section_purpose)
+            logger.warning(
+                "answer-first map-reduce: section %d (%s, purpose=%s) hit the "
+                "max_tokens cap and is TRUNCATED — the merged report is "
+                "incomplete (missing this section's tail). Raise its per-section "
+                "max_tokens (currently %s).",
+                idx, sections[idx][0], section_purpose, max_tokens,
+            )
+
+    # Deterministic post-strip of section plumbing a section may have emitted:
+    # (1) a split-plumbing marker (a "Part 1 of 2" title the model can leak) and
+    # (2) a stray fenced metadata/structured dump (two sections can each emit
+    # contradicting ```metadata blocks). Applied BEFORE the flush and the
+    # merge, so both the block-flushed later sections and the stored merged payload
+    # are guaranteed clean regardless of what the model wrote. (Section 0 already
+    # streamed its raw text live; the tightened directives keep its live view
+    # clean, and this guarantees the persisted report.)
+    texts = [
+        _strip_metadata_blocks(_strip_split_markers(text))
+        for (text, _stop_reason) in results
+    ]
+
+    # Ordered block-flush of sections 1..N-1 (section 0 already streamed live).
+    emit = getattr(on_delta, "emit_text", None)
+    if callable(emit):
+        for text in texts[1:]:
+            if text:
+                emit("\n\n" + text)
+
+    merged = "\n\n".join(t for t in texts if t)
+
+    def _finalize(meta: dict) -> dict:
+        out = _assemble(merged, meta, default_confidence)
+        if truncated_purposes:
+            # Marker the caller can see (the WARNING above is the non-silent
+            # guarantee; this lets a caller/telemetry act on it too).
+            out["_truncated"] = True
+            out["_truncated_purposes"] = truncated_purposes
+        return out
+
+    if not derive_metadata:
+        # Report path: the prose IS the deliverable and is already fully on
+        # screen. Skip the blocking structured pass to recover its ~25-37s from
+        # the tail — same return shape as the metadata-throws degrade below.
+        return _finalize({})
+
+    meta: dict = {}
+    try:
+        res = llm_call(
+            enterprise_id=enterprise_id,
+            agent=agent,
+            purpose=f"{purpose}_meta",
+            system=_METADATA_SYSTEM,
+            input=_metadata_user(ao_user, merged),
+            prompt_version=f"{prompt_version}-meta",
+            model=METADATA_MODEL,
+            json_schema=METADATA_SCHEMA,
+            # Cache hit on the corpus the section calls just warmed, so the
+            # confidence pass judges grounding, not prose alone (see `gateway`).
+            user_cacheable_prefix=user_cacheable_prefix,
+            max_tokens=2000,
+        )
+        meta = res.output if isinstance(res.output, dict) else {}
+    except Exception:  # noqa: BLE001 — metadata is advisory; the prose already shipped
+        logger.exception(
+            "answer-first map-reduce metadata pass failed; returning merged "
+            "answer with defaults"
+        )
+        meta = {}
+
+    return _finalize(meta)
