@@ -854,9 +854,19 @@ def execute_run(
         # drop rows ARE the feature and the window between this write and
         # `status="ready"` is about a second against a 3s poll, so a reader who
         # only saw it live would usually see nothing at all.
+        # TWO NUMBERS, BECAUSE THEY ARE TWO THINGS. `_cluster` gives every
+        # ungroupable claim its OWN cluster key, so `total_groups` counts one
+        # pseudo-group per claim we could not embed. It is the right number for
+        # the balance identity and the WRONG one to call a theme: on a tenant
+        # with no usable embeddings it would render "Grouped into 2,410 themes"
+        # directly above "2,410 claims never grouped at all" — one screen
+        # asserting both. `themes` is what a reader means by a theme, and
+        # `groups == themes + ungroupable` keeps the funnel checkable.
+        ungroupable_claims = (result.stats.get("dropped") or {}).get("ungroupable", 0)
         _progress(
             run_id, company_id, step="done",
             groups=total_groups,
+            themes=total_groups - ungroupable_claims,
             findings=len(result.findings),
             conflicts=result.stats.get("conflicts") or 0,
             deep=result.deep_count,

@@ -31,10 +31,12 @@
  *     entirely; rendering "0 set aside" there would claim a check passed that
  *     could not see.
  *  3. EVERY NUMBER CARRIES ITS UNIT. `claims_themed`/`claims_unthemed` are
- *     CLAIM counts that sum to `claims`; `groups` is a THEME count; the drop
+ *     CLAIM counts summing to `claims`. `themes` is what a reader calls a
+ *     theme. `groups` is the BALANCING total and includes one pseudo-group per
+ *     ungroupable claim, so it is never rendered as a theme count. The drop
  *     rules count GROUPS except `ungroupable`, which counts CLAIMS. Printing
- *     any two of those as parts of one whole is a quietly wrong number, and it
- *     is the defect this screen exists to avoid committing.
+ *     any two of those as parts of one whole is a quietly wrong number — and it
+ *     is the defect this screen exists to avoid, committed twice already.
  *  4. DRIFT MUST BE VISIBLE. If the engine adds a drop rule this file does not
  *     know, the row renders with its raw code rather than vanishing — a funnel
  *     that silently omits a rule stops adding up with nothing going red.
@@ -93,25 +95,40 @@ export function GoalRunNarration({ progress }: { progress: GoalRunProgress }) {
 
   // ── how they were grouped ──────────────────────────────────────────────
   //
-  // BOTH HALVES SAY "claims". They sum to the claim count, never to `groups`,
-  // so the sentence must not invite the reader to add them up to the headline.
-  if (typeof p.claims_themed === "number" || typeof p.claims_unthemed === "number") {
+  // THE HEADLINE IS `themes`, NOT `groups`. `groups` is the balancing total and
+  // counts one pseudo-group per ungroupable claim, so calling it a theme count
+  // would put "Grouped into 2,410 themes" directly above "2,410 claims never
+  // grouped at all" on a tenant with no usable embeddings.
+  //
+  // EACH HALF IS GATED ON ITSELF (rule 1). The claim split and the theme count
+  // come from DIFFERENT writes, and `_progress` swallows a failed write by
+  // design — so gating the headline on the split means one lost update silently
+  // drops the one number this whole screen exists to publish.
+  //
+  // BOTH HALVES OF THE SPLIT SAY "claims". They sum to the claim count, never
+  // to the theme count, so the sentence must not invite that addition.
+  const hasSplit =
+    typeof p.claims_themed === "number" || typeof p.claims_unthemed === "number"
+  if (typeof p.themes === "number" || hasSplit) {
     const themed = p.claims_themed ?? 0
     const unthemed = p.claims_unthemed ?? 0
     lines.push(
       <li key="grouped">
-        {typeof p.groups === "number" ? (
-          <>Grouped into <b>{n(p.groups)}</b> themes — from </>
+        {typeof p.themes === "number" ? (
+          <>
+            Grouped into <b>{n(p.themes)}</b> theme{p.themes === 1 ? "" : "s"}
+            {hasSplit ? " — from " : ""}
+          </>
         ) : (
           <>Grouping </>
         )}
-        <span className="ga-plan-witness">
-          {n(themed)} claim{themed === 1 ? "" : "s"} your knowledge graph had
-          already themed
-          {unthemed
-            ? `, plus ${n(unthemed)} it had not`
-            : ""}
-        </span>
+        {hasSplit ? (
+          <span className="ga-plan-witness">
+            {n(themed)} claim{themed === 1 ? "" : "s"} your knowledge graph had
+            already themed
+            {unthemed ? `, plus ${n(unthemed)} it had not` : ""}
+          </span>
+        ) : null}
       </li>,
     )
   }

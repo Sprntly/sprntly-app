@@ -439,6 +439,12 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // feature. `progress` is durable in `prioritisation`, so the finished report
   // can say how its ranking was narrowed instead of asking to be taken on
   // faith, which is the post-hoc-disclosure problem this work exists to end.
+  //
+  // THE TAB ONLY. The edited-document branch and the exported report still
+  // carry no funnel, so a reader who is handed the DOCUMENT is back to taking
+  // the ranking on authority. Stated rather than implied, because the previous
+  // version of this comment claimed the report reprinted the funnel when
+  // nothing did, and the next reader would have built on it.
   const readyProgress = run.prioritisation?.progress
   const howItNarrowed =
     readyProgress && readyProgress.step === "done" ? (

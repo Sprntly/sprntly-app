@@ -718,7 +718,13 @@ export type GoalRunProgress = {
    *  arithmetic that can never hold. */
   claims_themed?: number
   claims_unthemed?: number
+  /** THE BALANCING TOTAL — includes one pseudo-group per ungroupable claim,
+   *  because `_cluster` keys each of those as its own cluster. Use it for the
+   *  identity `groups === themes + ungroupable`, never as a theme count. */
   groups?: number
+  /** What a reader means by a theme: `groups` minus the ungroupable claims.
+   *  This is the number the headline shows. */
+  themes?: number
   findings?: number
   conflicts?: number
   deep?: number

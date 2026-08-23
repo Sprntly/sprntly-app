@@ -1209,15 +1209,164 @@ def test_the_claim_split_sums_to_claims_not_to_groups(ctx):
 
 def test_signals_dropped_before_projection_are_attributed_per_reason(ctx):
     """`seen - claims` is retired PLUS undated. Publishing one number under the
-    date rule made the panel contradict the run's own coverage note."""
+    date rule made the panel contradict the run's own coverage note.
+
+    THE FIXTURE HAS TO CONTAIN THE CONDITION. An earlier version of this test
+    seeded four ordinary signals, so both counts were 0 and the identity
+    reduced to `0 == 0` — it passed with the two fields SWAPPED and passed with
+    both hardcoded to zero. Guards-that-are-not-guards #2. So: exactly one
+    retired signal, exactly two undated, and the counts are pinned by value."""
+    from app.db.client import require_client
+
     for i in range(4):
         _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    c = require_client()
+    # Retired: the repo's own definition (`superseded_by` / `expired_at`).
+    c.table("kg_signal").insert({
+        "id": "sig-retired", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "customer_voice", "content": "a superseded bet",
+        "properties": {"customer": "Initech", "superseded_by": "sig-0000"},
+        "provenance": {"doc": "doc-a"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+    # Undated: no usable timestamp, so `project_signal` returns None.
+    for j in range(2):
+        c.table("kg_signal").insert({
+            "id": f"sig-undated-{j}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": "no date", "properties": {"customer": "Globex"},
+            "provenance": {"doc": "doc-b"},
+            # `project_signal` drops on an UNPARSEABLE `valid_at`, which is
+            # what "no usable timestamp" means to it. The fake's DDL is NOT
+            # NULL (production's column is looser), so an empty string is the
+            # faithful stand-in — `_parse_ts` returns None for both.
+            "valid_at": "",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
 
     run_id = _start(ctx).json()["id"]
     _confirm(ctx, run_id)
     ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
 
     p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
-    # Both keys published, so the panel never has to guess which rule applied.
-    assert "retired" in p and "undated" in p
+    # PINNED BY VALUE, so swapping the two fields fails. The identity alone
+    # cannot tell them apart.
+    assert p["retired"] == 1, p
+    assert p["undated"] == 2, p
     assert p["signals_read"] - p["claims"] == p["retired"] + p["undated"]
+
+
+def test_the_headline_is_themes_not_the_balancing_total(ctx):
+    """`_cluster` keys every ungroupable claim as its own cluster, so `groups`
+    counts one pseudo-group per unembeddable claim. Rendering THAT as a theme
+    count put "Grouped into N themes" directly above "N claims never grouped at
+    all" — the same screen asserting both."""
+    from app.db.client import require_client
+
+    # No embeddings at all, so every claim is ungroupable.
+    for i in range(5):
+        require_client().table("kg_signal").insert({
+            "id": f"sig-noemb-{i}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {"customer": f"Acct{i}"},
+            "provenance": {"doc": "doc-a"},
+            "valid_at": f"2026-0{1 + i}-11T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    ungroupable = p["dropped"]["ungroupable"]
+    assert ungroupable > 0, f"fixture produced no ungroupable claims: {p}"
+    # The whole point: a corpus that grouped into NOTHING must not report
+    # itself as having produced themes.
+    assert p["themes"] == 0, p
+    assert p["groups"] == p["themes"] + ungroupable, p
+
+
+def test_the_balance_identity_is_exercised_with_real_drops(ctx):
+    """The identity was only ever checked as `3 == 3 + 0 + 0`. Seed a corpus
+    where a group is actually refuted, so the subtraction is exercised."""
+    from app.crucible.pipeline import NARRATED_DROPS
+    from app.db.client import require_client
+
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001", "sig-0002"])
+    # A lone claim on its own theme -> an anecdote drop.
+    _signal(ctx.company_id, 90, embedding=str([0.9] * 4))
+    _theme(ctx.company_id, "ent-solo", "Billing", ["sig-0090"])
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    group_drops = sum(
+        p["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    assert group_drops > 0, f"no group-level drop was exercised: {p}"
+    assert p["themes"] == p["findings"] + group_drops, p
+    assert p["groups"] == p["themes"] + p["dropped"]["ungroupable"], p
+
+
+def test_every_engine_drop_code_has_panel_copy():
+    """CROSS-BOUNDARY. `NARRATED_DROPS` is declared "for the client", but the
+    client hardcodes its own parallel list — so a rule added to the engine
+    renders as a raw code. The fallback makes drift visible; this makes it
+    fail. Precedent: test_the_panel_and_the_api_agree_on_the_hypothesis_cap."""
+    import pathlib
+    import re
+
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    src = (pathlib.Path(__file__).resolve().parents[2]
+           / "web/app/components/shared/GoalRunNarration.tsx").read_text()
+    copy_block = src[src.index("const DROP_COPY"):src.index("const DROP_ORDER")]
+    order_block = src[src.index("const DROP_ORDER"):src.index("const n =")]
+    for code in NARRATED_DROPS:
+        assert re.search(rf"\b{code}\b", copy_block), (
+            f"{code} has no panel copy — it would render as a raw code"
+        )
+        assert re.search(rf'"{code}"', order_block), (
+            f"{code} is missing from DROP_ORDER — it would render out of funnel order"
+        )
+
+
+def test_an_unknown_drop_code_cannot_fail_a_run():
+    """`drops[code] += 1` on a plain dict raises KeyError, which escapes
+    build_findings into execute_run's catch-all and fails the run for every
+    tenant. Narration must never outrank the answer."""
+    from datetime import datetime, timezone
+
+    from app.crucible import pipeline as mod
+
+    real = mod._refute
+
+    def refute_with_a_new_code(*a, **kw):
+        return mod.Refutation("a_rule_nobody_declared", "invented for this test")
+
+    mod._refute = refute_with_a_new_code
+    try:
+        from tests.test_crucible_pipeline import claim
+
+        out = mod.build_findings(
+            [claim("x1", subject="exports", accounts=("Northwind",)),
+             claim("x2", subject="exports", accounts=("Initech",), days_ago=40)],
+            currency="accounts", now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        )
+    finally:
+        mod._refute = real
+
+    assert out.stats["dropped"]["a_rule_nobody_declared"] == 1
+    # And the declared set is still all present, at zero.
+    for code in mod.NARRATED_DROPS:
+        assert code in out.stats["dropped"]

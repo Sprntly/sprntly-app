@@ -43,7 +43,8 @@ const FULL = {
   sources: 4,
   claims_themed: 1502,
   claims_unthemed: 908,   // 1502 + 908 === 2410 === claims. Not === groups.
-  groups: 830,            // themes, a DIFFERENT unit from the two above
+  groups: 830,            // the BALANCING total: themes + ungroupable
+  themes: 622,            // 830 - 208 ungroupable. What the headline shows.
   findings: 168,
   conflicts: 3,
   deep: 5,
@@ -68,7 +69,7 @@ describe("the funnel", () => {
     const text = screen.getByTestId("goal-narration").textContent || ""
 
     expect(text).toContain("2,410")   // claims read
-    expect(text).toContain("830")     // groups (themes)
+    expect(text).toContain("622")     // themes (the headline)
     expect(text).toContain("396")     // anecdotes
     expect(text).toContain("168")     // findings
 
@@ -175,7 +176,7 @@ describe("units — the defect two reviewers found", () => {
     // "claims" on the split so a reader cannot be invited to add them to the
     // headline and conclude the headline is wrong.
     expect(text).toContain("1,502 claims")
-    expect(text).toMatch(/Grouped into\s*830\s*themes/)
+    expect(text).toMatch(/Grouped into\s*622\s*themes/)
     // The give-away phrasing of the old bug: the split rendered with no unit.
     expect(text).not.toContain("1,502 by your knowledge graph")
   })
@@ -194,14 +195,40 @@ describe("units — the defect two reviewers found", () => {
     expect(rows[0]).toContain("never grouped at all")
   })
 
-  it("the funnel balances, ungroupable included", () => {
-    // `_cluster` keys every ungroupable claim as `PREFIX + claim.id`, so it is
-    // exactly ONE cluster per claim — which is why it can be added to the
-    // group-level drops here even though it is counted in claims.
+  it("the funnel balances: themes === findings + group-level drops", () => {
     const groupDrops = GROUP_DROPS.reduce(
       (t, c) => t + (FULL.dropped as Record<string, number>)[c], 0)
-    expect(FULL.findings + groupDrops + FULL.dropped.ungroupable)
-      .toBe(FULL.groups)
+    expect(FULL.findings + groupDrops).toBe(FULL.themes)
+  })
+
+  it("groups is the balancing total, themes is what a reader is shown", () => {
+    // `_cluster` keys every ungroupable claim as its OWN cluster, so `groups`
+    // carries one pseudo-group per unembeddable claim. Showing THAT as a theme
+    // count is how "Grouped into N themes" ended up directly above "N claims
+    // never grouped at all".
+    expect(FULL.groups).toBe(FULL.themes + FULL.dropped.ungroupable)
+  })
+
+  it("never renders the balancing total as the headline", () => {
+    render(<GoalRunNarration progress={FULL} />)
+    const text = screen.getByTestId("goal-narration").textContent || ""
+    expect(text).not.toMatch(/Grouped into\s*830/)
+  })
+
+  it("a corpus that grouped into nothing does not claim to have themes", () => {
+    render(
+      <GoalRunNarration
+        progress={{
+          step: "done", claims: 2410, claims_themed: 0, claims_unthemed: 2410,
+          groups: 2410, themes: 0, findings: 0,
+          dropped: { ungroupable: 2410, anecdote: 0, echo: 0,
+                     single_account: 0, no_authority: 0, uncausal: 0 },
+        }}
+      />,
+    )
+    const text = screen.getByTestId("goal-narration").textContent || ""
+    expect(text).toContain("Grouped into 0 themes")
+    expect(text).not.toContain("Grouped into 2,410 themes")
   })
 })
 
@@ -229,5 +256,37 @@ describe("what was skipped before projection", () => {
     // The old copy attributed the whole 367 gap to a missing date, which
     // contradicted the run's own coverage note.
     expect(text).not.toContain("367")
+  })
+})
+
+
+describe("each number is gated on itself, not on its neighbour", () => {
+  it("still shows the theme count when the claim-split write was lost", () => {
+    // `_progress` swallows a failed write BY DESIGN, so losing only the
+    // `analysing` update is an expected state — and it used to silently drop
+    // the one number this screen exists to publish.
+    render(
+      <GoalRunNarration
+        progress={{
+          step: "done", claims: 2410, themes: 622, groups: 830, findings: 168,
+          dropped: { ...FULL.dropped },
+        }}
+      />,
+    )
+    const text = screen.getByTestId("goal-narration").textContent || ""
+    expect(text).toContain("Grouped into 622 themes")
+    expect(text).toContain("168")
+  })
+
+  it("still shows the claim split before the theme count exists", () => {
+    render(
+      <GoalRunNarration
+        progress={{ step: "analysing", claims: 2410,
+                    claims_themed: 1502, claims_unthemed: 908 }}
+      />,
+    )
+    const text = screen.getByTestId("goal-narration").textContent || ""
+    expect(text).toContain("1,502 claims")
+    expect(text).not.toContain("Grouped into")
   })
 })
