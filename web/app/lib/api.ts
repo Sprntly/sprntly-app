@@ -39,6 +39,15 @@ export function apiErrorMessage(status: number, body: unknown): string {
         .filter(Boolean)
       if (parts.length) return parts.join(" · ")
     }
+    // A structured detail: `{error: "...", message: "..."}`. The billing routes
+    // return these so the client can BRANCH on `error` (insufficient_credits vs
+    // subscription_inactive) while still having something readable to show.
+    // Without this branch every one of them rendered as "Request failed (502)",
+    // which is exactly the actionable half thrown away.
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as { message?: unknown }).message
+      if (typeof message === "string" && message.trim()) return message
+    }
   }
   if (typeof body === "string" && body.trim()) return body
   return `Request failed (${status})`

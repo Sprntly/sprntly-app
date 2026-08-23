@@ -395,6 +395,8 @@ export function BillingSettingsView(p: BillingView) {
           </div>
         </div>
 
+        {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
+
         <p className="bill-code-hint">
           Have a discount code? Enter it at checkout.
         </p>
@@ -422,6 +424,8 @@ export function BillingSettingsView(p: BillingView) {
               </button>
             ))}
           </div>
+
+          {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
 
           <div className="bill-topup-custom">
             <label htmlFor="bill-custom-amt">Custom amount (USD)</label>

@@ -379,3 +379,88 @@ def test_a_failing_handler_still_returns_200(ctx, monkeypatch):
 
     assert res.status_code == 200
     assert res.json()["result"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# Misconfiguration must be legible, not a 500
+# ---------------------------------------------------------------------------
+
+
+def test_a_dollar_amount_in_place_of_a_price_id_is_caught_before_stripe(ctx, monkeypatch):
+    """The easy mistake: pasting 59 into STRIPE_PRICE_STARTER_MONTHLY.
+
+    Stripe only reports it at checkout time ("The `price` parameter should be
+    the ID of a price object, rather than the literal numerical price"), by
+    which point the user has clicked Choose and got a 500 with nothing on
+    screen. Caught here instead, naming the variable to fix.
+    """
+    # `price_id` returns "" for a malformed value (unit-tested below); the
+    # route's job is to turn that into a message naming the variable to fix.
+    monkeypatch.setattr(stripe_client, "price_id", lambda plan, interval: "")
+
+    res = ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+
+    assert res.status_code == 503
+    detail = res.json()["detail"]
+    assert detail["error"] == "price_not_configured"
+    assert "STRIPE_PRICE_STARTER_MONTHLY" in detail["message"]
+    assert "price_" in detail["message"]
+
+
+@pytest.mark.parametrize(
+    "stored,expected",
+    [
+        ("price_1AbCdEf", "price_1AbCdEf"),   # a real id passes through
+        ("  price_1AbCdEf  ", "price_1AbCdEf"),  # whitespace from a paste
+        ("59", ""),        # the dollar amount mistake
+        ("590", ""),
+        ("prod_1AbCdEf", ""),  # a PRODUCT id, not a price id
+        ("", ""),
+    ],
+)
+def test_price_id_accepts_only_real_price_ids(monkeypatch, stored, expected, caplog):
+    """Patched on `stripe_client.settings` — the object the function actually
+    reads — because `isolated_settings` reloads app modules and a separately
+    imported `app.config.settings` can be a different instance."""
+    monkeypatch.setattr(
+        stripe_client.settings, "stripe_price_starter_monthly", stored
+    )
+    with caplog.at_level("ERROR"):
+        assert stripe_client.price_id(plans.STARTER, "monthly") == expected
+    if stored.strip() and not expected:
+        assert "stripe_price_malformed" in caplog.text
+
+
+def test_a_stripe_failure_becomes_a_readable_502_not_a_500(ctx, monkeypatch):
+    """Stripe's own message is almost always the actionable part, so it is
+    passed through rather than replaced with a generic failure."""
+
+    class FakeStripeError(Exception):
+        user_message = "Your card was declined by the issuer."
+
+    def _boom(**kw):
+        raise FakeStripeError("raw sdk text")
+
+    monkeypatch.setattr(stripe_client, "create_subscription_checkout", _boom)
+
+    res = ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+
+    assert res.status_code == 502
+    detail = res.json()["detail"]
+    assert detail["error"] == "stripe_error"
+    assert detail["op"] == "checkout"
+    assert detail["message"] == "Your card was declined by the issuer."
+
+
+def test_a_stripe_failure_on_the_portal_is_also_reported(ctx, monkeypatch):
+    billing_db.set_billing(ctx.company_id, {"stripe_customer_id": "cus_test"})
+
+    def _boom(**kw):
+        raise RuntimeError("No configuration provided for the customer portal")
+
+    monkeypatch.setattr(stripe_client, "create_portal_session", _boom)
+
+    res = ctx.client.post("/v1/billing/portal")
+
+    assert res.status_code == 502
+    assert "customer portal" in res.json()["detail"]["message"]

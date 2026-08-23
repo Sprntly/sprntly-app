@@ -65,6 +65,10 @@ def _stripe():
 # Price ids
 # ---------------------------------------------------------------------------
 
+# Every Stripe Price id starts with this. Anything else in the env var is a
+# configuration mistake, most often the dollar amount pasted in place of the id.
+_PRICE_ID_PREFIX = "price_"
+
 MONTHLY = "monthly"
 ANNUAL = "annual"
 
@@ -83,7 +87,23 @@ def price_id(plan: str, interval: str) -> str:
         (plans.PRODUCT_BUILDER, MONTHLY): settings.stripe_price_product_builder_monthly,
         (plans.PRODUCT_BUILDER, ANNUAL): settings.stripe_price_product_builder_annual,
     }
-    return table.get((plans.resolve_plan(plan), interval), "")
+    value = (table.get((plans.resolve_plan(plan), interval)) or "").strip()
+    if value and not value.startswith(_PRICE_ID_PREFIX):
+        # The easy mistake, and one Stripe only reports at checkout time as
+        # "The `price` parameter should be the ID of a price object, rather
+        # than the literal numerical price" — by which point the user has
+        # clicked Choose and got a 500. Caught here instead, so the route can
+        # say which variable is wrong before anyone talks to Stripe.
+        logger.error(
+            "stripe_price_malformed plan=%s interval=%s "
+            "value_looks_like=%r expected_prefix=%s",
+            plan,
+            interval,
+            value[:12],
+            _PRICE_ID_PREFIX,
+        )
+        return ""
+    return value
 
 
 # ---------------------------------------------------------------------------

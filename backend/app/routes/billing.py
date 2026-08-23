@@ -42,6 +42,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
 from app.billing import credits, plans, referrals, stripe_client
+from app.billing.stripe_client import BillingNotConfigured
 from app.billing import webhooks as billing_webhooks
 from app.config import settings
 from app.db import billing as billing_db
@@ -74,6 +75,31 @@ def _customer_id(company: CompanyContext) -> str:
     if customer_id != row.get("stripe_customer_id"):
         billing_db.set_billing(company.company_id, {"stripe_customer_id": customer_id})
     return customer_id
+
+
+def _stripe_call(what: str, fn):
+    """Run a Stripe SDK call, turning its errors into a readable response.
+
+    Without this every Stripe-side problem — a bad price id, a disabled
+    customer portal, an expired key — surfaces as a bare 500 with a stack trace
+    in the logs and nothing useful on screen, which reads to the user as "the
+    button did nothing". Stripe's own message is almost always the actionable
+    part, so it is passed through rather than replaced with a generic one.
+
+    502 rather than 500: the failure is upstream, not in this handler.
+    """
+    try:
+        return fn()
+    except BillingNotConfigured as exc:
+        raise HTTPException(503, str(exc)) from None
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the SDK raises its own hierarchy
+        message = getattr(exc, "user_message", None) or str(exc)
+        logger.exception("stripe_call_failed op=%s", what)
+        raise HTTPException(
+            502, detail={"error": "stripe_error", "op": what, "message": message}
+        ) from None
 
 
 def _return_url(status: str) -> str:
@@ -166,17 +192,28 @@ def start_checkout(
     if body.interval not in (stripe_client.MONTHLY, stripe_client.ANNUAL):
         raise HTTPException(400, "interval must be 'monthly' or 'annual'")
     if not stripe_client.price_id(body.plan, body.interval):
+        env_var = f"STRIPE_PRICE_{body.plan}_{body.interval}".upper()
         raise HTTPException(
-            503, f"No price is configured for {body.plan}/{body.interval}"
+            503,
+            detail={
+                "error": "price_not_configured",
+                "message": (
+                    f"No usable Stripe price for {body.plan}/{body.interval}. "
+                    f"Set {env_var} to a price id (price_…), not an amount."
+                ),
+            },
         )
 
-    url = stripe_client.create_subscription_checkout(
-        customer_id=_customer_id(company),
-        company_id=company.company_id,
-        plan=body.plan,
-        interval=body.interval,
-        success_url=_return_url("success"),
-        cancel_url=_return_url("cancelled"),
+    url = _stripe_call(
+        "checkout",
+        lambda: stripe_client.create_subscription_checkout(
+            customer_id=_customer_id(company),
+            company_id=company.company_id,
+            plan=body.plan,
+            interval=body.interval,
+            success_url=_return_url("success"),
+            cancel_url=_return_url("cancelled"),
+        ),
     )
     return {"url": url}
 
@@ -195,8 +232,12 @@ def open_portal(company: CompanyContext = Depends(require_company)) -> dict:
     if not row.get("stripe_customer_id"):
         raise HTTPException(400, "No billing account yet — start a subscription first")
 
-    url = stripe_client.create_portal_session(
-        customer_id=row["stripe_customer_id"], return_url=settings.billing_return_url
+    url = _stripe_call(
+        "portal",
+        lambda: stripe_client.create_portal_session(
+            customer_id=row["stripe_customer_id"],
+            return_url=settings.billing_return_url,
+        ),
     )
     return {"url": url}
 
@@ -223,13 +264,16 @@ def start_topup(
     _require_stripe()
 
     purchased = plans.topup_credits_for_usd(body.amount_usd)
-    url = stripe_client.create_topup_checkout(
-        customer_id=_customer_id(company),
-        company_id=company.company_id,
-        amount_usd=body.amount_usd,
-        credits_purchased=purchased,
-        success_url=_return_url("topup"),
-        cancel_url=_return_url("cancelled"),
+    url = _stripe_call(
+        "topup",
+        lambda: stripe_client.create_topup_checkout(
+            customer_id=_customer_id(company),
+            company_id=company.company_id,
+            amount_usd=body.amount_usd,
+            credits_purchased=purchased,
+            success_url=_return_url("topup"),
+            cancel_url=_return_url("cancelled"),
+        ),
     )
     return {"url": url, "credits": purchased}
 
