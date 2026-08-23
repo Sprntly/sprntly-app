@@ -141,6 +141,56 @@ def test_private_ask_routes_through_single_shot(monkeypatch):
     assert captured["scope"].project_id == 9
 
 
+def _run_ask_observing_commit(monkeypatch, answer_payload):
+    """Drive `run_ask_job` with `qa_agent.answer` stubbed to return
+    `answer_payload`, observing whether the row is committed (`complete_ask_job`)
+    or failed (`fail_ask_job`). Returns `(committed, failed)` capture dicts."""
+    monkeypatch.setattr(ajr.qa_agent, "answer", lambda **kw: answer_payload)
+    committed = {}
+    failed = {}
+    monkeypatch.setattr(ajr, "complete_ask_job",
+                        lambda i, p: committed.update(id=i, payload=p))
+    monkeypatch.setattr(ajr, "fail_ask_job",
+                        lambda i, msg, ec: failed.update(id=i, msg=msg, error_class=ec))
+    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    import app.project_memory as pm
+
+    monkeypatch.setattr(pm, "maybe_promote_turn", lambda *a, **kw: None)
+    monkeypatch.setattr("app.db.projects.project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr("app.db.projects.is_project_member", lambda *a, **k: True)
+    asyncio.run(ajr.run_ask_job(
+        ask_id=7, enterprise_id="c1", question="q", dataset="d",
+        conversation_id=5, user_id="u1",
+        context_source={"kind": "project", "params": {"project_id": 9, "surface": "private"}},
+    ))
+    return committed, failed
+
+
+def test_normal_answer_commits_ready(monkeypatch):
+    """Regression: a normal non-empty answer is unaffected end-to-end — it
+    commits as `ready` and never touches the failure path."""
+    committed, failed = _run_ask_observing_commit(
+        monkeypatch, {"answer": "a real answer", "citations": []})
+    assert failed == {}  # never failed
+    assert committed.get("id") == 7
+    assert committed["payload"]["answer"] == "a real answer"
+
+
+def test_empty_composer_answer_still_commits_ready(monkeypatch):
+    """The worker deliberately does NOT fail an empty composed answer — that
+    is the pre-existing behaviour (an empty composer answer commits `ready`,
+    relied on by `test_artifact_context.test_ask_grounds_on_the_open_evidence`,
+    which runs the real composer with no live LLM in CI). The empty-tool-loop
+    fix lives ONE layer up in `_try_scoped_tool_answer` (Guard 1), which
+    degrades to the composer BEFORE the worker ever sees the answer — so the
+    worker needs no empty guard, and adding one here would wrongly error every
+    real-composer test. This locks that boundary in."""
+    committed, failed = _run_ask_observing_commit(
+        monkeypatch, {"answer": "   ", "citations": []})
+    assert failed == {}  # NOT failed — empty composer answer is committed today
+    assert committed.get("id") == 7  # committed as ready, blank body and all
+
+
 def test_respond_individual_removed():
     import importlib
 
@@ -1263,3 +1313,78 @@ def test_private_scope_unaffected_by_edit_prd_grounding(monkeypatch):
         scope=private_scope,
     )
     assert out["answer"] == "Done — I've updated the PRD summary in my notes."
+
+
+# ── Empty-tool-loop guard (the empty-answer fix) ────────────────────────────
+# `run_tool_loop` can burn all its iterations on tool calls and return "" with
+# no closing text turn (the "returns nothing, user retries" bug). Surfacing
+# that verbatim stores `{"answer": ""}` → a blank bubble. The guard in
+# `_try_scoped_tool_answer` treats an empty return EXACTLY like the function's
+# existing failure path: PRIVATE degrades to `None` (→ the ordinary composer,
+# which can actually answer); a NON-private (group) surface re-raises.
+
+
+def test_empty_tool_loop_private_degrades_to_composer(monkeypatch, caplog):
+    """The primary fix: the loop returns "" (model called tools every turn,
+    no closing text). On the PRIVATE surface `_try_scoped_tool_answer` returns
+    None, `qa.answer` falls through to the ordinary composer, and the user
+    gets a REAL answer — never a blank bubble."""
+    # The loop enters (gate fires on "summarize the PRD") but produces no text.
+    monkeypatch.setattr("app.llm.run_tool_loop", lambda **kw: "   ")
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "the composer's real answer", "key_points": [],
+                "citations": [], "confidence": 0.6, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+    import logging
+    with caplog.at_level(logging.WARNING, logger="app.qa_agent"):
+        out = qa.answer(
+            enterprise_id="c1", question="summarize the PRD", dataset="d", scope=scope,
+        )
+    # Degraded to a real composer answer, NOT `{"answer": ""}`.
+    assert out["answer"] == "the composer's real answer"
+    # The empty-loop degrade was logged (no longer invisible).
+    assert any("scoped_tool_reply_empty" in r.message for r in caplog.records)
+
+
+def test_empty_tool_loop_nonprivate_reraises(monkeypatch):
+    """The NON-private (group) failure contract: an empty tool-loop return
+    re-raises rather than degrading (group has no single-shot composer
+    fallback), mirroring the function's existing except-branch `raise`. The
+    group surface was retired on this branch, so a non-private surface stands
+    in for it — the branch under test is `scope.surface != project_private`."""
+    monkeypatch.setattr("app.llm.run_tool_loop", lambda **kw: "")
+    scope = SurfaceScope(
+        surface=Surface.main, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    with pytest.raises(qa.EmptyScopedToolAnswer):
+        qa._try_scoped_tool_answer(
+            scope=scope, question="summarize the PRD", history=None,
+            enterprise_id="c1", dataset="d",
+        )
+
+
+def test_terminal_narration_not_treated_as_empty(monkeypatch):
+    """A terminal-tool narration turn (here `delegate_task`) is NOT the empty
+    case: even when the model's OWN free text is blank, the handler's
+    non-empty narration is the legit answer and the empty guard must not
+    fire. Proves the guard sits AFTER the narration overrides."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("delegate_task", {"assignee": "Priya", "task_summary": "Draft it"})
+        return ""  # model composed no closing text of its own
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    monkeypatch.setattr(
+        "app.project_delegation.handle_delegate_task",
+        lambda **kw: "Sent the brief to Priya's chat.",
+    )
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+    out = qa.answer(
+        enterprise_id="c1", question="please delegate the export review to Priya",
+        dataset="d", scope=scope,
+    )
+    # The handler narration survives — the guard did NOT degrade it to a blank.
+    assert out["answer"] == "Sent the brief to Priya's chat."

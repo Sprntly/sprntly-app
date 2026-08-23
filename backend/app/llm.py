@@ -803,6 +803,19 @@ def run_tool_loop(
                     {"type": "tool_result", "tool_use_id": b.id, "content": str(out)}
                 )
         messages.append({"role": "user", "content": results})
+    # Exhaustion guard: the `for` completed without an early `return` at
+    # `stop_reason != "tool_use"`, i.e. the model called a tool on every one of
+    # the `max_iters` turns and never composed a closing text turn. If it also
+    # never set `final_text` on any turn, the loop returns "" — the invisible
+    # empty-answer failure mode (this used to be a bare `return` with no log).
+    # Warn so the failure stops being silent in the logs; the caller
+    # (`_try_scoped_tool_answer`) now degrades an empty return to a real answer.
+    if not final_text.strip():
+        logger.warning(
+            "run_tool_loop exhausted max_iters=%s with no closing text turn — "
+            "returning empty text (model called tools every turn)",
+            max_iters,
+        )
     return final_text
 
 
