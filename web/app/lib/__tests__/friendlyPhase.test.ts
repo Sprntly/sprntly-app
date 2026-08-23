@@ -18,8 +18,30 @@ const ALLOWED_OUTPUTS = new Set<string>([
   "Reviewing your latest report…",
   "Researching your competitors…",
   "Writing your report…",
+  // Shared report vocabulary (backend/app/report_phases.ReportPhase).
+  "Gathering the latest information…",
+  "Analyzing the findings…",
+  "Researching products & features…",
+  "Researching positioning…",
+  "Researching pricing…",
+  "Researching market & recent news…",
   FRIENDLY_PHASE_GENERIC, // "Working on your answer…"
 ])
+
+// The RAW labels the shared report primitive emits (one per ReportPhase). Each
+// must map to its own curated line — a report path that emits one of these can
+// never fall through to the generic wait. Kept as an independent copy of the
+// backend vocabulary on purpose: this is the egress gate, so it declares for
+// itself exactly which labels it accepts.
+const REPORT_VOCAB_MAPPINGS: ReadonlyArray<[string, string]> = [
+  ["Gathering the latest information…", "Gathering the latest information…"],
+  ["Analyzing the findings…", "Analyzing the findings…"],
+  ["Writing your report…", "Writing your report…"],
+  ["Researching products & features…", "Researching products & features…"],
+  ["Researching positioning…", "Researching positioning…"],
+  ["Researching pricing…", "Researching pricing…"],
+  ["Researching market & recent news…", "Researching market & recent news…"],
+]
 
 // Real backend labels (the raw strings emitted by ask_runner / qa_agent /
 // competitive_intel), including the ones that interpolate detail that must be
@@ -31,6 +53,7 @@ const KNOWN_MAPPINGS: ReadonlyArray<[string, string]> = [
   ["Reading the last competitive review…", "Reviewing your latest report…"],
   ["Researched Acme Corp…", "Researching your competitors…"],
   ["Writing the review from 47 sourced observations…", "Writing your report…"],
+  ...REPORT_VOCAB_MAPPINGS,
 ]
 
 // Adversarial / leaky inputs: raw activity that would violate the contract if
@@ -68,6 +91,17 @@ describe("friendlyPhase — egress contract", () => {
   it("maps every known raw backend label to its curated copy", () => {
     for (const [raw, expected] of KNOWN_MAPPINGS) {
       expect(friendlyPhase(raw)).toBe(expected)
+    }
+  })
+
+  it("maps every shared report-vocabulary label to a curated non-generic line", () => {
+    // The one cross-cutting egress risk the audit called out: a wired backend
+    // label with no mapping is silently dropped to the fallback. This guards
+    // that every ReportPhase label the reports emit is curated.
+    for (const [raw, expected] of REPORT_VOCAB_MAPPINGS) {
+      const out = friendlyPhase(raw)
+      expect(out).toBe(expected)
+      expect(out).not.toBe(FRIENDLY_PHASE_GENERIC)
     }
   })
 

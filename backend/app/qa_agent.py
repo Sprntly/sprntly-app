@@ -1104,7 +1104,8 @@ _VOC_KG_SYSTEM = (
 
 
 def _answer_voc_report(
-    decision: RouteDecision, enterprise_id, question, history, on_delta=None
+    decision: RouteDecision, enterprise_id, question, history, on_delta=None,
+    on_phase=None,
 ) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
@@ -1127,6 +1128,13 @@ def _answer_voc_report(
     generic answer (which explains what to connect).
     """
     from app.graph.retrieval import VOC_SCALE, render_context_section
+    # Local import: report_phases imports emit_phase from THIS module, so a
+    # top-level import here would be a load-time cycle. At call time both are
+    # fully loaded (same lazy-import pattern the report dispatch below uses).
+    from app.report_phases import ReportPhase, emit_report_phase
+
+    # GATHERING: the KG bundle retrieval — the pinned path's evidence leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
 
     # Same widened retrieval as the merged path (`call_digest.build_kg_context`).
     # These two are the only callers that pass a scale, and they must pass the
@@ -1152,6 +1160,8 @@ def _answer_voc_report(
         + corpus_text
     )
     _voc_model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    # WRITING: the bundle is rendered — the document-scale synthesis is next.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     from app import answer_first
 
     if answer_first.enabled():
@@ -3325,6 +3335,8 @@ def answer(
             # Only consumed on the flagged map-reduce synthesis path (mirrors the
             # VoC/MI dispatch); ignored while that gate is off.
             on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3344,6 +3356,9 @@ def answer(
             # A sweep is several minutes of paid web search; each stage boundary
             # is a cancellation checkpoint, so a Stop actually stops it.
             is_cancelled=is_cancelled,
+            # The staged sweep narrates a per-stage checklist from inside the
+            # module — the longest wait in the product (competitive_intel parity).
+            on_phase=on_phase,
         )
         if cr is not None:
             return _maybe_verify(cr, enterprise_id)
@@ -3407,6 +3422,8 @@ def answer(
             # Only consumed on the flagged map-reduce synthesis path (mirrors the
             # VoC dispatch below); ignored while that gate is off.
             on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
         )
         if mi is not None:
             return _maybe_verify(mi, enterprise_id)
@@ -3447,6 +3464,9 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
                 constraints=(plan.constraints if plan is not None else None),
+                # Narrates its gather→synthesis legs (competitive_intel parity);
+                # David's most-used report and the reported blank-wait path.
+                on_phase=on_phase,
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).
@@ -3472,12 +3492,15 @@ def answer(
 
         if answer_first.enabled():
             voc = _answer_voc_report(
-                decision, enterprise_id, question, history, on_delta=on_delta
+                decision, enterprise_id, question, history, on_delta=on_delta,
+                on_phase=on_phase,
             )
             if voc is None:
                 answer_first.reset_stream(on_delta)
         else:
-            voc = _answer_voc_report(decision, enterprise_id, question, history)
+            voc = _answer_voc_report(
+                decision, enterprise_id, question, history, on_phase=on_phase,
+            )
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 

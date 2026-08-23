@@ -42,6 +42,7 @@ from typing import Callable
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
 from app.prompt_history import clamp_turn_text
+from app.report_phases import ReportPhase, emit_report_phase
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -401,7 +402,8 @@ def _capture(enterprise_id: str, scope: str) -> tuple[list[dict], bool]:
 def answer(*, enterprise_id: str, question: str,
            history: list[dict] | None = None,
            is_cancelled: Callable[[], bool] | None = None,
-           on_delta=None) -> dict | None:
+           on_delta=None,
+           on_phase: Callable[[str], None] | None = None) -> dict | None:
     """Run the market-intelligence pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -411,6 +413,10 @@ def answer(*, enterprise_id: str, question: str,
     `is_cancelled` is checked at the one boundary that matters — after the
     paid capture, before the paid synthesis — so a Stop in chat stops the
     second spend. The scheduled caller passes nothing.
+
+    `on_phase`, when supplied, narrates the two real legs of this wait —
+    GATHERING (the paid web capture) then WRITING (the document-scale
+    synthesis) — via the shared report vocabulary. A no-op without a sink.
 
     `on_delta`, when supplied, is the Ask worker's token sink. It is used ONLY
     on the map-reduce synthesis path (gated by
@@ -439,6 +445,8 @@ def answer(*, enterprise_id: str, question: str,
         )
 
     scope = _scope_block(profile, question)
+    # GATHERING: the paid web search — the first minutes-long leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     try:
         records, truncated = _capture(enterprise_id, scope)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
@@ -478,6 +486,9 @@ def answer(*, enterprise_id: str, question: str,
         _render_history(history) + f"Question: {question}\n\n{source_line}"
     )
     _report_input = f"{_report_header}\n\n{records_json}"
+    # WRITING: capture is done and records are counted — the document-scale
+    # synthesis is the second (and last) leg of the wait.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
         from app import answer_first
 
