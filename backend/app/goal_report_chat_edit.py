@@ -50,6 +50,7 @@ from app.db.custom_artifacts import (
     update_artifact,
 )
 from app.graph.gateway import llm_call
+from app import targeted_edit
 
 logger = logging.getLogger(__name__)
 
@@ -149,12 +150,12 @@ REPORT (HTML — edit and return the whole thing):
 """
 
 
-def apply_report_edit(report_html: str, instruction: str, enterprise_id: str) -> dict:
-    """Run the scoped editor. `{"html", "sections_changed", "summary"}`.
+def _full_emit_report(*, system: str, user: str, enterprise_id: str) -> dict:
+    """Today's `apply_report_edit` body verbatim: the full-document re-emit call.
 
-    Raises RuntimeError when the model returns no usable HTML, so the caller
-    leaves the stored document untouched rather than writing an empty one over
-    a report someone may have spent an afternoon on.
+    This is BOTH the flag-off path AND the fallback when a targeted splice is
+    rejected by any validation gate. The return shape
+    (`{html, sections_changed, summary}`) is the contract the caller consumes.
 
     NO `model=` ARGUMENT: the gateway's default is sonnet, which is the tiering
     policy's default for product code. Opus is reserved for the three surfaces
@@ -165,8 +166,8 @@ def apply_report_edit(report_html: str, instruction: str, enterprise_id: str) ->
         agent=_AGENT,
         purpose="apply_goal_report_chat_edit",
         prompt_version=EDIT_PROMPT_VERSION,
-        system=_EDIT_SYSTEM,
-        input=_EDIT_USER.format(instruction=instruction, report_html=report_html),
+        system=system,
+        input=user,
         json_schema=_EDIT_SCHEMA,
         max_tokens=32000,
         long_output=True,
@@ -185,6 +186,78 @@ def apply_report_edit(report_html: str, instruction: str, enterprise_id: str) ->
         "sections_changed": [s for s in sections if isinstance(s, str)],
         "summary": (out.get("summary") or "").strip(),
     }
+
+
+def _targeted_or_fallback_report(
+    *, report_html: str, system: str, user: str, enterprise_id: str
+) -> dict:
+    """Run the targeted-ops editor over the stored report body, splice + validate
+    via the shared primitive, and fall back to `_full_emit_report` (the proven
+    path) on ANY gate failure. Only reached when the goal-report sub-gate is ON.
+
+    `report_html` is the already-sanitized stored `body_html` (the writer
+    re-sanitizes on save), so the splice operates on stable anchors.
+    """
+    t_result = llm_call(
+        enterprise_id=enterprise_id,
+        agent=_AGENT,
+        purpose="apply_goal_report_chat_edit",
+        prompt_version=f"{EDIT_PROMPT_VERSION}-targeted",
+        system=targeted_edit.targeted_system(
+            system, targeted_edit.GOALREPORT_SECTION_MODEL
+        ),
+        input=user,
+        json_schema=targeted_edit.TARGETED_EDIT_SCHEMA,
+        max_tokens=32000,
+        long_output=True,
+    )
+    out = t_result.output if isinstance(t_result.output, dict) else {}
+    summary = (out.get("summary") or "").strip()
+    try:
+        html, sections = targeted_edit.interpret(
+            out,
+            stored_doc=report_html,
+            model=targeted_edit.GOALREPORT_SECTION_MODEL,
+            # Goal-report `html` was never code-fenced (unlike PRD), so identity —
+            # do not strip anything the model returns.
+            strip_fence=lambda s: s,
+        )
+    except targeted_edit.FallbackNeeded as exc:
+        logger.warning(
+            "targeted goal-report edit falling back to full-emit: %s", exc
+        )
+        return _full_emit_report(system=system, user=user, enterprise_id=enterprise_id)
+    return {
+        "html": html,
+        "sections_changed": [s for s in sections if isinstance(s, str)],
+        "summary": summary,
+    }
+
+
+def apply_report_edit(report_html: str, instruction: str, enterprise_id: str) -> dict:
+    """Run the scoped editor. `{"html", "sections_changed", "summary"}`.
+
+    Raises RuntimeError when the model returns no usable HTML, so the caller
+    leaves the stored document untouched rather than writing an empty one over
+    a report someone may have spent an afternoon on.
+
+    Behind `TARGETED_EDIT_GOALREPORT_ENABLED` (default OFF): flag-off is the
+    current full-document re-emit, byte-identical to today. Flag-on asks the
+    model for only the changed `<h2>` sections and splices them into the stored
+    body, validating against the six gates and falling back to the full-emit
+    call on any failure.
+    """
+    user = _EDIT_USER.format(instruction=instruction, report_html=report_html)
+    if not targeted_edit.goalreport_enabled():
+        return _full_emit_report(
+            system=_EDIT_SYSTEM, user=user, enterprise_id=enterprise_id
+        )
+    return _targeted_or_fallback_report(
+        report_html=report_html,
+        system=_EDIT_SYSTEM,
+        user=user,
+        enterprise_id=enterprise_id,
+    )
 
 
 def _actor(company) -> str:
