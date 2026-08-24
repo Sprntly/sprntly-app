@@ -45,6 +45,12 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "./ClarifyQuestionsCard"
+import {
+  GoalGateCard,
+  type GoalGate,
+  type GoalGateResolved,
+} from "./GoalGateCard"
+import type { PlanDecision } from "./GoalAnalysisPlan"
 import { OpenArtifactChips } from "./OpenArtifactChips"
 import { ArtifactListCards } from "./ArtifactListCards"
 import type { AskResponse, ChatArtifactItem, OpenArtifactCandidate } from "../../lib/api"
@@ -183,6 +189,15 @@ export interface ChatBubbleProps {
    *  still true. */
   prdCommandThinking?: boolean
 
+  /** A Goal Analysis gate riding this turn — the definition question or the
+   *  plan awaiting approval, answered IN THE THREAD. */
+  goalGate?: GoalGate | null
+  goalGateResolved?: GoalGateResolved
+  goalGateBusy?: boolean
+  /** A refusal the reader can act on, shown beside the live controls. */
+  goalGateError?: string
+  onConfirmGoalDefinition?: (definition: string) => void
+  onApproveGoalPlan?: (decision: PlanDecision) => void
   clarify?: ClarifyQuestion[] | null
   clarifyResolved?: ClarifyResolution
   /** True while the dock's stepper popup is open and targeting THIS turn —
@@ -431,6 +446,12 @@ export function ChatBubble(props: ChatBubbleProps) {
     summaryPending,
     onStop,
     prdCommandThinking,
+    goalGate,
+    goalGateResolved,
+    goalGateBusy,
+    goalGateError,
+    onConfirmGoalDefinition,
+    onApproveGoalPlan,
     clarify,
     clarifyResolved,
     clarifyPopupNote,
@@ -681,7 +702,12 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <>
                   {error ? <WaitFailedState onAskAgain={onAskAgain} /> : null}
                   {stopped && !reply ? <WaitStoppedState onAskAgain={onAskAgain} /> : null}
-                  {!reply && !error && !stopped ? (
+                  {/* A turn carrying a GATE is not a turn awaiting a reply: the
+                      card IS the agent's message. Without this the whole
+                      no-reply ladder ran beside it and printed "No response was
+                      generated for this message." directly above a live
+                      question. */}
+                  {!reply && !error && !stopped && !goalGate && !goalGateResolved ? (
                     summaryPending ? (
                       <div data-testid="summary-pending">
                         <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />
@@ -735,6 +761,16 @@ export function ChatBubble(props: ChatBubbleProps) {
                     ) : (
                       <div className="bc-stopped">No response was generated for this message.</div>
                     )
+                  ) : null}
+                  {goalGate || goalGateResolved ? (
+                    <GoalGateCard
+                      gate={goalGate ?? undefined}
+                      resolved={goalGateResolved}
+                      busy={goalGateBusy}
+                      error={goalGateError}
+                      onConfirmDefinition={(d) => onConfirmGoalDefinition?.(d)}
+                      onApprovePlan={(d) => onApproveGoalPlan?.(d)}
+                    />
                   ) : null}
                   {clarify?.length && (clarifyResolved || clarifyGateOpen) ? (
                     clarifyPopupNote && !clarifyResolved ? (

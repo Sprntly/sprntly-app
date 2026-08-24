@@ -38,7 +38,6 @@ import {
   type GoalRunDetail,
   apiErrorMessage,
 } from "../../lib/api"
-import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
@@ -105,9 +104,6 @@ function _detailOf(e: unknown): string {
 export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [definition, setDefinition] = useState("")
-  const [confirming, setConfirming] = useState(false)
-  const [approving, setApproving] = useState(false)
   // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
   // has not changed, so without this the effect never re-runs and the panel
   // stays on the last status it saw.
@@ -118,7 +114,6 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // The user's edit must survive a poll landing underneath it. Without this
   // the textarea is reset every three seconds and a long definition is
   // impossible to type.
-  const touched = useRef(false)
 
   // ── The report as a document ────────────────────────────────────────────
   //
@@ -144,9 +139,6 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       failures.current = 0
       setError(null)              // a recovered poll clears the warning
       setRun(detail)
-      if (!touched.current) {
-        setDefinition(detail.prioritisation?.proposed_definition ?? "")
-      }
       return detail.status
     } catch {
       failures.current += 1
@@ -181,66 +173,11 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     }
   }, [load, pollKey])
 
-  const confirm = async () => {
-    if (!definition.trim() || confirming) return
-    setConfirming(true)
-    try {
-      await goalAnalysisApi.confirm(runId, definition.trim())
-      touched.current = false
-      failures.current = 0
-      // Re-arm. The run has just left `awaiting_confirmation`, and nothing
-      // else would ever ask it again.
-      setPollKey((k) => k + 1)
-    } catch {
-      // The most important click in the feature. A silent no-op here reads as
-      // a dead button.
-      //
-      // AND RE-ARM THE POLL. The server claims the row before it does anything
-      // else, so a response lost after that claim means the run IS going —
-      // and `awaiting_confirmation` is terminal, so nothing was watching. The
-      // old copy told the user to confirm again, which would 409 forever
-      // against their own successful claim. Poll instead and let the run say
-      // what happened.
-      setError("We could not tell whether that started. Checking…")
-      setPollKey((k) => k + 1)
-    } finally {
-      setConfirming(false)
-    }
-  }
-
-  const approve = async (decision: PlanDecision) => {
-    if (approving) return
-    setApproving(true)
-    try {
-      await goalAnalysisApi.approve(runId, decision)
-      failures.current = 0
-      // Re-arm: `awaiting_approval` is terminal for the poller, so nothing
-      // else would ever look at this run again.
-      setPollKey((k) => k + 1)
-    } catch (e) {
-      // A REJECTED request is not a LOST one, and they need opposite handling.
-      // 422/413 mean the server refused the body before claiming anything: the
-      // run is still `awaiting_approval` and nothing is running. Polling would
-      // say "Checking…" forever while the user retypes the same over-long
-      // hypothesis, never learning why. Say what the server said instead.
-      const status = (e as { status?: unknown })?.status
-      if (status === 422 || status === 413) {
-        setError(
-          _detailOf(e) ||
-            "That was not accepted. Shorten what you wrote and try again.",
-        )
-        return
-      }
-      // Otherwise: the server CLAIMS the row before it starts work, so a
-      // response lost after that claim means the run is going and nothing is
-      // watching it. Telling the user to approve again would 409 forever
-      // against their own successful approval, so poll and let the run speak.
-      setError("We could not tell whether that started. Checking…")
-      setPollKey((k) => k + 1)
-    } finally {
-      setApproving(false)
-    }
-  }
+  // `confirm` and `approve` lived here and are gone with the gates they served:
+  // both are answered in the chat thread now (`GoalGateCard`), and the 422/413
+  // vs lost-response distinction they carried moved to `confirmGoalDefinition` /
+  // `approveGoalPlan` in ChatScreen with its reasoning intact. Leaving them
+  // here would have been ~80 lines nothing could reach.
 
   // Load the report document, if this run already has one. GATED ON
   // `artifact_id` rather than fired unconditionally: most runs never have a
@@ -341,67 +278,30 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     <p className="ga-error" role="status" data-testid="goal-error">{error}</p>
   ) : null
 
-  // ── The I9 gate. Not a loading state — a question. ───────────────────────
-  if (run.status === "awaiting_confirmation") {
-    const proposed = run.prioritisation?.proposed_definition
+  // ── The gates live in the CHAT THREAD now ────────────────────────────────
+  //
+  // Both are a conversation — what does this goal mean, and here is what I will
+  // read — so they are answered in the conversation, as `GoalGateCard` turns.
+  // The panel keeps the finished report, which is a document.
+  //
+  // RENDERING THEM HERE TOO IS NOT A HARMLESS DUPLICATE. The same gate would
+  // carry two live Confirm buttons on one screen; answering in the panel leaves
+  // the thread card open on a question that has already been answered, and its
+  // button then 409s against a run that has moved on.
+  if (run.status === "awaiting_confirmation" || run.status === "awaiting_approval") {
     return (
-      <div className="ga" data-testid="goal-confirm">
+      <div className="ga" data-testid="goal-gate-in-thread">
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-ask">
-          {run.prioritisation?.ask ||
-            "Before this runs, confirm what this goal means."}
+          {/* "the chat it was started in", not "the chat": two tabs can share a
+              conversation and only one holds the gate, so a reader looking at
+              the other one was told to answer something that is not there. */}
+          {run.status === "awaiting_confirmation"
+            ? "Confirm what this goal means in the chat it was started in, to "
+              + "begin the analysis."
+            : "Approve the plan in the chat it was started in, to start reading."}
         </p>
-        {proposed ? (
-          <p className="ga-provenance">
-            Proposed from {run.prioritisation?.proposed_source || "your KPI tree"}.
-            Edit it if that is not what you meant.
-          </p>
-        ) : null}
-        {/* §6: the calculation, stated in the SAME step and editable. Identity
-            without method is F4's "half of this that gets missed". */}
-        {run.prioritisation?.method_note ? (
-          <p className="ga-doc-note" data-testid="goal-method-note">
-            {run.prioritisation.method_note}
-          </p>
-        ) : null}
-        <textarea
-          className="ga-definition"
-          aria-label="What this goal means"
-          value={definition}
-          rows={4}
-          onChange={(e) => {
-            touched.current = true
-            setDefinition(e.target.value)
-          }}
-        />
-        <button
-          type="button"
-          className="ga-confirm"
-          disabled={!definition.trim() || confirming}
-          onClick={confirm}
-        >
-          {confirming ? "Starting…" : "Confirm and analyse"}
-        </button>
-      </div>
-    )
-  }
-
-  // ── The plan gate. Not a loading state either — a decision. ──────────────
-  //
-  // The plan is what the user approves, so a missing plan must NOT render as
-  // an approve button over nothing: that would be a click agreeing to
-  // something never shown. It falls through to the running view instead, where
-  // the poll keeps going and the row can correct itself.
-  if (run.status === "awaiting_approval" && run.prioritisation?.plan) {
-    return (
-      <div className="ga" data-testid="goal-approve">
-        {banner}
-        <GoalAnalysisPlan
-          plan={run.prioritisation.plan}
-          approving={approving}
-          onApprove={approve}
-        />
       </div>
     )
   }

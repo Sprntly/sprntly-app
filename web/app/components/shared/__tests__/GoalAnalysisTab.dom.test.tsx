@@ -76,59 +76,14 @@ describe("sizing", () => {
   })
 })
 
-describe("the confirmation gate", () => {
-  it("shows the question, not a spinner", async () => {
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "Which revenue does this mean?", proposed_definition: "" },
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const panel = await screen.findByTestId("goal-confirm")
-    expect(panel.textContent).toContain("Which revenue does this mean?")
-    expect(screen.queryByTestId("goal-running")).toBeNull()
-  })
-
-  it("prefills the proposal so adopting it is one click", async () => {
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: {
-        ask: "Confirm what this means.",
-        proposed_definition: "expansion minus churn across renewing accounts",
-        proposed_source: "your KPI tree",
-      },
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const box = await screen.findByLabelText("What this goal means")
-    expect((box as HTMLTextAreaElement).value)
-      .toBe("expansion minus churn across renewing accounts")
-  })
-
-  it("sends the user's edit, not the proposal", async () => {
-    // An edited definition is theirs, and the backend records it as elicited
-    // rather than adopted. Sending the proposal instead would mislabel it.
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "gross revenue" },
-    })
-    confirm.mockResolvedValue({ ...RUN, status: "running" })
-    render(<GoalAnalysisTab runId={7} />)
-    const box = await screen.findByLabelText("What this goal means")
-    fireEvent.change(box, { target: { value: "net revenue, excluding one-offs" } })
-    fireEvent.click(screen.getByText("Confirm and analyse"))
-    await waitFor(() =>
-      expect(confirm).toHaveBeenCalledWith(7, "net revenue, excluding one-offs"))
-  })
-
-  it("cannot confirm an empty definition", async () => {
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "" },
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
-    expect((screen.getByText("Confirm and analyse") as HTMLButtonElement).disabled).toBe(true)
-  })
-})
+// THE CONFIRMATION GATE MOVED TO THE CHAT THREAD.
+//
+// It is a question, and questions belong in the conversation — a PM has to be
+// able to scroll back and see what was asked and what they answered. The four
+// guarantees that lived here (the question renders rather than a spinner, the
+// proposal prefills, the user's EDIT is what gets sent, an empty definition
+// cannot be confirmed) now live in `GoalGateCard.dom.test.tsx` against the card
+// that renders them.
 
 describe("nothing is quietly dropped", () => {
   it("renders coverage notes above the findings they qualify", async () => {
@@ -217,36 +172,13 @@ describe("polling", () => {
     expect(get.mock.calls.length).toBeGreaterThan(calls)
   })
 
-  it("stops polling while waiting on the human", async () => {
-    get.mockResolvedValue({ ...RUN, status: "awaiting_confirmation", prioritisation: { ask: "?" } })
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
-    const calls = get.mock.calls.length
-    await vi.advanceTimersByTimeAsync(12_000)
-    expect(get.mock.calls.length).toBe(calls)
-  })
+  // MOVED: `awaiting_confirmation` and `awaiting_approval` are gates answered in
+  // the chat thread, so the panel no longer renders — or polls through — either
+  // of them. What the panel still owns is `running -> ready`, covered by the two
+  // tests above.
 
-  it("RESTARTS polling after the user confirms", async () => {
-    // THE ONE THAT MATTERS. `awaiting_confirmation` is terminal, so the loop
-    // had already stopped; `load` is keyed on runId, which never changes, so
-    // nothing re-armed it. Every user confirmed and then watched
-    // "Reading 0 claims…" forever while the run finished on the server.
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "net revenue" },
-    })
-    confirm.mockResolvedValue({ ...RUN, status: "running" })
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
-
-    get.mockResolvedValue({ ...RUN, status: "running" })
-    fireEvent.click(screen.getByText("Confirm and analyse"))
-    await waitFor(() => expect(confirm).toHaveBeenCalled())
-
-    const calls = get.mock.calls.length
-    await vi.advanceTimersByTimeAsync(9_500)
-    expect(get.mock.calls.length).toBeGreaterThan(calls)
-  })
+  // MOVED with the gate: confirming happens in the thread now, and re-arming
+  // after it is `confirmGoalDefinition`'s job in ChatScreen.
 })
 
 describe("transient failure", () => {
@@ -294,18 +226,8 @@ describe("the error is visible without destroying the panel", () => {
     expect(screen.getByTestId("goal-running")).toBeTruthy()
   })
 
-  it("a failed confirm is not a silent no-op", async () => {
-    // The most important click in the feature.
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "net revenue" },
-    })
-    confirm.mockRejectedValue(new Error("500"))
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
-    fireEvent.click(screen.getByText("Confirm and analyse"))
-    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
-  })
+  // MOVED: a refused confirm now surfaces on the TURN that asked, via
+  // `failGoalTurn`. Covered in `ChatScreen.goal-restore.dom.test.tsx`.
 
   it("a recovered poll clears the warning it showed", async () => {
     // Was vacuous: the banner only appeared on the THIRD consecutive failure,
@@ -326,48 +248,9 @@ describe("the error is visible without destroying the panel", () => {
     expect(screen.queryByTestId("goal-error")).toBeNull()
   })
 
-  it("the confirm button comes back so a retry is possible at all", async () => {
-    // `setConfirming(false)` in the `finally`. Without it the button stays
-    // disabled and reads "Starting…" forever after any failure — an error
-    // message beside a dead button is no better than the silent no-op it
-    // replaced.
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "net revenue" },
-    })
-    confirm.mockRejectedValueOnce(new Error("504"))
-           .mockResolvedValue({ ...RUN, status: "running" })
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
+  // MOVED with the confirm button itself — see `GoalGateCard.dom.test.tsx`.
 
-    fireEvent.click(screen.getByText("Confirm and analyse"))
-    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
-
-    const button = await screen.findByText("Confirm and analyse")
-    expect((button as HTMLButtonElement).disabled).toBe(false)
-    fireEvent.click(button)
-    await waitFor(() => expect(confirm).toHaveBeenCalledTimes(2))
-  })
-
-  it("a failed confirm re-arms the poll instead of stranding the run", async () => {
-    // The server claims the row BEFORE doing anything, so a response lost
-    // after the claim means the run is going and nothing is watching —
-    // `awaiting_confirmation` is terminal. Telling the user to confirm again
-    // would 409 forever against their own successful claim.
-    get.mockResolvedValue({
-      ...RUN, status: "awaiting_confirmation",
-      prioritisation: { ask: "?", proposed_definition: "net revenue" },
-    })
-    confirm.mockRejectedValue(new Error("504"))
-    render(<GoalAnalysisTab runId={7} />)
-    await screen.findByTestId("goal-confirm")
-
-    get.mockResolvedValue({ ...RUN, status: "running" })
-    fireEvent.click(screen.getByText("Confirm and analyse"))
-    await waitFor(() => expect(screen.getByTestId("goal-error")).toBeTruthy())
-    // Polling resumed, so the run's real state reaches the panel on its own.
-    await waitFor(() => expect(screen.getByTestId("goal-running")).toBeTruthy())
-  })
+  // MOVED with the gate; the panel has no confirm to fail.
 })
 
 describe("the running view narrates instead of spinning", () => {

@@ -24982,6 +24982,42 @@
 }
 .ga-confirm:disabled { opacity: 0.45; cursor: default; }
 .ga-loading, .ga-empty { opacity: 0.7; margin: 0; }
+
+/* Goal Analysis gates rendered IN THE CHAT THREAD (GoalGateCard). Sits inside
+   an existing .bc-agent-body, so it styles only its own internals and inherits
+   the agent chrome — the same arrangement .cqc-* uses for the clarify card.
+   Without these the card rendered as a bare textarea and a default button. */
+.ggc { display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+/* `pre-line` for the same reason .ga-ask needs it: the ask is composed with
+   real newlines, and collapsed it becomes one unreadable run-on. */
+.ggc-ask { margin: 0; line-height: 1.55; white-space: pre-line; }
+.ggc-provenance { margin: 0; opacity: 0.65; font-size: 12px; }
+.ggc-note { margin: 0; font-size: 12.5px; opacity: 0.72; line-height: 1.5; }
+.ggc-definition {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border, #e5e5e5);
+  border-radius: 8px; font: inherit; resize: vertical; background: transparent;
+  color: inherit;
+}
+.ggc-confirm {
+  align-self: flex-start; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid transparent; background: var(--accent, #111); color: #fff;
+  cursor: pointer; font: inherit;
+}
+.ggc-confirm:disabled { opacity: 0.45; cursor: default; }
+/* The settled record: what was agreed, kept in the thread rather than
+   collapsed to a bare "done". Muted, because it is history now. */
+.ggc-settled {
+  gap: 4px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border, #e5e5e5);
+}
+.ggc-settled-label {
+  margin: 0; font-size: 11.5px; letter-spacing: 0.02em;
+  text-transform: uppercase; opacity: 0.6;
+}
+.ggc-settled-body { margin: 0; line-height: 1.5; }
+/* Beside the live controls, never instead of them — a refused gate is usually
+   retryable, and the run is still waiting server-side. */
+.ggc-error { margin: 0; color: var(--danger, #b42318); line-height: 1.5; }
 .ga-error { color: var(--danger, #b42318); margin: 0; }
 
 /* Coverage sits ABOVE the findings: a note that a third of the evidence was

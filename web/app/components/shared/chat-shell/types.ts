@@ -393,6 +393,14 @@ export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onCla
  * Typed structurally against the host so this module never imports the
  * main-chat screen.
  */
+/** Structural mirror of `GoalAnalysisPlan`'s `PlanDecision`. Named here rather
+ *  than imported for the reason stated at the top of this file: this module
+ *  describes its host's fields structurally and does not depend on them. */
+export type GoalPlanDecision = {
+  excluded_sources: string[]
+  hypotheses: string[]
+}
+
 export interface MapMainTurnsDeps {
   // in-flight / last-turn state
   animatedTurnIds: MutableRefObject<Set<string>>
@@ -474,6 +482,24 @@ export interface MapMainTurnsDeps {
   onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
   onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
+  /** Goal Analysis gates, answered in the thread.
+   *
+   *  REQUIRED, and deliberately so — a surface without the feature passes
+   *  `undefined` EXPLICITLY. As optional fields they could be left off the deps
+   *  object with a clean `tsc`, and that is exactly how this feature shipped
+   *  inert: `mapDeps` never passed the handlers, every button short-circuited
+   *  through `confirmGoalDefinition?.(…)`, and nothing anywhere complained.
+   *  Naming them costs a surface one line and makes dropping them a build
+   *  error. */
+  goalGateBusyTurnId: string | null | undefined
+  confirmGoalDefinition:
+    | ((tabId: string, turnId: string, runId: number,
+        definition: string) => void | Promise<void>)
+    | undefined
+  approveGoalPlan:
+    | ((tabId: string, turnId: string, runId: number,
+        decision: GoalPlanDecision) => void | Promise<void>)
+    | undefined
   setViewerAttachment: (a: {
     name: string
     content: string
