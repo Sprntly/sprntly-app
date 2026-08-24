@@ -56,6 +56,9 @@ export function useChatIntentExecutors(
     // OPTIONAL: undefined when omitted → dispatch falls through to onAnswer.
     onShareToSlack: adapter.onShareToSlack,
     onCreateProject: adapter.onCreateProject,
+    // Also optional: a surface with no side panel has no open report or
+    // document to edit, and falls through to its grounded ask.
+    onEditArtifact: adapter.onEditArtifact,
     onAnswer,
   }
 }

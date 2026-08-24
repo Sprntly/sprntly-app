@@ -250,6 +250,15 @@ _ACTIONS: frozenset[str] = frozenset({
     # message, while a false create silently fills a shared team library with
     # documents nobody asked for.
     "create_artifact",
+    # Change the REPORT or DOCUMENT already open beside this chat: "convert the
+    # RICE section into a table", "cut the appendix", "rewrite the summary for
+    # an exec", "add a risks section to that report". Its own action rather
+    # than a shading of `edit_prd`, because the target is a different artifact
+    # behind a different endpoint — a PRD editor pointed at a voice-of-customer
+    # report edits a document by rules written about another one. Its argument
+    # is `instruction`; the TARGET comes from the SURFACE (the artifact the
+    # user has open), never from the model.
+    "edit_artifact",
     # Switch an EXISTING PRD into a different uploaded format and re-write it
     # in place (POST /v1/prd/{id}/change-template). Its own action rather than
     # a shading of `edit_prd`, because the reported failure was exactly that
@@ -343,6 +352,10 @@ _NEEDS_TASK: frozenset[str] = frozenset({
 })
 _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     "edit_prd", "update_ticket",
+    # An edit with nothing to apply is worse than no action — the same rule the
+    # other three encode, and `answer` is the recoverable landing: it can ask
+    # what to change.
+    "edit_artifact",
     # An assignment with no instruction has nobody to assign and nothing to
     # assign them to — same "an action whose ARGUMENT is missing is worse than
     # no action" rule as the other two.
@@ -726,6 +739,17 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
+- edit_artifact — the user wants the REPORT or the DOCUMENT open beside this
+  chat CHANGED: "convert the RICE section into a table", "cut the appendix",
+  "rewrite the summary for an exec", "add a risks section to that report",
+  "make the report shorter". Set `instruction` to the change, self-contained.
+  THE "Open beside this chat" LINE ABOVE IS THE PRECONDITION. Choose this only
+  when that line names a report or a document; with nothing open there is
+  nothing to edit and the request is `answer`. A PRD open instead is edit_prd —
+  the two are different documents behind different editors.
+  A QUESTION ABOUT the open document is `answer`, not this: "what does the
+  report say about pricing?" and "is the RICE section right?" want prose in the
+  chat. Only an instruction to CHANGE it is this action.
 - change_prd_template — the user wants an EXISTING PRD switched into a
   different uploaded format and re-written in that structure: "change the
   template to Acme", "switch this PRD to our lightweight format", "re-write
@@ -1482,27 +1506,58 @@ def _sources_block(connected: list[str]) -> str:
     return block
 
 
-def _open_prd_block(prd_id: Optional[int], prd_title: Optional[str]) -> str:
-    """"Active tab: PRD #123 — "Title" is open beside this chat."
+def _open_artifact_block(
+    prd_id: Optional[int],
+    prd_title: Optional[str],
+    open_artifact: Optional[dict] = None,
+) -> str:
+    """What the tab that sent this message has OPEN beside the chat.
+
+        Active tab: PRD #123 — "Checkout v2" is open beside this chat.
+        Active tab: report #45 — "Voice of customer · June" is open beside this chat.
 
     The planner used to be told NOTHING about the thread's open artifact, while
-    the pre-planner intent resolver rendered exactly this line
-    (`chat_intent._render_context`). It cost real routing accuracy: "build a
-    report from this prd" planned as `answer` with the reason "no PRD is open or
-    identified in the thread — need to ask which PRD they mean", on a thread that
-    HAD one open — so a document the user asked for was written into the chat as
-    prose and filed nowhere. The endpoint held the id the whole time and only
-    used it AFTER the fact, to gate `_NEEDS_PRD` verdicts.
+    the pre-planner intent resolver rendered exactly the PRD line
+    (`chat_intent._render_context`). It cost real routing accuracy twice over:
 
-    Empty when no PRD is open: the absence is already the default the prompt
-    reasons from ("no PRD exists in this thread yet → generate_prd"), and a
-    "No PRD is open" line on every planless message is tokens spent to say
-    nothing.
+      * "build a report from this prd" planned as `answer` with the reason "no
+        PRD is open or identified in the thread — need to ask which PRD they
+        mean", on a thread that HAD one open. The endpoint held the id the whole
+        time and only used it AFTER the fact, to gate `_NEEDS_PRD` verdicts.
+      * "I am referring to the report" / "convert that section into a table"
+        had no referent at all, so an edit request was answered by printing the
+        rewritten section into the chat and telling the user to paste it in
+        themselves. `edit_artifact` reads this line as its precondition.
+
+    Empty when nothing is open: the absence is already the default the prompt
+    reasons from ("no PRD exists in this thread yet → generate_prd"), and a "No
+    PRD is open" line on every message is tokens spent to say nothing.
+
+    A PRD and another artifact can both be open (a thread with a PRD that also
+    produced a report), and both lines are rendered — the prompt's own rules
+    decide which one an instruction is about, which is a judgement it can only
+    make if it can see both.
     """
-    if not prd_id:
-        return ""
-    title = f' — "{prd_title}"' if prd_title else ""
-    return f"Active tab: PRD #{prd_id}{title} is open beside this chat.\n\n"
+    lines = []
+    if prd_id:
+        title = f' — "{prd_title}"' if prd_title else ""
+        lines.append(f"Active tab: PRD #{prd_id}{title} is open beside this chat.")
+    if open_artifact:
+        kind = str(open_artifact.get("kind") or "").strip().lower()
+        oid = open_artifact.get("id")
+        # Only the two kinds the editor can actually act on. An unknown kind is
+        # dropped rather than rendered: a line naming something no action can
+        # target invites the model to choose one that will then be refused.
+        if kind in {"report", "document"} and oid is not None:
+            raw = str(open_artifact.get("title") or "").strip()
+            # One line, bounded: the title is customer text landing in a prompt,
+            # and a newline inside it could forge a section header here.
+            clean = " ".join(raw.split())[:120]
+            name = f' — "{clean}"' if clean else ""
+            lines.append(
+                f"Active tab: {kind} #{oid}{name} is open beside this chat."
+            )
+    return "\n".join(lines) + "\n\n" if lines else ""
 
 
 def _build_input(
@@ -2083,6 +2138,7 @@ def plan(
     history: Optional[list[dict]] = None,
     prd_id: Optional[int] = None,
     prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
 ) -> Plan:
     """Run the planner over one question and return the GATED plan.
 
@@ -2135,7 +2191,7 @@ def plan(
         template_block=_template_block(templates),
         keyword_prior=keyword_prior,
         history=history,
-        open_prd_block=_open_prd_block(prd_id, prd_title),
+        open_prd_block=_open_artifact_block(prd_id, prd_title, open_artifact),
     )
     # BEFORE the call, deliberately: a prompt that made the model fail — a 400,
     # a refusal, junk output — is exactly the prompt you most need to have seen.
@@ -2230,22 +2286,34 @@ _plan_memo = TTLMap(_PLAN_MEMO_TTL_S)
 
 
 def _plan_memo_key(
-    enterprise_id: str, question: str, prd_id: Optional[int] = None
+    enterprise_id: str,
+    question: str,
+    prd_id: Optional[int] = None,
+    open_artifact: Optional[dict] = None,
 ) -> str:
     """A stable key for one turn's plan. See `_plan_memo` for why history is
     deliberately absent.
 
-    `prd_id` IS part of it, unlike history: the open PRD is now an input to the
-    plan (`_open_prd_block`), so the same sentence asked on a thread with PRD 12
-    open and on one with PRD 40 open are two different questions — sharing a
-    verdict between them inside the TTL would route one of them by the other's
-    context.
+    WHAT IS OPEN is part of it, unlike history: the open PRD and the open
+    report/document are inputs to the plan now (`_open_artifact_block`), so the
+    same sentence asked on a thread with PRD 12 open and on one with PRD 40 open
+    are two different questions — sharing a verdict between them inside the TTL
+    would route one of them by the other's context, and "convert that into a
+    table" would edit the wrong document.
 
     Hashed rather than concatenated: the question can be tens of kilobytes (an
     inlined attachment block), and a dict key that large is pure memory overhead
     for a value that only has to be compared for equality."""
     payload = json.dumps(
-        [enterprise_id, question, prd_id], sort_keys=True, default=str
+        [
+            enterprise_id,
+            question,
+            prd_id,
+            (open_artifact or {}).get("kind"),
+            (open_artifact or {}).get("id"),
+        ],
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -2686,6 +2754,7 @@ def plan_for_answer(
     history: Optional[list[dict]] = None,
     prd_id: Optional[int] = None,
     prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
 ) -> Optional[Plan]:
     """The plan to execute for this turn, or None to answer the old way.
 
@@ -2713,7 +2782,7 @@ def plan_for_answer(
     # action, and the ask worker, which needs the plan to execute the answer —
     # and neither can be dropped. So the second one reads what the first
     # computed instead of paying for sonnet again.
-    key = _plan_memo_key(enterprise_id, question, prd_id)
+    key = _plan_memo_key(enterprise_id, question, prd_id, open_artifact)
     memoised = _plan_memo.get(key)
     if memoised is not None:
         logger.info(
@@ -2729,6 +2798,7 @@ def plan_for_answer(
             history=history,
             prd_id=prd_id,
             prd_title=prd_title,
+            open_artifact=open_artifact,
         )
     except Exception:  # noqa: BLE001 — a planner outage must not break chat
         logger.exception("[planner] plan failed for %s — answering unplanned", enterprise_id)

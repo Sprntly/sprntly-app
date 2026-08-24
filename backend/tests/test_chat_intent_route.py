@@ -61,10 +61,11 @@ def _capture_resolver(monkeypatch, envelope=None):
     seen: dict = {}
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False):
+                 prd_title=None, has_attachments=False, open_artifact=None):
         seen.update(
             enterprise_id=enterprise_id, message=message, history=history,
             prd_id=prd_id, prd_title=prd_title, has_attachments=has_attachments,
+            open_artifact=open_artifact,
         )
         return dict(envelope or {
             "intent": "answer", "confidence": 0.9, "task": None,
