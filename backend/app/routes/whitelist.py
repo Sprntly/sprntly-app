@@ -23,10 +23,11 @@ Three properties this surface deliberately has:
     mail an arbitrary stranger. If a confirmation email is ever wanted it needs
     its own thought about that, not a line added here.
 
-CORS: the marketing site is a DIFFERENT origin from the app, so its origin must
-be in ALLOWED_ORIGINS for the browser to accept the response — that is an
-operator step (see backend/docs/CONNECTORS.md for where env lives), not
-something this module can do. There is no CSRF/Origin dependency here on
+CORS: the marketing site is a DIFFERENT origin from the app, so its origin has
+to be allowed for the browser to accept the response. It no longer depends on an
+operator remembering to put it in `ALLOWED_ORIGINS` — `config.ALWAYS_ALLOWED_ORIGINS`
+bakes our own domains in, in every environment, because a deploy that forgot them
+wrote the row and still showed the visitor a failure. There is no CSRF/Origin dependency here on
 purpose: this route carries no session, so there is no cookie for a cross-site
 POST to abuse (app/design_agent/csrf.py explains the same exemption for the
 public share routes).
