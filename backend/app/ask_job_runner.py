@@ -617,6 +617,68 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
+        # A report GENERATED within a project chat auto-attaches to that
+        # project's own artifact list — the same standing rule the other
+        # five artifact types already follow (prd/evidence/ticket_set/
+        # prototype/custom_artifact: "any artifact made in a project lands
+        # in the project"). `capture_report` above is a NO-OP here: it only
+        # captures a self-contained HTML-DOCUMENT answer, and report
+        # pipelines answer in markdown now — `report_capture.py`'s own
+        # docstring records that the HTML sniff "self-disables" for VoC/
+        # CIR/public-feedback since the pinned HTML templates were removed
+        # — so trusting ITS return id would silently never attach for a real
+        # report. Mint the row ourselves instead, reusing the SAME pair the
+        # manual "Save to project" button already calls (`routes/projects.
+        # py:save_chat_artifact` → `save_chat_output_as_report` then
+        # `add_artifact`) rather than reinventing report persistence.
+        #
+        # `_skill` is the report-decision signal already riding on the
+        # payload: every report-pipeline module tags its OWN `_skill` before
+        # returning (`call_digest.answer` → "voice-of-customer-report" for
+        # both the VoC ask and the bare call-digest entry point, `market_
+        # intel.answer` → "market-intelligence-report", and so on) — reading
+        # it here against `qa_agent._REPORT_PIPELINE_IDS` reuses the EXACT
+        # set the sixth-branch report-deferral gate already reads, never a
+        # second "is this a report" definition to keep in sync.
+        #
+        # Gated STRICTLY on `context_source["kind"] == "project"` — never a
+        # top-level `project_id` fallback, which project chat never sends
+        # (the same source `maybe_promote_turn` below reads its project id
+        # from). `add_artifact` upserts on the `(project_id, artifact_type,
+        # artifact_id)` PK, so a rare double-run of this best-effort block
+        # is a no-op, never a duplicate ref. Best-effort by construction:
+        # a failure here can only fail to ADD an artifact ref — it can never
+        # delay or break the answer, already durably stored above.
+        if (
+            context_source
+            and context_source.get("kind") == "project"
+            and payload.get("_skill") in qa_agent._REPORT_PIPELINE_IDS
+        ):
+            _report_project_id = (context_source.get("params") or {}).get("project_id")
+            if _report_project_id is not None:
+                try:
+                    answer_text = payload.get("answer") or ""
+                    if answer_text.strip():
+                        from app.db import projects as projects_db
+                        from app.project_artifact_capture import (
+                            save_chat_output_as_report,
+                        )
+
+                        _report_id = save_chat_output_as_report(
+                            content=answer_text,
+                            company_id=enterprise_id,
+                            workspace_id=workspace_id,
+                            conversation_id=conversation_id,
+                        )
+                        if _report_id is not None:
+                            projects_db.add_artifact(
+                                int(_report_project_id), "report", _report_id
+                            )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "project report auto-attach failed ask_id=%s project_id=%s",
+                        ask_id, _report_project_id, exc_info=True,
+                    )
         # Private project chat: promote a durable insight into project
         # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
         # (the assembler resolved a project `SurfaceScope` for this turn, which
