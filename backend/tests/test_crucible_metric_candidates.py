@@ -313,3 +313,27 @@ def test_the_unique_key_is_what_makes_rows_and_periods_agree(db):
         assert len(periods) == len(set(periods)), (
             f"{metric}/{source} has a repeated period — rows and periods can "
             f"now diverge, so MIN_PERIODS must stay counted in periods")
+
+
+def test_the_source_suffix_only_appears_when_a_sibling_survives(db):
+    """The label decision is made over the SURVIVING candidates, not the
+    registry. Counted at registry level, a metric whose second provider was
+    filtered out by MIN_PERIODS still got a "· clickup" suffix with nothing to
+    distinguish it from — an annotation pretending to be a disambiguation."""
+    # clickup has a real series; jira has ONE point and gets filtered.
+    for p in ("2026-08-03", "2026-08-10", "2026-08-17"):
+        _point(db, "tasks_open", p, 40, source="clickup")
+    _point(db, "tasks_open", "2026-08-17", 15, source="jira")
+
+    cands, _ = candidates_for_goal(CID, "tasks")
+    assert len(cands) == 1, "jira had one period and should be filtered"
+    assert cands[0].label == "Tasks open", (
+        f"no sibling survived, so no suffix: got {cands[0].label!r}")
+
+    # And with BOTH surviving, the suffix comes back.
+    for p in ("2026-08-03", "2026-08-10"):
+        _point(db, "tasks_open", p, 15, source="jira")
+    both, _ = candidates_for_goal(CID, "tasks")
+    assert len(both) == 2
+    assert all(" · " in c.label for c in both), (
+        f"two survivors need disambiguating: {[c.label for c in both]}")

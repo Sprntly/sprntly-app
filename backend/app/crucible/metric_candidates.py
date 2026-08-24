@@ -51,7 +51,7 @@ then owns.
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -207,14 +207,6 @@ def candidates_for_goal(
         if key:
             grouped.setdefault((str(key), str(row.get("source") or "")), []).append(row)
 
-    # Which metric NAMES have more than one provider writing them. Only those
-    # need the source in the label: appending it unconditionally clutters the
-    # ordinary single-source case, and the point is to disambiguate, not to
-    # annotate.
-    sources_per_metric: dict[str, set[str]] = {}
-    for metric_name, src in grouped:
-        sources_per_metric.setdefault(metric_name, set()).add(src)
-
     goal_tokens = set(_tokens(goal_text))
     built: list[tuple[int, int, MetricCandidate]] = []
     for (key, source), group in grouped.items():
@@ -240,12 +232,8 @@ def candidates_for_goal(
         overlap = len(goal_tokens & set(_tokens(key.replace("_", " "))))
         built.append((overlap, len(periods), MetricCandidate(
             key=key,
-            # THE SOURCE IS IN THE LABEL only when two providers measure the
-            # same thing — otherwise the list shows one name twice, with
-            # different numbers and no way to tell them apart.
-            label=(f"{_humanise(key)} · {source_label}"
-                   if source_label and len(sources_per_metric.get(key, ())) > 1
-                   else _humanise(key)),
+            # Labelled below, once the surviving set is known.
+            label=_humanise(key),
             source=source,
             source_label=source_label,
             points=len(periods),
@@ -258,8 +246,24 @@ def candidates_for_goal(
 
     # Best name match first, then the longest series BY DISTINCT PERIODS — a
     # metric measured for a year is a better thing to steer by than one read
-    # twice in the same week by two trackers.
+    # twice in the same week by two trackers. Key is TOTAL (`key` and `source`
+    # are unique together), so the order cannot flip between requests.
     built.sort(key=lambda t: (-t[0], -t[1], t[2].key, t[2].source))
+
+    # THE SOURCE GOES IN THE LABEL ONLY WHERE THERE IS A SIBLING TO
+    # DISAMBIGUATE FROM, and that has to be decided over the SURVIVING
+    # candidates rather than over the registry. Counted at registry level, a
+    # metric whose second provider was filtered out by MIN_PERIODS still got a
+    # "· clickup" suffix with nothing to distinguish it from — an annotation
+    # pretending to be a disambiguation.
+    survivors: dict[str, int] = {}
+    for _o, _p, cand in built:
+        survivors[cand.key] = survivors.get(cand.key, 0) + 1
+    labelled = [
+        (replace(cand, label=f"{cand.label} · {cand.source_label}")
+         if survivors.get(cand.key, 0) > 1 and cand.source_label else cand)
+        for _o, _p, cand in built
+    ]
     stats = {
         "registry_readable": True,
         "points": len(rows),
@@ -267,7 +271,7 @@ def candidates_for_goal(
         "distinct_series": len(grouped),
         "offered": min(len(built), MAX_CANDIDATES),
     }
-    return [c for _, _, c in built[:MAX_CANDIDATES]], stats
+    return labelled[:MAX_CANDIDATES], stats
 
 
 def searched_summary(company_id: str, *, registry_stats: dict) -> list[dict]:
