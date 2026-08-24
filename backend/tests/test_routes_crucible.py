@@ -1564,3 +1564,66 @@ def test_the_ask_and_the_method_note_do_not_repeat_each_other(ctx):
 
     shared = grams(ask) & grams(note)
     assert not shared, f"ask and method note share phrasing: {sorted(shared)[:3]}"
+
+
+# ─── §6: the convention, stated per metric and correctable ───────────────────
+
+def test_the_method_note_states_the_convention_for_the_metric_named(ctx):
+    """§6: "If no computation is found, state the common convention you are
+    assuming for that metric, in one sentence, and let them change it."
+
+    An earlier version answered a different question — what the ANALYSIS reads
+    — while citing §6 and F4 ("two teams both say revenue and mean recognised
+    versus booked") as its justification. True sentence, wrong question, §6's
+    citation on it."""
+    run_id = _start(ctx, goal="reduce customer churn").json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    # It names the fork it is choosing, because the fork is what resizes every
+    # recommendation.
+    assert "logo churn" in note.lower()
+    assert "revenue churn" in note.lower()
+    # And it is offered for correction, not asserted.
+    assert "say otherwise" in note.lower()
+
+
+def test_the_convention_follows_the_goal_not_the_company(ctx):
+    """Keyed on the GOAL's words. A per-company convention would be the
+    cross-customer contamination README F11 bars."""
+    churn = ctx.client.get(
+        f"/v1/crucible/{_start(ctx, goal='reduce churn').json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+    revenue = ctx.client.get(
+        f"/v1/crucible/{_start(ctx, goal='grow revenue').json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    assert "logo churn" in churn.lower()
+    assert "recognised" in revenue.lower() and "booked" in revenue.lower()
+    assert churn != revenue, "the convention must follow the metric named"
+
+
+def test_an_unrecognised_goal_gets_no_invented_convention(ctx):
+    """§10 forbids inferring a definition. Where the goal names no metric family
+    there is no convention to state, and making one up would be exactly that."""
+    run_id = _start(ctx, goal="make the widget frobnicate better").json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert "I will read" not in note, f"invented a convention: {note}"
+    # It still says what the run does, which is what it always was.
+    assert "reads your documents" in note
+
+
+def test_the_convention_never_reaches_a_definition_on_its_own(ctx):
+    """It is an assumption offered for correction. Nothing here may end up in
+    `crucible_goal_definitions` unless the user leaves it in their own text."""
+    run_id = _start(ctx, goal="reduce customer churn").json()["id"]
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "accounts that cancel in a quarter"})
+
+    from app.db.client import require_client
+
+    rows = (require_client().table("crucible_goal_definitions")
+            .select("definition_text").execute()).data or []
+    for r in rows:
+        assert "I will read" not in (r.get("definition_text") or ""), (
+            "the convention leaked into a stored definition")

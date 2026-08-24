@@ -348,45 +348,81 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
-def _method_note(company_id: str) -> str:
+#: §6's convention statement, per metric family. "If no computation is found,
+#: state the common convention you are assuming for that metric, in one
+#: sentence, and let them change it."
+#:
+#: THIS IS AN ASSUMPTION OFFERED FOR CORRECTION, NOT AN INFERENCE. §10 forbids
+#: inferring a definition and I9 forbids locking one without a human; §6
+#: explicitly asks for the opposite move — say out loud what you would otherwise
+#: assume silently, so the user can overwrite it in the box directly beneath.
+#: The difference is whether the sentence is stated and editable, and it is
+#: both: nothing here reaches `crucible_goal_definitions` unless the user leaves
+#: it in their own confirmed text.
+#:
+#: Keyed on words that appear in the GOAL, not on anything about the company —
+#: a per-company convention would be exactly the cross-customer contamination
+#: README F11 bars. These are the ordinary industry readings, and each names the
+#: fork it is choosing, because the fork is the part that resizes every
+#: recommendation (F4: "two teams both say revenue and mean recognised versus
+#: booked").
+_METRIC_CONVENTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("churn", "attrition"),
+     "I will read churn as LOGO churn — accounts that cancel or fail to renew — "
+     "rather than revenue churn, and as voluntary and involuntary together."),
+    (("retention", "renewal", "nrr", "grr"),
+     "I will read retention on ACCOUNTS rather than on revenue, and count an "
+     "account retained if it renews at all, regardless of contraction."),
+    (("revenue", "arr", "mrr", "bookings"),
+     "I will read revenue as RECOGNISED rather than booked, net of refunds and "
+     "credits, excluding internal and comped accounts."),
+    (("activation", "onboarding", "adoption"),
+     "I will read activation as an account reaching first meaningful use, not "
+     "merely signing up, and count it once per account."),
+    (("engagement", "active", "usage", "dau", "mau"),
+     "I will read active as having taken an action in the window, not merely "
+     "having logged in."),
+    (("conversion", "signup", "trial"),
+     "I will read conversion as the share of starts that reach the paid step "
+     "within the window, counted on accounts rather than on sessions."),
+)
+
+
+def _method_note(goal_text: str) -> str:
     """§6's one sentence: the calculation, stated and editable.
 
     A metric NAME is not a definition — "revenue" can be recognised or booked,
     "active" can mean logged in or took an action, and none of that is visible
-    in the name while all of it resizes every recommendation. §6's rule is to
-    surface the company's own computation, not to reconstruct it or interrogate
-    the user about it, and to state a convention where none is found.
+    in the name while all of it resizes every recommendation (F4).
 
-    Nothing in this codebase reads a dbt model or a metric layer yet, AND
-    nothing in the pipeline reads the metric registry either — so there is no
-    computation to surface and only one honest sentence to write: state what
-    the definition will be taken to mean, state that nothing is filled in on
-    the user's behalf, and state what the run actually reads.
+    §6's rule is to surface the company's own computation where one exists and
+    otherwise to STATE THE CONVENTION being assumed. Nothing in this codebase
+    reads a dbt model or a metric layer yet, so the second branch is the honest
+    one — and an earlier version of this function skipped it entirely, saying
+    only what the ANALYSIS reads (documents, not a metric series) while citing
+    §6 and F4 as its justification. That is a true sentence answering a
+    different, easier question than the one §6 poses, with §6's citation on it.
 
-    `company_id` is unused and kept so the signature does not have to change
-    when a metric layer does become readable.
+    Where the goal names no recognisable metric family there is no convention to
+    state, and inventing one would be the inference §10 forbids. That case gets
+    the process sentence alone, which is what it always was.
     """
-    # ONE SENTENCE, AND IT HAS TO BE TRUE OF THE RUN. The first version said
-    # "I will use your own recorded numbers for whichever metric you name,
-    # exactly as they are stored — I do not recompute them". That is false:
-    # `execute_run` reads `kg_signal` and nothing in the pipeline reads
-    # `metric_points` at all, so no number from the registry enters the sizing.
-    # A method note that promises the engine's behaviour wrongly is the exact
-    # overpromise `plan.py` has already been burned by twice, arriving one gate
-    # earlier — and here it would be a false statement about METHOD, which is
-    # the thing §6 exists to pin down.
-    # DOES NOT REPEAT THE ASK'S OWN CLAUSE. The ask directly above this asks
-    # for "what is counted, over what population, over what window"; ending
-    # this sentence the same way put the identical phrase in two consecutive
-    # paragraphs — the exact redundancy the ask rewrite exists to remove,
-    # reintroduced one element lower on the same screen.
-    return (
+    lowered = f" {(goal_text or '').lower()} "
+    convention = next(
+        (text for words, text in _METRIC_CONVENTIONS
+         if any(w in lowered for w in words)),
+        "",
+    )
+    process = (
         "I will work to that sentence exactly as you write it: I do not "
         "recompute it, and I do not fill in anything you leave out. The "
         "analysis then reads your documents, tickets and conversations against "
         "it, not a metric series, so it reports how much of your book each "
         "theme touches rather than a movement in this number."
     )
+    if not convention:
+        return process
+    return f"{convention} Say otherwise below and I will use your reading. {process}"
 
 
 def _create_document(row: dict, company: WorkspaceContext) -> dict:
@@ -726,7 +762,7 @@ def execute_run(
                     # two teams can point at the same metric name and mean
                     # recognised versus booked, and none of that is visible in
                     # the name while all of it resizes every recommendation.
-                    "method_note": _method_note(company_id),
+                    "method_note": _method_note(goal_text),
                 },
             )
             _remember(run_id, resolution)
