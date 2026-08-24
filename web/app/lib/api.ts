@@ -696,6 +696,58 @@ export type GoalRunPlan = {
   hypotheses?: string[]
 }
 
+/** What the run has decided so far, written as it goes.
+ *
+ *  EVERY FIELD OPTIONAL, and the reason is not defensiveness. A run publishes
+ *  this in three writes, so a poll can land between any two of them; and runs
+ *  that finished before this shipped have no `progress` at all. The panel
+ *  renders whatever is present and says nothing about what is not. */
+export type GoalRunProgress = {
+  step?: "grouping" | "analysing" | "done"
+  signals_read?: number
+  claims?: number
+  /** Signals dropped before projection, by REASON — they are two different
+   *  rules and attributing both to a missing date prints a number that
+   *  contradicts the run's own coverage note. */
+  retired?: number
+  undated?: number
+  /** Distinct source types among the CLAIMS, not among the rows read. */
+  sources?: number
+  /** CLAIM counts, and named so. `claims_themed + claims_unthemed === claims`,
+   *  never `groups` — rendering them as the parts of a theme count invites an
+   *  arithmetic that can never hold. */
+  claims_themed?: number
+  claims_unthemed?: number
+  /** THE BALANCING TOTAL — includes one pseudo-group per ungroupable claim,
+   *  because `_cluster` keys each of those as its own cluster.
+   *
+   *  DELIBERATELY RENDERED NOWHERE. It exists so the funnel stays checkable
+   *  (`groups === themes + ungroupable_groups`, and `themes === findings +
+   *  drops`)
+   *  from stored data, by a test or by anyone auditing a run — showing it
+   *  beside `themes` would put two theme-shaped numbers on one screen, which
+   *  is the confusion this field's own history is made of. Do not add a render
+   *  site; use `themes`. */
+  groups?: number
+  /** What a reader means by a theme: `groups` minus the ungroupable GROUPS —
+   *  not the ungroupable claim count, which is a different number whenever one
+   *  ungroupable cluster holds more than one claim. This is the number the
+   *  headline shows. */
+  themes?: number
+  /** Ungroupable CLUSTERS, as distinct from `dropped.ungroupable` (claims).
+   *  Published so `groups === themes + ungroupable_groups` can be checked from
+   *  the payload; `dropped.ungroupable` does NOT satisfy that identity. */
+  ungroupable_groups?: number
+  findings?: number
+  conflicts?: number
+  deep?: number
+  /** Per rule, every key present even at zero. */
+  dropped?: Record<string, number>
+  /** TRUE means the echo rule never ran, which is NOT the same as dropping
+   *  nothing — the panel must say so rather than render a zero. */
+  echo_check_skipped?: boolean
+}
+
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
@@ -710,6 +762,7 @@ export type GoalRunDetail = GoalRun & {
     proposed_source?: string | null
     conflicts?: unknown[]
     plan?: GoalRunPlan
+    progress?: GoalRunProgress
   }
 }
 

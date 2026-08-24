@@ -992,3 +992,468 @@ def test_the_panel_and_the_api_agree_on_the_hypothesis_cap():
         f"the panel refuses at {panel_cap} but the API refuses at {api_cap} — "
         f"whichever is larger produces the unrecoverable 422 this guards"
     )
+
+
+# ─── The run narrates itself ─────────────────────────────────────────────────
+#
+# `running` used to be one state showing "Reading N claims…" for minutes. The
+# funnel is now published as the run decides, and two things can go wrong in
+# ways a reader would feel:
+#
+#   1. CLOBBERING THE PLAN. Progress rides in `prioritisation`, the same blob
+#      that holds Stage 0's ask and the approved plan. A write that replaces
+#      instead of merging erases the record the report has to reprint.
+#   2. NARRATING A CHECK THAT DID NOT RUN. When the corpus is dated by ingest
+#      the echo rule is skipped; publishing "0 dropped" would claim a check
+#      passed that could not see.
+
+def test_a_finished_run_publishes_the_funnel_it_actually_applied(ctx):
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    progress = meta.get("progress")
+    assert progress, "a finished run published no funnel"
+
+    assert progress["step"] == "done"
+    assert progress["claims"] > 0
+    assert progress["sources"] >= 1
+    # Every rule present, even at zero — the panel distinguishes "dropped
+    # nothing" from "did not run", and a missing key cannot carry that.
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    assert set(progress["dropped"]) == set(NARRATED_DROPS)
+    # The funnel has to ADD UP against what the run stored, or it is decoration.
+    findings = ctx.client.get(f"/v1/crucible/{run_id}").json()["findings"]
+    assert progress["findings"] == len(findings)
+
+
+def test_publishing_progress_never_erases_the_approved_plan(ctx):
+    """The blob is shared. `_progress` read-modify-writes for the same reason
+    `_meta_of` exists — a replacing write would lose the plan mid-run, and the
+    report would then be unable to say what it read."""
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"hypotheses": ["onboarding is where they drop off"]},
+    )
+
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    assert meta.get("progress"), "no progress written"
+    assert meta.get("plan"), "the plan was erased by a progress write"
+    assert meta["plan"]["hypotheses"] == ["onboarding is where they drop off"]
+
+
+def test_a_skipped_echo_check_is_published_as_skipped_not_as_zero(ctx):
+    """`valid_at == created_at` means the corpus is dated by when we read it,
+    so the one-conversation rule cannot see and is skipped. Publishing a zero
+    there would state that a check ran and found nothing."""
+    from app.db.client import require_client
+
+    for i in range(4):
+        require_client().table("kg_signal").insert({
+            "id": f"sig-ing-{i}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {"customer": f"Acct{i}"},
+            "provenance": {"doc": "doc-a"},
+            # The ingest clock: identical to created_at, which is what the
+            # detector keys on.
+            "valid_at": "2026-08-19T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+            "embedding": str([0.1 * (i + 1)] * 4),
+        }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    progress = (
+        ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    )
+    assert progress["echo_check_skipped"] is True
+    assert progress["dropped"]["echo"] == 0, (
+        "a skipped check must not also report drops"
+    )
+
+
+def test_a_progress_write_failure_never_fails_a_good_run(ctx, monkeypatch):
+    """Narration is display. A run that produced real findings must not die
+    because a progress write did.
+
+    THE STORE IS BROKEN ONLY FOR PROGRESS, not for every meta write. Patching
+    `_meta_of` wholesale also breaks the plan-record write — which is a
+    different, unguarded path — and the test then passes for the wrong reason
+    while proving nothing about this guard."""
+    import app.routes.crucible as mod
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    real_update = mod.runs_db.update
+
+    def update(run_id, company_id, **fields):
+        meta = fields.get("prioritisation")
+        if isinstance(meta, dict) and "progress" in meta:
+            raise RuntimeError("progress store unavailable")
+        return real_update(run_id, company_id, **fields)
+
+    monkeypatch.setattr(mod.runs_db, "update", update)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready", f"run died on a display write: {row}"
+    # And the guard is what saved it, not a progress write that never happened.
+    assert not row["prioritisation"].get("progress")
+    assert row["prioritisation"].get("plan"), "the plan write was collateral"
+
+
+# ─── The funnel has to BALANCE, and on a MIXED tenant ────────────────────────
+#
+# Both review passes found the same defect and neither test in this file could
+# have: `assign_clusters` returns its own `"clusters"` key counting only the
+# graph-unthemed leftovers, and merging it clobbered `build_findings`' total,
+# so the panel's headline became the leftover count. It is invisible in exactly
+# two states — the graph themes everything, or it themes nothing — and every
+# fixture here was the second one (`grep theme` in this file was zero hits).
+#
+# So this seeds a MIXED corpus, which is the production shape, and asserts the
+# identity a PM would check on screen:
+#
+#     groups == findings + group-level drops + ungroupable
+#
+# One line, and it fails on the old code.
+
+def _theme(company_id: str, entity_id: str, label: str, signal_ids: list[str]) -> None:
+    """Join signals to a graph theme, the way the extractor does."""
+    from app.db.client import require_client
+
+    c = require_client()
+    stamp = "2026-08-19T00:00:00+00:00"
+    c.table("kg_entity").insert({
+        "id": entity_id, "enterprise_id": company_id, "type": "theme",
+        "canonical_label": label,
+        "valid_at": stamp, "transaction_at": stamp,
+    }).execute()
+    for sid in signal_ids:
+        # `id` is autoincrement here, so it is left to the table.
+        c.table("kg_relationship").insert({
+            "enterprise_id": company_id,
+            "source_id": sid, "source_kind": "signal",
+            "target_id": entity_id, "target_kind": "entity", "type": "about",
+            "valid_at": stamp, "transaction_at": stamp,
+        }).execute()
+
+
+def test_the_published_funnel_balances_on_a_mixed_tenant(ctx):
+    """THE ONE BOTH REVIEWERS ASKED FOR. Some claims themed by the graph, some
+    left to embeddings — the shape where the headline used to be the leftover
+    count instead of the total."""
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    # Six signals the graph themes into two themes, plus four it does not.
+    for i in range(10):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001", "sig-0002"])
+    _theme(ctx.company_id, "ent-b", "Billing", ["sig-0003", "sig-0004", "sig-0005"])
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    progress = row["prioritisation"]["progress"]
+
+    # The corpus really was mixed, or this test proves nothing.
+    assert progress["claims_themed"] > 0, "no claim was themed by the graph"
+    assert progress["claims_unthemed"] > 0, "nothing was left for embeddings"
+
+    group_drops = sum(
+        progress["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    # `_cluster` keys each ungroupable claim as its own cluster, so it counts
+    # once here despite being a claim count elsewhere.
+    assert progress["groups"] == (
+        progress["findings"] + group_drops + progress["dropped"]["ungroupable"]
+    ), f"funnel does not balance: {progress}"
+
+    # And the headline is the TOTAL, never the leftovers-only count.
+    assert progress["groups"] >= progress["findings"]
+
+
+def test_the_claim_split_sums_to_claims_not_to_groups(ctx):
+    """`claims_themed`/`claims_unthemed` are CLAIM counts. Publishing them as
+    the parts of a THEME count invited an arithmetic that can never hold."""
+    for i in range(8):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001"])
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    assert p["claims_themed"] + p["claims_unthemed"] == p["claims"]
+
+
+def test_signals_dropped_before_projection_are_attributed_per_reason(ctx):
+    """`seen - claims` is retired PLUS undated. Publishing one number under the
+    date rule made the panel contradict the run's own coverage note.
+
+    THE FIXTURE HAS TO CONTAIN THE CONDITION. An earlier version of this test
+    seeded four ordinary signals, so both counts were 0 and the identity
+    reduced to `0 == 0` — it passed with the two fields SWAPPED and passed with
+    both hardcoded to zero. Guards-that-are-not-guards #2. So: exactly one
+    retired signal, exactly two undated, and the counts are pinned by value."""
+    from app.db.client import require_client
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    c = require_client()
+    # Retired: the repo's own definition (`superseded_by` / `expired_at`).
+    c.table("kg_signal").insert({
+        "id": "sig-retired", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "customer_voice", "content": "a superseded bet",
+        "properties": {"customer": "Initech", "superseded_by": "sig-0000"},
+        "provenance": {"doc": "doc-a"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+    # Undated: no usable timestamp, so `project_signal` returns None.
+    for j in range(2):
+        c.table("kg_signal").insert({
+            "id": f"sig-undated-{j}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": "no date", "properties": {"customer": "Globex"},
+            "provenance": {"doc": "doc-b"},
+            # `project_signal` drops on an UNPARSEABLE `valid_at`, which is
+            # what "no usable timestamp" means to it. The fake's DDL is NOT
+            # NULL (production's column is looser), so an empty string is the
+            # faithful stand-in — `_parse_ts` returns None for both.
+            "valid_at": "",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    # PINNED BY VALUE, so swapping the two fields fails. The identity alone
+    # cannot tell them apart.
+    assert p["retired"] == 1, p
+    assert p["undated"] == 2, p
+    assert p["signals_read"] - p["claims"] == p["retired"] + p["undated"]
+
+
+def test_the_headline_is_themes_not_the_balancing_total(ctx):
+    """`_cluster` keys every ungroupable claim as its own cluster, so `groups`
+    counts one pseudo-group per unembeddable claim. Rendering THAT as a theme
+    count put "Grouped into N themes" directly above "N claims never grouped at
+    all" — the same screen asserting both."""
+    from app.db.client import require_client
+
+    # No embeddings at all, so every claim is ungroupable.
+    for i in range(5):
+        require_client().table("kg_signal").insert({
+            "id": f"sig-noemb-{i}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {"customer": f"Acct{i}"},
+            "provenance": {"doc": "doc-a"},
+            "valid_at": f"2026-0{1 + i}-11T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    ungroupable = p["dropped"]["ungroupable"]
+    assert ungroupable > 0, f"fixture produced no ungroupable claims: {p}"
+    # The whole point: a corpus that grouped into NOTHING must not report
+    # itself as having produced themes.
+    assert p["themes"] == 0, p
+    assert p["groups"] == p["themes"] + ungroupable, p
+
+
+def test_the_balance_identity_is_exercised_with_real_drops(ctx):
+    """THE PRODUCTION SHAPE: real themes AND ungroupable claims AND a real
+    group-level drop, all non-zero at once.
+
+    The two earlier tests for this arithmetic sat at the degenerate ends — one
+    all-ungroupable, one with none — and between them `themes` was green under
+    `max(0, groups - 2 * ungroupable)`, which on a real corpus publishes 414
+    where the truth is 622. The only shape that pins the coefficient is the one
+    where both terms are non-zero, and it existed in no test. Third round of
+    "the fixture does not contain the condition" on this PR."""
+    from app.crucible.pipeline import NARRATED_DROPS
+    # Themed and embeddable -> real findings.
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001", "sig-0002"])
+    # A lone claim on its own theme -> an anecdote drop.
+    _signal(ctx.company_id, 90, embedding=str([0.9] * 4))
+    _theme(ctx.company_id, "ent-solo", "Billing", ["sig-0090"])
+    # UNEMBEDDABLE and unthemed -> ungroupable, so the subtraction is real.
+    # `_signal` already defaults `embedding=None`; hand-rolling the row here
+    # would drift from the helper the next time a column is added.
+    for j in (91, 92):
+        _signal(ctx.company_id, j, doc="doc-z")
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    group_drops = sum(
+        p["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
+    )
+    # ALL THREE non-zero, or this test is back at a degenerate end and proves
+    # nothing about the coefficient.
+    assert group_drops > 0, f"no group-level drop exercised: {p}"
+    assert p["dropped"]["ungroupable"] > 0, f"no ungroupable claim: {p}"
+    assert p["themes"] > 0, f"no real theme survived: {p}"
+
+    # The pin. `themes` must be the theme count, not the balancing total and
+    # not any multiple of the correction.
+    assert p["themes"] == p["findings"] + group_drops, p
+    assert p["groups"] > p["themes"], (
+        "groups must exceed themes when claims were ungroupable", p)
+
+
+def test_every_engine_drop_code_has_panel_copy():
+    """CROSS-BOUNDARY. `NARRATED_DROPS` is declared "for the client", but the
+    client hardcodes its own parallel list — so a rule added to the engine
+    renders as a raw code. The fallback makes drift visible; this makes it
+    fail. Precedent: test_the_panel_and_the_api_agree_on_the_hypothesis_cap."""
+    import pathlib
+    import re
+
+    from app.crucible.pipeline import NARRATED_DROPS
+
+    path = (pathlib.Path(__file__).resolve().parents[2]
+            / "web/app/components/shared/GoalRunNarration.tsx")
+    # FAIL AS A CONTRACT BREAK, not as a stack trace. A moved file or a renamed
+    # constant would otherwise surface as FileNotFoundError/ValueError from a
+    # test named "every engine drop code has panel copy", which reads as a
+    # broken test — and the cheapest way to green a broken test is to delete it.
+    if not path.exists():
+        pytest.fail(f"panel copy lives at {path}, which no longer exists — "
+                    f"move this test with it rather than dropping the contract")
+    src = path.read_text()
+    # MATCHED AS DECLARATIONS, not sliced between anchors. Slicing coupled this
+    # to the ORDER the constants appear in: hoisting the `n` helper above
+    # DROP_ORDER emptied the slice and this failed with "missing from
+    # DROP_ORDER" while DROP_ORDER was intact — a failure that lies about its
+    # cause is one someone deletes instead of fixing.
+    copy_m = re.search(r"const DROP_COPY[^=]*=\s*\{(.*?)\n\}", src, re.S)
+    order_m = re.search(r"const DROP_ORDER[^=]*=\s*\[(.*?)\]", src, re.S)
+    if not copy_m:
+        pytest.fail(f"`const DROP_COPY` is gone from {path.name}; the drop-copy "
+                    f"contract cannot be checked — update this test")
+    if not order_m:
+        pytest.fail(f"`const DROP_ORDER` is gone from {path.name}; the funnel "
+                    f"order contract cannot be checked — update this test")
+    copy_block, order_block = copy_m.group(1), order_m.group(1)
+    for code in NARRATED_DROPS:
+        # ANCHORED AS A KEY, not merely present. `\bcode\b` also matched the
+        # word inside a comment, so commenting an entry OUT left this green
+        # while the panel rendered the raw code.
+        assert re.search(rf"^\s*{code}:", copy_block, re.M), (
+            f"{code} has no panel copy KEY — it would render as a raw code"
+        )
+        assert re.search(rf'"{code}"', order_block), (
+            f"{code} is missing from DROP_ORDER — it would render out of funnel order"
+        )
+
+
+def test_an_unknown_drop_code_cannot_fail_a_run():
+    """`drops[code] += 1` on a plain dict raises KeyError, which escapes
+    build_findings into execute_run's catch-all and fails the run for every
+    tenant. Narration must never outrank the answer."""
+    from datetime import datetime, timezone
+
+    from app.crucible import pipeline as mod
+
+    real = mod._refute
+
+    def refute_with_a_new_code(*a, **kw):
+        return mod.Refutation("a_rule_nobody_declared", "invented for this test")
+
+    mod._refute = refute_with_a_new_code
+    try:
+        from tests.test_crucible_pipeline import claim
+
+        out = mod.build_findings(
+            [claim("x1", subject="exports", accounts=("Northwind",)),
+             claim("x2", subject="exports", accounts=("Initech",), days_ago=40)],
+            currency="accounts", now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        )
+    finally:
+        mod._refute = real
+
+    assert out.stats["dropped"]["a_rule_nobody_declared"] == 1
+    # And the declared set is still all present, at zero.
+    for code in mod.NARRATED_DROPS:
+        assert code in out.stats["dropped"]
+
+
+def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
+    """THE LINE THE LAST TWO COMMITS EXIST TO PRODUCE, pinned at the route.
+
+    `themes = groups - ungroupable_GROUPS`. Reverting that to the ungroupable
+    CLAIM count left all 91 crucible tests green, because no route fixture can
+    reach the shape where they differ — `_cluster` keys each ungroupable claim
+    by its own id, so one cluster holds one claim and the two counts coincide.
+
+    So the pin is structural rather than data-driven: hand the route a
+    PipelineResult whose two ungroupable counts genuinely disagree, and assert
+    the published `themes` used the group one. Same patch-and-restore idiom
+    this file already uses for `_refute`."""
+    import app.routes.crucible as mod
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    real = mod.build_findings
+
+    def build_with_disagreeing_counts(*a, **kw):
+        result = real(*a, **kw)
+        # 10 clusters, of which 2 are ungroupable GROUPS holding 5 claims
+        # between them. themes must be 10 - 2 = 8, never 10 - 5 = 5.
+        result.stats["clusters"] = 10
+        result.stats["ungroupable_groups"] = 2
+        result.stats["dropped"] = {**result.stats["dropped"], "ungroupable": 5}
+        return result
+
+    monkeypatch.setattr(mod, "build_findings", build_with_disagreeing_counts)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    assert p["groups"] == 10, p
+    assert p["themes"] == 8, (
+        "themes must be groups minus ungroupable GROUPS (2), not minus "
+        "ungroupable CLAIMS (5)", p)
+    # And the payload carries the number the identity actually needs, so an
+    # auditor is not left computing it from the claim count.
+    assert p["ungroupable_groups"] == 2, p
+    assert p["groups"] == p["themes"] + p["ungroupable_groups"], p

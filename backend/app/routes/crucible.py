@@ -756,6 +756,22 @@ def execute_run(
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
+        # SOURCES OF THE CLAIMS, not of the rows. Counting `signals` says "read
+        # from 4 sources" on a tenant whose entire `docs` corpus was retired —
+        # so a PM defending the ranking believes their documents are in it when
+        # no claim came from one.
+        # BOTH DROP REASONS, separately. `seen - projected` is retired PLUS
+        # undated, and attributing all of it to a missing date is the same
+        # "confidently stated false reason" the coverage note already avoids —
+        # the two would print different numbers for one fact on one run.
+        _progress(
+            run_id, company_id, step="grouping",
+            signals_read=stats.get("seen") or 0,
+            claims=stats.get("projected") or 0,
+            retired=stats.get("retired") or 0,
+            undated=stats.get("no_timestamp") or 0,
+            sources=len({c.source_id for c in claims if c.source_id}),
+        )
 
         # GROUPING: the graph's own themes first, embeddings only for whatever
         # it left unthemed.
@@ -793,6 +809,20 @@ def execute_run(
             cluster_stats.update(embed_stats)
 
         runs_db.update(run_id, company_id, claim_count=len(claims))
+        # EXACT COUNTS ONLY. `themed`/`unthemed` are measured; the number of
+        # GROUPS is not known until `build_findings` clusters, so it is not
+        # reported here rather than estimated and silently corrected later — a
+        # narration that revises its own numbers teaches a reader to distrust
+        # all of them.
+        # CLAIM counts, named as claim counts. `assign_themes` returns
+        # `themed + unthemed == len(claims)`, so rendering them as the parts of
+        # a THEME count invites an arithmetic that can never hold — the same
+        # unit error this feature already guards at the ungroupable row.
+        _progress(
+            run_id, company_id, step="analysing",
+            claims_themed=cluster_stats.get("themed") or 0,
+            claims_unthemed=cluster_stats.get("unthemed") or 0,
+        )
 
         if not claims:
             runs_db.fail(run_id, company_id, code="no_evidence",
@@ -803,8 +833,61 @@ def execute_run(
         ingest_clock = _dates_are_ingest_clock(signals)
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock)
-        result.stats.update(cluster_stats)
+        # CAPTURED BEFORE THE MERGE, and this is not a style preference.
+        # `assign_clusters` returns its OWN `"clusters"` key counting only the
+        # groups formed among the graph-unthemed leftovers, and the merge below
+        # lands it on top of `build_findings`' total. Read afterwards, the
+        # funnel's headline becomes the leftover count — smaller than numbers
+        # printed beneath it, and 0 outright on a tenant whose embeddings are
+        # unusable. Worse, `ungroupable` can ONLY be produced by
+        # `assign_clusters`, so the wrong headline and the ungroupable row are
+        # exactly co-incident: whenever the panel shows one, the other is wrong.
+        total_groups = result.stats.get("clusters") or 0
+        # READ BEFORE THE MERGE TOO, for the same reason and not by analogy:
+        # `assign_clusters` is the function that CREATES ungroupable claims, so
+        # it is the most likely future source of an `ungroupable_groups` key of
+        # its own. Read after the merge, that key would clobber the pipeline's
+        # total and put the headline back on the leftover count — on precisely
+        # the no-embedding tenants this feature exists to narrate.
+        ungroupable_groups = result.stats.get("ungroupable_groups") or 0
+        # Namespaced on the way in so the collision cannot come back.
+        result.stats.update({
+            ("embed_clusters" if k == "clusters" else k): v
+            for k, v in cluster_stats.items()
+        })
         runs_db.heartbeat(run_id, company_id)
+        # THE FUNNEL. It is also rendered after the run finishes — `progress` is
+        # durable in `prioritisation` and the ready view reads it — because the
+        # drop rows ARE the feature and the window between this write and
+        # `status="ready"` is about a second against a 3s poll, so a reader who
+        # only saw it live would usually see nothing at all.
+        # TWO NUMBERS, BECAUSE THEY ARE TWO THINGS. `_cluster` gives every
+        # ungroupable claim its OWN cluster key, so `total_groups` counts one
+        # pseudo-group per claim we could not embed. It is the right number for
+        # the balance identity and the WRONG one to call a theme: on a tenant
+        # with no usable embeddings it would render "Grouped into 2,410 themes"
+        # directly above "2,410 claims never grouped at all" — one screen
+        # asserting both. `themes` is what a reader means by a theme, and
+        # `groups == themes + ungroupable` keeps the funnel checkable.
+        _progress(
+            run_id, company_id, step="done",
+            groups=total_groups,
+            themes=total_groups - ungroupable_groups,
+            # PUBLISHED, because `themes` is derived from THIS and not from
+            # `dropped.ungroupable`. Without it an auditor checking the
+            # identity the `groups` field exists for computes
+            # `themes + dropped.ungroupable` and gets the wrong total in
+            # exactly the case the group count was introduced to handle.
+            ungroupable_groups=ungroupable_groups,
+            findings=len(result.findings),
+            conflicts=result.stats.get("conflicts") or 0,
+            deep=result.deep_count,
+            dropped=result.stats.get("dropped") or {},
+            # NOT a zero. When the corpus is dated by ingest the echo rule
+            # never ran, and rendering "0 dropped" would claim a check passed
+            # that could not see. The panel reads this and says so.
+            echo_check_skipped=bool(result.stats.get("echo_check_skipped")),
+        )
 
         rows = []
         for rank, (finding, impact, confidence) in enumerate(zip(
@@ -946,6 +1029,36 @@ def _meta_of(run_id: int, company_id: str) -> dict:
         except Exception:  # noqa: BLE001
             meta = {}
     return meta if isinstance(meta, dict) else {}
+
+
+def _progress(run_id: int, company_id: str, **fields) -> None:
+    """Publish what the run has decided SO FAR, for the panel to render.
+
+    WHY A RUN NARRATES ITSELF. Until now `running` was one state and the panel
+    showed "Reading N claims…" for minutes, so the first thing a user learned
+    about how the answer was reached was the finished report. But this pipeline
+    is deterministic and every number in its funnel is already computed — the
+    only reason they were invisible is that nothing wrote them down. A reader
+    who watched 1,744 groups become 168 findings knows what the ranking IS; a
+    reader handed 168 findings has to take them on faith.
+
+    RIDES IN `prioritisation`, so this needs no migration. Read-modify-written
+    for the same reason `_meta_of` exists: the blob already holds Stage 0's ask
+    and the approved plan, and replacing it would erase the plan the report has
+    to reprint.
+
+    TOTAL, like its caller. A run that produced real findings must not fail
+    because a progress write did — the narration is display, and display never
+    outranks the answer.
+    """
+    try:
+        meta = dict(_meta_of(run_id, company_id))
+        progress = dict(meta.get("progress") or {})
+        progress.update(fields)
+        meta["progress"] = progress
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — see the docstring; display only.
+        logger.warning("crucible: could not write progress for run %s", run_id)
 
 
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:

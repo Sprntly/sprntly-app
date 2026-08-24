@@ -369,3 +369,79 @@ describe("the error is visible without destroying the panel", () => {
     await waitFor(() => expect(screen.getByTestId("goal-running")).toBeTruthy())
   })
 })
+
+describe("the running view narrates instead of spinning", () => {
+  it("renders the funnel once the run has published one", async () => {
+    get.mockResolvedValue({
+      ...RUN,
+      status: "running",
+      prioritisation: {
+        progress: {
+          step: "done", claims: 2410, sources: 4,
+          groups: 1744, themes: 1744, findings: 168, conflicts: 3, deep: 5,
+          dropped: { anecdote: 1576, echo: 9, single_account: 0,
+                     no_authority: 0, uncausal: 0, ungroupable: 0 },
+        },
+      },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-narration")
+    expect(screen.getByTestId("goal-running").textContent).toContain("1,576")
+  })
+
+  it("falls back to the old line when there is no funnel yet", async () => {
+    // A run that has only just started, and EVERY run that finished before
+    // narration shipped. The fallback is the honest shape — a funnel of
+    // zeroes would state that this run dropped nothing.
+    get.mockResolvedValue({ ...RUN, status: "running", claim_count: 42,
+                            prioritisation: {} })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-running")
+    expect(screen.queryByTestId("goal-narration")).toBeNull()
+    expect(screen.getByTestId("goal-running").textContent).toContain("42")
+  })
+})
+
+
+describe("the funnel survives the run", () => {
+  // The gap between the final progress write and `status="ready"` is about a
+  // second against a 3s poll, so a reader who could only see this live would
+  // usually see nothing — and the drop rows ARE the feature.
+  const DONE = {
+    step: "done", claims: 2410, sources: 4, groups: 830, themes: 622,
+    findings: 168, conflicts: 3, deep: 5,
+    dropped: { ungroupable: 208, anecdote: 396, echo: 9, single_account: 41,
+               no_authority: 2, uncausal: 6 },
+  }
+
+  it("a finished run can still say how its ranking was narrowed", async () => {
+    get.mockResolvedValue({ ...RUN, status: "ready",
+                            prioritisation: { progress: DONE } })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    const recap = await screen.findByTestId("goal-narration-recap")
+    expect(recap.textContent).toContain("How this was narrowed")
+    expect(recap.textContent).toContain("396")
+  })
+
+  it("shows no recap for a run that predates the feature", async () => {
+    get.mockResolvedValue({ ...RUN, status: "ready", prioritisation: {} })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-narration-recap")).toBeNull()
+  })
+
+  it("shows no recap when the final write was lost mid-run", async () => {
+    // A restart between the `analysing` and `done` writes leaves a partial
+    // funnel on the row. Half a funnel beside a finished report is worse than
+    // none: it reads as the whole story.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { progress: { step: "analysing", claims: 2410,
+                                    claims_themed: 1502, claims_unthemed: 908 } },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-narration-recap")).toBeNull()
+  })
+})

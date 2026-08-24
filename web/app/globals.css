@@ -25150,3 +25150,17 @@
 }
 .ga-plan-source input { margin-top: 3px; }
 .ga-plan-witness { font-size: 12px; opacity: 0.68; }
+
+/* The run narrating itself while it works — see GoalRunNarration.tsx. Reads as
+   a funnel, so the nesting is the point: each rule's count sits under the step
+   that applied it. */
+.ga-narration { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; font-size: 13px; }
+.ga-narration > li { line-height: 1.45; }
+.ga-narration-drops { margin: 4px 0 0; padding-left: 1.1rem; display: grid; gap: 3px; opacity: 0.82; }
+/* The funnel, kept beside the finished report. Folded by default: it is the
+   evidence for the ranking, not the ranking, so it should be reachable rather
+   than in the way. */
+.ga-narration-recap { margin-top: 18px; border-top: 1px solid var(--border, #e5e5e5); padding-top: 12px; }
+.ga-narration-recap > summary { cursor: pointer; font-size: 12.5px; opacity: 0.72; }
+.ga-narration-recap > summary:hover { opacity: 1; }
+.ga-narration-recap .ga-narration { margin-top: 10px; }

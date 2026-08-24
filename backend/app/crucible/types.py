@@ -319,7 +319,15 @@ class Claim:
     assertion: str
     type: ClaimType
     subject: str
-    source_id: str            # connector id — NOT an enum, see SPEC §4
+    # THE SOURCE TYPE, despite the name. `project_signal` assigns
+    # `source_id=source_type` (`claims.py`), so this carries `customer_voice` /
+    # `project_mgmt` / … — the same vocabulary `AUTHORITATIVE_FOR` is keyed on,
+    # which is why the authority check works at all. The comment here used to
+    # read "connector id — NOT an enum, see SPEC §4", which described the SPEC's
+    # intent rather than the code, and the run's published `sources` count is
+    # correct only because the code disagrees with it. If this is ever made a
+    # real connector id, `routes/crucible.py`'s `sources` must stop counting it.
+    source_id: str
     artifact_id: str
     artifact_type: str
     strength: EvidenceStrength

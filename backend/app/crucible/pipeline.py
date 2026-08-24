@@ -22,7 +22,7 @@ import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, NamedTuple, Optional, Sequence
 
 from app.crucible.cluster import UNGROUPABLE_PREFIX
 from app.crucible.lint import lint_claim
@@ -40,6 +40,16 @@ from app.crucible.types import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Every reason a candidate can die, in the order the run applies them. The
+#: running view renders this funnel, so the set is CLOSED and declared here
+#: rather than inferred from whatever rejections a particular run happened to
+#: produce — a funnel that silently omits a rule the run applied reads as "this
+#: never happens" when the truth is "nothing counted it".
+NARRATED_DROPS = (
+    "ungroupable", "anecdote", "echo", "single_account", "no_authority",
+    "uncausal",
+)
 
 #: A cluster below this many claims is not a finding, it is an anecdote.
 MIN_CLAIMS_PER_FINDING = 2
@@ -129,13 +139,26 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+class Refutation(NamedTuple):
+    """Why a candidate died, in two registers.
+
+    `code` is for COUNTING and `reason` is for READING, and they are separate
+    fields because the funnel the running view renders has to say which rule
+    killed how many — and deriving that by matching on the prose would break
+    the first time someone improves a sentence. The codes are a closed set;
+    `NARRATED_DROPS` names every one of them for the client.
+    """
+    code: str
+    reason: str
+
+
 def _refute(
     claims: Sequence[Claim],
     accounts: Sequence[str],
     *,
     dates_are_ingest_clock: bool = False,
-) -> Optional[str]:
-    """Try to kill the finding. Returns a reason if it dies.
+) -> Optional[Refutation]:
+    """Try to kill the finding. Returns a code and a reason if it dies.
 
     Modelled on what actually killed the spike's first framing: evidence that
     looks like a pattern because there is a lot of it, when all of it lands in
@@ -185,23 +208,23 @@ def _refute(
     fully_attributed = len(sources) > 0 and all(c.artifact_id for c in claims)
     one_conversation = fully_attributed and len(sources) == 1
     if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
-        return (
+        return Refutation("echo", (
             f"all {len(claims)} supporting claims come from one source "
             f"document within {span.days} days — this is one conversation "
             f"echoing through the corpus, not a pattern over time"
-        )
+        ))
     # Exactly one, not "at most one": ZERO named accounts is unsizeable, which
     # is a finding we keep and mark (I3), not one we drop.
     if len(accounts) == 1:
-        return (
+        return Refutation("single_account", (
             "every supporting claim comes from a single account, so this is "
             "that account's situation rather than a pattern across the book"
-        )
+        ))
     if not any(c.authoritative for c in claims):
-        return (
+        return Refutation("no_authority", (
             "no source that may speak to this claim type reported it — every "
             "supporting claim is outside its source's authority"
-        )
+        ))
     return None
 
 
@@ -231,6 +254,21 @@ def build_findings(
     confidences: list[Confidence] = []
     rejected: list[Rejection] = []
     ungroupable: list[str] = []
+    # COUNTED HERE, not derived from `rejected` afterwards. `rejected` is the
+    # LISTED set: over `MAX_LISTED_REJECTIONS` it collapses into one summary
+    # row, so counting it would report 100 anecdotes on a run that dropped
+    # 1,576. The funnel has to be the truth, not the excerpt.
+    # `defaultdict`, PRE-SEEDED. Pre-seeded so every rule is present at zero
+    # (the panel distinguishes "dropped nothing" from "did not run"); a
+    # defaultdict so a rule added to `_refute` without its constant cannot
+    # raise KeyError here — that escapes into `execute_run`'s catch-all and
+    # fails the run for every tenant. Narration must never outrank the answer.
+    drops: defaultdict[str, int] = defaultdict(int)
+    for _code in NARRATED_DROPS:
+        drops[_code] = 0
+    #: Ungroupable CLUSTERS, as distinct from the ungroupable CLAIMS in
+    #: `drops`. The theme count is `clusters - this`.
+    ungroupable_groups = 0
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)
@@ -244,9 +282,18 @@ def build_findings(
             # many identical rows into the ledger buries every genuine
             # rejection under it and makes the considered list unreadable.
             ungroupable.extend(ids)
+            drops["ungroupable"] += len(ids)
+            # COUNTED SEPARATELY FROM THE CLAIMS, because the theme count is
+            # derived by subtracting it and the two are only equal by an
+            # assumption: `_cluster` lowercases its key, so two claim ids
+            # differing only in case would share one ungroupable cluster and
+            # the subtraction would quietly under-report. Counting the groups
+            # themselves removes the assumption instead of relying on it.
+            ungroupable_groups += 1
             continue
 
         if len(group) < MIN_CLAIMS_PER_FINDING:
+            drops["anecdote"] += 1
             rejected.append(Rejection(
                 _label(group, key),
                 f"only {len(group)} supporting claim — an anecdote, not a "
@@ -264,7 +311,9 @@ def build_findings(
         refutation = _refute(group, raw_accounts,
                              dates_are_ingest_clock=dates_are_ingest_clock)
         if refutation:
-            rejected.append(Rejection(_label(group, key), refutation, "verification", ids))
+            drops[refutation.code] += 1
+            rejected.append(Rejection(
+                _label(group, key), refutation.reason, "verification", ids))
             continue
 
         # The KEY groups; the LABEL reads. They are different strings on
@@ -275,6 +324,7 @@ def build_findings(
         statement = _statement(label, group, accounts)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
+            drops["uncausal"] += 1
             # I5 is a hard error at the boundary; here it is a drop, because a
             # statement we cannot phrase honestly is not one to ship with a
             # caveat.
@@ -362,6 +412,16 @@ def build_findings(
             "claims": len(claims), "clusters": len(clusters),
             "findings": len(findings), "rejected": len(rejected),
             "sizeable": sum(1 for i in impacts if i.value is not None),
+            "conflicts": sum(1 for f in findings if f.adjudication == "conflict"),
+            # PER REASON, and every key present even at zero — the running view
+            # distinguishes "this rule dropped nothing" from "this rule did not
+            # run", and a missing key cannot carry that difference.
+            "dropped": dict(drops),
+            # `clusters` counts one pseudo-group per ungroupable claim, so a
+            # reader's "themes" is `clusters - ungroupable_groups`. Published
+            # rather than derived at the call site, so the subtraction cannot
+            # drift from how the clustering actually keyed.
+            "ungroupable_groups": ungroupable_groups,
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },

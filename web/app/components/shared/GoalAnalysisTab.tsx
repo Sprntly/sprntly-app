@@ -40,6 +40,7 @@ import {
 } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
+import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
@@ -411,16 +412,47 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   }
 
   if (run.status !== "ready") {
+    // THE RUN NARRATES ITSELF WHERE IT CAN. `progress` is written as the run
+    // decides, so this fills in over the minutes rather than sitting on one
+    // sentence. It is absent on a run that has only just started and on every
+    // run that finished before narration shipped, and the old line is the
+    // honest fallback for both — never a funnel of zeroes.
+    const progress = run.prioritisation?.progress
     return (
       <div className="ga" data-testid="goal-running">
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
-        <p className="ga-loading">
-          Reading {run.claim_count || 0} claims…
-        </p>
+        {progress ? (
+          <GoalRunNarration progress={progress} />
+        ) : (
+          <p className="ga-loading">
+            Reading {run.claim_count || 0} claims…
+          </p>
+        )}
       </div>
     )
   }
+
+  // THE FUNNEL SURVIVES THE RUN. The gap between the final progress write and
+  // `status="ready"` is about a second against a 3s poll, so a reader who could
+  // only see this live would usually see nothing — the drop rows are the whole
+  // feature. `progress` is durable in `prioritisation`, so the finished report
+  // can say how its ranking was narrowed instead of asking to be taken on
+  // faith, which is the post-hoc-disclosure problem this work exists to end.
+  //
+  // THE TAB ONLY. The edited-document branch and the exported report still
+  // carry no funnel, so a reader who is handed the DOCUMENT is back to taking
+  // the ranking on authority. Stated rather than implied, because the previous
+  // version of this comment claimed the report reprinted the funnel when
+  // nothing did, and the next reader would have built on it.
+  const readyProgress = run.prioritisation?.progress
+  const howItNarrowed =
+    readyProgress && readyProgress.step === "done" ? (
+      <details className="ga-narration-recap" data-testid="goal-narration-recap">
+        <summary>How this was narrowed</summary>
+        <GoalRunNarration progress={readyProgress} />
+      </details>
+    ) : null
 
   const note = docNote ? (
     <p className="ga-doc-note" role="status" data-testid="goal-doc-note">
@@ -471,6 +503,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         onSaveCopy={saveCopy}
         busy={docBusy}
       />
+      {howItNarrowed}
     </div>
   )
 }
