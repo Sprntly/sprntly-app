@@ -1482,6 +1482,29 @@ def _sources_block(connected: list[str]) -> str:
     return block
 
 
+def _open_prd_block(prd_id: Optional[int], prd_title: Optional[str]) -> str:
+    """"Active tab: PRD #123 — "Title" is open beside this chat."
+
+    The planner used to be told NOTHING about the thread's open artifact, while
+    the pre-planner intent resolver rendered exactly this line
+    (`chat_intent._render_context`). It cost real routing accuracy: "build a
+    report from this prd" planned as `answer` with the reason "no PRD is open or
+    identified in the thread — need to ask which PRD they mean", on a thread that
+    HAD one open — so a document the user asked for was written into the chat as
+    prose and filed nowhere. The endpoint held the id the whole time and only
+    used it AFTER the fact, to gate `_NEEDS_PRD` verdicts.
+
+    Empty when no PRD is open: the absence is already the default the prompt
+    reasons from ("no PRD exists in this thread yet → generate_prd"), and a
+    "No PRD is open" line on every planless message is tokens spent to say
+    nothing.
+    """
+    if not prd_id:
+        return ""
+    title = f' — "{prd_title}"' if prd_title else ""
+    return f"Active tab: PRD #{prd_id}{title} is open beside this chat.\n\n"
+
+
 def _build_input(
     question: str,
     *,
@@ -1491,6 +1514,7 @@ def _build_input(
     history: Optional[list[dict]],
     document_block: str = "",
     template_block: str = "",
+    open_prd_block: str = "",
 ) -> str:
     """The uncached half of the call, assembled in ASK_PLANNER_PROMPT.md §3's
     order: date, company skills, company formats, connected sources,
@@ -1519,6 +1543,9 @@ def _build_input(
         # being judged is the most recent text in the prompt.
         + document_block
         + keyword_prior
+        # The thread's own state, beside the history it belongs with: what is
+        # OPEN in this tab is context for the message, not a company fact.
+        + open_prd_block
         + _render_history_via_qa(history)
         + f"Question: {question}"
     )
@@ -2054,6 +2081,8 @@ def plan(
     *,
     enterprise_id: str,
     history: Optional[list[dict]] = None,
+    prd_id: Optional[int] = None,
+    prd_title: Optional[str] = None,
 ) -> Plan:
     """Run the planner over one question and return the GATED plan.
 
@@ -2106,6 +2135,7 @@ def plan(
         template_block=_template_block(templates),
         keyword_prior=keyword_prior,
         history=history,
+        open_prd_block=_open_prd_block(prd_id, prd_title),
     )
     # BEFORE the call, deliberately: a prompt that made the model fail — a 400,
     # a refusal, junk output — is exactly the prompt you most need to have seen.
@@ -2199,14 +2229,24 @@ _PLAN_MEMO_TTL_S = 180.0
 _plan_memo = TTLMap(_PLAN_MEMO_TTL_S)
 
 
-def _plan_memo_key(enterprise_id: str, question: str) -> str:
+def _plan_memo_key(
+    enterprise_id: str, question: str, prd_id: Optional[int] = None
+) -> str:
     """A stable key for one turn's plan. See `_plan_memo` for why history is
     deliberately absent.
+
+    `prd_id` IS part of it, unlike history: the open PRD is now an input to the
+    plan (`_open_prd_block`), so the same sentence asked on a thread with PRD 12
+    open and on one with PRD 40 open are two different questions — sharing a
+    verdict between them inside the TTL would route one of them by the other's
+    context.
 
     Hashed rather than concatenated: the question can be tens of kilobytes (an
     inlined attachment block), and a dict key that large is pure memory overhead
     for a value that only has to be compared for equality."""
-    payload = json.dumps([enterprise_id, question], sort_keys=True, default=str)
+    payload = json.dumps(
+        [enterprise_id, question, prd_id], sort_keys=True, default=str
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2644,6 +2684,8 @@ def plan_for_answer(
     enterprise_id: Optional[str],
     question: str,
     history: Optional[list[dict]] = None,
+    prd_id: Optional[int] = None,
+    prd_title: Optional[str] = None,
 ) -> Optional[Plan]:
     """The plan to execute for this turn, or None to answer the old way.
 
@@ -2671,7 +2713,7 @@ def plan_for_answer(
     # action, and the ask worker, which needs the plan to execute the answer —
     # and neither can be dropped. So the second one reads what the first
     # computed instead of paying for sonnet again.
-    key = _plan_memo_key(enterprise_id, question)
+    key = _plan_memo_key(enterprise_id, question, prd_id)
     memoised = _plan_memo.get(key)
     if memoised is not None:
         logger.info(
@@ -2681,7 +2723,13 @@ def plan_for_answer(
         return memoised
 
     try:
-        result = plan(question, enterprise_id=enterprise_id, history=history)
+        result = plan(
+            question,
+            enterprise_id=enterprise_id,
+            history=history,
+            prd_id=prd_id,
+            prd_title=prd_title,
+        )
     except Exception:  # noqa: BLE001 — a planner outage must not break chat
         logger.exception("[planner] plan failed for %s — answering unplanned", enterprise_id)
         return None

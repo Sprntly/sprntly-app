@@ -1055,6 +1055,11 @@ def answer(
         "confidence": 0.6,
         "unanswered": "",
         "_skill": CR_SKILL,
+        # The sweep's findings document — captured as a `reports` artifact and
+        # attached to the chat that produced it. Not on `_plain_payload`'s
+        # apologies or on query mode's pointed answers, which carry `_skill`
+        # all the same.
+        "_report": True,
         "_skill_action": f"Company research · {len(records)} facts",
         "_skill_source": "company-research",
     }

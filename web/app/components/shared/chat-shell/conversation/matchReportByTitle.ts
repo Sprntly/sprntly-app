@@ -6,7 +6,7 @@ import { type ReportSummary } from "../../../../lib/api"
  *  id: capture runs after the ask completes, deliberately (it must never delay
  *  the answer), so the id doesn't exist yet when the reply is stored. Both sides
  *  derive the title from the document's own <h1> — the client via
- *  reportTitleFromHtml, the server via report_capture.report_title — so they
+ *  reportTitleFromDoc, the server via report_capture.report_title — so they
  *  agree by construction.
  *
  *  Matched exactly first, then leniently (case/whitespace, then either side

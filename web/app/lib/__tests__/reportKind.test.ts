@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { reportKindLabel, reportTitleFromHtml } from "../reportKind"
+import { reportKindLabel, reportTitleFromDoc } from "../reportKind"
 
 describe("reportKindLabel", () => {
   it("uses the established name for the known report skills", () => {
@@ -38,7 +38,7 @@ describe("reportKindLabel", () => {
 // which of the thread's reports it is by matching this against the stored title,
 // which the backend derives with report_capture.report_title. The two must agree
 // exactly — see the ordering test below for the bug that proves why.
-describe("reportTitleFromHtml", () => {
+describe("reportTitleFromDoc", () => {
   it("prefers <title> over <h1>, exactly as the backend does", () => {
     // The regression this locks: reading the <h1> first gave "Voice of Customer
     // Report" while the stored row said "…— 30 July 2026 · 1 day", so a card
@@ -46,31 +46,62 @@ describe("reportTitleFromHtml", () => {
     const html =
       "<!DOCTYPE html><html><head><title>Voice of Customer Report — 30 July 2026 · 1 day</title></head>" +
       "<body><h1>Voice of Customer Report</h1></body></html>"
-    expect(reportTitleFromHtml(html, "voice-of-customer-report")).toBe(
+    expect(reportTitleFromDoc(html, "voice-of-customer-report")).toBe(
       "Voice of Customer Report — 30 July 2026 · 1 day",
     )
   })
 
   it("falls back to the first <h1> when there is no <title>", () => {
     const html = "<!DOCTYPE html><html><body><h1>Competitive teardown</h1><h1>second</h1></body></html>"
-    expect(reportTitleFromHtml(html, "competitive-intelligence-review")).toBe("Competitive teardown")
+    expect(reportTitleFromDoc(html, "competitive-intelligence-review")).toBe("Competitive teardown")
   })
 
   it("strips markup and collapses whitespace inside the title", () => {
     const html = "<html><head><title>\n  Voice of <em>Customer</em>\n  Report\n</title></head></html>"
-    expect(reportTitleFromHtml(html, null)).toBe("Voice of Customer Report")
+    expect(reportTitleFromDoc(html, null)).toBe("Voice of Customer Report")
   })
 
   it("falls back to the humanised kind when the document names itself nothing", () => {
-    expect(reportTitleFromHtml("<html><body>no title</body></html>", "voice-of-customer-report"))
+    expect(reportTitleFromDoc("<html><body>no title</body></html>", "voice-of-customer-report"))
       .toBe("Voice of Customer")
-    expect(reportTitleFromHtml("<html><head><title>  </title></head></html>", null)).toBe("Report")
-    expect(reportTitleFromHtml(null, "status-report")).toBe("Status")
+    expect(reportTitleFromDoc("<html><head><title>  </title></head></html>", null)).toBe("Report")
+    expect(reportTitleFromDoc(null, "status-report")).toBe("Status")
   })
 
   it("caps at the same length the backend stores", () => {
     const long = "x".repeat(300)
-    expect(reportTitleFromHtml(`<html><head><title>${long}</title></head></html>`, null))
+    expect(reportTitleFromDoc(`<html><head><title>${long}</title></head></html>`, null))
       .toHaveLength(200)
+  })
+})
+
+describe("reportTitleFromDoc — markdown reports", () => {
+  // Every pipeline answers in markdown since the pinned HTML templates were
+  // removed, so this rung is the one real reports actually take. It has to agree
+  // with `report_capture.report_title`'s markdown rung, because the chat card
+  // resolves WHICH report a turn is by matching this against the stored title.
+  it("reads the first markdown heading", () => {
+    expect(
+      reportTitleFromDoc(
+        "# Voice-of-Customer Report — Sprntly\n\n## Themes\n\n- friction\n",
+        "voice-of-customer-report",
+      ),
+    ).toBe("Voice-of-Customer Report — Sprntly")
+  })
+
+  it("takes the FIRST heading, at any level, and collapses its whitespace", () => {
+    expect(reportTitleFromDoc("###   Q3   market   scan  \n\n# Later\n", null))
+      .toBe("Q3 market scan")
+  })
+
+  it("ignores a hash that is not a heading", () => {
+    expect(reportTitleFromDoc("Ticket #14 is blocked.\n", "public-feedback-report"))
+      .toBe("Public Feedback")
+  })
+
+  it("still prefers an HTML title over a heading in the same document", () => {
+    expect(
+      reportTitleFromDoc("<title>Stored name</title>\n# Markdown name\n", null),
+    ).toBe("Stored name")
   })
 })

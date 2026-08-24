@@ -68,6 +68,11 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         "list_mode": None,
         "reason": "asked for a spec",
         "source": "planner",
+        # WHERE the answer gets written. Present on every verdict, False on the
+        # ones it does not belong to — a report pipeline is the only thing that
+        # turns it on, and the client reads it to open the panel that writes the
+        # document instead of letting a report scroll through the thread.
+        "report": False,
     }
 
 
@@ -456,3 +461,52 @@ def test_the_planner_verdict_wins_when_it_returns_one(monkeypatch):
     assert envelope["intent"] == "generate_tickets"
     assert envelope["task"] == "split the PRD"
     assert envelope["source"] == "planner"
+
+
+# ── the report flag (WHERE the answer is written) ───────────────────────────
+# A report pipeline answers with a DOCUMENT. The intent stays `answer` — the ask
+# path runs it exactly as before — but the client needs to know at send time so
+# it opens the panel's Reports tab in its generating state and streams the
+# document there, instead of scrolling a report through the chat thread it is
+# about to appear beside.
+
+
+def test_a_report_pipeline_is_flagged_on_the_envelope():
+    for pipeline in ("voice-of-customer-report", "competitive-intelligence-review"):
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id=pipeline, action_confidence=0.95,
+                  confidence=0.85, reason="wants a VoC report"),
+            prd_id=None,
+        )
+        assert envelope["intent"] == "answer", pipeline
+        assert envelope["report"] is True, pipeline
+
+
+def test_an_ordinary_answer_is_not_a_report():
+    envelope = ci._plan_to_envelope(
+        _plan("answer", action_confidence=0.95, reason="a question"), prd_id=None,
+    )
+    assert envelope["report"] is False
+
+
+def test_a_non_report_pipeline_is_not_a_report():
+    """`_REPORT_PIPELINE_IDS` is narrower than "a pipeline ran" — the lookup and
+    utility machinery ids are deliberately outside it."""
+    envelope = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="tracker-lookup", action_confidence=0.9,
+              confidence=0.9, reason="jira lookup"),
+        prd_id=None,
+    )
+    assert envelope["report"] is False
+
+
+def test_the_flag_reads_the_dispatch_set_itself():
+    """One set, not two: a name in `qa_agent._REPORT_PIPELINE_IDS` that this
+    endpoint didn't know about would print a report into the chat, and one it
+    knew about that the answer path didn't would open a panel over an answer."""
+    from app import qa_agent
+
+    for pipeline in sorted(qa_agent._REPORT_PIPELINE_IDS):
+        assert ci._is_report_pipeline(pipeline) is True, pipeline
+    assert ci._is_report_pipeline(None) is False
+    assert ci._is_report_pipeline("") is False

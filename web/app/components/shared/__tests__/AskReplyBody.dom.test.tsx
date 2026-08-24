@@ -122,3 +122,61 @@ describe("AskReplyBody HTML report titles", () => {
     expect(container.querySelector("iframe")?.getAttribute("title")).toBe("Voice of Customer report")
   })
 })
+
+// ── A report answer is an artifact, not a chat message ───────────────────────
+// PR #963 made a report answer render as a CARD that opens the document in the
+// panel, instead of printing the whole report into the thread — where it showed
+// twice, once inline and once in the panel. That card was gated on the HTML
+// document sniff; when the pinned templates were removed every pipeline started
+// answering in markdown, the sniff stopped firing, and reports went back to
+// printing inline. `_report` is the marker the engines stamp on the one return
+// that IS the document, and the same one `report_capture` captures on.
+const REPORT_MD = "# Voice-of-Customer Report — Sprntly\n\n## Themes\n\n- Onboarding friction\n"
+
+describe("AskReplyBody — a report answer", () => {
+  it("renders a card naming the document, not the document", () => {
+    const { container, getByTestId } = render(
+      <AskReplyBody
+        reply={{ ...REPLY, answer: REPORT_MD, _report: true, _skill: "voice-of-customer-report" }}
+        onOpenReport={() => {}}
+      />,
+    )
+    expect(getByTestId("report-answer-card")).toBeTruthy()
+    expect(container.textContent).toContain("Voice-of-Customer Report — Sprntly")
+    expect(container.textContent).toContain("Voice of Customer report")
+    // The report BODY stays out of the thread — that is the whole point.
+    expect(container.textContent).not.toContain("Onboarding friction")
+  })
+
+  it("opens THAT report by its title", () => {
+    const opened: string[] = []
+    const { getByTestId } = render(
+      <AskReplyBody
+        reply={{ ...REPLY, answer: REPORT_MD, _report: true, _skill: "voice-of-customer-report" }}
+        onOpenReport={(t) => opened.push(t)}
+      />,
+    )
+    getByTestId("open-report-btn").click()
+    // Matches `report_capture.report_title`'s markdown rung, which is what
+    // `matchReportByTitle` joins on — a thread can hold several reports.
+    expect(opened).toEqual(["Voice-of-Customer Report — Sprntly"])
+  })
+
+  it("reads inline on a surface with no panel to open it in", () => {
+    const { container, queryByTestId } = render(
+      <AskReplyBody
+        reply={{ ...REPLY, answer: REPORT_MD, _report: true, _skill: "voice-of-customer-report" }}
+      />,
+    )
+    expect(queryByTestId("report-answer-card")).toBeNull()
+    expect(container.textContent).toContain("Onboarding friction")
+  })
+
+  it("leaves an ordinary answer alone", () => {
+    const { container, queryByTestId } = render(
+      <AskReplyBody reply={REPLY} onOpenReport={() => {}} />,
+    )
+    expect(queryByTestId("report-answer-card")).toBeNull()
+    expect(container.textContent).toContain("Invite-flow friction")
+  })
+})
