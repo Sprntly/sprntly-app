@@ -511,6 +511,61 @@ describe("the guards around the restore", () => {
     ).toBe(false)
   })
 
+  it("re-arms an unanswered gate after a reload, even in a chat that already ran one", async () => {
+    // THE DEAD END THIS EXISTS TO STOP. The gate lives on the thread, and the
+    // thread lives in sessionStorage. A new session came back with the run at
+    // its gate, the panel deferring to the chat, and the chat holding no card:
+    // nothing anywhere could answer it.
+    //
+    // The first guard asked "has this thread EVER held a gate", so the settled
+    // record of a previous run — the artefact this change exists to keep —
+    // blocked the rebuild for the next one. Keyed on the RUN now.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 99, conversation_id: 7, status: "awaiting_confirmation" }],
+    })
+    getRun.mockResolvedValue({
+      id: 99, status: "awaiting_confirmation", goal_text: "raise NRR",
+      prioritisation: { ask: "What counts as retained?" },
+    })
+    // A thread that ALREADY carries a finished run's settled record.
+    seedPersistedTab({
+      id: "t1", title: "chat", dbConvId: 7,
+      thread: [{ id: "old", query: "reduce churn",
+        goalGateResolved: { kind: "definition", definition: "logo churn" } }],
+    }, "t1")
+    mountApp()
+
+    await waitFor(() => expect(getRun).toHaveBeenCalledWith(99))
+    await waitFor(() =>
+      expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+    expect(document.body.textContent).toContain("What counts as retained?")
+  })
+
+  it("a pending gate does not come back from storage as a permanent spinner", async () => {
+    // `pending` is an in-flight indicator whose poll died with the page — the
+    // same class as `prdCommandThinking` and `ticketSetRunning`, both stripped
+    // on save. Restored it would sit forever AND satisfy the has-this-run guard
+    // against itself, blocking the rebuild that would have replaced it.
+    listRuns.mockResolvedValue({
+      runs: [{ id: 99, conversation_id: 7, status: "awaiting_confirmation" }],
+    })
+    getRun.mockResolvedValue({
+      id: 99, status: "awaiting_confirmation", goal_text: "raise NRR",
+      prioritisation: { ask: "What counts as retained?" },
+    })
+    seedPersistedTab({
+      id: "t1", title: "chat", dbConvId: 7,
+      thread: [{ id: "p", query: "raise NRR",
+        goalGate: { kind: "pending", goalText: "raise NRR" } }],
+    }, "t1")
+    mountApp()
+
+    // The rebuild runs rather than being blocked by the stale spinner.
+    await waitFor(() =>
+      expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+    expect(screen.queryByTestId("goal-gate-pending")).toBeNull()
+  })
+
   it("does not mark an innocent tab as already-opened", async () => {
     // The other half of the same bug: a claim misfiled against tab A marks it
     // as already-auto-opened, so A's OWN restored analysis never opens when

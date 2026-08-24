@@ -482,16 +482,24 @@ export interface MapMainTurnsDeps {
   onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
   onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
-  /** Goal Analysis gates, answered in the thread. OPTIONAL so surfaces without
-   *  the feature (project group chat) map turns unchanged. */
-  goalGateBusyTurnId?: string | null
-  goalGateErrorTurnId?: string | null
-  confirmGoalDefinition?: (
-    tabId: string, turnId: string, runId: number, definition: string,
-  ) => void
-  approveGoalPlan?: (
-    tabId: string, turnId: string, runId: number, decision: GoalPlanDecision,
-  ) => void
+  /** Goal Analysis gates, answered in the thread.
+   *
+   *  REQUIRED, and deliberately so — a surface without the feature passes
+   *  `undefined` EXPLICITLY. As optional fields they could be left off the deps
+   *  object with a clean `tsc`, and that is exactly how this feature shipped
+   *  inert: `mapDeps` never passed the handlers, every button short-circuited
+   *  through `confirmGoalDefinition?.(…)`, and nothing anywhere complained.
+   *  Naming them costs a surface one line and makes dropping them a build
+   *  error. */
+  goalGateBusyTurnId: string | null | undefined
+  confirmGoalDefinition:
+    | ((tabId: string, turnId: string, runId: number,
+        definition: string) => void | Promise<void>)
+    | undefined
+  approveGoalPlan:
+    | ((tabId: string, turnId: string, runId: number,
+        decision: GoalPlanDecision) => void | Promise<void>)
+    | undefined
   setViewerAttachment: (a: {
     name: string
     content: string

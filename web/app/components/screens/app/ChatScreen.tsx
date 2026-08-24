@@ -692,6 +692,20 @@ const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
     chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
 }
 
+/** Drop a `pending` goal gate coming back from storage.
+ *
+ *  Stripped on SAVE too, but a thread written by an older build still carries
+ *  one — and a restored `pending` gate is a spinner nothing can fill: the poll
+ *  that would replace it with the run's question died with the page that
+ *  started it. Worse, it would satisfy the restore's has-this-run guard against
+ *  itself and block the rebuild that replaces it. Answered gates survive: a
+ *  settled definition or plan is a record, not an indicator.
+ */
+function _thawThread(thread: ThreadTurn[] | undefined): ThreadTurn[] {
+  return (thread ?? []).map((tn) =>
+    (tn.goalGate?.kind === "pending" ? { ...tn, goalGate: undefined } : tn))
+}
+
 export function ChatScreen() {
   const {
     currentScreen,
@@ -779,7 +793,7 @@ export function ChatScreen() {
       return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
         id: t.id ?? "",
         title: t.title ?? "",
-        thread: t.thread ?? [],
+        thread: _thawThread(t.thread),
         dbConvId: t.dbConvId ?? null,
         briefMeta: t.briefMeta ?? null,
         insightBody: t.insightBody ?? null,
@@ -876,7 +890,7 @@ export function ChatScreen() {
       const saved = sessionStorage.getItem(tabsKey)
       if (saved) {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
-          id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
+          id: t.id ?? "", title: t.title ?? "", thread: _thawThread(t.thread),
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
@@ -1026,9 +1040,19 @@ export function ChatScreen() {
               // the `resolved` record both persist (a settled share must still
               // say what was posted after a reload); only the in-flight flag
               // is dropped, exactly like `ticketSetRunning` above.
-              turn.slackShare?.busy
-                ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
-                : turn),
+              // A `pending` goal gate is the same kind of in-flight indicator
+              // as the two above, and dies the same way: the poll that would
+              // replace it with the run's question lives in the page that just
+              // went. Restored, it is a permanent "working out what this goal
+              // means…" that nothing can fill — and worse, it satisfies the
+              // restore's own has-a-gate guard and blocks the rebuild that
+              // would have replaced it. The ANSWERED gates persist: a settled
+              // definition or plan is a record, not a spinner.
+              turn.goalGate?.kind === "pending"
+                ? { ...turn, goalGate: undefined }
+                : turn.slackShare?.busy
+                  ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
+                  : turn),
         }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
@@ -3700,6 +3724,12 @@ export function ChatScreen() {
     const inTab = activeId && activeId !== BRIEF_TAB_ID
       ? tabsRef.current.find((t) => t.id === activeId)
       : undefined
+    // A NAMED tab that no longer exists is a DROPPED turn, never a new one.
+    // Pinning the destination made the id load-bearing without making a stale
+    // one detectable: falling through to `openTab(handle, …)` with an empty
+    // `handle` — every gate turn carries `query: ""` — spawned a blank-titled
+    // tab in the rail holding a plan for a conversation the reader had closed.
+    if (intoTabId && !inTab) return
     let tabId: string
     if (inTab) {
       tabId = inTab.id
@@ -3714,7 +3744,11 @@ export function ChatScreen() {
     } else {
       tabId = openTab(handle, [turn])
     }
-    pushPendingConversation(turn.id, seedQuery, tabId)
+    // ONLY A TURN WITH TEXT IS A CONVERSATION TURN. The gate turns carry
+    // `query: ""` — they are a card, not something the user said — and pushing
+    // them persisted an empty user row per gate into the thread's history,
+    // which then replays as a blank message on every later restore.
+    if (seedQuery) pushPendingConversation(turn.id, seedQuery, tabId)
     if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
@@ -4650,9 +4684,29 @@ export function ChatScreen() {
             && mine.status !== "awaiting_approval") return
         const tabId = activeTabIdRef.current
         if (!tabId) return
-        const already = (tabsRef.current.find((t) => t.id === tabId)?.thread ?? [])
-          .some((tn) => tn.goalGate != null || tn.goalGateResolved != null)
-        if (already) return
+        const tab = tabsRef.current.find((t) => t.id === tabId)
+        if (!tab) return
+        // A tab whose thread is still being fetched is NOT an empty tab. Seeding
+        // it here races `resumeChat`'s fill, which only writes when the thread
+        // is still empty — so the loser is whichever arrives second, and the
+        // gate can be silently swallowed. `reusableActiveTab` skips a hydrating
+        // tab for exactly this reason; the next run of this effect catches it.
+        if (tab.hydrating) return
+
+        // KEYED ON THE RUN, NOT ON "HAS THIS THREAD EVER HELD A GATE". The first
+        // version asked the latter, so the settled record of a PREVIOUS run —
+        // the artefact this whole change exists to keep in the thread — blocked
+        // the rebuild for the next one, and a second analysis in one chat was
+        // unanswerable after a reload.
+        //
+        // ACROSS EVERY TAB, because two tabs can share a conversation id (this
+        // effect's own dependency comment says so) and each is restored
+        // independently — one gate per tab means two live Confirm buttons for
+        // one question, which is the duplicate the panel was stripped to avoid.
+        const alreadyOnScreen = tabsRef.current.some((t) => t.thread.some((tn) =>
+          (tn.goalGate?.kind === "definition" || tn.goalGate?.kind === "plan")
+            && tn.goalGate.runId === mine.id))
+        if (alreadyOnScreen) return
         const detail = await goalAnalysisApi.get(mine.id)
         if (!live) return
         if (detail.status === "awaiting_confirmation") {
@@ -4856,12 +4910,26 @@ export function ChatScreen() {
     (tabId: string, turnId: string, reason: string) => {
       goalGateBusyTurnRef.current = null
       setGoalGateBusyTurnId(null)
-      patchTurn(tabId, turnId, {
-        goalGate: undefined,
-        goalGateResolved: { kind: "failed", reason },
-      })
+      // The settled record SURVIVES. A definition the reader confirmed is the
+      // thing they would have to defend later; overwriting it with the failure
+      // threw away the answer and kept only the complaint. The failure rides
+      // `goalGateError` beside it instead.
+      setTabs((prev) => prev.map((t) => (t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) => (tn.id === turnId
+              ? {
+                  ...tn,
+                  goalGate: undefined,
+                  goalGateError: reason,
+                  goalGateResolved: tn.goalGateResolved
+                    ?? { kind: "failed" as const, reason },
+                }
+              : tn)),
+          }
+        : t)))
     },
-    [patchTurn],
+    [setTabs],
   )
 
   const failGoalTurn = useCallback(
@@ -4970,17 +5038,39 @@ export function ChatScreen() {
         openContentPanel("goal")
       } catch (e) {
         const refused = goalRefusalMessage(e)
-        // Either way the card stays: a refusal is retryable, and a lost
-        // response leaves a run that may already be going — neither is a reason
-        // to lock the reader out of it.
-        failGoalTurn(tabId, turnId, refused
-          || "We could not tell whether that started. Checking…")
+        if (refused) {
+          // The server refused the body before claiming anything: the run is
+          // still at its gate and the card stays answerable.
+          failGoalTurn(tabId, turnId, refused)
+          return
+        }
+        // AND THEN ACTUALLY CHECK. The server claims the row before it does any
+        // work, so a response lost after that claim means the run IS going with
+        // nothing watching it. Saying "Checking…" and then not checking is
+        // worse than saying nothing: it promises a resolution that never comes.
+        failGoalTurn(tabId, turnId,
+          "We could not tell whether that started. Checking…")
+        const after = await awaitGoalRun(runId, ["running", "ready"])
+        if (!after) return
+        patchTurn(tabId, turnId, {
+          goalGateError: undefined,
+          goalGateResolved: {
+            kind: "plan",
+            excludedSources: decision.excluded_sources,
+            hypotheses: decision.hypotheses,
+          },
+        })
+        goalRunRef.current = runId
+        setContent({ goalRunId: runId })
+        goalAutoOpenedRef.current.add(tabId)
+        openContentPanel("goal")
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
       }
     },
-    [failGoalTurn, goalRefusalMessage, patchTurn, setContent, openContentPanel],
+    [awaitGoalRun, failGoalTurn, goalRefusalMessage, patchTurn, setContent,
+     openContentPanel],
   )
 
   // The entry point: start the run, then put its FIRST question in the thread.
@@ -6041,7 +6131,6 @@ export function ChatScreen() {
               // short-circuited through `confirmGoalDefinition?.(…)` — the
               // second independent way this feature shipped inert.
               goalGateBusyTurnId,
-              goalGateErrorTurnId: null,
               confirmGoalDefinition,
               approveGoalPlan,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
