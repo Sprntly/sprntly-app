@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation"
 import { useWorkspace } from "../context/WorkspaceContext"
 import { slugForStep } from "../lib/onboarding/types"
 import { postLoginPath } from "../lib/supabase/client"
+import { AppLoading } from "./AppLoading"
 
 // Enforces "onboarding must be finished before the app proper" for every entry
 // into the protected `(app)` route group — not just the sign-in form and the
@@ -115,25 +116,10 @@ function OnboardingRequiredGuard({ children }: { children: React.ReactNode }) {
   // The app proper renders ONLY for a fully-onboarded user. Everyone else holds
   // on the loading shell while the effect routes them away — so a workspace-less
   // user never sees an empty app.
-  if (loading || !completed) {
-    return (
-      <div
-        style={{
-          minHeight: "100vh",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "#FFFFFF",
-          color: "#000000",
-          fontFamily: "Geist, system-ui, sans-serif",
-          fontSize: 15,
-          fontWeight: 500,
-        }}
-      >
-        Loading…
-      </div>
-    )
-  }
+  // The same wordless mark the server splash and `AuthLoading` paint, so a
+  // reload runs ONE animation from the first frame to the app instead of a logo
+  // that vanishes and leaves the word "Loading…" standing behind it.
+  if (loading || !completed) return <AppLoading />
 
   return <>{children}</>
 }

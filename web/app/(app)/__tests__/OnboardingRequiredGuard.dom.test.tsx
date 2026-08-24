@@ -162,12 +162,17 @@ describe("OnboardingRequiredGuard", () => {
     expect(replace).not.toHaveBeenCalled()
   })
 
-  it("paints the loading shell white with black text (not a black screen)", () => {
+  it("holds on the wordless mark, on white (not a black screen)", () => {
+    // The shell is the same spinning mark the server splash paints, with no
+    // caption: a reload runs ONE animation to the app instead of a logo that
+    // vanishes and leaves the word "Loading…" standing behind it.
     ws = { loading: true, workspace: null }
-    const { getByText } = renderGuard()
-    const shell = getByText("Loading…")
+    const { container } = renderGuard()
+    const mark = container.querySelector(".spr-iris")
+    expect(mark).not.toBeNull()
+    expect(container.textContent).not.toContain("Loading")
+    const shell = container.firstElementChild as HTMLElement
     expect(shell.style.background).toBe("rgb(255, 255, 255)")
-    expect(shell.style.color).toBe("rgb(0, 0, 0)")
   })
 
   it("falls back to the onboarding entry if postLoginPath throws", async () => {
