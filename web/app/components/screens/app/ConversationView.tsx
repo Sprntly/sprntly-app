@@ -419,7 +419,6 @@ export function ConversationView(props: ConversationViewProps) {
                 attachments: pendingSend.attachments.map((a) => ({ name: a.name })),
               }}
               agentName={AGENT_NAME}
-              agentBadge="Product Coworker"
               agentBodyNode={
                 // The same ladder the real turn will pick up — and
                 // the same clock, handed over with the turn — so a
@@ -547,7 +546,6 @@ export function ConversationView(props: ConversationViewProps) {
         },
         transcript: {
           agentName: AGENT_NAME,
-          agentBadge: "Product Coworker",
           timestamps: "none",
           leading: leadingNode,
         },

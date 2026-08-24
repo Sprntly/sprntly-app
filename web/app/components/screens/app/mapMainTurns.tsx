@@ -272,7 +272,6 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       // suppress the agent block via `author` above.
       ...(turn.postedOnly && !turn.author ? { showAgent: false } : {}),
       agentName: AGENT_NAME,
-      agentBadge: "Product Coworker",
       isLast,
       isGenerating,
       isAnimated: hasFreshReply,

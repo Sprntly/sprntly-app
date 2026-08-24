@@ -115,7 +115,7 @@ class AskFailedError extends Error {
  * ask_id is deliberately left in place so a reload re-attaches. Split out from
  * the generic failure so the chat can render the honest "still running on our
  * side — reload and it will pick up where it left off" state instead of the
- * red "that answer didn't come through" bubble.
+ * red "there was an interruption" bubble.
  */
 export class AskTimeoutError extends AskFailedError {}
 
