@@ -215,25 +215,34 @@ def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
     reading a transcript that doesn't exist yet.
 
     This closes that gap for the one case it's safe to close it in: `context`
-    thin enough that there was plainly nothing to resolve from. It calls
-    `qa_agent.answer` UNPLANNED (`plan=None`) — the same router every
-    unplanned chat question goes through, so "report on our biggest issues"
-    gets exactly the call-digest/VoC dispatch the identical bare question
-    already gets. Best-effort: any failure here (including "I don't have
-    enough information to answer that") returns "" and `generate_into` falls
-    straight back through to its original, honest, empty-context behavior —
-    this can only ADD grounding, never remove the fallback that already
-    existed.
+    thin enough that there was plainly nothing to resolve from.
+
+    MUST BUILD A REAL PLAN FIRST. The first cut of this call passed
+    `plan=None` on the theory that `qa_agent.answer(plan=None)` is "the same
+    router every unplanned chat question goes through" — quoting the docstring
+    out of context. Every LIVE caller of `qa_agent.answer` (routes/ask.py via
+    `ask_job_runner`) calls `ask_planner.plan_for_answer` FIRST and passes its
+    result; `plan=None` is what a PLANNER OUTAGE degrades to, not a path any
+    real question takes today. Verified live: the identical question, asked
+    plainly through chat (which plans it), returned a 10,044-character grounded
+    answer citing this exact workspace's data; the same call from here, with
+    `plan=None`, returned nothing — the missing plan, not the retrieval, was
+    the gap. `plan_for_answer` never raises (a planner outage returns None,
+    the documented fail-open), so this stays best-effort either way.
     """
     if not dataset or not task.strip():
         return ""
     try:
-        from app import qa_agent
+        from app import ask_planner, qa_agent
 
+        plan = ask_planner.plan_for_answer(
+            enterprise_id=company_id, question=task, history=None,
+        )
         result = qa_agent.answer(
             enterprise_id=company_id,
             question=task,
             dataset=dataset,
+            plan=plan,
         )
     except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
         logger.exception(
