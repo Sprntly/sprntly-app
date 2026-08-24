@@ -1530,32 +1530,53 @@ def test_a_clean_adoption_is_not_handed_a_pick_list(ctx, monkeypatch):
     """§7: when Step 2 found a definition the confirmation "is not a question,
     it is a statement with an escape hatch, and it should take two seconds to
     clear". A six-item pick-list beside an adopted verbatim definition invites
-    the user to replace it with our paraphrase — which §10 forbids."""
-    import app.routes.crucible as mod
+    the user to replace it with our paraphrase — which §10 forbids, and the
+    panel's pick used to be a REPLACE with no undo.
 
+    DRIVEN THROUGH THE REAL RESOLVER, not a stub. An earlier version of this
+    test monkeypatched `resolve` to return a fake object, which `_remember`
+    then stored in the module-level `_pending_definitions` dict — keyed by
+    `run_id`, which restarts at 1 whenever the test DB resets. A LATER test
+    picked the fake up and died in `confirm()` on `definition.id`. The fake
+    was the bug; the real ladder is also the better test.
+    """
+    from app.kpi_tree import KpiTree, NorthStar
+
+    tree = KpiTree(
+        north_star=NorthStar(
+            metric="Net Revenue Retention (NRR)",
+            description="expansion minus churn across renewing accounts",
+        ),
+        primary_metrics=[],
+        secondary_signals=[],
+    )
+    monkeypatch.setattr("app.kpi_tree.load_kpi_tree", lambda cid: tree)
+
+    # A registry with something in it, so an empty list cannot pass vacuously.
     for i, p in enumerate(["2026-02-02", "2026-03-02"]):
         _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
 
-    real = mod.resolve
-
-    class _Adopted:
-        status = "candidate"
-        ask = "Confirm this definition."
-        conflicts: list = []
-
-        class definition:  # noqa: N801 — a stand-in for the resolved object
-            definition_text = "Signups means accounts completing onboarding."
-            definition_source_ref = "kpi_tree"
-
-    monkeypatch.setattr(mod, "resolve", lambda **kw: _Adopted())
-
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
     meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
-    assert meta["proposed_definition"] == (
-        "Signups means accounts completing onboarding.")
+
+    assert "expansion minus churn" in meta["proposed_definition"], (
+        "the fixture did not actually reach an adoption")
     assert (meta.get("candidates") or []) == [], (
         "an adopted definition must not be offered a replacement list")
-    assert real is not None  # keep the reference honest
+
+
+def test_a_registry_metric_is_still_offered_when_nothing_was_adopted(ctx):
+    """The other half of the test above: with no KPI-tree match the SAME
+    registry does produce candidates, so the assertion there is about the
+    adoption and not about an empty registry."""
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    assert not meta.get("proposed_definition")
+    assert [c["key"] for c in (meta.get("candidates") or [])] == [
+        "weekly_signups_count"]
 
 
 def test_a_failed_registry_read_never_blocks_the_ask(ctx, monkeypatch):
