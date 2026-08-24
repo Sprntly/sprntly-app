@@ -24,6 +24,7 @@ import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { SlackShareMessage } from "../../shared/SlackSharePreviewCard"
 import { ChatArtifactActions, ChatTicketSetActions } from "../../shared/chat-shell/ChatArtifactActions"
 import { turnAfterNode } from "../../shared/chat-shell/turnAfterNode"
+import type { PlanDecision } from "../../shared/GoalAnalysisPlan"
 import { type ThreadTurn } from "./ChatScreen"
 
 export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): ChatTranscriptTurn[] {
@@ -53,6 +54,9 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleAskAgain,
     handleStopAsk,
     submitClarifyAnswers,
+    goalGateBusyTurnId,
+    confirmGoalDefinition,
+    approveGoalPlan,
     setViewerAttachment,
     editingTurnId,
     copiedTurnId,
@@ -290,6 +294,15 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       summaryPending: turn.summaryPending,
       onStop: handleStopAsk,
       prdCommandThinking: !!activeTab?.prdCommandThinking,
+      goalGate: turn.goalGate,
+      goalGateResolved: turn.goalGateResolved,
+      // Busy is per-TURN, not per-thread: two gates can sit in one thread (the
+      // definition above, the plan below) and a thread-wide flag would grey out
+      // the settled one as well as the live one.
+      goalGateBusy: goalGateBusyTurnId === turn.id,
+      onConfirmGoalDefinition: (d: string) => confirmGoalDefinition?.(turn.id, d),
+      onApproveGoalPlan: (decision: PlanDecision) =>
+        approveGoalPlan?.(turn.id, decision),
       clarify: turn.clarify,
       clarifyResolved: turn.clarifyResolved,
       clarifyPopupNote: clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved,

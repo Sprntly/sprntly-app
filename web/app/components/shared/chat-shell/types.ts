@@ -393,6 +393,14 @@ export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onCla
  * Typed structurally against the host so this module never imports the
  * main-chat screen.
  */
+/** Structural mirror of `GoalAnalysisPlan`'s `PlanDecision`. Named here rather
+ *  than imported for the reason stated at the top of this file: this module
+ *  describes its host's fields structurally and does not depend on them. */
+export type GoalPlanDecision = {
+  excluded_sources: string[]
+  hypotheses: string[]
+}
+
 export interface MapMainTurnsDeps {
   // in-flight / last-turn state
   animatedTurnIds: MutableRefObject<Set<string>>
@@ -474,6 +482,11 @@ export interface MapMainTurnsDeps {
   onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
   onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
+  /** Goal Analysis gates, answered in the thread. OPTIONAL so surfaces without
+   *  the feature (project group chat) map turns unchanged. */
+  goalGateBusyTurnId?: string | null
+  confirmGoalDefinition?: (turnId: string, definition: string) => void
+  approveGoalPlan?: (turnId: string, decision: GoalPlanDecision) => void
   setViewerAttachment: (a: {
     name: string
     content: string

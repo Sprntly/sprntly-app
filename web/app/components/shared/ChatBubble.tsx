@@ -45,6 +45,12 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "./ClarifyQuestionsCard"
+import {
+  GoalGateCard,
+  type GoalGate,
+  type GoalGateResolved,
+} from "./GoalGateCard"
+import type { PlanDecision } from "./GoalAnalysisPlan"
 import { OpenArtifactChips } from "./OpenArtifactChips"
 import { ArtifactListCards } from "./ArtifactListCards"
 import type { AskResponse, ChatArtifactItem, OpenArtifactCandidate } from "../../lib/api"
@@ -183,6 +189,13 @@ export interface ChatBubbleProps {
    *  still true. */
   prdCommandThinking?: boolean
 
+  /** A Goal Analysis gate riding this turn — the definition question or the
+   *  plan awaiting approval, answered IN THE THREAD. */
+  goalGate?: GoalGate | null
+  goalGateResolved?: GoalGateResolved
+  goalGateBusy?: boolean
+  onConfirmGoalDefinition?: (definition: string) => void
+  onApproveGoalPlan?: (decision: PlanDecision) => void
   clarify?: ClarifyQuestion[] | null
   clarifyResolved?: ClarifyResolution
   /** True while the dock's stepper popup is open and targeting THIS turn —
@@ -431,6 +444,11 @@ export function ChatBubble(props: ChatBubbleProps) {
     summaryPending,
     onStop,
     prdCommandThinking,
+    goalGate,
+    goalGateResolved,
+    goalGateBusy,
+    onConfirmGoalDefinition,
+    onApproveGoalPlan,
     clarify,
     clarifyResolved,
     clarifyPopupNote,
@@ -735,6 +753,15 @@ export function ChatBubble(props: ChatBubbleProps) {
                     ) : (
                       <div className="bc-stopped">No response was generated for this message.</div>
                     )
+                  ) : null}
+                  {goalGate ? (
+                    <GoalGateCard
+                      gate={goalGate}
+                      resolved={goalGateResolved}
+                      busy={goalGateBusy}
+                      onConfirmDefinition={(d) => onConfirmGoalDefinition?.(d)}
+                      onApprovePlan={(d) => onApproveGoalPlan?.(d)}
+                    />
                   ) : null}
                   {clarify?.length && (clarifyResolved || clarifyGateOpen) ? (
                     clarifyPopupNote && !clarifyResolved ? (

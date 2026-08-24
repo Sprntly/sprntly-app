@@ -27,6 +27,8 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
+import type { GoalGate, GoalGateResolved } from "../../shared/GoalGateCard"
+import type { PlanDecision } from "../../shared/GoalAnalysisPlan"
 import { type PopupAnswer } from "../../shared/QuestionPopup"
 import {
   useSlackShareCardHandlers,
@@ -51,7 +53,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -166,6 +168,15 @@ export type ThreadTurn = {
    *  The card renders while the tab's `pendingClarify` is live and, once
    *  settled, as the read-only record below; only a full history rehydration
    *  (which rebuilds turns from text alone) falls back to `reply.answer`. */
+  /** A Goal Analysis gate riding this turn — the definition question, or the
+   *  plan awaiting approval. Rendered IN THE THREAD as an answerable card, the
+   *  same contract `clarify` uses: live while unresolved, replaced by a settled
+   *  summary once `goalGateResolved` lands. Both gates are the conversation
+   *  that lets a PM defend the result, so they belong in the conversation. */
+  goalGate?: GoalGate
+  /** What the user actually agreed to. Its presence flips the card to its
+   *  settled form and is what keeps the record in the thread. */
+  goalGateResolved?: GoalGateResolved
   clarify?: ClarifyQuestion[]
   /** How the batch above was settled — answers given, or the assumptions each
    *  unanswered question fell back to. Its presence is what flips the card from
@@ -4682,24 +4693,180 @@ export function ChatScreen() {
   }, [goalAnalysisOn, isBriefTab, activeTabId, content.goalRunId,
       contentPanelTab, openContentPanel])
 
-  // Start a Goal Analysis run and put its panel on screen.
+  // ── Goal Analysis, conducted IN THE THREAD ────────────────────────────────
   //
-  // The panel opens on the run id RATHER THAN on a result, because the first
-  // thing a run does is stop and ask what the goal means.
+  // Both gates are a CONVERSATION, so they happen in the conversation. The run
+  // asks what the goal means; the user answers. It states what it will read;
+  // the user approves, or drops a source, or says what they already expect.
+  // Only then does it read anything, and only the finished report — which is a
+  // document, not a question — goes to the panel.
+  //
+  // WHY NOT THE PANEL FOR THE GATES. It was, and the thread went quiet the
+  // moment a goal was typed: the question that decides what the whole run means
+  // was answered somewhere other than the conversation it belonged to, and
+  // scrolling back later showed a goal with no record of what was agreed. A PM
+  // has to defend the result, and the defence is exactly this exchange.
+  //
+  // NOTHING ADVANCES ON ITS OWN. Each gate waits for a click. The poll below
+  // only watches for the run REACHING a gate; it never answers one.
+  const goalGateBusyTurnRef = useRef<string | null>(null)
+  const [goalGateBusyTurnId, setGoalGateBusyTurnId] = useState<string | null>(null)
+  /** Which run a gate turn belongs to. Keyed by turn so two runs in one thread
+   *  can never cross-answer each other. */
+  const goalRunByTurnRef = useRef<Map<string, number>>(new Map())
+
+  const patchTurn = useCallback(
+    (turnId: string, patch: Partial<ThreadTurn>) => {
+      setTabs((prev) => prev.map((t) => ({
+        ...t,
+        thread: t.thread.map((tn) => (tn.id === turnId ? { ...tn, ...patch } : tn)),
+      })))
+    },
+    [setTabs],
+  )
+
+  /** Poll one run until it leaves `from`. Returns the row, or null if it failed
+   *  or the caller gave up. Deliberately dumb: it reports, it never decides. */
+  const awaitGoalRun = useCallback(
+    async (runId: number, leaving: string): Promise<GoalRunDetail | null> => {
+      for (let i = 0; i < 400; i++) {
+        try {
+          const detail = await goalAnalysisApi.get(runId)
+          if (detail.status !== leaving) return detail
+        } catch {
+          // A transient read failure is not a verdict on the run. Keep polling;
+          // a run that really died lands on `failed` and returns through the
+          // line above.
+        }
+        await new Promise((r) => setTimeout(r, 1500))
+      }
+      return null
+    },
+    [],
+  )
+
+  const failGoalTurn = useCallback(
+    (turnId: string, message: string) => {
+      goalGateBusyTurnRef.current = null
+      setGoalGateBusyTurnId(null)
+      patchTurn(turnId, { goalGate: undefined, error: message })
+    },
+    [patchTurn],
+  )
+
+  // Gate 1 → Gate 2. The definition the user confirmed is THEIR words, which may
+  // be an edit of what was proposed; it is sent verbatim.
+  const confirmGoalDefinition = useCallback(
+    async (turnId: string, definition: string) => {
+      const runId = goalRunByTurnRef.current.get(turnId)
+      if (runId == null || goalGateBusyTurnRef.current) return
+      goalGateBusyTurnRef.current = turnId
+      setGoalGateBusyTurnId(turnId)
+      try {
+        await goalAnalysisApi.confirm(runId, definition)
+        // The record of what was agreed stays in the thread.
+        patchTurn(turnId, { goalGateResolved: { kind: "definition", definition } })
+        const detail = await awaitGoalRun(runId, "running")
+        if (!detail || detail.status === "failed") {
+          failGoalTurn(turnId, "The analysis could not build a plan for this goal.")
+          return
+        }
+        if (detail.status === "awaiting_approval" && detail.prioritisation?.plan) {
+          // A NEW turn: the plan is the run's next thing to say, and a reply
+          // belongs beside the question it answers rather than replacing it.
+          const planTurnId = `goal-plan-${runId}`
+          goalRunByTurnRef.current.set(planTurnId, runId)
+          emitCommandTurn({
+            id: planTurnId,
+            query: "",
+            goalGate: {
+              kind: "plan", runId, plan: detail.prioritisation.plan,
+            },
+          })
+        }
+      } catch (e) {
+        failGoalTurn(turnId, e instanceof Error ? e.message : String(e))
+      } finally {
+        goalGateBusyTurnRef.current = null
+        setGoalGateBusyTurnId(null)
+      }
+    },
+    [awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn],
+  )
+
+  // Gate 2 → the run. Only here does anything get read.
+  const approveGoalPlan = useCallback(
+    async (turnId: string, decision: PlanDecision) => {
+      const runId = goalRunByTurnRef.current.get(turnId)
+      if (runId == null || goalGateBusyTurnRef.current) return
+      goalGateBusyTurnRef.current = turnId
+      setGoalGateBusyTurnId(turnId)
+      try {
+        await goalAnalysisApi.approve(runId, {
+          excluded_sources: decision.excluded_sources,
+          hypotheses: decision.hypotheses,
+        })
+        patchTurn(turnId, {
+          goalGateResolved: {
+            kind: "plan",
+            excludedSources: decision.excluded_sources,
+            hypotheses: decision.hypotheses,
+          },
+        })
+        // NOW the panel earns its place: what follows is a document.
+        goalRunRef.current = runId
+        setContent({ goalRunId: runId })
+        if (activeTabIdRef.current) {
+          goalAutoOpenedRef.current.add(activeTabIdRef.current)
+        }
+        openContentPanel("goal")
+      } catch (e) {
+        failGoalTurn(turnId, e instanceof Error ? e.message : String(e))
+      } finally {
+        goalGateBusyTurnRef.current = null
+        setGoalGateBusyTurnId(null)
+      }
+    },
+    [failGoalTurn, patchTurn, setContent, openContentPanel],
+  )
+
+  // The entry point: start the run, then put its FIRST question in the thread.
+  // The panel is not opened here — there is nothing document-shaped to show yet.
   const startGoalAnalysis = useCallback(async (goalText: string) => {
+    const turnId = `goal-${Date.now()}`
+    // THE TURN GOES UP FIRST, before the network call. The dispatcher reports
+    // `handled` from this executor's PRESENCE, so by the time we run, the
+    // caller has already rolled the optimistic turn away — if the start then
+    // 403s or times out and we had not emitted anything, the user's message
+    // would simply vanish from the thread. Emitting first means the worst case
+    // is a turn carrying an error, which is a conversation; a deleted message
+    // is not.
+    emitCommandTurn({ id: turnId, query: goalText })
     try {
       const run = await goalAnalysisApi.start(goalText, {
         ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
       })
       goalRunRef.current = run.id
-      setContent({ goalRunId: run.id })
-      // Claim the tab: this IS its one auto-open, so closing the panel here
-      // must not hand straight over to the auto-open effect above. Same
-      // sentence as the reports hand-off at `:4164` and the ticket-set one.
-      // Without it the claim was only ever taken on the RESTORE path, so a run
-      // the reader STARTED reopened the instant they dismissed it.
-      if (activeTabId) goalAutoOpenedRef.current.add(activeTabId)
-      openContentPanel("goal")
+      goalRunByTurnRef.current.set(turnId, run.id)
+      const detail = await awaitGoalRun(run.id, "queued")
+      if (!detail || detail.status === "failed") {
+        failGoalTurn(turnId, "The analysis could not start for this goal.")
+        return
+      }
+      if (detail.status === "awaiting_confirmation") {
+        patchTurn(turnId, {
+          goalGate: {
+            kind: "definition",
+            runId: run.id,
+            goalText,
+            ask: detail.prioritisation?.ask
+              || "Before this runs, confirm what this goal means.",
+            proposedDefinition: detail.prioritisation?.proposed_definition,
+            proposedSource: detail.prioritisation?.proposed_source,
+            methodNote: detail.prioritisation?.method_note,
+          },
+        })
+      }
     } catch (e) {
       // A 403 here is the entitlement gate, and it is the one failure worth
       // naming precisely: the control was visible, so "something went wrong"
@@ -4711,17 +4878,16 @@ export function ChatScreen() {
           ? "This is an experimental feature and your company is not enrolled yet."
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
+      // The toast is transient and the thread is not. Whatever went wrong is
+      // recorded against the turn the user actually sent.
+      failGoalTurn(
+        turnId,
+        denied
+          ? "Goal Analysis is not enabled for this workspace yet."
+          : "That analysis could not be started.",
+      )
     }
-    // `activeTabId` IS A REAL DEPENDENCY, not a lint appeasement — the same
-    // sentence this file already carries at `:2191` and `:4586`, and I still
-    // read it here without listing it. Rebuilt only on a CONVERSATION change,
-    // this callback holds a stale tab id whenever the conversation does not
-    // change: two tabs on one conversation, and two brand-new chats (which
-    // share `activeConvId === null`). The claim then files against the tab the
-    // reader LEFT — so the run they just started reopens the moment they
-    // dismiss it, and the innocent tab is marked as already-auto-opened, which
-    // hides its own restored analysis on the next visit.
-  }, [activeConvId, activeTabId, setContent, openContentPanel, showToast])
+  }, [activeConvId, awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn, showToast])
 
   // Republished on every render so the dispatcher always calls the current
   // closure. An effect would work equally well here — `dispatchChatIntent`
