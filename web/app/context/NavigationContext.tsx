@@ -120,6 +120,9 @@ export type ReportFocusRequest = { conversationId: number; reportId: number }
  *  the resumed tab is actually active, then loads the set and opens the panel.
  *  No new panel tab: a set reads on the existing `"tickets"` one. */
 export type TicketSetFocusRequest = { conversationId: number; ticketSetId: number }
+/** Open a team DOCUMENT in the chat thread it was written in, with the panel's
+ *  Document tab on it -- the same posture a PRD row and a report row take. */
+export type DocumentFocusRequest = { conversationId: number; documentId: number }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
@@ -247,6 +250,17 @@ interface NavigationContextType {
    *  routes to the chat surface and says which set to land on. */
   openTicketSetTab: (request: TicketSetFocusRequest) => void
 
+  /** Filled by `openDocumentTab`; consumed once by ChatScreen, which opens the
+   *  panel's Document tab on that document as soon as its own thread is the
+   *  active tab. */
+  pendingDocumentFocus: DocumentFocusRequest | null
+  setPendingDocumentFocus: (value: DocumentFocusRequest | null) => void
+  /** Open a team document in the chat thread it belongs to. The CALLER must
+   *  already have written the `sprntly_resume_conv` hand-off for that
+   *  conversation (ChatScreen's resume path spawns/refocuses the tab); this
+   *  routes to the chat surface and says which document to land on. */
+  openDocumentTab: (request: DocumentFocusRequest) => void
+
   /** Global search / command palette (⌘K). Rendered once by AppShell; the
    *  sidebar trigger and the global hotkey both drive this shared state. */
   paletteOpen: boolean
@@ -298,6 +312,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
   const [pendingReportFocus, setPendingReportFocus] = useState<ReportFocusRequest | null>(null)
   const [pendingTicketSetFocus, setPendingTicketSetFocus] = useState<TicketSetFocusRequest | null>(null)
+  const [pendingDocumentFocus, setPendingDocumentFocus] = useState<DocumentFocusRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
@@ -516,6 +531,15 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const openDocumentTab = useCallback((request: DocumentFocusRequest) => {
+    setPendingDocumentFocus(request)
+    // Same posture as `openReportTab`: this navigation to `/` exists to OPEN
+    // the panel, so the route-change effect must not close it on arrival.
+    skipPanelCloseOnNavRef.current = true
+    router.push("/")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openTicketSetTab = useCallback((request: TicketSetFocusRequest) => {
     setPendingTicketSetFocus(request)
     // Same posture as openReportTab: this navigation to `/` exists to OPEN the
@@ -606,6 +630,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingTicketSetFocus,
         setPendingTicketSetFocus,
         openTicketSetTab,
+        pendingDocumentFocus,
+        setPendingDocumentFocus,
+        openDocumentTab,
         paletteOpen,
         openPalette,
         closePalette,
