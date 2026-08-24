@@ -46,8 +46,10 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from app.prompt_history import clamp_turn_text
+from app.report_phases import ReportPhase, emit_report_phase
 from app.connector_lookup import slack_voc
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.connectors.zoom_oauth import (
@@ -1736,8 +1738,15 @@ def answer(
     history: list[dict] | None = None,
     on_delta=None,
     constraints: dict | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
+
+    `on_phase`, when supplied, narrates the two real legs of the wait —
+    GATHERING (the live corpus/KG/Slack fetch) then WRITING (the document-scale
+    synthesis) — via the shared report vocabulary. This is David's most-used
+    report path and the one whose blank wait was reported; a no-op without a
+    sink (scheduled/test callers).
 
     `on_delta`, when given, is the Ask worker's token sink (see
     `app.ask_stream.AnswerFieldExtractor`): the report call below publishes its
@@ -1785,6 +1794,9 @@ def answer(
             f"{window.label} plus the prior period for comparison",
             explicit=True,
         )
+    # GATHERING: the live evidence fetch — calls (Fireflies/Zoom), then the KG
+    # and the Slack feedback channels below. The first (minutes-long) leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     corpus = build_corpus(enterprise_id, window)
 
     # No explicit window in the question + default window empty → widen through
@@ -1939,6 +1951,10 @@ def answer(
     # live fetch from every connected source, the windowing, the full-corpus
     # pass, and the coverage disclosure above. Those are capability; the layout
     # was format.
+    # WRITING: the corpus is assembled — the document-scale synthesis (the
+    # slowest call in the product) is the last leg. The query-shaped branch
+    # above returns before reaching here, so this fires only for the report.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
         from app.ask_runner import _ASK_RESPONSE_SCHEMA
         from app.graph.gateway import llm_call

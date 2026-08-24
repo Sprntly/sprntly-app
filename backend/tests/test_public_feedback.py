@@ -170,6 +170,47 @@ def test_answer_truncated_empty_capture_never_claims_no_feedback(monkeypatch):
     assert "couldn't find enough feedback" not in out["answer"]
 
 
+def _stub_happy_path(monkeypatch):
+    """Wire the happy path (profile + capture + gateway + save) and return the
+    persisted-run capture dict, so a phase test reuses the exact same stubs the
+    render/persist test uses."""
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(
+        pf, "llm_call",
+        lambda **kw: SimpleNamespace(output=dict(REPORT_DATA)))
+    import app.db as db
+    monkeypatch.setattr(db, "save_public_feedback_run", lambda *a, **k: 7)
+
+
+def test_phases_name_capture_then_synthesis_in_order(monkeypatch):
+    _stub_happy_path(monkeypatch)
+    phases: list[str] = []
+    pf.answer(enterprise_id="e1", question="what are people saying about us online?",
+              on_phase=phases.append)
+    assert phases == [
+        "Gathering the latest information…",
+        "Writing your report…",
+    ]
+
+
+def test_no_synthesis_phase_when_capture_found_nothing(monkeypatch):
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    phases: list[str] = []
+    pf.answer(enterprise_id="e1", question="public feedback report",
+              on_phase=phases.append)
+    assert phases == ["Gathering the latest information…"]
+
+
+def test_pipeline_runs_unchanged_without_a_phase_sink(monkeypatch):
+    _stub_happy_path(monkeypatch)
+    with_sink = pf.answer(enterprise_id="e1", question="public feedback report",
+                          on_phase=lambda _l: None)
+    without = pf.answer(enterprise_id="e1", question="public feedback report")
+    assert with_sink == without
+
+
 def test_answer_happy_path_renders_and_persists(monkeypatch):
     _patch_profile(monkeypatch)
     monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))

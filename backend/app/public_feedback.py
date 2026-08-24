@@ -31,10 +31,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Callable
 
 from app.prompt_history import clamp_turn_text
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.report_phases import ReportPhase, emit_report_phase
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -641,7 +643,8 @@ def _pf_reduce(*, enterprise_id: str, question: str, report: str,
 
 
 def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None,
-           on_delta=None) -> dict | None:
+           on_delta=None,
+           on_phase: Callable[[str], None] | None = None) -> dict | None:
     """Run the public-feedback pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -652,7 +655,11 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     the map-reduce synthesis path (gated by
     `answer_first.report_mapreduce_enabled("public_feedback")`); with the gate off
     the synthesis stays the single un-streamed forced-JSON call it is today and
-    `on_delta` is ignored. The scheduled caller passes nothing."""
+    `on_delta` is ignored. The scheduled caller passes nothing.
+
+    `on_phase`, when supplied, narrates the two real legs — GATHERING (the paid
+    public-web capture) then WRITING (the synthesis) — via the shared report
+    vocabulary. A no-op without a sink."""
     from app.research.market import company_profile
 
     # Follow-up filter over an existing run → query mode (seconds, no web
@@ -691,6 +698,8 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     scope = _scope_block(profile, question)
     product = profile.get("product") or {}
     subject = product.get("name") or profile.get("display_name") or ""
+    # GATHERING: the paid public-web sweep (app stores / Reddit / reviews).
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     try:
         records, truncated = _capture(enterprise_id, scope, subject)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
@@ -729,6 +738,8 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         _render_history(history) + f"Question: {question}\n\n{source_line}"
     )
     _report_input = f"{_report_header}\n\n{records_json}"
+    # WRITING: capture is done — the document-scale synthesis is the last leg.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
         from app import answer_first
 

@@ -498,6 +498,51 @@ def test_answer_ok_runs_the_voc_pass_over_the_whole_corpus(monkeypatch):
     assert "Call 1" in captured["input"] and 'Cust: "quote 1"' in captured["input"]
 
 
+def test_report_path_phases_name_gather_then_write_in_order(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch)
+    phases: list[str] = []
+    cd.answer(enterprise_id="co",
+              question="summarize customer calls last week",
+              on_phase=phases.append)
+    # GATHERING (the live corpus/KG/Slack fetch) then WRITING (the synthesis).
+    assert phases == [
+        "Gathering the latest information…",
+        "Writing your report…",
+    ]
+
+
+def test_query_path_emits_gathering_but_not_the_writing_leg(monkeypatch):
+    # A query-shaped ask returns from _answer_query BEFORE the report synthesis,
+    # so it narrates only the gather leg.
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            text="=== CALLS ==="))
+    monkeypatch.setattr(
+        cd, "_answer_query",
+        lambda **kw: {"answer": "counts", "_skill_source": "voc-query"})
+    phases: list[str] = []
+    cd.answer(enterprise_id="co",
+              question="did complaints about exports increase this week?",
+              on_phase=phases.append)
+    assert phases == ["Gathering the latest information…"]
+
+
+def test_report_path_runs_unchanged_without_a_phase_sink(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch)
+    with_sink = cd.answer(enterprise_id="co", question="summarize calls last week",
+                          on_phase=lambda _l: None)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch)
+    without = cd.answer(enterprise_id="co", question="summarize calls last week")
+    assert with_sink["answer"] == without["answer"]
+    assert with_sink["_skill_source"] == without["_skill_source"]
+
+
 def test_answer_disclosure_when_quotes_trimmed(monkeypatch):
     # When the fit trimmed quotes to keep every call in, the source line the
     # report sees says so — the run line can then state real coverage.

@@ -73,6 +73,42 @@ export function friendlyPhase(raw: string | null | undefined): string {
     return "Writing your report…"
   }
 
+  // ── Reports — shared vocabulary (backend/app/report_phases.ReportPhase) ─────
+  // ONE mapping set that covers every report path (voice-of-customer, market-
+  // intel, public-feedback, company-research). The backend emits these generic,
+  // already-user-safe raw labels via `emit_report_phase`; each maps to its own
+  // hardcoded constant here so the count/detail-stripping guarantee still holds
+  // by construction. The company-research stage set is FIXED (non-tenant), so
+  // each stage surfaces as its own checklist line.
+  //
+  // Company-research per-stage lines are checked BEFORE the generic "researching"
+  // gathering fallthrough so a stage keeps its specific copy.
+  if (s.startsWith("researching products")) {
+    return "Researching products & features…"
+  }
+  if (s.startsWith("researching positioning")) {
+    return "Researching positioning…"
+  }
+  if (s.startsWith("researching pricing")) {
+    return "Researching pricing…"
+  }
+  if (s.startsWith("researching market")) {
+    return "Researching market & recent news…"
+  }
+  // ReportPhase.GATHERING "Gathering the latest information…"
+  if (s.startsWith("gathering")) {
+    return "Gathering the latest information…"
+  }
+  // ReportPhase.ANALYZING "Analyzing the findings…" (reserved for the
+  // per-section map-reduce fast-follow; mapped now so the vocabulary is whole).
+  if (s.startsWith("analyzing") || s.startsWith("analysing")) {
+    return "Analyzing the findings…"
+  }
+  // ReportPhase.WRITING "Writing your report…"
+  if (s.startsWith("writing your report") || s.startsWith("writing the report")) {
+    return "Writing your report…"
+  }
+
   // Fail safe: anything we don't recognize gets the claim-free generic line,
   // never the raw activity.
   return FRIENDLY_PHASE_GENERIC
