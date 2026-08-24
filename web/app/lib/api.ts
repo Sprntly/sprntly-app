@@ -1244,6 +1244,13 @@ export type ChatIntentEnvelope = {
    *  which is why the union is wider than any one surface handles. */
   intent:
     | "answer"
+    /** A business GOAL the user wants moved — "increase revenue by 5%",
+     *  "reduce churn". Hands off to Goal Analysis, which stops and asks what
+     *  the metric means, states what it will read, and waits for approval
+     *  before reading anything. The backend gates it on the `crucible`
+     *  entitlement and fails CLOSED, so a company without the module never
+     *  receives this intent. */
+    | "analyse_goal"
     | "generate_prd"
     | "edit_prd"
     /** Change the REPORT or DOCUMENT open beside this chat — dispatches

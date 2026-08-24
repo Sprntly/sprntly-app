@@ -59,6 +59,10 @@ export function useChatIntentExecutors(
     // Also optional: a surface with no side panel has no open report or
     // document to edit, and falls through to its grounded ask.
     onEditArtifact: adapter.onEditArtifact,
+    // OPTIONAL for the same reason: a surface with no Goal Analysis panel to
+    // open (the brief chat, the AI bar) must fall through to its ask path
+    // rather than silently swallowing a goal.
+    onAnalyseGoal: adapter.onAnalyseGoal,
     onAnswer,
   }
 }

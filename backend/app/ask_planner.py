@@ -210,8 +210,24 @@ _PLANNER_THRESHOLD = 0.6
 # `qa_agent.answer`, reached by regex, and it is an ACTION (it rewrites a
 # ticket) rather than a way of answering a question.
 ACTION_ANSWER = "answer"
+
+# A business GOAL the user wants MOVED — "increase revenue by 5%", "reduce
+# churn", "improve activation this quarter". Its own action because the
+# machinery is a different SHAPE from answering: Goal Analysis stops and asks
+# what the metric means before it reads anything, states what it is going to
+# read, and only runs once the user approves — the whole point being that the
+# PM can defend the result afterwards.
+#
+# Routed as `answer` it produced exactly the failure the feature exists to
+# prevent: a user asked to increase revenue by 5% and got a list of
+# opportunities, with no definition confirmed, no plan shown, and nothing
+# approved. The planner had no route to Goal Analysis at all — the only way in
+# was a `+` menu item — so the model's only reachable choice was the wrong one.
+ACTION_ANALYSE_GOAL = "analyse_goal"
+
 _ACTIONS: frozenset[str] = frozenset({
     ACTION_ANSWER,
+    ACTION_ANALYSE_GOAL,
     "generate_prd",
     "edit_prd",
     "generate_tickets",
@@ -340,6 +356,10 @@ LIST_ARTIFACT_KINDS: frozenset[str] = frozenset({
 #: Tickets and prototypes have no such fallback surface, so they keep the rule.
 _NEEDS_TASK: frozenset[str] = frozenset({
     "generate_tickets", "generate_prototype", "multi_agent",
+    # Goal Analysis opens by asking what the goal's metric MEANS, and it can
+    # only ask that about a stated goal. With no task there is nothing to ask
+    # about, so this degrades to `answer` — which can ask what they meant.
+    ACTION_ANALYSE_GOAL,
     # A document with no brief is a blank page with a title. Unlike
     # `generate_prd` — which has a chat surface that asks "what should it
     # cover?" and waits — there is no such prompt for an arbitrary document
@@ -418,7 +438,17 @@ _PLANNER_SCHEMA: dict = {
             "enum": sorted(_ACTIONS),
             "description": (
                 "What the user is asking the assistant to DO. 'answer' is the "
-                "normal outcome — the rest each hand off to a builder."
+                "normal outcome — the rest each hand off to a builder.\n"
+                "'analyse_goal' is for a business GOAL the user wants MOVED: "
+                "\"increase revenue by 5%\", \"reduce churn\", \"improve "
+                "activation this quarter\". It hands off to Goal Analysis, "
+                "which asks what the metric means, states what it will read, "
+                "and runs only once the user approves. Choose it even when you "
+                "could attempt an answer — a goal answered directly skips the "
+                "confirmation the user needs in order to defend the result. Do "
+                "NOT choose it for a QUESTION about a metric (\"what is our "
+                "churn?\", \"how did revenue move last quarter?\"), which "
+                "reports a number and is 'answer'."
             ),
         },
         # THE ACTION'S OWN CONVICTION, and it needs its own field because the
@@ -1952,6 +1982,34 @@ def apply_gates(
     action, task, instruction = _gate_action(
         out.get("action"), out.get("task"), out.get("instruction")
     )
+    # GOAL ANALYSIS IS ENTITLEMENT-GATED, and the gate belongs HERE rather than
+    # only on the route it dispatches to. The route's `require_crucible_module`
+    # returns 403, which for a chat message means the user typed a goal and got
+    # an error instead of the answer the assistant would otherwise have given.
+    # Dropping to `answer` degrades to the pre-existing behaviour instead, which
+    # is the right failure for a company that does not have the feature.
+    #
+    # FAILS CLOSED: any error reading the flags drops to `answer` too. The route
+    # is still the enforcing boundary — this never grants access the route would
+    # refuse, it only avoids routing into a refusal.
+    if action == ACTION_ANALYSE_GOAL:
+        try:
+            from app.entitlements import (
+                crucible_enabled, feature_flags_for_company,
+            )
+            allowed = crucible_enabled(feature_flags_for_company(enterprise_id))
+        except Exception:
+            logger.exception(
+                "[planner] crucible entitlement lookup failed for %s — "
+                "dropping analyse_goal to answer", enterprise_id,
+            )
+            allowed = False
+        if not allowed:
+            logger.info(
+                "[planner] analyse_goal dropped to answer: crucible off for %s",
+                enterprise_id,
+            )
+            action, task, instruction = ACTION_ANSWER, "", ""
     # Absent → 1.0, never 0.0. See `Plan.action_confidence`: a missing field is
     # "this payload doesn't carry one", not "the model was unsure".
     raw_action_confidence = out.get("action_confidence")
