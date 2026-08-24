@@ -437,6 +437,56 @@ _DEFAULT_MIN_CACHEABLE_TOKENS = 4096
 _CHARS_PER_TOKEN = 4
 
 
+def _create_maybe_batched(
+    client, *, batch: bool, label: str = "", batch_deadline_s: float | None = None,
+    stream: bool = False, background: bool = False, on_delta=None,
+    on_json_delta=None, **kwargs,
+):
+    """`_create_with_retries`, except a caller with no one waiting can pay half.
+
+    Anthropic's Message Batches API runs the SAME request for 50% of the price;
+    the trade is latency (minutes, not seconds). `batch=True` means "this work
+    is not on anyone's request path" — background ingest, a catalog backfill —
+    and it is opt-in per call site rather than a global default because only the
+    call site knows whether anything is waiting.
+
+    Falls back to the ordinary synchronous path whenever batching does not work
+    out (`run_batch` returns None: switch off, non-Anthropic key, API error,
+    deadline). Two shapes can never batch and are refused here rather than in
+    `app.llm_batch`, because the reason is local to this module:
+
+      * STREAMING. A batch returns one finished message; there are no deltas to
+        forward, so a caller that asked for `on_delta`/`on_json_delta` (or the
+        long-output transport) must keep the live path or it would silently stop
+        streaming.
+      * A per-request `timeout`, for the same reason it exists — it bounds a
+        synchronous read, and there is no synchronous read to bound.
+
+    The batched request is byte-identical to the one the sync path would send,
+    which is the point: `_build_base_kwargs` produced it, both paths consume it,
+    and neither can drift from the other.
+    """
+    can_batch = (
+        batch and not stream and on_delta is None and on_json_delta is None
+        and "timeout" not in kwargs
+    )
+    if can_batch:
+        from app.llm_batch import BatchRequest, run_batch
+
+        results = run_batch(
+            [BatchRequest("r0", dict(kwargs))],
+            label=label,
+            **({"deadline_s": batch_deadline_s}
+               if batch_deadline_s is not None else {}),
+        )
+        if results and "r0" in results:
+            return results["r0"]
+    return _create_with_retries(
+        client, stream=stream, background=background, on_delta=on_delta,
+        on_json_delta=on_json_delta, **kwargs,
+    )
+
+
 def _cache_control(ttl: str | None) -> dict:
     """The `cache_control` block for a TTL tier.
 
@@ -594,8 +644,16 @@ def call_json(
     background: bool = False,
     temperature: float | None = None,
     on_json_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
+
+    `batch=True` routes the call through the Message Batches API at half price
+    when nothing is waiting on it — see `_create_maybe_batched`. It is a pure
+    cost/latency trade: the request, the response handling, and the returned
+    value are identical either way, and any problem falls back to the live path.
 
     If `schema` is provided, uses Anthropic tool-use with a forced tool_choice
     — the SDK validates the structured input and returns a real dict, which
@@ -635,8 +693,11 @@ def call_json(
             "description": "Submit the structured response. All fields required.",
             "input_schema": schema,
         }
-        msg = _create_with_retries(
+        msg = _create_maybe_batched(
             client,
+            batch=batch,
+            label=batch_label,
+            batch_deadline_s=batch_deadline_s,
             stream=stream,
             background=background,
             on_json_delta=on_json_delta,
@@ -653,7 +714,10 @@ def call_json(
             502, "LLM did not invoke the structured response tool"
         )
 
-    msg = _create_with_retries(client, stream=stream, background=background, **base_kwargs)
+    msg = _create_maybe_batched(
+        client, batch=batch, label=batch_label, batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, **base_kwargs,
+    )
     _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
@@ -684,8 +748,18 @@ def call_md(
     background: bool = False,
     temperature: float | None = None,
     on_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
+
+    `batch=True` is the same half-price opt-in `call_json` takes — see
+    `_create_maybe_batched`. Threaded here too so `batch=True` is never a
+    SILENT no-op: most markdown callers are long-output (prd-author and
+    friends) and therefore stream, which `_create_maybe_batched` refuses and
+    falls back on — but a future non-streaming markdown caller that opts in
+    would otherwise get no saving, no warning and no error.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for
@@ -713,8 +787,10 @@ def call_md(
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
-    msg = _create_with_retries(
-        get_client(), stream=stream, background=background, on_delta=on_delta, **kwargs
+    msg = _create_maybe_batched(
+        get_client(), batch=batch, label=batch_label,
+        batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, on_delta=on_delta, **kwargs
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()

@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     # deploy and a reloaded Settings singleton in tests stays honest.
     # Env-overridable via DESIGN_AGENT_WORKER_ENABLED.
     design_agent_worker_enabled: bool = False
+
+    # --- Message Batches (app.llm_batch) -----------------------------------
+    # Anthropic charges HALF for the same request submitted as a batch, and
+    # ~46% of measured spend is work with no human waiting on it (connector
+    # ingest, the catalog backfill, the scheduled brief). Off by default: the
+    # trade is latency for money, so each call site opts in and this switch
+    # turns the whole mechanism off again without a revert.
+    llm_batch_enabled: bool = False
+
     # When True, a backend startup whose prototype template version is greater
     # than an existing 'ready' prototype's stamped version demotes that prototype
     # to 'invalidated' (the View path 404s it → the PRD screen drops to the

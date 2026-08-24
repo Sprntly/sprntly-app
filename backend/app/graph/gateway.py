@@ -202,6 +202,7 @@ def llm_call(
     background: bool = False,
     temperature: Optional[float] = None,
     on_delta=None,
+    batch: bool = False,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -296,6 +297,13 @@ def llm_call(
             # actually emits) — the caller wraps it in an extractor (e.g.
             # app.ask_stream.AnswerFieldExtractor) to turn them into text.
             output: Any = call_json(
+                # `batch` is the caller's statement that nothing is waiting on
+                # this result, so it may take the half-price Batches path (see
+                # app.llm._create_maybe_batched). Everything else about the call
+                # — attribution, telemetry, the decision-log row written below —
+                # is identical, which is why the switch lives here rather than
+                # in a parallel code path.
+                batch=batch, batch_label=f"{agent}.{purpose}",
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
                 cache_ttl=cache_ttl,
@@ -309,6 +317,11 @@ def llm_call(
             # `system` prompt is cached too when substantial (see
             # _build_base_kwargs).
             output = call_md(
+                # Same opt-in as the json branch above. Most markdown callers
+                # are long-output and therefore stream, which the batch seam
+                # refuses and falls back on — threaded anyway so `batch=True`
+                # is never a silent no-op on this branch.
+                batch=batch, batch_label=f"{agent}.{purpose}",
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 user_cacheable_prefix=user_cacheable_prefix,
                 cache_ttl=cache_ttl,

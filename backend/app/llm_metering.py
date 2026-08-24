@@ -94,8 +94,17 @@ def _record(
     status: str = "succeeded",
     error_class: str | None = None,
     cache_ttl: str | None = None,
+    cost_multiplier: float = 1.0,
 ) -> None:
-    """Stitch one usage row together and hand it to the buffered writer."""
+    """Stitch one usage row together and hand it to the buffered writer.
+
+    `cost_multiplier` scales the ESTIMATED cost only, never the token counts.
+    It exists for the Message Batches API, which charges half for an otherwise
+    identical request (`app.llm_batch.BATCH_COST_MULTIPLIER`). Leaving it at 1.0
+    for batched work would over-report that spend by exactly 2x and hide the
+    saving; scaling the TOKENS instead would corrupt the one number that is
+    ground truth, so the discount is applied at the price, not the quantity.
+    """
     try:
         from app.db.llm_usage import record_usage
         from app.llm_keys import current_company_id
@@ -145,6 +154,7 @@ def _record(
         try:
             cost = (
                 run.est_cost_usd(actual_model, cache_ttl or CACHE_TTL_5M)
+                * cost_multiplier
                 if actual_model else None
             )
         except UnknownModelError:
@@ -335,3 +345,47 @@ def install_metering(client: Any, key_mode: str, provider: str = "anthropic") ->
         return client
     client.messages = _MeteredMessages(client.messages, key_mode, provider)
     return client
+
+
+def key_mode_of(client: Any, default: str = "platform") -> str:
+    """The key mode a metered client was built with.
+
+    `install_metering` fixes `key_mode` per client (the clients are cached per
+    API key, and the mode follows from the key), so reading it back off the
+    proxy is exact — and cheaper and less racy than re-resolving the company's
+    key posture just to label a row. Falls back to the platform mode for a
+    client that was never instrumented, e.g. in a test.
+    """
+    return getattr(getattr(client, "messages", None), "_key_mode", default)
+
+
+def record_external_usage(
+    *,
+    key_mode: str,
+    provider: str,
+    model: str | None,
+    message: Any,
+    started_at: float,
+    cost_multiplier: float = 1.0,
+) -> None:
+    """Meter a response that did NOT come through `client.messages.create`.
+
+    The proxy in this module instruments `create`/`stream`; anything reaching
+    the API another way is invisible to it. The Message Batches endpoint is the
+    first such path (`app.llm_batch`), and without this its spend would be
+    missing from `llm_usage_events` entirely — moving work onto batches would
+    read on the dashboard as volume disappearing rather than as a saving.
+
+    Batched responses carry no `cache_control` echo, so the write tier cannot be
+    read back off the request the way `_requested_cache_ttl` does for a live
+    call; the 5-minute default applies, which is what every batching call site
+    sends today.
+    """
+    _record(
+        key_mode=key_mode,
+        provider=provider,
+        model=model,
+        message=message,
+        started_at=started_at,
+        cost_multiplier=cost_multiplier,
+    )
