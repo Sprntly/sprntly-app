@@ -425,16 +425,13 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
         # its own report in the panel; what it does not do is file a second copy
         # for the team. The earlier run keeps the document, which is the
         # conservative direction: it is the one someone may already have opened.
-        goal_text = (row.get("goal_text") or "").strip()
+        goal_text = row.get("goal_text") or ""
         if goal_text:
-            for other in runs_db.list_for_company(company_id) or []:
-                if (other.get("id") != run_id
-                        and other.get("artifact_id")
-                        and (other.get("goal_text") or "").strip() == goal_text):
-                    logger.info(
-                        "crucible: run %s reuses run %s's document for the same "
-                        "goal", run_id, other.get("id"))
-                    return
+            if runs_db.documented_run_for_goal(
+                    company_id, goal_text, excluding_run_id=run_id):
+                logger.info("crucible: run %s leaves the document to an earlier "
+                            "run of the same goal", run_id)
+                return
         html = _body_or_413(_render_document_html(row, company_id), run_id)
         artifact = create_artifact(
             company_id,
@@ -455,6 +452,33 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
             # A concurrent manual save won the claim. Drop ours: nobody holds
             # its id, so nothing is lost, and leaving it would put a second
             # copy of the same report in the shared library.
+            delete_artifact(company_id, artifact["id"])
+            return
+
+        # THE CHECK-THEN-WRITE RACE, CLOSED AFTER THE FACT.
+        #
+        # `link_document`'s `artifact_id IS NULL` claim guards ONE ROW AGAINST
+        # ITSELF — it makes re-invocation for the same run idempotent. It does
+        # nothing about two DIFFERENT runs of the same goal: both scans run
+        # before either link lands, both see no document, both file one. Two
+        # near-simultaneous runs is the ordinary way to produce that (a
+        # double-click, or a rerun started before the first finished — the
+        # exploratory pattern this dedup exists for).
+        #
+        # There is no unique constraint on `(company_id, goal_text)` to lean on,
+        # and adding one is a migration. So the window is closed the same way
+        # the manual-save collision above is: look again AFTER linking, and if
+        # someone else got there first, stand down and remove our copy. The
+        # tie-break is the lower run id, so both racers reach the same verdict
+        # rather than each deferring to the other and deleting both.
+        rival = runs_db.documented_run_for_goal(
+            company_id, goal_text, excluding_run_id=run_id) if goal_text else None
+        if rival and (rival.get("id") or 0) < run_id:
+            logger.info(
+                "crucible: run %s lost a same-goal race to run %s; removing the "
+                "duplicate document", run_id, rival.get("id"))
+            runs_db.update(run_id, company_id, artifact_id=None,
+                           report_body_hash=None)
             delete_artifact(company_id, artifact["id"])
     except Exception:  # noqa: BLE001 — see the docstring; convenience only.
         logger.warning("crucible: could not autosave the report for run %s",

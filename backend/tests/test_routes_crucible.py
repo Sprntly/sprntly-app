@@ -1857,14 +1857,115 @@ def test_nothing_in_the_run_reads_the_metric_registry():
     substrings of the note and would keep passing on a stale string.
 
     This fails instead, and points at the note."""
+    import pathlib
+    import re
+
+    # THE WHOLE PIPELINE, not one function's body. Greping
+    # `inspect.getsource(execute_run)` was trivially defeated by ordinary
+    # refactoring: a `_size_with_registry(...)` helper defined elsewhere and
+    # called from `execute_run` puts none of these names in `execute_run`'s own
+    # source, and this file already factors work out that way — so the guard
+    # would have been silently defeated by whoever does that work next rather
+    # than by anyone trying to dodge it.
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    watched = [root / "crucible" / f for f in
+               ("pipeline.py", "claims.py", "scoring.py", "cluster.py",
+                "kg_themes.py", "report.py")]
+    watched.append(root / "routes" / "crucible.py")
+
+    offenders = []
+    for path in watched:
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if path.name == "crucible.py" and path.parent.name == "routes":
+            # `_method_note` and the ask's candidate scan legitimately read the
+            # registry; the ANALYSIS must not. Strip the two known-good readers
+            # before looking.
+            text = re.sub(r"def (_method_note|_autosave_document)\b.*?(?=\ndef )",
+                          "", text, flags=re.S)
+            text = text.replace("from app.crucible.metric_candidates import", "")
+        for forbidden in ("metric_points", "list_metric_points",
+                          "distinct_metrics"):
+            if forbidden in text:
+                offenders.append(f"{path.name}: {forbidden}")
+
+    assert not offenders, (
+        f"the analysis now touches the metric registry ({offenders}). "
+        f"`_method_note` promises the run reads your documents, tickets and "
+        f"conversations rather than a metric series — rewrite that sentence "
+        f"before wiring the registry into sizing."
+    )
+
+
+def test_two_concurrent_runs_of_one_goal_leave_one_document(ctx, monkeypatch):
+    """THE RACE THE SEQUENTIAL TEST CANNOT SEE.
+
+    `link_document`'s `artifact_id IS NULL` claim guards one row against
+    ITSELF; it says nothing about two different runs. Both scans can run before
+    either link lands, both see no document, and both file one — reintroducing
+    the duplicate the dedup exists to prevent. A double-click, or a rerun
+    started before the first finished, is the ordinary way to produce it.
+
+    Simulated deterministically by making the FIRST run's pre-flight scan see
+    nothing (as it would in the race) and letting the after-the-fact re-check
+    do the work.
+    """
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+    import app.routes.crucible as mod
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    # Run A completes normally and files the document.
+    a = _start(ctx, goal="reduce customer churn").json()["id"]
+    _confirm(ctx, a)
+    ctx.client.post(f"/v1/crucible/{a}/approve", json={})
+    assert ctx.client.get(f"/v1/crucible/{a}").json()["artifact_id"]
+
+    # Run B: blind its PRE-FLIGHT scan only, which is exactly what the race
+    # does — B looked before A's link landed. The post-link re-check must still
+    # catch it.
+    real = mod.runs_db.documented_run_for_goal
+    calls = {"n": 0}
+
+    def blind_first(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None          # the race: B sees no document yet
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mod.runs_db, "documented_run_for_goal", blind_first)
+
+    b = _start(ctx, goal="reduce customer churn").json()["id"]
+    _confirm(ctx, b)
+    ctx.client.post(f"/v1/crucible/{b}/approve", json={})
+
+    assert calls["n"] >= 2, "the post-link re-check never ran"
+    reports = [x for x in (list_artifacts_for_company(ctx.company_id) or [])
+               if x.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, (
+        f"the race filed {len(reports)} documents for one goal")
+    # A keeps it (lower run id wins), and B stood down cleanly.
+    assert ctx.client.get(f"/v1/crucible/{a}").json()["artifact_id"]
+    assert not ctx.client.get(f"/v1/crucible/{b}").json().get("artifact_id")
+    assert ctx.client.get(f"/v1/crucible/{b}").json()["status"] == "ready", (
+        "standing down must not fail the run")
+
+
+def test_the_goal_dedup_is_not_bounded_by_a_page_of_recent_runs(ctx):
+    """`list_for_company`'s default limit is 50, ordered `created_at DESC`, so
+    scanning it meant that on a company with fifty runs since a goal was last
+    analysed the earlier document fell off the end and a rerun filed a second
+    one — silent degradation on exactly the companies busy enough to have a
+    clutter problem. The lookup is filtered in the query instead."""
     import inspect
 
-    from app.routes import crucible as mod
+    import app.routes.crucible as mod
 
-    src = inspect.getsource(mod.execute_run)
-    for forbidden in ("metric_points", "list_metric_points", "distinct_metrics"):
-        assert forbidden not in src, (
-            f"`execute_run` now touches {forbidden}. `_method_note` promises the "
-            f"run reads documents rather than a metric series — rewrite that "
-            f"sentence before wiring the registry into the analysis."
-        )
+    src = inspect.getsource(mod._autosave_document)
+    assert "list_for_company" not in src, (
+        "the dedup is paging recent runs again; it must filter by goal in the "
+        "query or it degrades silently past the page limit")
+    assert "documented_run_for_goal" in src

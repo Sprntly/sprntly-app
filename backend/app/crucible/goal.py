@@ -470,14 +470,19 @@ def _no_definition_ask(goal_text: str) -> str:
 
     So it no longer opens with what is missing, and it does not repeat what the
     search block directly above it has already shown. It opens with the one
-    thing that IS established — that the search ran — and moves straight to the
-    decision the user is being asked to make. `goal_text` is quoted so the
-    question is unmistakably about their goal and not a generic prompt.
+    thing that IS established — WHERE IT LOOKED — and only then names the gap,
+    once, before moving to the decision. That is the shape §5's own templates
+    use ("I looked for a complaints metric in Amplitude, Zendesk... There isn't
+    one definition these agree on"). An earlier attempt opened with "Your
+    systems don't record a definition yet", which is still absence-first and
+    echoed the search block's own "nothing recorded yet" almost word for word,
+    so the screen said "nothing here" three times before asking anything.
+    `goal_text` is quoted so the question is unmistakably about their goal.
     """
     return (
-        f"Your systems don't record a definition for \"{goal_text}\" yet, so "
-        f"the definition is yours to state — and stating it is the whole of "
-        f"what I need.\n\n"
+        f"I checked your KPI tree and the metrics you record, and neither "
+        f"carries a definition for \"{goal_text}\" — so this one is yours to "
+        f"state, and stating it is the whole of what I need.\n\n"
         f"Write what you'd want to see move: what is counted, over what "
         f"population, over what window. I'd rather ask than guess, because a "
         f"definition I invented would give you a confident answer to a "

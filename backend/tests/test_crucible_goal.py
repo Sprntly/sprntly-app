@@ -98,10 +98,15 @@ def test_no_definition_anywhere_asks_rather_than_inventing_one():
     assert out.status == "needs_input"
     assert out.definition is None
     assert out.ask, "a miss has to produce a question"
-    # It must not open with the gap — that is the defect §5 req 1 names.
-    assert not out.ask.lower().startswith("i can't find")
-    # And it must ask for the parts a definition actually needs.
-    assert "what is counted" in out.ask.lower()
+    # §5 req 1: the ask must reference the SEARCH before the gap. Asserted as a
+    # property — the first sentence mentions where it looked — rather than by
+    # pinning a phrase, which is the fragility the old assertion had and which
+    # a previous rewrite of this test reintroduced with "what is counted".
+    first = out.ask.split(".")[0].lower()
+    assert any(w in first for w in ("checked", "looked", "searched")), (
+        f"the ask opens without referencing the search: {first!r}")
+    # And it asks the user for a definition rather than proposing one.
+    assert out.definition is None
 
 
 def test_the_ask_says_why_guessing_would_be_worse():
