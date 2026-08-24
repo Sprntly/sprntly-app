@@ -271,7 +271,7 @@ def test_synthesis_cycle_skips_company_with_top_insights_off():
 
     with patch("app.db.companies.list_companies", return_value=companies), \
          patch("app.synthesis_brief.generate_brief_for",
-               side_effect=lambda slug: generated.append(slug)), \
+               side_effect=lambda slug, **kw: generated.append(slug)), \
          patch("app.brief_runner.warm_synthesis_drilldowns", lambda slug: None):
         asyncio.run(sched_mod._run_synthesis_for_all_companies())
 

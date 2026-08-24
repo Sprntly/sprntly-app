@@ -467,6 +467,12 @@ def run_synthesis(
     dataset_slug: str,
     agent: str = "synthesis",
     deliver: bool = True,
+    # Half-price Message Batches, for the SCHEDULED callers only. The brief has
+    # a three-hour GENERATION_LEAD before delivery, so minutes of batch latency
+    # are free there -- but `routes/synthesis.py POST /brief` and
+    # `routes/brief.py` are synchronous user-facing routes where a person is
+    # watching a spinner, so this defaults OFF and only the scheduler opts in.
+    batch: bool = False,
 ) -> dict:
     """Generate + persist a KG-driven brief. Returns the brief payload.
 
@@ -643,6 +649,14 @@ def run_synthesis(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_top_insights",
         model=DEEP_MODEL,
+        # This is the single most expensive call in the product (~$486/mo of a
+        # ~$2,731/mo run-rate: opus, a 32k-token method block, one call per
+        # company per period), and when nothing is waiting on it it is also the
+        # best candidate for the 50% batch discount. `batch_deadline_s` sits far
+        # inside GENERATION_LEAD (3h): if the batch has not come back in 45
+        # minutes the seam cancels it and runs the call live, so a slow batch can
+        # never make a brief miss its delivery slot.
+        batch=batch, batch_deadline_s=45 * 60,
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
         input=(strategic + roadmap_block + bizctx_block + skill_request
                + "\n\nCANDIDATE EVIDENCE (for the structured render fields):\n"
