@@ -30,6 +30,20 @@ if (typeof window !== "undefined" && !window.matchMedia) {
 
 const listRuns = vi.fn()
 const startRun = vi.fn()
+const getRun = vi.fn()
+const confirmRun = vi.fn()
+const approveRun = vi.fn()
+
+/** A plan thin enough to render and real enough to approve. */
+const PLAN = {
+  goal_text: "raise net revenue retention",
+  definition_text: "NRR, all paying accounts, trailing 90 days",
+  currency: "USD",
+  total_signals: 12,
+  sources: [{ source_type: "slack", signal_count: 12, witnesses: "what people said" }],
+  cannot_answer: [],
+  will_produce: ["themes"],
+}
 
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -48,8 +62,9 @@ vi.mock("../../../../lib/api", () => {
     goalAnalysisApi: {
       list: (...a: unknown[]) => listRuns(...a),
       start: (...a: unknown[]) => startRun(...a),
-      get: vi.fn(),
-      confirm: vi.fn(),
+      get: (...a: unknown[]) => getRun(...a),
+      confirm: (...a: unknown[]) => confirmRun(...a),
+      approve: (...a: unknown[]) => approveRun(...a),
     },
   }
 })
@@ -167,6 +182,31 @@ async function switchToTab(title: string) {
 }
 
 /** Drive the composer the way a user does: + menu -> Analyse a goal -> send. */
+/** Drive a started run all the way through BOTH gates, in the thread.
+ *
+ *  The panel no longer opens when a run starts — the gates are a conversation
+ *  and they happen in the conversation, so the panel opens only once there is a
+ *  document-shaped thing to show. Every guard below therefore has to be
+ *  exercised at APPROVE time, which is where the panel now appears.
+ */
+async function answerBothGatesInThread(runId: number) {
+  await waitFor(() => expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+  await act(async () => {
+    fireEvent.change(screen.getByLabelText("What this goal means"),
+      { target: { value: "NRR, all paying accounts, trailing 90 days" } })
+  })
+  getRun.mockResolvedValue({
+    id: runId, status: "awaiting_approval", prioritisation: { plan: PLAN },
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
+  })
+  await waitFor(() => expect(screen.getByTestId("goal-gate-plan")).toBeTruthy())
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /approve|start reading/i }))
+  })
+}
+
 async function startAGoal(text: string) {
   await act(async () => {
     fireEvent.click(screen.getAllByLabelText("Add attachment or skill")[0])
@@ -187,6 +227,11 @@ beforeEach(() => {
   crucible = true
   listRuns.mockReset()
   listRuns.mockResolvedValue({ runs: [] })
+  getRun.mockReset()
+  confirmRun.mockReset()
+  approveRun.mockReset()
+  confirmRun.mockResolvedValue({})
+  approveRun.mockResolvedValue({})
   startRun.mockReset()
   startRun.mockResolvedValue({ id: 1, conversation_id: null, status: "resolving_goal" })
   sessionStorage.clear()
@@ -313,22 +358,28 @@ describe("the guards around the restore", () => {
 
   it("a run the user just started is not clobbered by an older listing", async () => {
     // The ref guard. The listing is in flight when the user starts a run; if
-    // it wins the race it yanks the panel back to a run they did not ask for.
+    // it wins the race it yanks the panel to a run they did not ask for.
+    //
+    // STARTING NO LONGER OPENS THE PANEL — the gates are answered in the thread
+    // — so the guard is observed where the panel now appears: after approve it
+    // must be the run the user started, not the one the stale listing carried.
     let release: (v: unknown) => void = () => {}
     listRuns.mockReturnValue(new Promise((r) => { release = r }))
     seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
     mountApp()
     await waitFor(() => expect(listRuns).toHaveBeenCalled())
 
-    // A run starts while the listing is still open.
     startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
     await startAGoal("raise net revenue retention")
-    await waitFor(() => expect(goalProbe()).toBe("99"))
 
-    // Only now does the older listing land.
+    // Only now does the older listing land — while the user is mid-gate.
     release({ runs: [{ id: 42, conversation_id: 7, status: "running" }] })
     await new Promise((r) => setTimeout(r, 50))
-    expect(goalProbe()).toBe("99")
+
+    await answerBothGatesInThread(99)
+    await waitFor(() => expect(goalProbe()).toBe("99"))
+    await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 
   it("switching away and back restores again", async () => {
@@ -360,12 +411,10 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(panelProbe()).toBe("goal"))
   })
 
-  it("a run the reader STARTED also stays closed once dismissed", async () => {
-    // The headline "stays closed" test only ever exercised the RESTORE path,
-    // where the auto-open effect takes the per-tab claim itself. A run the
-    // reader starts opens the panel directly, so unless `startGoalAnalysis`
-    // claims the tab too, the reader's close satisfies every guard and the
-    // effect shoves the panel straight back.
+  it("a run the reader APPROVED also stays closed once dismissed", async () => {
+    // The per-tab claim. A run the reader drove themselves opens the panel
+    // directly, so unless the approve path claims the tab, the reader's close
+    // satisfies every guard and the auto-open effect shoves the panel back.
     //
     // The file says this out loud one tab over, at the reports hand-off:
     // "Claim the tab: this IS its one auto-open, so closing the panel here
@@ -376,7 +425,9 @@ describe("the guards around the restore", () => {
     await waitFor(() => expect(listRuns).toHaveBeenCalled())
 
     startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
     await startAGoal("raise net revenue retention")
+    await answerBothGatesInThread(99)
     await waitFor(() => expect(panelProbe()).toBe("goal"))
 
     fireEvent.click(screen.getByTestId("close-panel"))
@@ -385,15 +436,13 @@ describe("the guards around the restore", () => {
     expect(panelProbe()).toBe("closed")
   })
 
-  it("claims the tab the run was started ON, not the one last seen", async () => {
-    // `startGoalAnalysis` reads `activeTabId`, so it has to DEPEND on it.
-    // Rebuilt only when the conversation changes, the callback holds a stale
-    // tab id in exactly the two cases this file already calls out by name:
-    // two tabs on one conversation, and two brand-new chats (both
-    // `activeConvId === null`).
-    //
-    // Filing the claim against the tab the reader LEFT breaks it twice over —
-    // here, the run they just started reopens the instant they dismiss it.
+  it("claims the tab the run was ANSWERED on, not the one last seen", async () => {
+    // The claim has to name the tab the reader is actually on. It used to be
+    // read from `activeTabId` inside a callback rebuilt only when the
+    // conversation changes — stale in exactly the two cases this file calls out
+    // by name: two tabs on one conversation, and two brand-new chats (both
+    // `activeConvId === null`). Filing against the tab the reader LEFT means
+    // the run reopens the instant they dismiss it.
     listRuns.mockResolvedValue({ runs: [] })
     seedPersistedTab(
       { id: "t1", title: "A", dbConvId: 7, messages: [] },
@@ -405,13 +454,49 @@ describe("the guards around the restore", () => {
 
     await switchToTab("B")
     startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
     await startAGoal("raise net revenue retention")
+    // The claim is filed where the panel actually opens: at approve. The tab
+    // id is passed through from the turn being answered rather than read from
+    // a closure, so it cannot go stale the way `activeTabId` could.
+    await answerBothGatesInThread(99)
     await waitFor(() => expect(panelProbe()).toBe("goal"))
 
     fireEvent.click(screen.getByTestId("close-panel"))
     await waitFor(() => expect(panelProbe()).toBe("closed"))
     await new Promise((r) => setTimeout(r, 60))
     expect(panelProbe()).toBe("closed")
+  })
+
+  it("a refused confirm surfaces on the turn instead of vanishing", async () => {
+    // Moved here with the gate. The panel used to own this: a confirm that the
+    // server refused had to say so rather than leave a dead button. Now the
+    // gate is a turn, so the failure belongs on that turn — a toast is
+    // transient and the thread is not.
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
+    await startAGoal("raise net revenue retention")
+    await waitFor(() => expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+
+    confirmRun.mockRejectedValue(new Error("the run had already moved on"))
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("What this goal means"),
+        { target: { value: "NRR, all paying accounts" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
+    })
+
+    // The card is gone and the reason is on the turn — not a silent no-op.
+    await waitFor(() =>
+      expect(screen.queryByTestId("goal-gate-definition")).toBeNull())
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("already moved on"))
   })
 
   it("does not mark an innocent tab as already-opened", async () => {
@@ -432,7 +517,9 @@ describe("the guards around the restore", () => {
 
     await switchToTab("B")
     startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
     await startAGoal("raise net revenue retention")
+    await answerBothGatesInThread(99)
     await waitFor(() => expect(goalProbe()).toBe("99"))
 
     // Back to A: a new visit, its claim retired, its own run should show.

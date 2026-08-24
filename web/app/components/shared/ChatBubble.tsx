@@ -699,7 +699,12 @@ export function ChatBubble(props: ChatBubbleProps) {
                 <>
                   {error ? <WaitFailedState onAskAgain={onAskAgain} /> : null}
                   {stopped && !reply ? <WaitStoppedState onAskAgain={onAskAgain} /> : null}
-                  {!reply && !error && !stopped ? (
+                  {/* A turn carrying a GATE is not a turn awaiting a reply: the
+                      card IS the agent's message. Without this the whole
+                      no-reply ladder ran beside it and printed "No response was
+                      generated for this message." directly above a live
+                      question. */}
+                  {!reply && !error && !stopped && !goalGate ? (
                     summaryPending ? (
                       <div data-testid="summary-pending">
                         <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />

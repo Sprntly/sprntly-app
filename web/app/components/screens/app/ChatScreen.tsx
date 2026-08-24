@@ -4711,32 +4711,57 @@ export function ChatScreen() {
   // only watches for the run REACHING a gate; it never answers one.
   const goalGateBusyTurnRef = useRef<string | null>(null)
   const [goalGateBusyTurnId, setGoalGateBusyTurnId] = useState<string | null>(null)
-  /** Which run a gate turn belongs to. Keyed by turn so two runs in one thread
-   *  can never cross-answer each other. */
-  const goalRunByTurnRef = useRef<Map<string, number>>(new Map())
 
+  // SCOPED TO ONE TAB. `goal-plan-${runId}` is a deterministic, persisted turn
+  // id, so the same conversation open in two tabs holds the same id twice —
+  // patching every tab's thread would answer both. It also rebuilt every tab
+  // object on every patch for no reason.
   const patchTurn = useCallback(
-    (turnId: string, patch: Partial<ThreadTurn>) => {
-      setTabs((prev) => prev.map((t) => ({
-        ...t,
-        thread: t.thread.map((tn) => (tn.id === turnId ? { ...tn, ...patch } : tn)),
-      })))
+    (tabId: string, turnId: string, patch: Partial<ThreadTurn>) => {
+      setTabs((prev) => prev.map((t) => (t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) =>
+              (tn.id === turnId ? { ...tn, ...patch } : tn)),
+          }
+        : t)))
     },
     [setTabs],
   )
 
-  /** Poll one run until it leaves `from`. Returns the row, or null if it failed
-   *  or the caller gave up. Deliberately dumb: it reports, it never decides. */
+  /** Poll one run until it reaches one of `until`, or dies. Returns null when
+   *  it failed, was cancelled, the component unmounted, or the ceiling was hit.
+   *
+   *  WAITS FOR A DESTINATION, NOT FOR A DEPARTURE. The first version polled
+   *  "until the status leaves `queued`" — and Goal Analysis has no `queued`
+   *  status at all (`crucible_runs.STATES`; a run is born `resolving_goal`).
+   *  The very first tick therefore satisfied "left queued", matched no branch,
+   *  and the gate was never attached: the whole feature inert, with every test
+   *  still green. Naming the destination makes that class of mistake fail
+   *  loudly instead of silently.
+   */
   const awaitGoalRun = useCallback(
-    async (runId: number, leaving: string): Promise<GoalRunDetail | null> => {
-      for (let i = 0; i < 400; i++) {
+    async (
+      runId: number,
+      until: readonly string[],
+    ): Promise<GoalRunDetail | null> => {
+      const deadline = Date.now() + 10 * 60 * 1000
+      while (Date.now() < deadline) {
+        // Stop the moment the screen is gone: this loop outlives a closed tab
+        // otherwise, and its resolve path writes a turn into a conversation
+        // nobody is looking at.
+        if (!mountedRef.current) return null
         try {
           const detail = await goalAnalysisApi.get(runId)
-          if (detail.status !== leaving) return detail
-        } catch {
-          // A transient read failure is not a verdict on the run. Keep polling;
-          // a run that really died lands on `failed` and returns through the
-          // line above.
+          if (until.includes(detail.status)) return detail
+          if (detail.status === "failed" || detail.status === "cancelled") {
+            return detail
+          }
+        } catch (e) {
+          // A 403/404 is a verdict — the run is gone or not ours — and polling
+          // it for ten minutes helps nobody. Only a transient keeps the loop.
+          const st = e instanceof ApiError ? e.status : 0
+          if (st === 403 || st === 404) return null
         }
         await new Promise((r) => setTimeout(r, 1500))
       }
@@ -4746,46 +4771,56 @@ export function ChatScreen() {
   )
 
   const failGoalTurn = useCallback(
-    (turnId: string, message: string) => {
+    (tabId: string, turnId: string, message: string) => {
       goalGateBusyTurnRef.current = null
       setGoalGateBusyTurnId(null)
-      patchTurn(turnId, { goalGate: undefined, error: message })
+      // NOT `error`: the thread's generic failed-turn renderer shows "There was
+      // an interruption, try again." and discards the message entirely, so the
+      // one thing the reader needs — why — would be thrown away. Settling the
+      // gate as failed keeps the reason in the conversation.
+      patchTurn(tabId, turnId, {
+        goalGateResolved: { kind: "failed", reason: message },
+      })
     },
     [patchTurn],
   )
 
   // Gate 1 → Gate 2. The definition the user confirmed is THEIR words, which may
   // be an edit of what was proposed; it is sent verbatim.
+  //
+  // `runId` COMES OFF THE GATE, not a side map. A `Map` on a ref does not
+  // survive a reload, but the thread does (sessionStorage) — so the card came
+  // back enabled after F5 with no way to resolve its run, and Confirm was a
+  // live-looking button that issued no request and showed no error. The gate
+  // object already carries the id it needs.
   const confirmGoalDefinition = useCallback(
-    async (turnId: string, definition: string) => {
-      const runId = goalRunByTurnRef.current.get(turnId)
-      if (runId == null || goalGateBusyTurnRef.current) return
+    async (tabId: string, turnId: string, runId: number, definition: string) => {
+      if (goalGateBusyTurnRef.current) return
       goalGateBusyTurnRef.current = turnId
       setGoalGateBusyTurnId(turnId)
       try {
         await goalAnalysisApi.confirm(runId, definition)
         // The record of what was agreed stays in the thread.
-        patchTurn(turnId, { goalGateResolved: { kind: "definition", definition } })
-        const detail = await awaitGoalRun(runId, "running")
-        if (!detail || detail.status === "failed") {
-          failGoalTurn(turnId, "The analysis could not build a plan for this goal.")
+        patchTurn(tabId, turnId, {
+          goalGateResolved: { kind: "definition", definition },
+        })
+        const detail = await awaitGoalRun(runId, ["awaiting_approval"])
+        if (!detail || detail.status !== "awaiting_approval") {
+          failGoalTurn(tabId, turnId,
+            "The analysis could not build a plan for this goal.")
           return
         }
-        if (detail.status === "awaiting_approval" && detail.prioritisation?.plan) {
+        if (detail.prioritisation?.plan) {
           // A NEW turn: the plan is the run's next thing to say, and a reply
           // belongs beside the question it answers rather than replacing it.
-          const planTurnId = `goal-plan-${runId}`
-          goalRunByTurnRef.current.set(planTurnId, runId)
           emitCommandTurn({
-            id: planTurnId,
+            id: `goal-plan-${runId}`,
             query: "",
-            goalGate: {
-              kind: "plan", runId, plan: detail.prioritisation.plan,
-            },
+            goalGate: { kind: "plan", runId, plan: detail.prioritisation.plan },
           })
         }
       } catch (e) {
-        failGoalTurn(turnId, e instanceof Error ? e.message : String(e))
+        failGoalTurn(tabId, turnId, e instanceof Error ? e.message : String(e))
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
@@ -4794,11 +4829,11 @@ export function ChatScreen() {
     [awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn],
   )
 
-  // Gate 2 → the run. Only here does anything get read.
+  // Gate 2 → the run. Only here does anything get read, and only here does the
+  // panel earn its place: what follows is a document.
   const approveGoalPlan = useCallback(
-    async (turnId: string, decision: PlanDecision) => {
-      const runId = goalRunByTurnRef.current.get(turnId)
-      if (runId == null || goalGateBusyTurnRef.current) return
+    async (tabId: string, turnId: string, runId: number, decision: PlanDecision) => {
+      if (goalGateBusyTurnRef.current) return
       goalGateBusyTurnRef.current = turnId
       setGoalGateBusyTurnId(turnId)
       try {
@@ -4806,22 +4841,19 @@ export function ChatScreen() {
           excluded_sources: decision.excluded_sources,
           hypotheses: decision.hypotheses,
         })
-        patchTurn(turnId, {
+        patchTurn(tabId, turnId, {
           goalGateResolved: {
             kind: "plan",
             excludedSources: decision.excluded_sources,
             hypotheses: decision.hypotheses,
           },
         })
-        // NOW the panel earns its place: what follows is a document.
         goalRunRef.current = runId
         setContent({ goalRunId: runId })
-        if (activeTabIdRef.current) {
-          goalAutoOpenedRef.current.add(activeTabIdRef.current)
-        }
+        goalAutoOpenedRef.current.add(tabId)
         openContentPanel("goal")
       } catch (e) {
-        failGoalTurn(turnId, e instanceof Error ? e.message : String(e))
+        failGoalTurn(tabId, turnId, e instanceof Error ? e.message : String(e))
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
@@ -4835,38 +4867,40 @@ export function ChatScreen() {
   const startGoalAnalysis = useCallback(async (goalText: string) => {
     const turnId = `goal-${Date.now()}`
     // THE TURN GOES UP FIRST, before the network call. The dispatcher reports
-    // `handled` from this executor's PRESENCE, so by the time we run, the
-    // caller has already rolled the optimistic turn away — if the start then
-    // 403s or times out and we had not emitted anything, the user's message
-    // would simply vanish from the thread. Emitting first means the worst case
-    // is a turn carrying an error, which is a conversation; a deleted message
-    // is not.
+    // `handled` from this executor's PRESENCE, so by the time we run, the caller
+    // has already rolled the optimistic turn away — if the start then 403s or
+    // times out and we had emitted nothing, the user's message would simply
+    // vanish from the thread. That is not hypothetical: it is what the deployed
+    // build does today, observed on staging (goal typed, panel opens, thread
+    // shows an empty "New chat"). Emitting first means the worst case is a turn
+    // carrying an error, which is still a conversation.
     emitCommandTurn({ id: turnId, query: goalText })
+    const tabId = activeTabIdRef.current
+    if (!tabId) return
     try {
       const run = await goalAnalysisApi.start(goalText, {
         ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
       })
       goalRunRef.current = run.id
-      goalRunByTurnRef.current.set(turnId, run.id)
-      const detail = await awaitGoalRun(run.id, "queued")
-      if (!detail || detail.status === "failed") {
-        failGoalTurn(turnId, "The analysis could not start for this goal.")
+      // A run is born `resolving_goal` and reaches the gate a moment later.
+      const detail = await awaitGoalRun(run.id, ["awaiting_confirmation"])
+      if (!detail || detail.status !== "awaiting_confirmation") {
+        failGoalTurn(tabId, turnId,
+          "The analysis could not start for this goal.")
         return
       }
-      if (detail.status === "awaiting_confirmation") {
-        patchTurn(turnId, {
-          goalGate: {
-            kind: "definition",
-            runId: run.id,
-            goalText,
-            ask: detail.prioritisation?.ask
-              || "Before this runs, confirm what this goal means.",
-            proposedDefinition: detail.prioritisation?.proposed_definition,
-            proposedSource: detail.prioritisation?.proposed_source,
-            methodNote: detail.prioritisation?.method_note,
-          },
-        })
-      }
+      patchTurn(tabId, turnId, {
+        goalGate: {
+          kind: "definition",
+          runId: run.id,
+          goalText,
+          ask: detail.prioritisation?.ask
+            || "Before this runs, confirm what this goal means.",
+          proposedDefinition: detail.prioritisation?.proposed_definition,
+          proposedSource: detail.prioritisation?.proposed_source,
+          methodNote: detail.prioritisation?.method_note,
+        },
+      })
     } catch (e) {
       // A 403 here is the entitlement gate, and it is the one failure worth
       // naming precisely: the control was visible, so "something went wrong"
@@ -4878,16 +4912,13 @@ export function ChatScreen() {
           ? "This is an experimental feature and your company is not enrolled yet."
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
-      // The toast is transient and the thread is not. Whatever went wrong is
-      // recorded against the turn the user actually sent.
-      failGoalTurn(
-        turnId,
-        denied
-          ? "Goal Analysis is not enabled for this workspace yet."
-          : "That analysis could not be started.",
-      )
+      // The toast is transient and the thread is not.
+      failGoalTurn(tabId, turnId, denied
+        ? "Goal Analysis is not enabled for this workspace yet."
+        : "That analysis could not be started.")
     }
-  }, [activeConvId, awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn, showToast])
+  }, [activeConvId, awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn,
+      showToast])
 
   // Republished on every render so the dispatcher always calls the current
   // closure. An effect would work equally well here — `dispatchChatIntent`
@@ -5871,6 +5902,14 @@ export function ChatScreen() {
               chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
               inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
               clarifyPopupOpen, pendingClarifyTurn,
+              // WITHOUT THESE THE CARD IS DECORATION. They are optional on
+              // `MapMainTurnsDeps` (the group surface has no Goal Analysis), so
+              // omitting them here type-checked cleanly and every button
+              // short-circuited through `confirmGoalDefinition?.(…)` — the
+              // second independent way this feature shipped inert.
+              goalGateBusyTurnId,
+              confirmGoalDefinition,
+              approveGoalPlan,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
               editingTurnId,
               copiedTurnId,

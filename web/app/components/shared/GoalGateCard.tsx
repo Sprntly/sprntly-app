@@ -56,6 +56,11 @@ export type GoalGate =
 export type GoalGateResolved =
   | { kind: "definition"; definition: string }
   | { kind: "plan"; excludedSources: string[]; hypotheses: string[] }
+  /** The gate could not be answered — the server refused, or the run died.
+   *  Carries the REASON: the generic "there was an interruption" the thread
+   *  shows for an ordinary failed turn throws that away, and "why can I not
+   *  confirm this?" is exactly what the reader needs. */
+  | { kind: "failed"; reason: string }
 
 export function GoalGateCard({
   gate,
@@ -147,6 +152,14 @@ function GoalDefinitionGate({
 }
 
 function GoalGateSettled({ resolved }: { resolved: GoalGateResolved }) {
+  if (resolved.kind === "failed") {
+    return (
+      <div className="ggc ggc-settled" data-testid="goal-gate-failed">
+        <p className="ggc-settled-label">Analysis stopped</p>
+        <p className="ggc-settled-body">{resolved.reason}</p>
+      </div>
+    )
+  }
   if (resolved.kind === "definition") {
     return (
       <div className="ggc ggc-settled" data-testid="goal-gate-definition-done">

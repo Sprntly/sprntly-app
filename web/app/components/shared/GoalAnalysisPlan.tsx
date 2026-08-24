@@ -27,6 +27,7 @@
  * with nothing to read produces a confident-looking empty report, which is the
  * worst output this feature has.
  */
+import * as React from "react"
 import { useMemo, useState } from "react"
 import type { GoalRunPlan } from "../../lib/api"
 

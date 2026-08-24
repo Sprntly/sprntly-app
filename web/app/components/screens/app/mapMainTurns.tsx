@@ -300,9 +300,18 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       // definition above, the plan below) and a thread-wide flag would grey out
       // the settled one as well as the live one.
       goalGateBusy: goalGateBusyTurnId === turn.id,
-      onConfirmGoalDefinition: (d: string) => confirmGoalDefinition?.(turn.id, d),
-      onApproveGoalPlan: (decision: PlanDecision) =>
-        approveGoalPlan?.(turn.id, decision),
+      // `runId` off the GATE, and the tab off the active tab: both survive a
+      // reload, which a ref-held Map does not.
+      onConfirmGoalDefinition: (d: string) => {
+        if (activeTab && turn.goalGate) {
+          confirmGoalDefinition?.(activeTab.id, turn.id, turn.goalGate.runId, d)
+        }
+      },
+      onApproveGoalPlan: (decision: PlanDecision) => {
+        if (activeTab && turn.goalGate) {
+          approveGoalPlan?.(activeTab.id, turn.id, turn.goalGate.runId, decision)
+        }
+      },
       clarify: turn.clarify,
       clarifyResolved: turn.clarifyResolved,
       clarifyPopupNote: clarifyPopupOpen && pendingClarifyTurn?.id === turn.id && !turn.clarifyResolved,

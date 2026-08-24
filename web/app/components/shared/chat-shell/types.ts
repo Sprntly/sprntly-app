@@ -485,8 +485,12 @@ export interface MapMainTurnsDeps {
   /** Goal Analysis gates, answered in the thread. OPTIONAL so surfaces without
    *  the feature (project group chat) map turns unchanged. */
   goalGateBusyTurnId?: string | null
-  confirmGoalDefinition?: (turnId: string, definition: string) => void
-  approveGoalPlan?: (turnId: string, decision: GoalPlanDecision) => void
+  confirmGoalDefinition?: (
+    tabId: string, turnId: string, runId: number, definition: string,
+  ) => void
+  approveGoalPlan?: (
+    tabId: string, turnId: string, runId: number, decision: GoalPlanDecision,
+  ) => void
   setViewerAttachment: (a: {
     name: string
     content: string

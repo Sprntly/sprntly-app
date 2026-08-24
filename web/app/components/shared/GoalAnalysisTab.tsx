@@ -341,67 +341,26 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     <p className="ga-error" role="status" data-testid="goal-error">{error}</p>
   ) : null
 
-  // ── The I9 gate. Not a loading state — a question. ───────────────────────
-  if (run.status === "awaiting_confirmation") {
-    const proposed = run.prioritisation?.proposed_definition
+  // ── The gates live in the CHAT THREAD now ────────────────────────────────
+  //
+  // Both are a conversation — what does this goal mean, and here is what I will
+  // read — so they are answered in the conversation, as `GoalGateCard` turns.
+  // The panel keeps the finished report, which is a document.
+  //
+  // RENDERING THEM HERE TOO IS NOT A HARMLESS DUPLICATE. The same gate would
+  // carry two live Confirm buttons on one screen; answering in the panel leaves
+  // the thread card open on a question that has already been answered, and its
+  // button then 409s against a run that has moved on.
+  if (run.status === "awaiting_confirmation" || run.status === "awaiting_approval") {
     return (
-      <div className="ga" data-testid="goal-confirm">
+      <div className="ga" data-testid="goal-gate-in-thread">
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-ask">
-          {run.prioritisation?.ask ||
-            "Before this runs, confirm what this goal means."}
+          {run.status === "awaiting_confirmation"
+            ? "Confirm what this goal means in the chat to start the analysis."
+            : "Approve the plan in the chat to start reading."}
         </p>
-        {proposed ? (
-          <p className="ga-provenance">
-            Proposed from {run.prioritisation?.proposed_source || "your KPI tree"}.
-            Edit it if that is not what you meant.
-          </p>
-        ) : null}
-        {/* §6: the calculation, stated in the SAME step and editable. Identity
-            without method is F4's "half of this that gets missed". */}
-        {run.prioritisation?.method_note ? (
-          <p className="ga-doc-note" data-testid="goal-method-note">
-            {run.prioritisation.method_note}
-          </p>
-        ) : null}
-        <textarea
-          className="ga-definition"
-          aria-label="What this goal means"
-          value={definition}
-          rows={4}
-          onChange={(e) => {
-            touched.current = true
-            setDefinition(e.target.value)
-          }}
-        />
-        <button
-          type="button"
-          className="ga-confirm"
-          disabled={!definition.trim() || confirming}
-          onClick={confirm}
-        >
-          {confirming ? "Starting…" : "Confirm and analyse"}
-        </button>
-      </div>
-    )
-  }
-
-  // ── The plan gate. Not a loading state either — a decision. ──────────────
-  //
-  // The plan is what the user approves, so a missing plan must NOT render as
-  // an approve button over nothing: that would be a click agreeing to
-  // something never shown. It falls through to the running view instead, where
-  // the poll keeps going and the row can correct itself.
-  if (run.status === "awaiting_approval" && run.prioritisation?.plan) {
-    return (
-      <div className="ga" data-testid="goal-approve">
-        {banner}
-        <GoalAnalysisPlan
-          plan={run.prioritisation.plan}
-          approving={approving}
-          onApprove={approve}
-        />
       </div>
     )
   }
