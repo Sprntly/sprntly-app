@@ -126,7 +126,11 @@ describe("AuthGate", () => {
         <AppTreeSpy />
       </AuthGate>,
     )
-    expect(screen.getByText("Loading…")).not.toBeNull()
+    // The shell is the SPINNING MARK, wordless — the same one the server splash
+    // paints, so a reload runs one animation instead of a logo that vanishes
+    // and leaves the word "Loading…" behind it.
+    expect(document.querySelector(".spr-iris")).not.toBeNull()
+    expect(screen.queryByText("Loading…")).toBeNull()
     expect(screen.queryByTestId("real-app-tree")).toBeNull()
   })
 })
