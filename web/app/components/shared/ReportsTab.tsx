@@ -6,6 +6,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { HtmlReportView } from "./HtmlReportView"
 import { SavedChatMarkdown } from "./SavedChatMarkdown"
 import { ReportShareMenu } from "./ReportShareMenu"
+import { ReportDocument } from "./ReportDocument"
 import { EmptyPane } from "./EmptyPane"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { REPORT_GEN } from "./generationPhases"
@@ -56,6 +57,10 @@ export function ReportsTab({
   // `picked` is the one thing this component owns: a row chosen from ITS list.
   // It wins while set, and Back clears both.
   const [picked, setPicked] = useState<number | null>(null)
+  // Reading or editing. A report is READ far more often than it is changed, so
+  // the rendered document is the resting state and editing is asked for — the
+  // posture the artifacts screen already takes for a document.
+  const [editing, setEditing] = useState(false)
   const focusId = content.reportFocusId
   // A focus set for a DIFFERENT thread is ignored: the panel is global, so a
   // leftover id could otherwise open one thread's report inside another's.
@@ -220,14 +225,30 @@ export function ReportsTab({
           ) : (
             <span />
           )}
-          {/* Download + share only exist once there is a document to act on. */}
-          {doc && (
-            <ReportShareMenu
-              report={doc}
-              onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
-              onToast={showToast}
-            />
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* Editing is offered for a MARKDOWN report only. A legacy HTML
+                document reads inside a sandboxed iframe and has no source to
+                put in a textarea, and a control that cannot work is worse than
+                no control. */}
+            {doc && !isFullHtmlDocument(doc.html) && (
+              <button
+                type="button"
+                className="cw-btn"
+                data-testid="reports-edit-toggle"
+                onClick={() => setEditing((v) => !v)}
+              >
+                {editing ? "Done" : "Edit"}
+              </button>
+            )}
+            {/* Download + share only exist once there is a document to act on. */}
+            {doc && (
+              <ReportShareMenu
+                report={doc}
+                onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
+                onToast={showToast}
+              />
+            )}
+          </div>
         </div>
 
         <div style={{ margin: "10px 0 14px" }}>
@@ -260,17 +281,27 @@ export function ReportsTab({
           </div>
         )}
         {doc && (
-          // Markdown vs document is decided by the BODY, not only the skill:
-          // "saved-chat" rows always hold raw markdown
-          // (`project_artifact_capture.py`), and the scheduled monthly runs
-          // save the report skills' answers as markdown too
-          // (`app.monthly_reports`) — while the legacy rows for those same
-          // skills are self-contained HTML documents. Sniffing the stored
-          // body (the same `looksLikeHtmlBrief` test chat uses to pick an
-          // iframe) renders every combination correctly.
-          doc.skill === "saved-chat" || !looksLikeHtmlBrief(doc.html)
-            ? <SavedChatMarkdown markdown={doc.html} />
-            : <HtmlReportView html={doc.html} title={title} fitPanel />
+          // A report is a RICH DOCUMENT — the same shape, the same editor and
+          // the same toolbar as a team document, which is what "edit the report
+          // in the panel" means. The body arrives as HTML whatever is stored:
+          // new reports are captured as HTML, and the rows written before that
+          // (the scheduled monthly runs, and everything captured since #1024)
+          // are converted on the way out by `app/report_markdown.py`.
+          //
+          // A LEGACY SELF-CONTAINED DOCUMENT still reads in its sandboxed
+          // iframe: it carries its own <head> and <style> and owns its
+          // rendering, so it is shown, not edited.
+          isFullHtmlDocument(doc.html) ? (
+            <HtmlReportView html={doc.html} title={title} fitPanel />
+          ) : (
+            <ReportDocument
+              key={doc.id}
+              reportId={doc.id}
+              html={doc.html}
+              editing={editing}
+              onSaved={(html) => setDoc((cur) => (cur ? { ...cur, html } : cur))}
+            />
+          )
         )}
       </div>
     )
@@ -378,4 +409,20 @@ function ReportSkeleton() {
       <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
     </div>
   )
+}
+
+/** Is this body a SELF-CONTAINED HTML document — doctype, head, its own
+ *  `<style>` — rather than the HTML fragment every report is now?
+ *
+ *  Only the legacy rows are: reports written under the pinned templates, before
+ *  #1024 removed them. Those own their rendering and read in a sandboxed
+ *  iframe, so they are shown and not edited. Everything else — captured HTML,
+ *  and the markdown rows the API converts on the way out — is a fragment this
+ *  panel renders and edits like any other document.
+ *
+ *  The same `looksLikeHtmlBrief` sniff chat uses to choose an iframe and
+ *  `report_capture` uses to recognise a document answer, so all three agree
+ *  about what a given report is. */
+function isFullHtmlDocument(html: string): boolean {
+  return looksLikeHtmlBrief(html)
 }

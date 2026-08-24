@@ -138,13 +138,32 @@ type MenuEntry = {
  * focus out of the document and collapses the selection the command is supposed
  * to act on — the same reason the HTML PRD's `exec` re-focuses its iframe.
  */
-export function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus: PrdSaveStatus; exec: (cmd: string, value?: string) => void }) {
+export function PrdToolbar({ hasDoc, saveStatus, exec, omit }: {
+  hasDoc: boolean
+  saveStatus: PrdSaveStatus
+  exec: (cmd: string, value?: string) => void
+  /** Commands this HOST cannot run, left out of the bar entirely.
+   *
+   *  A contenteditable answers every execCommand there is; a schema-backed
+   *  editor answers the ones its extensions implement. The document panel drives
+   *  a TipTap document with no text-align, indent or table extension, so those
+   *  entries would be buttons that visibly do nothing — the exact defect this
+   *  file already carries a note about ("shipped with NO onClick — inert the
+   *  whole time"). Omitted, not disabled: a disabled control still claims the
+   *  feature exists somewhere. Empty/absent for the PRD, whose bar is unchanged. */
+  omit?: ReadonlySet<string>
+}) {
   const statusLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved" : "Saved · Draft"
   const statusColor = saveStatus === "saving" ? "var(--accent)" : saveStatus === "unsaved" ? "var(--ink-3)" : "var(--accent)"
   // WHICH menu is open, not whether one is — opening either must close the
   // other, and two independent booleans would let both sit open at once.
   const [openMenu, setOpenMenu] = useState<"style" | "more" | null>(null)
   const barRef = useRef<HTMLDivElement>(null)
+  // The two menu lists, minus anything this host cannot run. Computed rather
+  // than filtered inline so both the list and the "is the menu worth showing"
+  // question read from one value.
+  const overflow = omit ? OVERFLOW_TOOLS.filter((t) => !omit.has(t.cmd)) : OVERFLOW_TOOLS
+  const supports = (cmd: string) => !omit?.has(cmd)
 
   // Click-away and Escape close the menu. Bound only while it is open, so the
   // toolbar adds no document listeners in its resting state.
@@ -280,7 +299,7 @@ export function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; save
         </button>
         {/* This button shipped with NO onClick — it has been inert the whole
             time. `insertHTML` because execCommand has no table primitive. */}
-        <button
+        {supports("insertHTML") && <button
           type="button"
           className="prd-tool"
           disabled={!hasDoc}
@@ -292,7 +311,7 @@ export function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; save
           onClick={() => exec("insertHTML", STARTER_TABLE)}
         >
           <IconGrid size={15} /><span style={{ marginLeft: 5 }}>Table</span>
-        </button>
+        </button>}
 
       </div>
 
@@ -303,14 +322,16 @@ export function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; save
           container is CLIPPED by it — the button opened and nothing appeared.
           Pinned out here beside the status, it also stays reachable without
           scrolling, which is what an overflow affordance is for. */}
-      <ToolMenu
-        id="more"
-        title="More formatting"
-        testId="prd-tool-more"
-        entries={OVERFLOW_TOOLS}
-        align="left"
-        trigger={<IconDots size={16} stroke={1.9} />}
-      />
+      {overflow.length > 0 && (
+        <ToolMenu
+          id="more"
+          title="More formatting"
+          testId="prd-tool-more"
+          entries={overflow}
+          align="left"
+          trigger={<IconDots size={16} stroke={1.9} />}
+        />
+      )}
 
       <div className="prd-status">
         <span style={{ width: 6, height: 6, borderRadius: "50%", background: hasDoc ? statusColor : "var(--muted)", transition: "background 0.3s" }} />

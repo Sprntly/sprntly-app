@@ -102,31 +102,62 @@ def test_editing_a_report_writes_the_new_body(isolated_settings, monkeypatch):
 
     rid = db.save_report(
         "c1", skill="voice-of-customer-report", title="VoC",
-        html="# VoC\n\nRICE: reach 5\n",
+        html="<h1>VoC</h1><p>RICE: reach 5</p>",
     )
     monkeypatch.setattr(
-        ace, "apply_edit", lambda *a, **k: _edit(document="# VoC\n\n| RICE |\n"),
+        ace, "apply_edit",
+        lambda *a, **k: _edit(document="<h1>VoC</h1><table><tr><td>RICE</td></tr></table>"),
     )
 
     out = ace.edit_report_scoped(rid, "make it a table", _Company())
 
     assert out["sections_changed"] == ["Summary"]
-    assert out["report"]["html"] == "# VoC\n\n| RICE |\n"
+    assert "<table>" in out["report"]["html"]
     # And it is durable, not just returned.
-    assert db.get_report(rid, "c1")["html"] == "# VoC\n\n| RICE |\n"
+    assert "<table>" in db.get_report(rid, "c1")["html"]
 
 
-def test_a_markdown_report_is_stored_verbatim(isolated_settings, monkeypatch):
-    """Both viewers render a non-HTML body through react-markdown without
-    `rehype-raw`, so escaping here would print the escapes at the reader."""
+def test_a_legacy_markdown_report_is_edited_as_html(isolated_settings, monkeypatch):
+    """The rows written before reports became rich documents hold markdown. They
+    convert on the way IN, so the editor is handed the same shape it is handed
+    for every other report — and the row is rewritten as HTML, which is the one
+    moment that one-way conversion is something the user asked for."""
     from app import db
 
-    rid = db.save_report("c1", skill="voice-of-customer-report", title="V", html="# V")
-    body = "# V\n\n**bold** & <not-a-tag> — 5 > 3\n"
-    monkeypatch.setattr(ace, "apply_edit", lambda *a, **k: _edit(document=body))
+    rid = db.save_report(
+        "c1", skill="voice-of-customer-report", title="V",
+        html="# V\n\nThe **core** workflow works.\n",
+    )
+    seen: dict = {}
+
+    def _capture(document, instruction, **kw):
+        seen["document"] = document
+        return _edit(document="<h1>V</h1><p>The <strong>core</strong> workflow works well.</p>")
+
+    monkeypatch.setattr(ace, "apply_edit", _capture)
+    ace.edit_report_scoped(rid, "say it works well", _Company())
+
+    assert seen["document"].startswith("<h1>V</h1>"), "converted before the editor sees it"
+    assert db.get_report(rid, "c1")["html"].startswith("<h1>V</h1>")
+
+
+def test_an_edit_is_stored_as_sanitised_html(isolated_settings, monkeypatch):
+    """An edit is model output like any other, and this body is rendered in the
+    app, in the PDF and behind a public link. An editor that answered in markdown
+    despite being handed HTML is converted rather than stored as source text."""
+    from app import db
+
+    rid = db.save_report("c1", skill="voice-of-customer-report", title="V", html="<p>V</p>")
+    monkeypatch.setattr(
+        ace, "apply_edit",
+        lambda *a, **k: _edit(document="# V\n\n**bold** and <script>alert(1)</script>\n"),
+    )
 
     ace.edit_report_scoped(rid, "tweak it", _Company())
-    assert db.get_report(rid, "c1")["html"] == body
+    stored = db.get_report(rid, "c1")["html"]
+    assert stored.startswith("<h1>V</h1>")
+    assert "<strong>bold</strong>" in stored
+    assert "<script>" not in stored
 
 
 def test_a_question_about_a_report_writes_nothing(isolated_settings, monkeypatch):
