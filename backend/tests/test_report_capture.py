@@ -400,3 +400,111 @@ async def test_report_has_no_conversation_when_the_ask_carried_none(
     )
     row = db.get_report(rows[0]["id"], "noconv-co")
     assert row["conversation_id"] is None
+
+
+# ─── markdown reports (the shape every pipeline answers in today) ────────────
+# The capture policy USED to be the HTML sniff alone. When the pinned report
+# templates were removed (#1024) every pipeline started answering in markdown,
+# the sniff stopped matching, and chat-generated reports silently stopped
+# reaching the library — no artifacts row, and so no `conversation_id` either,
+# which is the id /artifacts opens a report's thread by and the id the thread's
+# own Reports panel lists on. These pin the second shape that closes it.
+
+VOC_MARKDOWN = (
+    "# Voice of customer · 1–30 Jun\n\n"
+    "## Themes\n\n- Onboarding friction was the top complaint.\n"
+    "- Pricing came up on every renewal call.\n"
+)
+
+
+def _report_payload(answer: str, skill: str = "voice-of-customer-report") -> dict:
+    """A payload the ENGINE marked as its document — `_report` is stamped on
+    the one return that is a report, never on the degraded apologies."""
+    return {**_payload(answer, skill), "_report": True}
+
+
+def test_is_report_payload_reads_the_engines_marker():
+    assert rc.is_report_payload(_report_payload(VOC_MARKDOWN))
+    assert rc.is_report_payload(_payload(VOC_HTML)), "the HTML shape still counts"
+    assert not rc.is_report_payload(_payload(VOC_MARKDOWN)), (
+        "markdown with no marker is an ordinary answer"
+    )
+    assert not rc.is_report_payload(
+        _payload("I couldn't find any calls in that window to summarize.")
+    ), "an apology carries `_skill` too — only `_report` says a document exists"
+
+
+def test_report_title_falls_back_to_the_first_markdown_heading():
+    assert (
+        rc.report_title(VOC_MARKDOWN, "voice-of-customer-report")
+        == "Voice of customer · 1–30 Jun"
+    )
+    # No heading at all still lands on the skill's label rather than a slice of
+    # the body — the artifacts row must never read as a stray sentence.
+    assert (
+        rc.report_title("- just a bullet\n", "public-feedback-report")
+        == "Public feedback report"
+    )
+
+
+def test_capture_writes_a_marked_markdown_report(monkeypatch):
+    seen = _patch_save(monkeypatch, result=77)
+
+    report_id = rc.capture_report(
+        _report_payload(VOC_MARKDOWN),
+        company_id="c1",
+        question="what are customers saying?",
+        workspace_id="w1",
+        ask_id=31,
+        conversation_id=42,
+    )
+
+    assert report_id == 77
+    assert seen["skill"] == "voice-of-customer-report"
+    assert seen["title"] == "Voice of customer · 1–30 Jun"
+    # Stored VERBATIM: both viewers sniff the body and render a non-HTML one as
+    # markdown, so wrapping or escaping it here would defeat that.
+    assert seen["html"] == VOC_MARKDOWN
+    assert seen["conversation_id"] == 42, "this is what opens the report's thread"
+    assert seen["ask_id"] == 31
+
+
+def test_capture_skips_a_report_pipelines_apology(monkeypatch):
+    seen = _patch_save(monkeypatch)
+    out = rc.capture_report(
+        _payload("I'm not connected to a transcript source yet."), company_id="c1"
+    )
+    assert out is None
+    assert seen == {}, "a degraded answer is not an artifact"
+
+
+async def test_run_ask_job_persists_a_markdown_report_end_to_end(
+    isolated_settings, monkeypatch
+):
+    """The regression this closes, end to end: a report answered in markdown
+    leaves a readable row attached to the chat that produced it."""
+    from app import ask_job_runner as ajr
+    from app import db
+    from app.db.client import require_client
+
+    monkeypatch.setattr(
+        ajr.qa_agent, "answer", lambda **kw: _report_payload(VOC_MARKDOWN)
+    )
+    monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: None)
+    monkeypatch.setattr(ajr, "is_ask_cancelled", lambda i: False)
+    monkeypatch.setattr(ajr, "fail_ask_job", lambda i, m: None)
+
+    await ajr.run_ask_job(
+        ask_id=21, enterprise_id="md-co", question="what are customers saying?",
+        dataset="d", conversation_id=88, workspace_id="w1",
+    )
+
+    rows = (
+        require_client().table("reports").select("id")
+        .eq("company_id", "md-co").execute().data
+    )
+    assert len(rows) == 1, "a markdown report is captured like any other"
+    row = db.get_report(rows[0]["id"], "md-co")
+    assert row["skill"] == "voice-of-customer-report"
+    assert row["html"] == VOC_MARKDOWN
+    assert row["conversation_id"] == 88

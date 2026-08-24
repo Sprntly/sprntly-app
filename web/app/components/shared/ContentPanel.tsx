@@ -432,7 +432,13 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
     // thread list at all — the open document IS the reason the tab belongs. Keyed
     // on the explicit flag, not on "a focus id exists": a focus id that merely
     // outlived its thread used to keep a Reports tab on chats that have none.
-    !content.reportFocusStandalone
+    !content.reportFocusStandalone &&
+    // A report being WRITTEN is a Reports tab with no row behind it yet — the
+    // same window `ticketSetGenerating` covers below, except capture is a
+    // post-terminal server step, so this window is the WHOLE generation rather
+    // than a second of it. Keying purely on the list would leave a report
+    // generating inside a tab nobody can see.
+    !content.reportGenerating
 
   // A standalone ticket set is on screen — INCLUDING the window before the row
   // exists. `runTicketSetGeneration` publishes `ticketSetGenerating` on its very

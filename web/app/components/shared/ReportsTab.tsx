@@ -7,7 +7,9 @@ import { HtmlReportView } from "./HtmlReportView"
 import { SavedChatMarkdown } from "./SavedChatMarkdown"
 import { ReportShareMenu } from "./ReportShareMenu"
 import { EmptyPane } from "./EmptyPane"
-import { IconArrowLeft } from "@tabler/icons-react"
+import { GeneratingBanner, GeneratingPane } from "./GenerationState"
+import { REPORT_GEN } from "./generationPhases"
+import { IconArrowLeft, IconChartBar } from "@tabler/icons-react"
 import { reportKindLabel } from "../../lib/reportKind"
 import { formatRelativeDate } from "../../lib/sources-helpers"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
@@ -137,6 +139,43 @@ export function ReportsTab({
     // it qualifies would keep an empty Reports tab on the panel.
     setContent({ reportFocusId: null, reportFocusStandalone: false })
   }, [setContent])
+
+  // ── Generating: the report is being written, right here ──────────────────
+  // A report is an artifact, so it generates where artifacts generate. This is
+  // the same shape the PRD panel takes (`PrdPanelContent`): the streamed draft
+  // the moment there is one, the rotating working state before that.
+  //
+  // FIRST, ahead of the detail and the list: while a report is being written it
+  // is the only thing this tab is about. A thread's older reports are one click
+  // away again the moment it lands.
+  if (content.reportGenerating) {
+    const partial = content.reportPartialMd
+    return (
+      <div className="tkv2-list-wrap reports-panel" data-testid="reports-generating">
+        {partial ? (
+          <div style={{ minHeight: 280 }}>
+            <GeneratingBanner
+              testId="reports-streaming"
+              title="Writing the report…"
+              sub="Rendering it below as it's written — the finished report replaces this."
+            />
+            <div data-testid="reports-streaming-preview">
+              <SavedChatMarkdown markdown={partial} />
+            </div>
+          </div>
+        ) : (
+          <div style={{ minHeight: 280 }}>
+            <GeneratingPane
+              {...REPORT_GEN}
+              testId="reports-generating-pane"
+              icon={<IconChartBar size={19} />}
+              title="Generating report…"
+            />
+          </div>
+        )}
+      </div>
+    )
+  }
 
   // ── Detail: one report, in place ──────────────────────────────────────────
   if (selectedId != null) {

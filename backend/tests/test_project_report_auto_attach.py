@@ -2,38 +2,37 @@
 project's own artifact list — the same standing rule the other five
 artifact types already follow (prd/evidence/ticket_set/prototype/
 custom_artifact). Wiring tests for the `ask_job_runner._on_committed` hook;
-`save_chat_output_as_report` and `add_artifact` each have their own direct
-unit coverage elsewhere (`test_project_artifact_capture.py`,
-`test_db_projects.py`-shaped suites) — this file proves the HOOK calls them
-with the right arguments, under the right gate, and never at the wrong time.
+`capture_report` and `add_artifact` each have their own direct unit coverage
+elsewhere (`test_report_capture.py`, `test_db_projects.py`-shaped suites) —
+this file proves the HOOK calls them with the right arguments, under the
+right gate, and never at the wrong time.
 
-Root-cause note (verified directly against source, not assumed): the
-obvious-looking `capture_report` call a few lines above this hook in
-`_on_committed` is NOT the mechanism — `capture_report` only persists a
-self-contained HTML-DOCUMENT answer (`report_capture._HTML_DOC_RE`), and
-every report pipeline (VoC, competitive-intelligence, public-feedback,
-company-research, market-intelligence, call-digest) now answers in plain
-MARKDOWN — its own module docstring says the HTML sniff "self-disables" for
-exactly those skills since the pinned HTML templates were removed. So
-`capture_report` returns `None` for a real report and writes nothing; relying
-on its return id would be a vacuous no-op fix. The new hook mints the row
-itself via `save_chat_output_as_report` (the same writer the manual "Save to
-project" button already calls), independent of `capture_report`.
+Mechanism note. This hook used to mint its own row via
+`save_chat_output_as_report`, because `capture_report` only persisted a
+self-contained HTML-DOCUMENT answer and every report pipeline answers in
+MARKDOWN since the pinned templates were removed — so capture returned None
+for a real report and wrote nothing. That is fixed at the source:
+`report_capture` now also captures a payload the engines marked
+`_report: True`, which is what makes ONE row serve both the project's
+artifact list and (in main chat, where nothing attached at all) the library
+and the thread it was generated in. The hook therefore attaches the row
+capture just wrote instead of minting a second one under the `saved-chat`
+skill.
 """
 from __future__ import annotations
-
-import asyncio
 
 from app import ask_job_runner as ajr
 
 
-def _payload(answer: str, skill: str | None) -> dict:
+def _payload(answer: str, skill: str | None, *, report: bool = False) -> dict:
     """An Ask-shaped payload, as `qa_agent._tag` (or a report module's own
-    tagging) leaves it — `_skill` carries the report-decision signal the
-    hook reads."""
+    tagging) leaves it. `_report` is the engines' marker for "this return IS
+    the document" — never stamped on their degraded apologies, which carry
+    `_skill` all the same."""
     return {
         "answer": answer, "key_points": [], "citations": [],
         "confidence": 0.7, "unanswered": "", "_skill": skill,
+        **({"_report": True} if report else {}),
     }
 
 
@@ -70,15 +69,15 @@ def _wire_common(monkeypatch, *, answer_payload: dict):
 
 
 def _patch_capture(monkeypatch, *, report_id: int | None = 501):
-    """Mock the two writers the hook calls, returning capture dicts of every
-    call it made — `save_chat_output_as_report` (the mint) and `add_artifact`
-    (the attach), each patched at their OWN module (the hook imports them
-    fresh, by name, inside its try block, so patching the source module's
-    attribute is what a late `from ... import ...` actually picks up)."""
+    """Mock the two writers this path runs through — `db.save_report` (the
+    ONE row, written by `capture_report`) and `add_artifact` (the attach) —
+    returning capture dicts of every call each received. `add_artifact` is
+    patched at its own module because the hook imports it fresh, by name,
+    inside its try block."""
     calls = {"save": [], "attach": []}
 
-    def _fake_save(**kw):
-        calls["save"].append(kw)
+    def _fake_save(company_id, **kw):
+        calls["save"].append({"company_id": company_id, **kw})
         return report_id
 
     def _fake_add_artifact(project_id, artifact_type, artifact_id):
@@ -88,19 +87,19 @@ def _patch_capture(monkeypatch, *, report_id: int | None = 501):
             "artifact_id": artifact_id,
         }
 
-    monkeypatch.setattr(
-        "app.project_artifact_capture.save_chat_output_as_report", _fake_save
-    )
+    import app.db as db
+
+    monkeypatch.setattr(db, "save_report", _fake_save)
     monkeypatch.setattr("app.db.projects.add_artifact", _fake_add_artifact)
     return calls
 
 
-# ── AC1: a project report turn mints + attaches ─────────────────────────────
+# ── AC1: a project report turn captures + attaches ──────────────────────────
 
 
-async def test_project_report_turn_mints_and_attaches(monkeypatch):
+async def test_project_report_turn_captures_and_attaches(monkeypatch):
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "voice-of-customer-report",
+        _REPORT_BODY, "voice-of-customer-report", report=True,
     ))
     calls = _patch_capture(monkeypatch)
 
@@ -110,21 +109,28 @@ async def test_project_report_turn_mints_and_attaches(monkeypatch):
         context_source=_PROJECT_CONTEXT_SOURCE,
     )
 
-    assert len(calls["save"]) == 1
-    assert calls["save"][0]["content"] == _REPORT_BODY
-    assert calls["save"][0]["company_id"] == "c1"
-    assert calls["save"][0]["workspace_id"] is None
-    assert calls["save"][0]["conversation_id"] == 5
+    assert len(calls["save"]) == 1, "one row, not one per consumer"
+    saved = calls["save"][0]
+    assert saved["html"] == _REPORT_BODY
+    assert saved["company_id"] == "c1"
+    assert saved["workspace_id"] is None
+    assert saved["conversation_id"] == 5, "attached to the chat it ran in"
+    # The row is badged with the REPORT's own skill, not the generic
+    # `saved-chat` the retired workaround used — that is what gives the
+    # artifacts row its kind label and its per-kind filter.
+    assert saved["skill"] == "voice-of-customer-report"
     assert calls["attach"] == [(9, "report", 501)]
 
 
 async def test_project_report_turn_covers_every_report_pipeline_id(monkeypatch):
-    """Every member of the SAME `_REPORT_PIPELINE_IDS` set the sixth-branch
+    """Every member of the `_REPORT_PIPELINE_IDS` set the sixth-branch
     report-deferral gate reads (five `PIPELINE_SKILLS` report ids + the
-    `call-digest` machinery id) triggers the mint+attach — one signal, no
-    second allow-list that could drift out of sync."""
-    for report_id in sorted(ajr.qa_agent._REPORT_PIPELINE_IDS):
-        _wire_common(monkeypatch, answer_payload=_payload(_REPORT_BODY, report_id))
+    `call-digest` machinery id) captures and attaches when its payload is
+    marked as the document."""
+    for report_skill in sorted(ajr.qa_agent._REPORT_PIPELINE_IDS):
+        _wire_common(monkeypatch, answer_payload=_payload(
+            _REPORT_BODY, report_skill, report=True,
+        ))
         calls = _patch_capture(monkeypatch, report_id=777)
 
         await ajr.run_ask_job(
@@ -132,13 +138,13 @@ async def test_project_report_turn_covers_every_report_pipeline_id(monkeypatch):
             conversation_id=5, user_id="u1",
             context_source=_PROJECT_CONTEXT_SOURCE,
         )
-        assert calls["attach"] == [(9, "report", 777)], report_id
+        assert calls["attach"] == [(9, "report", 777)], report_skill
 
 
-# ── AC2: a non-report project answer mints/attaches nothing ─────────────────
+# ── AC2: a non-report project answer captures/attaches nothing ──────────────
 
 
-async def test_non_report_project_answer_no_mint_no_attach(monkeypatch):
+async def test_non_report_project_answer_no_capture_no_attach(monkeypatch):
     _wire_common(monkeypatch, answer_payload=_payload(
         "There are 3 tasks open on this project right now.", None,
     ))
@@ -154,7 +160,7 @@ async def test_non_report_project_answer_no_mint_no_attach(monkeypatch):
     assert calls["attach"] == []
 
 
-async def test_non_report_pipeline_skill_no_mint_no_attach(monkeypatch):
+async def test_non_report_pipeline_skill_no_capture_no_attach(monkeypatch):
     """A resolved skill that is NOT a report (a tracker lookup, a company
     skill, etc.) must not be misread as a report just because `_skill` is
     non-None."""
@@ -173,14 +179,35 @@ async def test_non_report_pipeline_skill_no_mint_no_attach(monkeypatch):
     assert calls["attach"] == []
 
 
-# ── AC3: a main-chat report never attaches ───────────────────────────────────
-
-
-async def test_main_chat_report_no_attach_no_context_source(monkeypatch):
-    """No `context_source` at all (the plain main-chat call shape) — a
-    report answer is stored as usual but never attached to any project."""
+async def test_a_report_pipelines_apology_is_not_an_artifact(monkeypatch):
+    """The engines stamp `_skill` on their degraded returns too ("I'm not
+    connected to a transcript source"). Only `_report` says a document was
+    produced, so an apology leaves no artifact behind."""
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "voice-of-customer-report",
+        "I couldn't find any calls in that window to summarize.",
+        "voice-of-customer-report",
+    ))
+    calls = _patch_capture(monkeypatch)
+
+    await ajr.run_ask_job(
+        ask_id=11, enterprise_id="c1", question="voc for last week",
+        dataset="d", conversation_id=5, user_id="u1",
+        context_source=_PROJECT_CONTEXT_SOURCE,
+    )
+
+    assert calls["save"] == []
+    assert calls["attach"] == []
+
+
+# ── AC3: a main-chat report is captured, but never attached ─────────────────
+
+
+async def test_main_chat_report_is_captured_and_never_attached(monkeypatch):
+    """No `context_source` at all (the plain main-chat call shape). The
+    report IS captured — that row is the library entry and the thread's own
+    Reports panel — but it belongs to no project, so nothing attaches."""
+    _wire_common(monkeypatch, answer_payload=_payload(
+        _REPORT_BODY, "voice-of-customer-report", report=True,
     ))
     calls = _patch_capture(monkeypatch)
 
@@ -189,7 +216,8 @@ async def test_main_chat_report_no_attach_no_context_source(monkeypatch):
         dataset="d", conversation_id=5, user_id="u1",
     )
 
-    assert calls["save"] == []
+    assert len(calls["save"]) == 1
+    assert calls["save"][0]["conversation_id"] == 5
     assert calls["attach"] == []
 
 
@@ -197,7 +225,7 @@ async def test_main_chat_report_no_attach_non_project_context_source_kind(monkey
     """A `context_source` present but of a DIFFERENT kind (never project) —
     the gate reads `kind == "project"` literally, nothing looser."""
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "market-intelligence-report",
+        _REPORT_BODY, "market-intelligence-report", report=True,
     ))
     calls = _patch_capture(monkeypatch)
 
@@ -207,7 +235,7 @@ async def test_main_chat_report_no_attach_non_project_context_source_kind(monkey
         context_source={"kind": "prd", "params": {"prd_id": 3}},
     )
 
-    assert calls["save"] == []
+    assert len(calls["save"]) == 1, "still a library artifact"
     assert calls["attach"] == []
 
 
@@ -216,7 +244,7 @@ async def test_project_report_never_falls_back_to_a_top_level_project_id(monkeyp
     top-level `project_id` kwarg (which project chat never actually sends)
     must never substitute for it."""
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "voice-of-customer-report",
+        _REPORT_BODY, "voice-of-customer-report", report=True,
     ))
     calls = _patch_capture(monkeypatch)
 
@@ -226,7 +254,6 @@ async def test_project_report_never_falls_back_to_a_top_level_project_id(monkeyp
         project_id=42,  # top-level kwarg only — no context_source at all
     )
 
-    assert calls["save"] == []
     assert calls["attach"] == []
 
 
@@ -251,7 +278,7 @@ async def test_repeated_attach_is_shaped_as_a_no_op(monkeypatch):
     )
 
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "voice-of-customer-report",
+        _REPORT_BODY, "voice-of-customer-report", report=True,
     ))
     calls = _patch_capture(monkeypatch, report_id=501)
 
@@ -266,20 +293,37 @@ async def test_repeated_attach_is_shaped_as_a_no_op(monkeypatch):
     assert calls["attach"] == [(9, "report", 501), (9, "report", 501)]
 
 
-# ── AC5: best-effort — a mint/attach failure never breaks the answer ────────
+async def test_a_capture_that_wrote_nothing_attaches_nothing(monkeypatch):
+    """No row means no id to attach — the hook must not invent one (and must
+    not fall back to minting a second, differently-badged row, which is what
+    it used to do)."""
+    _wire_common(monkeypatch, answer_payload=_payload(
+        _REPORT_BODY, "voice-of-customer-report", report=True,
+    ))
+    calls = _patch_capture(monkeypatch, report_id=None)
+
+    await ajr.run_ask_job(
+        ask_id=12, enterprise_id="c1", question="give me a voice-of-customer report",
+        dataset="d", conversation_id=5, user_id="u1",
+        context_source=_PROJECT_CONTEXT_SOURCE,
+    )
+
+    assert calls["attach"] == []
+
+
+# ── AC5: best-effort — a capture/attach failure never breaks the answer ─────
 
 
 async def test_attach_failure_does_not_break_the_answer(monkeypatch):
     _wire_common(monkeypatch, answer_payload=_payload(
-        _REPORT_BODY, "voice-of-customer-report",
+        _REPORT_BODY, "voice-of-customer-report", report=True,
     ))
+    _patch_capture(monkeypatch)
 
-    def _boom(**kw):  # noqa: ARG001
-        raise RuntimeError("forced mint failure")
+    def _boom(*a, **kw):  # noqa: ARG001
+        raise RuntimeError("forced attach failure")
 
-    monkeypatch.setattr(
-        "app.project_artifact_capture.save_chat_output_as_report", _boom
-    )
+    monkeypatch.setattr("app.db.projects.add_artifact", _boom)
 
     completed: dict = {}
     monkeypatch.setattr(ajr, "complete_ask_job", lambda i, p: completed.setdefault(i, p))

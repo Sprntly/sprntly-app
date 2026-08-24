@@ -334,6 +334,26 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     (key: string) => tabsRef.current?.find((t) => t.id === key)?.prdId ?? null,
     [tabsRef],
   )
+  // A report answer means the server just captured a `reports` row attached to
+  // this thread (see backend/app/report_capture.py). Nothing else client-side
+  // changes when that happens, so the one report fetcher is told to re-read —
+  // otherwise the panel only learns about the report on the next thread visit.
+  // The report stream, while one is being written for this thread. A report is
+  // an artifact, so it generates in the PANEL — the posture a PRD build takes —
+  // and the deltas render there instead of scrolling through the chat the
+  // document is about to appear beside. `null` ends the run: settled, failed or
+  // stopped, all of which mean the panel stops writing.
+  const onReportStream = useCallback((markdown: string | null) => {
+    setContent(
+      markdown === null
+        ? { reportGenerating: false, reportPartialMd: null }
+        : { reportPartialMd: markdown },
+    )
+  }, [setContent])
+
+  const onAnswer = useCallback((res: AskResponse) => {
+    if (res._report) setContent({ reportsRefreshKey: Date.now() })
+  }, [setContent])
 
   // ── The single-conversation ask-core (send-run + stop + action-turn) ───────
   const engine = useMainConversation({
@@ -344,6 +364,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     setBusy: setBusyTabs,
     resolveAskParams,
     getPrdId,
+    onReportStream,
+    onAnswer,
     mountedRef,
     animatedTurnIds,
     askStartRef,
@@ -531,6 +553,11 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
         }
       }
 
+      // Set when the planner resolved this turn to a report pipeline — the
+      // answer will BE a document, so the panel writes it and the thread does
+      // not. Declared out here because the envelope is scoped to the classify
+      // block below and the ask runs after it.
+      let reportRun = false
       if (!trimmed.startsWith("/")) {
         const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
         // The planner sees what the answer path will see — same `[Attached files]`
@@ -720,6 +747,12 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             dispatchChatIntent(envelope, dispatchCtx, executors)
             return
           }
+          // An `answer` that will write a REPORT. Not a dispatch — the ask path
+          // runs it, exactly as before — but the document belongs in the panel,
+          // so the Reports tab opens NOW in its generating state and the stream
+          // goes there. Any report the thread already holds is deselected: what
+          // is being written is what this tab is about until it lands.
+          reportRun = envelope.report === true
         }
       }
 
@@ -768,7 +801,17 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
           return
         }
       }
-      await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments })
+      if (reportRun) {
+        setContent({
+          reportGenerating: true,
+          reportPartialMd: null,
+          // The tab is about the report being written, not the one read before it.
+          reportFocusId: null,
+          reportFocusStandalone: false,
+        })
+        openContentPanel("reports")
+      }
+      await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments, reportRun })
     },
     [
       attachments, activeTabId, nextPrompts, setPendingSend, tabsRef, interceptBeforeIntent,

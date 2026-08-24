@@ -1631,3 +1631,77 @@ def test_an_unplanned_turn_still_routes(monkeypatch):
     )
 
     assert len(routed) == 1, "an unplanned turn must still reach the router"
+
+
+# ── the open PRD (the thread's own state) ────────────────────────────────────
+# The planner was told nothing about what the tab had open, while the
+# pre-planner resolver rendered exactly this line. "build a report from this
+# prd" planned as `answer` with the reason "no PRD is open or identified in the
+# thread — need to ask which PRD they mean", on a thread that had PRD 3723 open
+# beside it — so the document the user asked for was written into the chat as
+# prose and filed as no artifact at all.
+
+
+def test_the_open_prd_rides_the_input_when_one_is_open(monkeypatch):
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan(
+        "build a report from this prd",
+        enterprise_id=COMPANY,
+        prd_id=3723,
+        prd_title="Share-link token expiry",
+    )
+
+    text = calls[0]["input"]
+    assert 'Active tab: PRD #3723 — "Share-link token expiry" is open beside this chat.' in text
+    # Still ahead of the question, which stays last.
+    assert text.endswith("Question: build a report from this prd")
+
+
+def test_the_open_prd_line_survives_a_missing_title(monkeypatch):
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan("what does it say", enterprise_id=COMPANY, prd_id=12)
+
+    assert "Active tab: PRD #12 is open beside this chat." in calls[0]["input"]
+
+
+def test_no_open_prd_adds_no_line_at_all(monkeypatch):
+    """The absence is already the prompt's default ("no PRD exists in this
+    thread yet → generate_prd"); a "No PRD is open" line on every planless
+    message is tokens spent to say nothing."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan("what shipped last month", enterprise_id=COMPANY)
+
+    assert "Active tab:" not in calls[0]["input"]
+
+
+def test_two_threads_with_different_prds_open_do_not_share_a_plan(monkeypatch):
+    """The memo exists so ONE turn is planned once (the intent endpoint and the
+    ask worker both plan it). The open PRD is now an input, so it has to be part
+    of the key — otherwise the same sentence asked on two threads inside the TTL
+    is routed by the other thread's context."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    monkeypatch.setattr(ap, "decide_enabled", lambda *_a, **_k: True)
+    ap._plan_memo.clear()
+
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=12
+    )
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=40
+    )
+    assert len(calls) == 2, "a different open PRD is a different turn"
+
+    # The SAME thread's second caller (the ask worker after the intent endpoint)
+    # still reuses the one plan — that is what the memo is for.
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=40
+    )
+    assert len(calls) == 2, "same question, same open PRD — planned once"

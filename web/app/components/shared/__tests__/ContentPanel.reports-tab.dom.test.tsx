@@ -73,6 +73,10 @@ async function renderPanel(opts: {
   status?: "idle" | "loading" | "ready" | "error"
   /** A PRD in scope puts the Evidence → PRD → Tickets pipeline in scope too. */
   prd?: unknown
+  /** A report is being written for this thread right now. */
+  generating?: boolean
+  /** The streamed draft so far. */
+  partial?: string | null
   /** Which conversation the rows were FETCHED for. Defaults to the thread the
    *  panel is showing — the normal case, once useThreadReportsSync has answered
    *  for it. Pass a different id to stage the commit where the chat has already
@@ -90,6 +94,8 @@ async function renderPanel(opts: {
     conversationId: 77,
     reportFocusId: null,
     reportFocusStandalone: false,
+    reportGenerating: opts.generating ?? false,
+    reportPartialMd: opts.partial ?? null,
     threadReports: opts.reports ?? [],
     threadReportsStatus: opts.status ?? "ready",
     threadReportsConversationId: opts.listFor === undefined ? 77 : opts.listFor,
@@ -197,5 +203,38 @@ describe("ContentPanel — the Reports tab", () => {
     // The header names what the panel is showing — not the PRD, which a
     // report-only thread may not even have.
     expect(document.querySelector(".cpanel-main-name")?.textContent).toBe("Reports")
+  })
+})
+
+// ── A report generates in the panel, not in the chat ────────────────────────
+// A report is an artifact, so it is written where artifacts are written — the
+// same posture the PRD build takes. The tab has to EXIST for that whole window,
+// which is the whole generation: capture is a post-terminal server step, so
+// there is no row to key the tab on until the report has already landed.
+describe("ContentPanel — a report being written", () => {
+  it("shows the Reports tab while one is generating, with no row yet", async () => {
+    await renderPanel({ generating: true })
+    expect(reportsTab()).toBeTruthy()
+  })
+
+  it("shows the working state on that tab before the first delta", async () => {
+    await renderPanel({ tab: "reports", generating: true })
+    expect(screen.getByTestId("reports-generating-pane")).toBeTruthy()
+  })
+
+  it("renders the draft as it streams, in the panel", async () => {
+    await renderPanel({
+      tab: "reports",
+      generating: true,
+      partial: "# Voice of customer\n\nOnboarding friction leads the window.",
+    })
+    expect(screen.getByTestId("reports-streaming")).toBeTruthy()
+    expect(screen.getByTestId("reports-streaming-preview").textContent)
+      .toContain("Onboarding friction")
+  })
+
+  it("goes back to the thread's reports once it lands", async () => {
+    await renderPanel({ tab: "reports", reports: [ROW], generating: false })
+    expect(document.querySelector("[data-testid='reports-generating']")).toBeNull()
   })
 })

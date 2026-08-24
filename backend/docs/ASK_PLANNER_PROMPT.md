@@ -292,6 +292,8 @@ Keyword match: a keyword rule matched the "{pipeline_id}" pipeline for this
 question. Treat that as the default outcome unless one of the Company skills
 above genuinely fits the question better.
 
+Active tab: PRD #{id} — "{title}" is open beside this chat.
+
 Conversation so far:
 User: {turn}
 Assistant: {turn}
@@ -308,6 +310,7 @@ Question: {the user's question}
 | Connected sources | Always | `registry.connected_providers(enterprise_id)`, intersected with `LOOKUP_PROVIDERS` |
 | Not connected | Always | `LOOKUP_PROVIDERS` minus the above. Stating the negative measurably reduces hallucinated sources |
 | Keyword match | Only when the regex tier hit AND the company has uploads | `_keyword_prior` |
+| Active tab | Only when a PRD is open on the tab that sent the message | `_open_prd_block`. The same fact the pre-planner resolver already rendered (`chat_intent._render_context`) and the planner was never given: without it "build a report from this prd" planned as `answer` — *"no PRD is open or identified in the thread"* — on a thread that had one open. Absent when none is open; the prompt already reasons from that as its default |
 | Conversation | Only when history exists | `_render_history`, per-turn clamped |
 | Question | Always | **`_routing_text_with_filenames(...)`, never the raw `question`** — see below. Last |
 

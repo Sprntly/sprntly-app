@@ -57,6 +57,20 @@ export interface UseMainConversationDeps {
   /** The grounding PRD id for the post-answer suggestion fetch, read fresh at
    *  settle (main: the tab's current `prdId`; a project surface: null). */
   getPrdId: (key: string) => number | null
+  /** The report stream, when this run is a report one: each delta as it grows,
+   *  then null when the run ends — settled, failed or stopped.
+   *
+   *  A report is an artifact, so it generates where artifacts generate: the
+   *  panel. Routing the deltas here instead of onto the turn is what keeps a
+   *  report out of the thread it is about to appear beside, and the closing
+   *  null is what stops a panel generating forever over an ask that degraded to
+   *  an apology (a report pipeline can and does return one). */
+  onReportStream?: (markdown: string | null) => void
+  /** The settled answer, handed over once it is on screen. Main uses it to
+   *  refetch the thread's reports when the answer IS a report: capture is a
+   *  SERVER-side step that runs after the answer, so no client state otherwise
+   *  changes to say the thread just gained an artifact. */
+  onAnswer?: (res: AskResponse) => void
   /** Screen-mounted guard (aborts the poll on unmount). */
   mountedRef: RefObject<boolean>
   /** Turn ids that already streamed live — excluded from the replay animation. */
@@ -97,6 +111,9 @@ export interface MainConversation {
     displayQuery: string
     sendQuery: string
     persistedAttachments?: PersistedAttachment[]
+    /** This ask will answer with a REPORT: its stream belongs in the panel, not
+     *  in the thread. See `onReportStream`. */
+    reportRun?: boolean
   }) => Promise<void>
   /** Stop the active conversation's in-flight ask: reclaim the composer at once,
    *  mark the in-flight turn `stopped`, and best-effort backend-cancel. */
@@ -119,6 +136,8 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
     setBusy,
     resolveAskParams,
     getPrdId,
+    onReportStream,
+    onAnswer,
     mountedRef,
     animatedTurnIds,
     askStartRef,
@@ -132,12 +151,13 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
 
   // ── The single-conversation ASK run ───────────────────────────────────────
   const runConversationAsk = useCallback(
-    async ({ targetTabId, id, displayQuery, sendQuery, persistedAttachments }: {
+    async ({ targetTabId, id, displayQuery, sendQuery, persistedAttachments, reportRun }: {
       targetTabId: string
       id: string
       displayQuery: string
       sendQuery: string
       persistedAttachments?: PersistedAttachment[]
+      reportRun?: boolean
     }) => {
       // The conversation this run writes to. runTabAsk routes onResult/onError to
       // this same `targetTabId`, so every thread mutation below (stream partials,
@@ -186,6 +206,10 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
             // place of the thinking skeleton as the model writes it. Display
             // only — onResult's authoritative reply replaces it.
             onPartial: (text) => {
+              // A REPORT streams into the panel, never into the thread — it is an
+              // artifact being written, and the thread shows a card for it once
+              // it lands. Everything else renders in place of the skeleton here.
+              if (reportRun) { onReportStream?.(text); return }
               conv.patchTurns((thread) => thread.map((turn) =>
                 turn.id === id && !turn.reply && !turn.stopped
                   // A delta arriving after a drop means the preview came
@@ -230,6 +254,16 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
             ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }
             : turn))
           const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
+          // The answer is on screen and stored. If it IS a report, the server
+          // has just captured it as an artifact hanging off this thread — say
+          // so, so the thread's report list is re-read and the panel can open
+          // on the document the user watched being written.
+          // The run is over either way: clear the panel's generating state before
+          // anything else reads it. A report pipeline can answer with an apology
+          // instead of a document, and that ask must not leave a panel writing a
+          // report forever.
+          if (reportRun) onReportStream?.(null)
+          onAnswer?.(res)
           // Suggestions are fetched HERE — after the answer is on screen — and
           // deliberately not awaited by the turn: it is already complete, so a
           // slow or failed request degrades to the ordinary empty state. Only
@@ -265,6 +299,10 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           }
         },
         onError: (tabId, e) => {
+          // Failed, cancelled, stopped or timed out — the panel stops writing. The
+          // specific outcomes are sorted out below; none of them is a report
+          // still being written.
+          if (reportRun) onReportStream?.(null)
           // Poll cancelled because the user left the chat screen mid-flight: the
           // ask_id is still persisted, so the mount-time resume effect will
           // re-attach and populate on return. Not a failure — no error UI/toast.
@@ -340,7 +378,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
         },
       })
     },
-    [makeHandle, resolveAskParams, getPrdId, activeCompany, askingRef, setBusy, mountedRef, animatedTurnIds, askStartRef, resumedTurnsRef, pushPendingConversation, setActiveConv, finalizeConversationTurn, nextPrompts, showToast],
+    [makeHandle, resolveAskParams, getPrdId, onAnswer, onReportStream, activeCompany, askingRef, setBusy, mountedRef, animatedTurnIds, askStartRef, resumedTurnsRef, pushPendingConversation, setActiveConv, finalizeConversationTurn, nextPrompts, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
