@@ -170,6 +170,10 @@ def test_what_it_did_not_pick_names_the_term_that_decided_it():
     assert "smaller size" in reason
     # BOTH sides quoted — a comparison with one number in it is not checkable.
     assert "100" in reason and "1,000" in reason
+    # AND THE PERCENTAGE IS REAL. Leader 1000x0.8/4 = 200; runner 100x0.8/4 =
+    # 20; the gap is 90%. Asserting only that both numbers appear let a
+    # mutated denominator render a nonsensical ">100% behind" and still pass.
+    assert "90% behind" in reason, reason
 
 
 def test_an_unrankable_candidate_appears_in_what_was_not_picked():
@@ -214,7 +218,13 @@ def test_a_clear_winner_states_what_would_change_it():
     ])
     d = decide(out, FINDINGS).would_change_it
     assert d, "a recommendation with no falsifier is an assertion"
-    assert "effort" in d.lower() or "size" in d.lower()
+    # CHECKS THE NUMBER, not the words. The first version asserted only that
+    # the string was non-empty and mentioned "effort" or "size", so mutating
+    # the formula to a tautology still passed — the same "checks the words, not
+    # the numbers" hole that produced the I3 bug two functions over.
+    # Leader: 1000 x 0.8 / 4 = 200. Runner: 100 x 0.5 / 4 = 12.5.
+    # The size at which the leader ties the runner is 12.5 * 4 / 0.8 = 62.5.
+    assert "62.5" in d, f"the falsifier states no checkable number: {d}"
 
 
 def test_the_margin_is_what_decides_a_tie_not_a_hardcoded_pair():
@@ -230,3 +240,45 @@ def test_the_margin_is_what_decides_a_tie_not_a_hardcoded_pair():
         ("f-b", imp(100.0 * (1 - DECISIVE_MARGIN * 2), 1.0), conf(0.8), DERIVED),
     ])
     assert decide(clear, FINDINGS).recommended_id == "f-a"
+
+
+
+def test_the_reason_names_the_term_that_actually_decided_it():
+    """The first version picked a branch on raw thresholds and then quoted the
+    COMBINED gap in every branch — so a 0.06 confidence difference could be
+    reported as "weaker evidence, 98% behind" when the 98% came entirely from a
+    50x effort difference the sentence never mentioned."""
+    slow = eff(50.0, "median of 3: 40, 50, 60", (40.0, 50.0, 60.0))
+    out = prioritise([
+        ("f-lead", imp(1000.0, 10.0), conf(0.86), DERIVED),   # 4 weeks
+        ("f-slow", imp(1000.0, 10.0), conf(0.80), slow),      # 50 weeks
+    ])
+    d = decide(out, [{"id": "f-lead", "statement": "lead"},
+                     {"id": "f-slow", "statement": "slow"}])
+    reason = next(n.reason for n in d.not_picked if n.finding_id == "f-slow")
+    assert "more work" in reason, f"named the wrong term: {reason}"
+    assert "50 weeks" in reason and "4" in reason
+    assert "weaker evidence" not in reason
+
+
+def test_an_unsized_finding_is_never_ranked_or_recommended():
+    """I3 at the ranking. Coercing `value=None` into the numerator gave it a
+    real score of 0.0, let it rank, and let `decide()` recommend it — emitting
+    "the largest thing this reading found that can also be sized: —"."""
+    out = prioritise([("f-unsized", imp(None, 40.0), conf(0.9), DERIVED)])
+    assert not out.ranked
+    assert out.unrankable[0].unrankable == "unsized"
+    d = decide(out, [{"id": "f-unsized", "statement": "unsized thing"}])
+    assert d.recommended_id is None
+    assert "could not be sized" in out.note
+
+
+def test_a_zero_week_effort_is_unrankable_with_a_stated_reason():
+    """`weeks == 0` is not free work, it is an unusable denominator. It
+    previously produced score=None with `unrankable` unset, so the item landed
+    in the unrankable bucket carrying no reason at all."""
+    free = eff(0.0, "median of 3: 0, 0, 0", (0.0, 0.0, 0.0))
+    out = prioritise([("f-free", imp(100.0, 5.0), conf(0.7), free)])
+    assert not out.ranked
+    assert out.unrankable[0].unrankable == "effort_not_positive"
+    assert "zero weeks" in out.note

@@ -164,22 +164,37 @@ def prioritise_one(
     reach = impact.affected_population
     value = impact.value
 
-    if not effort.derivable:
+    def _unrankable(why: str, weeks: Optional[float] = None) -> Priority:
         return Priority(
             finding_id=finding_id, reach=reach, impact_value=value,
-            confidence_score=confidence.score, effort_weeks=None,
-            effort_derivation=effort.derivation,
-            unrankable="effort_underivable",
-            arithmetic="",
+            confidence_score=confidence.score, effort_weeks=weeks,
+            effort_derivation=effort.derivation, unrankable=why, arithmetic="",
         )
 
+    if not effort.derivable:
+        return _unrankable("effort_underivable")
+
+    # I3, AT THE RANKING. An unsized finding is NOT a zero-sized one — "we could
+    # not size this" and "this is worth nothing" lead to opposite decisions, and
+    # `scoring.py` is explicit that `value=None` means not measured. Coercing it
+    # into the numerator gave it a real score of 0.0 and let it rank normally,
+    # and `decide()` would then RECOMMEND it, emitting the self-contradicting
+    # "the largest thing this reading found that can also be sized: —".
+    if value is None:
+        return _unrankable("unsized", weeks=effort.weeks)
+
     weeks = effort.weeks or 0.0
+    # A derivable effort of zero weeks is not free work, it is an unusable
+    # denominator. Without this the score came out `None` while `unrankable`
+    # stayed unset, so the item landed in the unrankable bucket carrying no
+    # stated reason at all.
+    if weeks <= 0:
+        return _unrankable("effort_not_positive", weeks=weeks)
     # `value` already carries reach: Stage 9 computes it as
     # population x movable_gap x value_per_unit, so multiplying by reach again
     # would count the population twice — the "reach" column is shown for the
     # reader, not multiplied back in.
-    numerator = (value if value is not None else 0.0) * confidence.score
-    score = numerator / weeks if weeks else None
+    score = (value * confidence.score) / weeks
     return Priority(
         finding_id=finding_id, reach=reach, impact_value=value,
         confidence_score=confidence.score, effort_weeks=weeks,
@@ -234,14 +249,27 @@ def prioritise(
 
     note = ""
     if not ranked and unrankable:
+        # NAMES EVERY REASON PRESENT, not just the commonest one. "No effort
+        # could be derived" and "this was never sized" are different problems
+        # with different fixes, and a note that reports only the first would
+        # send a reader after the wrong one.
+        why = {p.unrankable for p in unrankable if p.unrankable}
+        reasons = []
+        if "effort_underivable" in why:
+            reasons.append(
+                "no record of how long comparable work took, so any effort "
+                "number would be a guess wearing a decision")
+        if "unsized" in why:
+            reasons.append(
+                "some candidates could not be sized at all, and an unsized "
+                "finding is not a zero-sized one")
+        if "effort_not_positive" in why:
+            reasons.append("an effort estimate came back as zero weeks")
         note = (
-            f"Nothing could be ranked. RICE needs an effort estimate and "
-            f"{len(unrankable)} candidate"
-            f"{'' if len(unrankable) == 1 else 's'} could not derive one — "
-            f"there is no record of how long comparable work took, so any "
-            f"number here would be a guess wearing a decision. Reach, size and "
-            f"confidence are shown for each; the ordering is the part that is "
-            f"missing."
+            f"Nothing could be ranked. {len(unrankable)} candidate"
+            f"{'' if len(unrankable) == 1 else 's'} could not be ordered: "
+            + "; ".join(reasons) + ". Reach, size and confidence are shown for "
+            "each; the ordering is the part that is missing."
         )
     return Prioritisation(framework=fw, ranked=tuple(ranked),
                           unrankable=tuple(unrankable), note=note)

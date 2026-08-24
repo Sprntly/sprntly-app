@@ -566,3 +566,91 @@ def test_clipping_never_emits_a_half_escaped_entity():
         out = r._esc_clipped('"' * 50, n)
         assert len(out) <= n
         assert "&" not in out or out.count("&") == out.count(";")
+
+
+# ─── Stage 11: the decision reaches the DOCUMENT, not just the API blob ──────
+
+def _meta_with_decision(**over):
+    base = {
+        "decision": {
+            "recommended_id": "f-1",
+            "recommended_statement": "Exports time out for enterprise accounts",
+            "why": "It is the largest thing this reading found that can also be "
+                   "sized: 1,000 at confidence 0.80, against 4 weeks.",
+            "not_picked": [{"finding_id": "f-2", "statement": "Mobile parity",
+                            "reason": "smaller size (100 against 1,000), 90% behind"}],
+            "would_change_it": "This stops being first if its size drops below 250.",
+            "withheld": "",
+        },
+        "prioritisation_v2": {
+            "framework": {"id": "rice_default", "source": "default_rice",
+                          "criteria": [], "verbatim": None, "stated_at": None},
+            "ranked": [{"finding_id": "f-1",
+                        "arithmetic": "1,000 x 0.80 confidence / 4 weeks = 200"}],
+            "unrankable": [], "note": "",
+        },
+    }
+    base.update(over)
+    return base
+
+
+def test_the_decision_is_rendered_in_the_document(run_row=None):
+    """WITHOUT THIS THE GATE DOES NOT EXIST. A first version computed the
+    ranking and the decision, stored both on the run, and rendered neither — so
+    the document a PM circulates was byte-identical to the one before, while the
+    PR claimed it "lands a decision". The tests asserted against the API blob,
+    which is how that passed review twice."""
+    html = render_report_html(
+        {"goal_text": "reduce churn", "prioritisation": _meta_with_decision()},
+        [{"statement": "Exports time out", "claim_ids": ["c1"]}], [],
+    )
+    assert "What I would do first" in html
+    assert "Exports time out for enterprise accounts" in html
+    # The reason a runner-up lost, with BOTH numbers, so it is checkable.
+    assert "What I did not pick" in html
+    assert "100 against 1,000" in html
+    # The falsifier.
+    assert "What would change it" in html
+    # §10b: the arithmetic, not just the ordering.
+    assert "1,000 x 0.80 confidence / 4 weeks = 200" in html
+
+
+def test_a_withheld_decision_renders_the_refusal_not_a_recommendation():
+    meta = _meta_with_decision(decision={
+        "recommended_id": None, "recommended_statement": "", "why": "",
+        "not_picked": [], "would_change_it": "",
+        "withheld": "I am not going to name a first move from this run.",
+    })
+    html = render_report_html(
+        {"goal_text": "reduce churn", "prioritisation": meta},
+        [{"statement": "Exports time out", "claim_ids": ["c1"]}], [],
+    )
+    assert "No first move from this run" in html
+    assert "not going to name a first move" in html
+    assert "What I would do first" not in html
+
+
+def test_a_run_without_a_decision_renders_exactly_as_before():
+    """Old runs carry no decision. The section must vanish rather than render
+    an empty heading."""
+    html = render_report_html(
+        {"goal_text": "reduce churn", "prioritisation": {}},
+        [{"statement": "Exports time out", "claim_ids": ["c1"]}], [],
+    )
+    assert "What I would do first" not in html
+    assert "How this was ordered" not in html
+    assert "Exports time out" in html
+
+
+def test_a_company_rule_is_rendered_verbatim_not_as_rice():
+    meta = _meta_with_decision()
+    meta["prioritisation_v2"]["framework"] = {
+        "id": "company_defined", "source": "company_defined", "criteria": [],
+        "verbatim": "we ship the cheapest thing that unblocks a paying customer",
+        "stated_at": "your company context"}
+    html = render_report_html(
+        {"goal_text": "reduce churn", "prioritisation": meta},
+        [{"statement": "Exports time out", "claim_ids": ["c1"]}], [],
+    )
+    assert "cheapest thing that unblocks a paying customer" in html
+    assert "RICE, because no prioritisation rule" not in html

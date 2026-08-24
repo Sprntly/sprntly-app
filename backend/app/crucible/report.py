@@ -513,6 +513,76 @@ def _hypotheses_section(plan: dict) -> str:
     ])
 
 
+def _decision_section(meta: dict) -> str:
+    """Stage 11 — the decision, in the document a PM actually circulates.
+
+    WITHOUT THIS THE GATE DOES NOT EXIST. A first version computed the ranking
+    and the decision, stored both on the run, and rendered neither — so the
+    report a reader opens was byte-identical to the one before, while the PR
+    claimed it "lands a decision". The data was in the API blob and the tests
+    asserted against the blob, which is how that passed review twice.
+
+    Rendered FIRST, above the findings: a reader who has to scroll past seven
+    themes to learn what to do has been handed the corpus back.
+    """
+    decision = _as_dict(meta.get("decision"))
+    prio = _as_dict(meta.get("prioritisation_v2"))
+    if not decision and not prio:
+        return ""
+
+    out: list[str] = []
+
+    if decision.get("withheld"):
+        out.append("<h2>No first move from this run</h2>")
+        out.append(_p(_esc(decision["withheld"])))
+    elif decision.get("recommended_statement"):
+        out.append("<h2>What I would do first</h2>")
+        out.append(_p(f"<strong>{_esc_clipped(decision['recommended_statement'], 400)}</strong>"))
+        if decision.get("why"):
+            out.append(_p(_esc_clipped(decision["why"], 600)))
+        if decision.get("would_change_it"):
+            out.append(_p(f"<strong>What would change it.</strong> "
+                          f"{_esc_clipped(decision['would_change_it'], 400)}"))
+
+    not_picked = _as_list(decision.get("not_picked"))
+    if not_picked:
+        out.append("<h3>What I did not pick, and why</h3>")
+        out.append(_ul(
+            f"<strong>{_esc_clipped(n.get('statement'), 200)}</strong> — "
+            f"{_esc_clipped(n.get('reason'), 260)}"
+            for n in not_picked if isinstance(n, dict)
+        ))
+
+    ranked = _as_list(prio.get("ranked"))
+    unrankable = _as_list(prio.get("unrankable"))
+    if ranked or unrankable:
+        fw = _as_dict(prio.get("framework"))
+        out.append("<h3>How this was ordered</h3>")
+        if fw.get("verbatim"):
+            out.append(_p("Your own stated rule, used as written:"))
+            out.append(f"<blockquote>{_esc_clipped(fw['verbatim'], 400)}</blockquote>")
+        else:
+            out.append(_p("RICE, because no prioritisation rule was found in "
+                          "your company context — reach, size, confidence, effort."))
+        if ranked:
+            # §10b: "The output shows the inputs, not just the ordering. A rank
+            # the reader cannot interrogate is an oracle."
+            out.append(_ul(
+                f"<strong>{_esc(r.get('finding_id'))}</strong> — "
+                f"{_esc_clipped(r.get('arithmetic'), 200)}"
+                for r in ranked if isinstance(r, dict)
+            ))
+        if unrankable:
+            out.append(_p(f"<strong>Could not be ranked ({len(unrankable)}).</strong> "
+                          f"{_esc_clipped(prio.get('note'), 600)}"))
+            out.append(_ul(
+                f"<strong>{_esc(u.get('finding_id'))}</strong> — "
+                f"{_esc_clipped(u.get('effort_derivation'), 200)}"
+                for u in unrankable if isinstance(u, dict)
+            ))
+    return "".join(out)
+
+
 def _ledger_section(ledger: list[dict]) -> str:
     if not ledger:
         return ""
@@ -626,6 +696,9 @@ def render_report_html(
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
             _definition_section(run, plan),
             _what_was_read_section(run, plan),
+            # THE DECISION, ABOVE THE FINDINGS. A reader who has to scroll past
+            # seven themes to learn what to do has been handed the corpus back.
+            _decision_section(_as_dict(run.get("prioritisation"))),
             _headline_section(findings),
             _findings_section(findings, full_cap, overflow_cap),
             _hypotheses_section(plan),

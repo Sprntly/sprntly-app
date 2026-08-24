@@ -95,23 +95,44 @@ def _loss_reason(leader: Priority, other: Priority) -> str:
     lead, mine = leader.score or 0.0, other.score
     gap = (lead - mine) / lead if lead else 0.0
 
-    # Which input explains the gap.
-    if (leader.impact_value or 0) > (other.impact_value or 0) * 1.2:
-        return (
-            f"smaller size ({_fmt(other.impact_value)} against "
-            f"{_fmt(leader.impact_value)}), {gap:.0%} behind on the combined score"
-        )
-    if leader.confidence_score > other.confidence_score + 0.05:
-        return (
-            f"weaker evidence (confidence {other.confidence_score:.2f} against "
-            f"{leader.confidence_score:.2f}), {gap:.0%} behind"
-        )
-    if (other.effort_weeks or 0) > (leader.effort_weeks or 0) * 1.2:
-        return (
-            f"more work for the same return ({_fmt(other.effort_weeks)} weeks "
-            f"against {_fmt(leader.effort_weeks)}), {gap:.0%} behind"
-        )
-    return f"{gap:.0%} behind on the combined score, with no single term deciding it"
+    # WHICH TERM ACTUALLY DECIDED IT, measured rather than guessed at with
+    # thresholds. The first version picked a branch on raw 1.2x / 0.05 cutoffs
+    # and then quoted the COMBINED gap in every branch — so a 0.06 confidence
+    # difference could be reported as "weaker evidence, 98% behind" when the
+    # 98% was driven entirely by a 50x effort difference the sentence never
+    # mentioned. A reason that names the wrong term is worse than no reason: it
+    # is checkable, and it fails the check.
+    #
+    # Each term's contribution is its own ratio against the leader's. The
+    # largest is what decided the ordering, and the sentence names that one.
+    def _ratio(mine_v: Optional[float], lead_v: Optional[float],
+               lower_is_better: bool = False) -> float:
+        m, l = (mine_v or 0.0), (lead_v or 0.0)
+        if lower_is_better:
+            m, l = l, m
+        if l <= 0:
+            return 0.0
+        return max(0.0, 1.0 - (m / l))
+
+    terms = {
+        "size": _ratio(other.impact_value, leader.impact_value),
+        "confidence": _ratio(other.confidence_score, leader.confidence_score),
+        "effort": _ratio(other.effort_weeks, leader.effort_weeks,
+                         lower_is_better=True),
+    }
+    decided = max(terms, key=lambda k: terms[k])
+    if terms[decided] <= 0.0:
+        return (f"{gap:.0%} behind on the combined score, with no single term "
+                f"deciding it")
+
+    if decided == "size":
+        return (f"smaller size ({_fmt(other.impact_value)} against "
+                f"{_fmt(leader.impact_value)}), {gap:.0%} behind overall")
+    if decided == "confidence":
+        return (f"weaker evidence (confidence {other.confidence_score:.2f} "
+                f"against {leader.confidence_score:.2f}), {gap:.0%} behind overall")
+    return (f"more work for the same return ({_fmt(other.effort_weeks)} weeks "
+            f"against {_fmt(leader.effort_weeks)}), {gap:.0%} behind overall")
 
 
 def decide(
