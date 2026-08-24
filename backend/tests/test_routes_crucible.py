@@ -1627,3 +1627,59 @@ def test_the_convention_never_reaches_a_definition_on_its_own(ctx):
     for r in rows:
         assert "I will read" not in (r.get("definition_text") or ""), (
             "the convention leaked into a stored definition")
+
+
+# ─── Stage 10b + 11 reach the run ────────────────────────────────────────────
+
+def test_a_finished_run_carries_a_prioritisation_and_a_decision(ctx):
+    """Gates 3 and 4, end to end. Effort is underivable on every tenant today,
+    so the honest output is an unrankable set and a WITHHELD recommendation —
+    both of which say why, which is I7 working rather than a gap."""
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    prio = meta.get("prioritisation_v2")
+    decision = meta.get("decision")
+    assert prio, "the run carries no prioritisation"
+    assert decision, "the run carries no decision"
+
+    # RICE by default, and it names where the rule came from.
+    assert prio["framework"]["source"] == "default_rice"
+    assert {c["key"] for c in prio["framework"]["criteria"]} == {
+        "reach", "impact", "confidence", "effort"}
+
+    # Nothing ranks, because nothing records how long comparable work took.
+    assert prio["ranked"] == []
+    assert prio["unrankable"], "the candidates vanished instead of being listed"
+    assert all(p["unrankable"] == "effort_underivable" for p in prio["unrankable"])
+    assert "Nothing could be ranked" in prio["note"]
+
+    # And the decision declines rather than picking from an ordering it does
+    # not have.
+    assert decision["recommended_id"] is None
+    assert "not going to name a first move" in decision["withheld"]
+
+
+def test_the_decision_never_costs_the_findings_if_it_fails(ctx, monkeypatch):
+    """Ordering is a READ over frozen scores. A failure there must not lose the
+    findings that are already computed."""
+    import app.routes.crucible as mod
+
+    monkeypatch.setattr(mod, "_company_context",
+                        lambda cid: (_ for _ in ()).throw(RuntimeError("down")))
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready", f"a read-only stage failed the run: {row}"
+    assert row["findings"], "the findings were lost"
+    assert not row["prioritisation"].get("decision")
