@@ -1,0 +1,92 @@
+{
+  "data": [
+    {
+      "group": "New",
+      "label": "Jan",
+      "value": 30.0
+    },
+    {
+      "group": "Returning",
+      "label": "Jan",
+      "value": 70.0
+    },
+    {
+      "group": "New",
+      "label": "Feb",
+      "value": 45.0
+    },
+    {
+      "group": "Returning",
+      "label": "Feb",
+      "value": 65.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.stacked_bar",
+    "rows": 4
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "group": "New",
+          "label": "Jan",
+          "value": 30.0
+        },
+        {
+          "group": "Returning",
+          "label": "Jan",
+          "value": 70.0
+        },
+        {
+          "group": "New",
+          "label": "Feb",
+          "value": 45.0
+        },
+        {
+          "group": "Returning",
+          "label": "Feb",
+          "value": 65.0
+        }
+      ]
+    },
+    "encoding": {
+      "color": {
+        "field": "group",
+        "sort": [
+          "New",
+          "Returning"
+        ],
+        "title": "Group",
+        "type": "nominal"
+      },
+      "x": {
+        "field": "label",
+        "sort": [
+          "Jan",
+          "Feb"
+        ],
+        "title": null,
+        "type": "nominal"
+      },
+      "y": {
+        "field": "value",
+        "stack": "zero",
+        "title": "Value",
+        "type": "quantitative"
+      }
+    },
+    "height": 300,
+    "mark": {
+      "tooltip": true,
+      "type": "bar"
+    },
+    "title": {
+      "text": "Sessions by cohort"
+    },
+    "width": 560
+  },
+  "title": "Sessions by cohort"
+}

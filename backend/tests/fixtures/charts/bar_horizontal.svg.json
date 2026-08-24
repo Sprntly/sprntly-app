@@ -1,0 +1,33 @@
+{
+  "colors": [
+    "#15201b",
+    "#5b7fff",
+    "#828d87",
+    "#eef0ee"
+  ],
+  "tags": {
+    "clipPath": 2,
+    "defs": 1,
+    "g": 38,
+    "line": 24,
+    "path": 22,
+    "svg": 1,
+    "text": 14
+  },
+  "texts": [
+    "0",
+    "10",
+    "15",
+    "20",
+    "25",
+    "30",
+    "35",
+    "40",
+    "45",
+    "5",
+    "Filters",
+    "Mentions by theme",
+    "Search",
+    "Value"
+  ]
+}

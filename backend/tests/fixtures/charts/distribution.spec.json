@@ -1,0 +1,82 @@
+{
+  "data": [
+    {
+      "bin_end": 3.0,
+      "bin_start": 1.0,
+      "count": 3
+    },
+    {
+      "bin_end": 5.0,
+      "bin_start": 3.0,
+      "count": 3
+    },
+    {
+      "bin_end": 7.0,
+      "bin_start": 5.0,
+      "count": 0
+    },
+    {
+      "bin_end": 9.0,
+      "bin_start": 7.0,
+      "count": 1
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.distribution",
+    "rows": 4
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "bin_end": 3.0,
+          "bin_start": 1.0,
+          "count": 3
+        },
+        {
+          "bin_end": 5.0,
+          "bin_start": 3.0,
+          "count": 3
+        },
+        {
+          "bin_end": 7.0,
+          "bin_start": 5.0,
+          "count": 0
+        },
+        {
+          "bin_end": 9.0,
+          "bin_start": 7.0,
+          "count": 1
+        }
+      ]
+    },
+    "encoding": {
+      "x": {
+        "field": "bin_start",
+        "title": "Value",
+        "type": "quantitative"
+      },
+      "x2": {
+        "field": "bin_end"
+      },
+      "y": {
+        "field": "count",
+        "title": "Count",
+        "type": "quantitative"
+      }
+    },
+    "height": 300,
+    "mark": {
+      "color": "#5B7FFF",
+      "tooltip": true,
+      "type": "bar"
+    },
+    "title": {
+      "text": "Time to first PRD"
+    },
+    "width": 560
+  },
+  "title": "Time to first PRD"
+}

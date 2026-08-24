@@ -1,0 +1,196 @@
+{
+  "data": [
+    {
+      "group": "Treated",
+      "kind": "observed",
+      "t": "2026-01-01",
+      "y": 100.0
+    },
+    {
+      "group": "Treated",
+      "kind": "observed",
+      "t": "2026-02-01",
+      "y": 130.0
+    },
+    {
+      "group": "Control",
+      "kind": "observed",
+      "t": "2026-01-01",
+      "y": 95.0
+    },
+    {
+      "group": "Control",
+      "kind": "observed",
+      "t": "2026-02-01",
+      "y": 101.0
+    },
+    {
+      "group": "Treated",
+      "kind": "counterfactual",
+      "t": "2026-02-01",
+      "y": 106.0
+    }
+  ],
+  "provenance": {
+    "evidence_ids": [],
+    "generated_by": "emitters.did",
+    "rows": 5
+  },
+  "spec": {
+    "$schema": "https://vega.github.io/schema/vega-lite/v6.4.1.json",
+    "data": {
+      "values": [
+        {
+          "group": "Treated",
+          "kind": "observed",
+          "t": "2026-01-01",
+          "y": 100.0
+        },
+        {
+          "group": "Treated",
+          "kind": "observed",
+          "t": "2026-02-01",
+          "y": 130.0
+        },
+        {
+          "group": "Control",
+          "kind": "observed",
+          "t": "2026-01-01",
+          "y": 95.0
+        },
+        {
+          "group": "Control",
+          "kind": "observed",
+          "t": "2026-02-01",
+          "y": 101.0
+        },
+        {
+          "group": "Treated",
+          "kind": "counterfactual",
+          "t": "2026-02-01",
+          "y": 106.0
+        }
+      ]
+    },
+    "height": 300,
+    "layer": [
+      {
+        "encoding": {
+          "color": {
+            "field": "group",
+            "sort": [
+              "Treated",
+              "Control"
+            ],
+            "title": "Group",
+            "type": "nominal"
+          },
+          "detail": {
+            "field": "kind",
+            "type": "nominal"
+          },
+          "strokeDash": {
+            "field": "kind",
+            "sort": [
+              "observed",
+              "counterfactual"
+            ],
+            "title": "Series",
+            "type": "nominal"
+          },
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "t",
+            "scale": {
+              "type": "utc"
+            },
+            "title": "Date",
+            "type": "temporal"
+          },
+          "y": {
+            "field": "y",
+            "title": "Value",
+            "type": "quantitative"
+          }
+        },
+        "mark": {
+          "strokeWidth": 2,
+          "tooltip": true,
+          "type": "line"
+        }
+      },
+      {
+        "data": {
+          "values": [
+            {
+              "at": "2026-01-15"
+            }
+          ]
+        },
+        "encoding": {
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "at",
+            "scale": {
+              "type": "utc"
+            },
+            "title": null,
+            "type": "temporal"
+          }
+        },
+        "mark": {
+          "color": "#4A554F",
+          "strokeDash": [
+            4,
+            3
+          ],
+          "strokeWidth": 1,
+          "type": "rule"
+        }
+      },
+      {
+        "data": {
+          "values": [
+            {
+              "at": "2026-01-15"
+            }
+          ]
+        },
+        "encoding": {
+          "x": {
+            "axis": {
+              "format": "%b %d",
+              "labelAngle": 0
+            },
+            "field": "at",
+            "scale": {
+              "type": "utc"
+            },
+            "title": null,
+            "type": "temporal"
+          }
+        },
+        "mark": {
+          "align": "left",
+          "baseline": "top",
+          "color": "#4A554F",
+          "dx": 4,
+          "dy": 2,
+          "text": "Intervention",
+          "type": "text"
+        }
+      }
+    ],
+    "title": {
+      "text": "Treated vs control"
+    },
+    "width": 560
+  },
+  "title": "Treated vs control"
+}
