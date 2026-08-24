@@ -843,6 +843,13 @@ def execute_run(
         # `assign_clusters`, so the wrong headline and the ungroupable row are
         # exactly co-incident: whenever the panel shows one, the other is wrong.
         total_groups = result.stats.get("clusters") or 0
+        # READ BEFORE THE MERGE TOO, for the same reason and not by analogy:
+        # `assign_clusters` is the function that CREATES ungroupable claims, so
+        # it is the most likely future source of an `ungroupable_groups` key of
+        # its own. Read after the merge, that key would clobber the pipeline's
+        # total and put the headline back on the leftover count — on precisely
+        # the no-embedding tenants this feature exists to narrate.
+        ungroupable_groups = result.stats.get("ungroupable_groups") or 0
         # Namespaced on the way in so the collision cannot come back.
         result.stats.update({
             ("embed_clusters" if k == "clusters" else k): v
@@ -862,14 +869,16 @@ def execute_run(
         # directly above "2,410 claims never grouped at all" — one screen
         # asserting both. `themes` is what a reader means by a theme, and
         # `groups == themes + ungroupable` keeps the funnel checkable.
-        # THE GROUP COUNT, not the claim count. They are equal in practice but
-        # only by an assumption about how `_cluster` keys ungroupable claims,
-        # and the theme count must not rest on it.
-        ungroupable_groups = result.stats.get("ungroupable_groups") or 0
         _progress(
             run_id, company_id, step="done",
             groups=total_groups,
             themes=total_groups - ungroupable_groups,
+            # PUBLISHED, because `themes` is derived from THIS and not from
+            # `dropped.ungroupable`. Without it an auditor checking the
+            # identity the `groups` field exists for computes
+            # `themes + dropped.ungroupable` and gets the wrong total in
+            # exactly the case the group count was introduced to handle.
+            ungroupable_groups=ungroupable_groups,
             findings=len(result.findings),
             conflicts=result.stats.get("conflicts") or 0,
             deep=result.deep_count,

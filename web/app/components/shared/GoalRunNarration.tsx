@@ -110,8 +110,14 @@ export function GoalRunNarration({ progress }: { progress: GoalRunProgress }) {
   const hasSplit =
     typeof p.claims_themed === "number" || typeof p.claims_unthemed === "number"
   if (typeof p.themes === "number" || hasSplit) {
-    const themed = p.claims_themed ?? 0
-    const unthemed = p.claims_unthemed ?? 0
+    // EACH HALF ON ITS OWN `typeof`, not `?? 0`. The default renders "Grouping
+    // 0 claims your knowledge graph had already themed" for a field the run may
+    // simply not have measured — rule 1, in the one place the un-gating left a
+    // default behind. Unreachable from today's writer (both keys ship in one
+    // `_progress` call); pinned anyway, because "unreachable today" is how the
+    // last two defects on this screen described themselves.
+    const themed = p.claims_themed
+    const unthemed = p.claims_unthemed
     lines.push(
       <li key="grouped">
         {typeof p.themes === "number" ? (
@@ -124,9 +130,14 @@ export function GoalRunNarration({ progress }: { progress: GoalRunProgress }) {
         )}
         {hasSplit ? (
           <span className="ga-plan-witness">
-            {n(themed)} claim{themed === 1 ? "" : "s"} your knowledge graph had
-            already themed
-            {unthemed ? `, plus ${n(unthemed)} it had not` : ""}
+            {typeof themed === "number"
+              ? `${n(themed)} claim${themed === 1 ? "" : "s"} your knowledge graph had already themed`
+              : ""}
+            {typeof themed === "number" && unthemed
+              ? `, plus ${n(unthemed)} it had not`
+              : typeof themed !== "number" && unthemed
+                ? `${n(unthemed)} claim${unthemed === 1 ? "" : "s"} your knowledge graph had not themed`
+                : ""}
           </span>
         ) : null}
       </li>,

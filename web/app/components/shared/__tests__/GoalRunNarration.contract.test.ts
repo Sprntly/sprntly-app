@@ -40,23 +40,30 @@ describe("every engine drop code has panel copy", () => {
       .toBeGreaterThan(0)
 
     const panel = readFileSync(PANEL, "utf8")
-    const copy = panel.slice(
-      panel.indexOf("const DROP_COPY"), panel.indexOf("const DROP_ORDER"),
-    )
-    const order = panel.slice(
-      panel.indexOf("const DROP_ORDER"), panel.indexOf("const n ="),
-    )
+
+    // MATCHED AS DECLARATIONS, not sliced between anchors. Slicing coupled the
+    // test to the ORDER the constants appear in: hoisting the `n` helper above
+    // DROP_ORDER produced an empty slice and both contract tests then failed
+    // with "ungroupable is missing from DROP_ORDER" while DROP_ORDER was
+    // intact — a failure message that lies about its own cause is how a guard
+    // gets deleted rather than fixed.
+    const copy = panel.match(/const DROP_COPY[^=]*=\s*\{([\s\S]*?)\n\}/)
+    const order = panel.match(/const DROP_ORDER[^=]*=\s*\[([\s\S]*?)\]/)
+    expect(copy, "const DROP_COPY is gone from the panel — update this test")
+      .toBeTruthy()
+    expect(order, "const DROP_ORDER is gone from the panel — update this test")
+      .toBeTruthy()
 
     for (const code of codes) {
       // ANCHORED AS A KEY. Merely finding the word also matches it inside a
       // comment, so commenting an entry out would leave this green while the
       // panel rendered the raw code.
       expect(
-        new RegExp(`^\\s*${code}:`, "m").test(copy),
+        new RegExp(`^\\s*${code}:`, "m").test(copy![1]),
         `${code} has no panel copy key — the funnel would render a raw code`,
       ).toBe(true)
       expect(
-        new RegExp(`"${code}"`).test(order),
+        new RegExp(`"${code}"`).test(order![1]),
         `${code} is missing from DROP_ORDER — it would render out of funnel order`,
       ).toBe(true)
     }

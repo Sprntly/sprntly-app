@@ -1303,8 +1303,6 @@ def test_the_balance_identity_is_exercised_with_real_drops(ctx):
     where both terms are non-zero, and it existed in no test. Third round of
     "the fixture does not contain the condition" on this PR."""
     from app.crucible.pipeline import NARRATED_DROPS
-    from app.db.client import require_client
-
     # Themed and embeddable -> real findings.
     for i in range(6):
         _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
@@ -1313,16 +1311,10 @@ def test_the_balance_identity_is_exercised_with_real_drops(ctx):
     _signal(ctx.company_id, 90, embedding=str([0.9] * 4))
     _theme(ctx.company_id, "ent-solo", "Billing", ["sig-0090"])
     # UNEMBEDDABLE and unthemed -> ungroupable, so the subtraction is real.
-    for j in range(2):
-        require_client().table("kg_signal").insert({
-            "id": f"sig-noemb-{j}", "enterprise_id": ctx.company_id,
-            "kind": "finding", "source_type": "customer_voice",
-            "content": f"unembeddable {j}", "properties": {"customer": f"Ungr{j}"},
-            "provenance": {"doc": "doc-z"},
-            "valid_at": f"2026-0{2 + j}-05T00:00:00+00:00",
-            "created_at": "2026-08-19T00:00:00+00:00",
-            "transaction_at": "2026-08-19T00:00:00+00:00",
-        }).execute()
+    # `_signal` already defaults `embedding=None`; hand-rolling the row here
+    # would drift from the helper the next time a column is added.
+    for j in (91, 92):
+        _signal(ctx.company_id, j, doc="doc-z")
 
     run_id = _start(ctx).json()["id"]
     _confirm(ctx, run_id)
@@ -1353,8 +1345,6 @@ def test_every_engine_drop_code_has_panel_copy():
     import pathlib
     import re
 
-    import pytest
-
     from app.crucible.pipeline import NARRATED_DROPS
 
     path = (pathlib.Path(__file__).resolve().parents[2]
@@ -1367,12 +1357,20 @@ def test_every_engine_drop_code_has_panel_copy():
         pytest.fail(f"panel copy lives at {path}, which no longer exists — "
                     f"move this test with it rather than dropping the contract")
     src = path.read_text()
-    for marker in ("const DROP_COPY", "const DROP_ORDER", "const n ="):
-        if marker not in src:
-            pytest.fail(f"`{marker}` is gone from {path.name}; the drop-copy "
-                        f"contract cannot be checked — update this test")
-    copy_block = src[src.index("const DROP_COPY"):src.index("const DROP_ORDER")]
-    order_block = src[src.index("const DROP_ORDER"):src.index("const n =")]
+    # MATCHED AS DECLARATIONS, not sliced between anchors. Slicing coupled this
+    # to the ORDER the constants appear in: hoisting the `n` helper above
+    # DROP_ORDER emptied the slice and this failed with "missing from
+    # DROP_ORDER" while DROP_ORDER was intact — a failure that lies about its
+    # cause is one someone deletes instead of fixing.
+    copy_m = re.search(r"const DROP_COPY[^=]*=\s*\{(.*?)\n\}", src, re.S)
+    order_m = re.search(r"const DROP_ORDER[^=]*=\s*\[(.*?)\]", src, re.S)
+    if not copy_m:
+        pytest.fail(f"`const DROP_COPY` is gone from {path.name}; the drop-copy "
+                    f"contract cannot be checked — update this test")
+    if not order_m:
+        pytest.fail(f"`const DROP_ORDER` is gone from {path.name}; the funnel "
+                    f"order contract cannot be checked — update this test")
+    copy_block, order_block = copy_m.group(1), order_m.group(1)
     for code in NARRATED_DROPS:
         # ANCHORED AS A KEY, not merely present. `\bcode\b` also matched the
         # word inside a comment, so commenting an entry OUT left this green
@@ -1414,3 +1412,48 @@ def test_an_unknown_drop_code_cannot_fail_a_run():
     # And the declared set is still all present, at zero.
     for code in mod.NARRATED_DROPS:
         assert code in out.stats["dropped"]
+
+
+def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
+    """THE LINE THE LAST TWO COMMITS EXIST TO PRODUCE, pinned at the route.
+
+    `themes = groups - ungroupable_GROUPS`. Reverting that to the ungroupable
+    CLAIM count left all 91 crucible tests green, because no route fixture can
+    reach the shape where they differ — `_cluster` keys each ungroupable claim
+    by its own id, so one cluster holds one claim and the two counts coincide.
+
+    So the pin is structural rather than data-driven: hand the route a
+    PipelineResult whose two ungroupable counts genuinely disagree, and assert
+    the published `themes` used the group one. Same patch-and-restore idiom
+    this file already uses for `_refute`."""
+    import app.routes.crucible as mod
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    real = mod.build_findings
+
+    def build_with_disagreeing_counts(*a, **kw):
+        result = real(*a, **kw)
+        # 10 clusters, of which 2 are ungroupable GROUPS holding 5 claims
+        # between them. themes must be 10 - 2 = 8, never 10 - 5 = 5.
+        result.stats["clusters"] = 10
+        result.stats["ungroupable_groups"] = 2
+        result.stats["dropped"] = {**result.stats["dropped"], "ungroupable": 5}
+        return result
+
+    monkeypatch.setattr(mod, "build_findings", build_with_disagreeing_counts)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    p = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["progress"]
+    assert p["groups"] == 10, p
+    assert p["themes"] == 8, (
+        "themes must be groups minus ungroupable GROUPS (2), not minus "
+        "ungroupable CLAIMS (5)", p)
+    # And the payload carries the number the identity actually needs, so an
+    # auditor is not left computing it from the claim count.
+    assert p["ungroupable_groups"] == 2, p
+    assert p["groups"] == p["themes"] + p["ungroupable_groups"], p

@@ -722,15 +722,22 @@ export type GoalRunProgress = {
    *  because `_cluster` keys each of those as its own cluster.
    *
    *  DELIBERATELY RENDERED NOWHERE. It exists so the funnel stays checkable
-   *  (`groups === themes + ungroupable`, and `themes === findings + drops`)
+   *  (`groups === themes + ungroupable_groups`, and `themes === findings +
+   *  drops`)
    *  from stored data, by a test or by anyone auditing a run — showing it
    *  beside `themes` would put two theme-shaped numbers on one screen, which
    *  is the confusion this field's own history is made of. Do not add a render
    *  site; use `themes`. */
   groups?: number
-  /** What a reader means by a theme: `groups` minus the ungroupable claims.
-   *  This is the number the headline shows. */
+  /** What a reader means by a theme: `groups` minus the ungroupable GROUPS —
+   *  not the ungroupable claim count, which is a different number whenever one
+   *  ungroupable cluster holds more than one claim. This is the number the
+   *  headline shows. */
   themes?: number
+  /** Ungroupable CLUSTERS, as distinct from `dropped.ungroupable` (claims).
+   *  Published so `groups === themes + ungroupable_groups` can be checked from
+   *  the payload; `dropped.ungroupable` does NOT satisfy that identity. */
+  ungroupable_groups?: number
   findings?: number
   conflicts?: number
   deep?: number
