@@ -453,6 +453,40 @@ describe("dispatchChatIntent — edit_artifact", () => {
       intent: "edit_artifact", instruction: "cut the appendix", open_artifact: target,
     })
     expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+  })
+})
+
+describe("a goal typed into chat reaches Goal Analysis", () => {
+  // THE FAILURE THIS EXISTS TO STOP, observed live: a user asked to "increase
+  // revenue by 5%" and got a list of opportunities — no definition confirmed,
+  // no plan shown, nothing approved. The planner had no goal action, so it fell
+  // to `answer`; once it had one, the CLIENT still dropped it here.
+  const goal = () => envelope({ intent: "analyse_goal", task: "increase revenue by 5%" })
+
+  it("hands the goal to the panel", () => {
+    const seen: string[] = []
+    const ex = { ...executors(), onAnalyseGoal: (g: string) => seen.push(g) }
+    const out = dispatchChatIntent(goal(), ctx(), ex)
+    expect(out).toEqual({ handled: true })
+    expect(seen).toEqual(["increase revenue by 5%"])
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+  })
+
+  it("answers instead on a surface with no panel", () => {
+    // The brief chat and the AI bar have nowhere to open a run. Falling through
+    // is right; swallowing the goal silently is not.
+    const ex = executors()
+    const out = dispatchChatIntent(goal(), ctx(), ex)
+    expect(out).toEqual({ handled: false })
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("answers rather than starting a run with no goal text", () => {
+    const ex = { ...executors(), onAnalyseGoal: vi.fn() }
+    const out = dispatchChatIntent(
+      envelope({ intent: "analyse_goal", task: "" }), ctx(), ex)
+    expect(out).toEqual({ handled: false })
+    expect(ex.onAnalyseGoal).not.toHaveBeenCalled()
     expect(ex.onAnswer).toHaveBeenCalled()
   })
 })
