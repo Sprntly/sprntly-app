@@ -426,3 +426,22 @@ def test_a_broken_source_does_not_end_stage_0():
     out = resolve(company_id="co", raw_goal_text="improve net revenue retention",
                   currency="accounts", sources=[Exploding(), KpiTreeSource(tree)])
     assert out.status == "candidate"
+
+
+def test_the_ask_claims_no_store_it_did_not_actually_search():
+    """`resolve()` is handed ONE source — `KpiTreeSource`. It never searches the
+    metric registry, and on the path where `load_kpi_tree` raises the caller
+    passes `None`, so even the tree was not really read.
+
+    An earlier wording said "I checked your KPI tree and the metrics you
+    record", which claimed a search that never happened and would have claimed
+    the tree on the unreadable path too. A false claim about diligence is worse
+    than a joyless one — the per-store detail belongs to the search block, which
+    knows its own "could not be read" state."""
+    out = resolve_with(KpiTreeSource(None), goal="improve activation")
+    ask = out.ask.lower()
+    for store in ("kpi tree", "metrics you record", "amplitude", "registry"):
+        assert store not in ask, (
+            f"the ask names {store!r}, which this resolver did not search")
+    # It still opens with the search, which is §5 requirement 1.
+    assert any(w in ask.split(".")[0] for w in ("looked", "checked", "searched"))

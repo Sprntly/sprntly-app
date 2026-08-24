@@ -470,19 +470,30 @@ def _no_definition_ask(goal_text: str) -> str:
 
     So it no longer opens with what is missing, and it does not repeat what the
     search block directly above it has already shown. It opens with the one
-    thing that IS established — WHERE IT LOOKED — and only then names the gap,
+    thing that IS established — that a search ran — and only then names the gap,
     once, before moving to the decision. That is the shape §5's own templates
     use ("I looked for a complaints metric in Amplitude, Zendesk... There isn't
     one definition these agree on"). An earlier attempt opened with "Your
     systems don't record a definition yet", which is still absence-first and
     echoed the search block's own "nothing recorded yet" almost word for word,
     so the screen said "nothing here" three times before asking anything.
+
+    IT NAMES NO STORES, and that is a correctness constraint rather than a style
+    choice. `resolve()` is handed ONE source — `KpiTreeSource` — so it never
+    searches the metric registry, and the attempt at fixing the wording above
+    said "I checked your KPI tree and the metrics you record", claiming a search
+    that never happened. It would also have claimed the KPI tree on the path
+    where `load_kpi_tree` raised and the caller passed `None`. A false claim
+    about diligence is worse than a joyless one, so the per-store detail — with
+    its own honest "could not be read" state — belongs to the search block that
+    actually knows, and this sentence asserts only what it did: it looked.
+
     `goal_text` is quoted so the question is unmistakably about their goal.
     """
     return (
-        f"I checked your KPI tree and the metrics you record, and neither "
-        f"carries a definition for \"{goal_text}\" — so this one is yours to "
-        f"state, and stating it is the whole of what I need.\n\n"
+        f"I looked for an existing definition of \"{goal_text}\" and did not "
+        f"find one to adopt, so this one is yours to state — and stating it is "
+        f"the whole of what I need.\n\n"
         f"Write what you'd want to see move: what is counted, over what "
         f"population, over what window. I'd rather ask than guess, because a "
         f"definition I invented would give you a confident answer to a "
