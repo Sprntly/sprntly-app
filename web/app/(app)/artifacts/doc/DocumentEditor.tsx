@@ -48,6 +48,7 @@ export function DocumentEditor({
   onChange,
   onBlur,
   onReady,
+  hideToolbar = false,
 }: {
   initialHtml: string
   editable?: boolean
@@ -65,6 +66,14 @@ export function DocumentEditor({
   onChange?: (html: string) => void
   onBlur?: () => void
   onReady?: (editor: Editor) => void
+  /** Render no toolbar inside the editor.
+   *
+   *  The chat panel pins its own bar to the TOP of the panel — the posture the
+   *  PRD already takes — so the controls stay put while the document scrolls
+   *  under them. Inside the editor the bar scrolled away with the text, which
+   *  is the report this closes. The full-page route keeps the built-in one:
+   *  there the editor IS the page, so in-flow is where that bar belongs. */
+  hideToolbar?: boolean
 }) {
   // Has a person actually touched this editor yet?
   //
@@ -194,7 +203,7 @@ export function DocumentEditor({
       data-doc-editor
       ref={wrapperRef}
     >
-      {editable && <Toolbar editor={editor} />}
+      {editable && !hideToolbar && <Toolbar editor={editor} />}
       <EditorContent editor={editor} />
       <style>{`
         [data-doc-editor] .tiptap { outline: none; min-height: 320px; }

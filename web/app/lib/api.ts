@@ -5959,6 +5959,16 @@ export const reportsApi = {
    *  `sections_changed: []` means the editor judged the instruction was a
    *  question rather than an edit, and NOTHING was written — the caller says so
    *  instead of claiming a change. */
+  /** Save a hand edit made in the panel. The body is the report's own text —
+   *  markdown for everything the pipelines write today.
+   *
+   *  Last-write-wins: `reports` carries no version column (a report was written
+   *  once by a pipeline and only ever read until this existed), so two people
+   *  editing the same report at the same moment is the race this does not cover.
+   *  See the route's own note. */
+  update: (reportId: number, body: { html: string }) =>
+    api.patch<{ id: number; title: string; html: string }>(`/v1/reports/${reportId}`, body),
+
   chatEdit: (reportId: number, instruction: string) =>
     api.post<{
       id: number

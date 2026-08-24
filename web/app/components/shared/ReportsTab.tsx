@@ -1,11 +1,13 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { useContent } from "../../context/ContentContext"
 import { useNavigation } from "../../context/NavigationContext"
 import { HtmlReportView } from "./HtmlReportView"
 import { SavedChatMarkdown } from "./SavedChatMarkdown"
 import { ReportShareMenu } from "./ReportShareMenu"
+import { ReportDocument } from "./ReportDocument"
 import { EmptyPane } from "./EmptyPane"
 import { GeneratingBanner, GeneratingPane } from "./GenerationState"
 import { REPORT_GEN } from "./generationPhases"
@@ -32,12 +34,19 @@ export function ReportsTab({
   reports,
   loading,
   error,
+  shareSlot,
 }: {
   reports: ReportSummary[]
   loading: boolean
   /** The list fetch failed. The tab says so rather than reading as an empty
    *  thread — "no reports" and "couldn't load them" are different facts. */
   error?: boolean
+  /** The panel HEADER slot this tab's share/PDF menu renders into, so it sits
+   *  where the PRD's does instead of inside the document it acts on. A portal,
+   *  because the menu reads the open report and that document is this tab's.
+   *  Absent / null (a test harness, the first commit before the ref lands) puts
+   *  the menu back inline, which is where it used to live. */
+  shareSlot?: HTMLElement | null
 }) {
   const { content, setContent } = useContent()
   const { showToast } = useNavigation()
@@ -56,6 +65,10 @@ export function ReportsTab({
   // `picked` is the one thing this component owns: a row chosen from ITS list.
   // It wins while set, and Back clears both.
   const [picked, setPicked] = useState<number | null>(null)
+  // The top-of-panel slot the document's formatting bar portals into: straight
+  // after the artifact tabs, ahead of the crumb and the title. State rather
+  // than a ref so the portal re-renders once the node exists.
+  const [toolbarSlot, setToolbarSlot] = useState<HTMLDivElement | null>(null)
   const focusId = content.reportFocusId
   // A focus set for a DIFFERENT thread is ignored: the panel is global, so a
   // leftover id could otherwise open one thread's report inside another's.
@@ -194,6 +207,16 @@ export function ReportsTab({
     const unavailable = settledKey === fetchKey && !docLoading && !doc && !docError
     return (
       <div className="tkv2-list-wrap reports-panel" data-testid="reports-detail">
+        {/* The formatting bar lands HERE — first thing under the
+            artifact tabs, above the crumb and the title, which is where a
+            control you reach for while typing belongs. It is filled by
+            `ReportDocument` through a portal: everything the bar reads (the
+            live editor, the save status) is that component's. */}
+        <div
+          ref={setToolbarSlot}
+          data-testid="reports-toolbar-slot"
+          style={{ position: "sticky", top: 0, zIndex: 5, background: "var(--surface, #fff)" }}
+        />
         <div style={{
           display: "flex", alignItems: "center", gap: 12,
           justifyContent: "space-between", marginTop: 16,
@@ -220,14 +243,36 @@ export function ReportsTab({
           ) : (
             <span />
           )}
-          {/* Download + share only exist once there is a document to act on. */}
-          {doc && (
-            <ReportShareMenu
-              report={doc}
-              onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
-              onToast={showToast}
-            />
-          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* NO EDIT BUTTON. A report is editable the moment it is open, the
+                way the PRD and the team document are: the toolbar is above it
+                and typing saves. A mode you have to ask for is a step between
+                the reader and a typo they can already see.
+
+                A legacy self-contained document is the exception and needs no
+                control to say so — it renders in its own iframe, with no
+                toolbar, because it owns its rendering. */}
+            {/* Download + share only exist once there is a document to act on,
+                and they render in the panel HEADER when this tab was given a
+                slot for them -- beside where the PRD's share sits, rather than
+                inside the document they act on. Inline is the fallback for a
+                host that passed none. */}
+            {doc && !shareSlot && (
+              <ReportShareMenu
+                report={doc}
+                onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
+                onToast={showToast}
+              />
+            )}
+            {doc && shareSlot && createPortal(
+              <ReportShareMenu
+                report={doc}
+                onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
+                onToast={showToast}
+              />,
+              shareSlot,
+            )}
+          </div>
         </div>
 
         <div style={{ margin: "10px 0 14px" }}>
@@ -260,17 +305,27 @@ export function ReportsTab({
           </div>
         )}
         {doc && (
-          // Markdown vs document is decided by the BODY, not only the skill:
-          // "saved-chat" rows always hold raw markdown
-          // (`project_artifact_capture.py`), and the scheduled monthly runs
-          // save the report skills' answers as markdown too
-          // (`app.monthly_reports`) — while the legacy rows for those same
-          // skills are self-contained HTML documents. Sniffing the stored
-          // body (the same `looksLikeHtmlBrief` test chat uses to pick an
-          // iframe) renders every combination correctly.
-          doc.skill === "saved-chat" || !looksLikeHtmlBrief(doc.html)
-            ? <SavedChatMarkdown markdown={doc.html} />
-            : <HtmlReportView html={doc.html} title={title} fitPanel />
+          // A report is a RICH DOCUMENT — the same shape, the same editor and
+          // the same toolbar as a team document, which is what "edit the report
+          // in the panel" means. The body arrives as HTML whatever is stored:
+          // new reports are captured as HTML, and the rows written before that
+          // (the scheduled monthly runs, and everything captured since #1024)
+          // are converted on the way out by `app/report_markdown.py`.
+          //
+          // A LEGACY SELF-CONTAINED DOCUMENT still reads in its sandboxed
+          // iframe: it carries its own <head> and <style> and owns its
+          // rendering, so it is shown, not edited.
+          isFullHtmlDocument(doc.html) ? (
+            <HtmlReportView html={doc.html} title={title} fitPanel />
+          ) : (
+            <ReportDocument
+              key={doc.id}
+              reportId={doc.id}
+              html={doc.html}
+              toolbarSlot={toolbarSlot}
+              onSaved={(html) => setDoc((cur) => (cur ? { ...cur, html } : cur))}
+            />
+          )
         )}
       </div>
     )
@@ -378,4 +433,20 @@ function ReportSkeleton() {
       <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
     </div>
   )
+}
+
+/** Is this body a SELF-CONTAINED HTML document — doctype, head, its own
+ *  `<style>` — rather than the HTML fragment every report is now?
+ *
+ *  Only the legacy rows are: reports written under the pinned templates, before
+ *  #1024 removed them. Those own their rendering and read in a sandboxed
+ *  iframe, so they are shown and not edited. Everything else — captured HTML,
+ *  and the markdown rows the API converts on the way out — is a fragment this
+ *  panel renders and edits like any other document.
+ *
+ *  The same `looksLikeHtmlBrief` sniff chat uses to choose an iframe and
+ *  `report_capture` uses to recognise a document answer, so all three agree
+ *  about what a given report is. */
+function isFullHtmlDocument(html: string): boolean {
+  return looksLikeHtmlBrief(html)
 }

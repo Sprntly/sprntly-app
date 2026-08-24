@@ -56,7 +56,7 @@ from app.db.custom_artifacts import (
 from app.db.reports import get_report, update_report_body
 from app.graph.gateway import llm_call
 from app.custom_artifact_html import sanitize_artifact_html
-from app.report_capture import looks_like_html_report
+from app import report_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,11 @@ def edit_report_scoped(report_id: int, instruction: str, company) -> dict:
     if row is None:
         raise HTTPException(404, "Report not found")
 
-    body = (row.get("html") or "").strip()
+    # HTML whatever the row holds: a report is a rich document now, and the
+    # legacy markdown rows convert on the way in exactly as they do for every
+    # other reader. Editing one therefore rewrites it as HTML, which is the only
+    # moment that one-way conversion is something the user asked for.
+    body = report_markdown.to_html(row.get("html")).strip()
     if not body:
         raise HTTPException(409, "This report has no content to edit yet")
 
@@ -210,14 +214,11 @@ def edit_report_scoped(report_id: int, instruction: str, company) -> dict:
         # A question, not an edit. Nothing is written.
         return {"report": row, "sections_changed": [], "summary": edit["summary"]}
 
-    # An HTML report stays sanitized on the way back in — the viewer serves this
-    # column into a sandboxed iframe, and an edit is model output like any other.
-    # Markdown is stored VERBATIM: both viewers render a non-HTML body through
-    # react-markdown without `rehype-raw`, so escaping here would print the
-    # escapes at the reader.
-    text = edit["document"]
-    if looks_like_html_report(text):
-        text = sanitize_artifact_html(text)
+    # Sanitised on the way back in: an edit is model output like any other, and
+    # this body is rendered in the app, in the PDF and behind a public link.
+    # `to_html` first, so a model that answered in markdown despite being handed
+    # HTML still stores a document rather than source text.
+    text = sanitize_artifact_html(report_markdown.to_html(edit["document"]))
 
     saved = update_report_body(report_id, company.company_id, html=text)
     if saved is None:

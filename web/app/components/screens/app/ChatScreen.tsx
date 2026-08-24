@@ -726,6 +726,8 @@ export function ChatScreen() {
     pendingReportFocus,
     setPendingReportFocus,
     pendingTicketSetFocus,
+    pendingDocumentFocus,
+    setPendingDocumentFocus,
     setPendingTicketSetFocus,
     showToast,
     openContentPanel,
@@ -4302,6 +4304,32 @@ export function ChatScreen() {
   }, [
     activeTabId, isBriefTab, pendingReportFocus, contentPanelTab,
     threadReports, content.threadReportsStatus, content.threadReportsConversationId,
+    setContent, openContentPanel,
+  ])
+
+  // ── Document → its own thread hand-off ────────────────────────────────────
+  // Clicking a team document in Artifacts writes the ordinary
+  // `sprntly_resume_conv` hand-off and fills `pendingDocumentFocus`.
+  // Structurally the report hand-off above, one artifact over: gated on the
+  // conversation id matching, so a failed resume opens nothing rather than the
+  // wrong thread's document.
+  //
+  // A document used to open its own PAGE from Artifacts instead — the reasoning
+  // being that writing wants the full measure of a page. It still does, and the
+  // page is still there; what was wrong is that this row behaved differently
+  // from every other row in the same list. A document born in a chat opens over
+  // that chat, like the PRD, the report and the ticket set beside it. One with
+  // no chat behind it (uploaded, or its thread deleted) still opens the page.
+  useEffect(() => {
+    if (!pendingDocumentFocus) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.dbConvId !== pendingDocumentFocus.conversationId) return
+    const documentId = pendingDocumentFocus.documentId
+    setPendingDocumentFocus(null)
+    setContent({ documentId, documentGenerating: false })
+    openContentPanel("document")
+  }, [
+    pendingDocumentFocus, setPendingDocumentFocus, activeTabId,
     setContent, openContentPanel,
   ])
 

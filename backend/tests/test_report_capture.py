@@ -462,9 +462,15 @@ def test_capture_writes_a_marked_markdown_report(monkeypatch):
     assert report_id == 77
     assert seen["skill"] == "voice-of-customer-report"
     assert seen["title"] == "Voice of customer · 1–30 Jun"
-    # Stored VERBATIM: both viewers sniff the body and render a non-HTML one as
-    # markdown, so wrapping or escaping it here would defeat that.
-    assert seen["html"] == VOC_MARKDOWN
+    # Stored as HTML. A report is a rich document now — read in the panel, edited
+    # there under the same toolbar the PRD uses, rendered to PDF and served
+    # behind a public link — and the pipelines answer in markdown, so the
+    # conversion happens once at capture rather than in each of the four readers.
+    # The heading survives AS a heading, which is what the chat card and the
+    # artifacts row read the title from.
+    assert seen["html"].startswith("<h1>Voice of customer")
+    assert "<h2>Themes</h2>" in seen["html"]
+    assert "Onboarding friction" in seen["html"]
     assert seen["conversation_id"] == 42, "this is what opens the report's thread"
     assert seen["ask_id"] == 31
 
@@ -506,5 +512,7 @@ async def test_run_ask_job_persists_a_markdown_report_end_to_end(
     assert len(rows) == 1, "a markdown report is captured like any other"
     row = db.get_report(rows[0]["id"], "md-co")
     assert row["skill"] == "voice-of-customer-report"
-    assert row["html"] == VOC_MARKDOWN
+    # Converted at capture — see the note in the sibling test above.
+    assert row["html"].startswith("<h1>Voice of customer")
+    assert "Onboarding friction" in row["html"]
     assert row["conversation_id"] == 88

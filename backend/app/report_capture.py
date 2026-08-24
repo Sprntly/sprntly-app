@@ -48,6 +48,7 @@ import re
 from collections.abc import Callable
 from html import unescape
 
+from app import report_markdown
 from app.labels import humanize_label
 from app.llm import strip_code_fence
 
@@ -174,7 +175,14 @@ def capture_report(
         # public `/r/<token>` viewer both sniff the stored body and render a
         # non-HTML one through react-markdown (no `rehype-raw`), so escaping
         # here would print the escapes, and wrapping it would defeat the sniff.
-        doc = strip_code_fence(payload.get("answer") or "")
+        # A report is STORED AS HTML: it is a rich document now, read in the
+        # panel and edited there under the same toolbar the PRD and the team
+        # document use, and rendered to PDF and behind a public link. The
+        # pipelines answer in markdown, so the conversion happens once, here,
+        # rather than in each of the four readers. Sanitised inside `to_html`
+        # with the same allow-list team documents are stored under — which is
+        # what lets one editor serve both.
+        doc = report_markdown.to_html(strip_code_fence(payload.get("answer") or ""))
 
         from app import db
 
