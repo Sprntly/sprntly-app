@@ -401,6 +401,172 @@ def test_missing_context_is_stated_rather_than_left_blank(gen_env, monkeypatch):
     assert "CONTEXT: none was supplied" in captured["input"]
 
 
+# ─── Thin-context grounding fallback ─────────────────────────────────────────
+#
+# THE BUG. "Generate a report for the biggest issues we have, explain it" as a
+# thread's first message reaches `generate_into` with only the seeded ack turn
+# as context (~100 chars — the user's own question plus "Writing your issues
+# report..."), so the document's own honesty rule correctly wrote "no factual
+# grounding was available" for every section. The IDENTICAL question without
+# the word "report" reached `qa_agent.answer` instead and answered correctly,
+# because THAT path retrieves (call digest / voice-of-customer / the KG). These
+# tests pin `_ground_thin_context`'s three behaviors and `generate_into`'s use
+# of it: fires only when context is thin AND a dataset is present, folds a real
+# answer in when one comes back, and changes nothing when it doesn't.
+
+def test_grounding_is_skipped_with_no_dataset(gen_env, monkeypatch):
+    """Backward compatibility: an older frontend build (or any caller) that
+    omits `dataset` gets exactly today's behavior — no retrieval attempted,
+    the original honest-empty-context path runs unchanged."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "should never be reached"})
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues",
+    )
+
+    assert calls == []
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_grounding_fires_on_thin_context_and_folds_the_real_answer_in(
+    gen_env, monkeypatch
+):
+    """The fix. A cold-thread create with a dataset gets ONE retrieval pass —
+    the same `qa_agent.answer` an unplanned chat question already goes
+    through — and the result becomes the document's grounding, instead of the
+    document honestly reporting a gap a plain question wouldn't have had."""
+    from app import qa_agent
+
+    calls = []
+
+    def _fake_answer(**kw):
+        calls.append(kw)
+        return {"answer": "Export failures are 28.7% of the support queue this month."}
+
+    monkeypatch.setattr(qa_agent, "answer", _fake_answer)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues, explain it",
+        context="Q: our biggest issues, explain it\n\nA: Writing your issues report — it will open in the panel on the right.",
+        dataset="acme",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["dataset"] == "acme"
+    assert calls[0]["enterprise_id"] == gen_env
+    assert calls[0]["question"] == "our biggest issues, explain it"
+    # UNPLANNED — no `plan` passed, so this hits the exact router an unplanned
+    # bare chat question already goes through (docstring's whole point).
+    assert "plan" not in calls[0] or calls[0]["plan"] is None
+    assert "Export failures are 28.7%" in captured["input"]
+    # Never silently overwritten: the caller's own (thin) context survives
+    # alongside the grounded answer, not replaced by it.
+    assert "Writing your issues report" in captured["input"]
+
+
+def test_grounding_is_skipped_when_context_is_already_substantive(
+    gen_env, monkeypatch
+):
+    """A document drafted from a real conversation is unaffected — retrieval
+    would answer a different question from the one already discussed, exactly
+    as the module's grounding-source rule says. No extra LLM call, no extra
+    latency, for the case that was never broken."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "unused"})
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result("<h1>T</h1><p>x</p>"))
+
+    rich_context = "Prior turn established the export bug in detail. " * 10
+    assert len(rich_context) >= gen._THIN_CONTEXT_CHARS
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="leadership update", task="write it up",
+        context=rich_context, dataset="acme",
+    )
+
+    assert calls == []
+
+
+def test_grounding_failure_falls_back_to_the_original_honest_path(
+    gen_env, monkeypatch
+):
+    """Best-effort by contract: a raising retrieval must not fail the
+    generation or leak an exception past `generate_into`'s total-by-contract
+    boundary — it can only ADD grounding, never remove the fallback that
+    already existed."""
+    from app import qa_agent
+
+    def _boom(**kw):
+        raise RuntimeError("KG unreachable")
+
+    monkeypatch.setattr(qa_agent, "answer", _boom)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    doc_id = _pending(gen_env)
+    gen.generate_into(
+        company_id=gen_env, artifact_id=doc_id,
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_grounding_with_no_task_is_skipped(gen_env, monkeypatch):
+    """`_ground_thin_context` needs a real question to ask — an empty task has
+    nothing for `qa_agent.answer` to route, and calling it with "" would ask a
+    different, meaningless question."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "x"})
+
+    assert gen._ground_thin_context(company_id=gen_env, dataset="acme", task="   ") == ""
+    assert calls == []
+
+
+def test_grounding_with_an_empty_qa_answer_changes_nothing(gen_env, monkeypatch):
+    """A retrieval that ran but genuinely had nothing to say ("" or whitespace)
+    is not different from one that never ran — the document falls back to its
+    own honest-empty-context copy either way."""
+    from app import qa_agent
+
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: {"answer": "   "})
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
 # ─── The orphan sweep ────────────────────────────────────────────────────────
 
 def _age(company_id: str, doc_id: int, minutes: int) -> None:

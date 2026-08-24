@@ -209,8 +209,13 @@ describe("a document written from a brand-new chat", () => {
     await settle()
 
     expect(generateDoc).toHaveBeenCalledTimes(1)
-    const payload = generateDoc.mock.calls[0][0] as { conversation_id: number | null }
+    const payload = generateDoc.mock.calls[0][0] as { conversation_id: number | null; dataset?: string }
     expect(payload.conversation_id).toBe(NEW_CONV_ID)
+    // Lets the backend ground a thin-context document (a fresh "generate a
+    // report" with no prior thread to draw on) on a real answer instead of
+    // writing one honestly reporting it has nothing to say — see
+    // custom_artifact_generate.py's `_ground_thin_context`.
+    expect(payload.dataset).toBe("acme")
   })
 
   it("reuses the conversation the turn persistence is already creating", async () => {

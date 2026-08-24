@@ -398,6 +398,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postOpenArtifactReply,
     markTicketSetAutoOpened,
     postSummary,
+    activeCompany,
   })
 
   const { runConversationAsk, runActionTurnInTab, handleStopAsk } = engine

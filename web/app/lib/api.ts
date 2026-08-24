@@ -5877,12 +5877,20 @@ export const customArtifactsApi = {
   ) => api.patch<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`, body),
   remove: (id: number) => api.delete<{ deleted: boolean }>(`/v1/custom-artifacts/${id}`),
   /** Start an LLM generation. Returns immediately with a `generating` row to
-   *  open and poll — the document lands on that same row. */
+   *  open and poll — the document lands on that same row.
+   *
+   *  `dataset`, when supplied, is what lets the backend ground a THIN-context
+   *  document (a fresh "generate a report on X" with no prior thread to draw
+   *  on) on a real answer instead of writing one honestly reporting it has
+   *  nothing to say — see custom_artifact_generate.py's `_ground_thin_context`.
+   *  Ownership-gated server-side exactly like `askApi.start`'s own `dataset`;
+   *  omit it and generation behaves exactly as it did before this existed. */
   generate: (body: {
     kind: string
     task: string
     context?: string
     conversation_id?: number | null
+    dataset?: string
   }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts/generate", body),
 }
 

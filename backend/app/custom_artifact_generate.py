@@ -19,12 +19,20 @@ WHAT IS FIXED is therefore only the two things the app depends on:
     that invents a revenue number is worse than no leadership update, because
     it is the artifact most likely to be forwarded without being checked.
 
-GROUNDING SOURCE. Context comes from the caller (the chat turn that asked),
-not from a fresh retrieval pass here. The chat already resolved what the thread
-is about — that is what the planner's `task` brief is — and re-running
-retrieval would answer a different question from the one the user watched being
-answered. A generation started from the library with no chat behind it simply
-has less context, and the prompt's honesty rule covers that case.
+GROUNDING SOURCE, MOSTLY THE CALLER. Context comes from the caller (the chat
+turn that asked), not from a fresh retrieval pass here — BY DEFAULT. The chat
+already resolved what the thread is about — that is what the planner's `task`
+brief is — and re-running retrieval would answer a different question from the
+one the user watched being answered.
+
+The one exception is `_ground_thin_context`: when `context` is THIN (a cold
+thread — "generate a report on X" as the first message, with nothing yet
+discussed to draw on), this module runs ONE retrieval pass — the same
+`qa_agent.answer` an unplanned chat question already goes through — before
+writing the document, rather than honestly reporting a gap that a plain
+question one line earlier in the same thread would not have had. A generation
+with real prior context, or with no `dataset` to ground against, is completely
+unaffected; the prompt's honesty rule still covers whatever gap remains.
 
 LIFECYCLE mirrors ticket sets: the row is created `generating` BEFORE the
 multi-minute call so the panel has an id to open and poll, and this module
@@ -182,6 +190,60 @@ def _title_from(html: str, fallback: str) -> str:
     return (text or fallback or "Untitled document")[:300]
 
 
+# A THIN-CONTEXT THRESHOLD, not a zero one. `threadContextFor` on a cold thread
+# still seeds ~100-150 chars (the user's own question plus the "Writing your
+# X — it will open in the panel on the right" ack), so gating on `context == ""`
+# would never fire on the exact case this exists for. 300 is comfortably above
+# that seed and comfortably below one real prior Q/A turn, so a thread that has
+# already surfaced something stays on the original no-retrieval path — the
+# thing GROUNDING FALLBACK below deliberately does NOT re-run for.
+_THIN_CONTEXT_CHARS = 300
+
+
+def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
+    """A real answer for `task`, via the SAME retrieval `answer` already uses.
+
+    GROUNDING FALLBACK. `generate_into`'s context is "whatever the caller
+    already resolved" (see the module docstring) — correct for a document
+    drafted from a conversation that has already discussed its subject, and
+    silently wrong for one asked cold: "generate a report on our biggest
+    issues" as a thread's FIRST message reaches here with nothing to draw on,
+    so the document's own honesty rule (below) correctly writes "no factual
+    grounding was available" — while the SAME question, asked without the word
+    "report", reaches `qa_agent.answer` instead and gets a real answer, because
+    that path retrieves (call digest, voice-of-customer, the KG) instead of
+    reading a transcript that doesn't exist yet.
+
+    This closes that gap for the one case it's safe to close it in: `context`
+    thin enough that there was plainly nothing to resolve from. It calls
+    `qa_agent.answer` UNPLANNED (`plan=None`) — the same router every
+    unplanned chat question goes through, so "report on our biggest issues"
+    gets exactly the call-digest/VoC dispatch the identical bare question
+    already gets. Best-effort: any failure here (including "I don't have
+    enough information to answer that") returns "" and `generate_into` falls
+    straight back through to its original, honest, empty-context behavior —
+    this can only ADD grounding, never remove the fallback that already
+    existed.
+    """
+    if not dataset or not task.strip():
+        return ""
+    try:
+        from app import qa_agent
+
+        result = qa_agent.answer(
+            enterprise_id=company_id,
+            question=task,
+            dataset=dataset,
+        )
+    except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
+        logger.exception(
+            "custom artifact grounding answer failed for company_id=%s", company_id
+        )
+        return ""
+    answer = str(result.get("answer") or "").strip()
+    return answer
+
+
 def generate_into(
     *,
     company_id: str,
@@ -189,6 +251,7 @@ def generate_into(
     kind: str,
     task: str,
     context: str = "",
+    dataset: str = "",
 ) -> None:
     """Write the document and land it on the row. Never raises.
 
@@ -196,7 +259,24 @@ def generate_into(
     the panel polls that row and an exception escaping here would leave it
     spinning on a generation that is not running. The stored error string is
     for operators; the web maps failures onto its own recovery copy.
+
+    `dataset`, when supplied, gates a GROUNDING FALLBACK — see
+    `_ground_thin_context` — that only ever fires when `context` is thin; a
+    document drafted from a real conversation is completely unaffected.
     """
+    # THIN-CONTEXT GROUNDING (see `_ground_thin_context`). Folded into `context`
+    # itself, before the rendering prompt is built, so everything downstream —
+    # the prompt, the honesty rule, the grounding-source comment the model
+    # reads — behaves exactly as if the caller had supplied this as `context`
+    # in the first place. A grounding answer that came back empty (no dataset,
+    # no real answer, or the retrieval itself failed) changes nothing: `context`
+    # is unchanged and the module's original honest-empty-context path runs.
+    if len(context.strip()) < _THIN_CONTEXT_CHARS:
+        grounded = _ground_thin_context(company_id=company_id, dataset=dataset, task=task)
+        if grounded:
+            context = (
+                f"{context.strip()}\n\n" if context.strip() else ""
+            ) + f"From the workspace's connected sources:\n{grounded}"
     # Which side of the model call we are on when something raises. Set the
     # instant the call returns, so "the generator could not be reached" is only
     # ever said about a run where that is true.
