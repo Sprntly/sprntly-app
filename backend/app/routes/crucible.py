@@ -375,13 +375,17 @@ def _method_note(company_id: str) -> str:
     # overpromise `plan.py` has already been burned by twice, arriving one gate
     # earlier — and here it would be a false statement about METHOD, which is
     # the thing §6 exists to pin down.
+    # DOES NOT REPEAT THE ASK'S OWN CLAUSE. The ask directly above this asks
+    # for "what is counted, over what population, over what window"; ending
+    # this sentence the same way put the identical phrase in two consecutive
+    # paragraphs — the exact redundancy the ask rewrite exists to remove,
+    # reintroduced one element lower on the same screen.
     return (
-        "This sentence is the whole definition I will work to — what is "
-        "counted, over what population, over what window. I do not recompute "
-        "it and I do not fill in the parts you leave out. The analysis then "
-        "reads your documents, tickets and conversations against it, not a "
-        "metric series, so it reports how much of your book each theme touches "
-        "rather than a movement in this number."
+        "I will work to that sentence exactly as you write it: I do not "
+        "recompute it, and I do not fill in anything you leave out. The "
+        "analysis then reads your documents, tickets and conversations against "
+        "it, not a metric series, so it reports how much of your book each "
+        "theme touches rather than a movement in this number."
     )
 
 

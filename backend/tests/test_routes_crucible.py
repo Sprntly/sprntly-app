@@ -1537,3 +1537,30 @@ def test_nothing_in_the_run_reads_the_metric_registry():
         f"before wiring the registry into sizing."
     )
 
+
+
+def test_the_ask_and_the_method_note_do_not_repeat_each_other(ctx):
+    """They render back to back on the same screen.
+
+    Both originally ended with "what is counted, over what population, over
+    what window" — the identical clause in consecutive paragraphs, which is the
+    exact redundancy the ask rewrite exists to remove, reintroduced one element
+    lower. The ask asks for the parts; the note says what will be done with
+    them."""
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    ask, note = meta["ask"], meta["method_note"]
+
+    # The ask owns the instruction.
+    assert "what is counted" in ask.lower()
+    # The note must not restate it.
+    assert "what is counted" not in note.lower()
+
+    # And no long phrase should appear in both. Cheap n-gram overlap check, so
+    # this catches the next accidental echo rather than only this one.
+    def grams(text: str, n: int = 6) -> set[str]:
+        words = [w.strip(".,:;—\"'") for w in text.lower().split()]
+        return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+    shared = grams(ask) & grams(note)
+    assert not shared, f"ask and method note share phrasing: {sorted(shared)[:3]}"
