@@ -4,6 +4,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# First-party origins that are allowed on TOP of whatever `ALLOWED_ORIGINS`
+# names, in every environment. These are our own domains — the marketing site,
+# which is a separate deploy and the only caller of the no-auth
+# `POST /v1/whitelist` signup form. Leaving them to the env var meant the form
+# worked or not depending on which box a human had remembered to edit: prod's
+# `.env` happened to list them, staging's did not, so the browser threw away a
+# 200 as `400 Disallowed CORS origin` and the signup looked broken while the row
+# was in fact being written. There is no environment in which we want to refuse
+# our own marketing site, so the list should not be a thing anyone can forget.
+ALWAYS_ALLOWED_ORIGINS = (
+    "https://sprntly.ai",
+    "https://www.sprntly.ai",
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -768,7 +782,12 @@ class Settings(BaseSettings):
 
     @property
     def origins_list(self) -> list[str]:
-        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        # Order matters to `conftest.py`, which sends `origins_list[0]` as the
+        # test client's Origin, and reads better in logs: the env var stays
+        # first and the baked-in floor is appended, de-duplicated so an env that
+        # already names a marketing origin does not list it twice.
+        configured = [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        return configured + [o for o in ALWAYS_ALLOWED_ORIGINS if o not in configured]
 
     @property
     def cookie_secure(self) -> bool:
