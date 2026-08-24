@@ -33,6 +33,7 @@ const startRun = vi.fn()
 const getRun = vi.fn()
 const confirmRun = vi.fn()
 const approveRun = vi.fn()
+const listTurns = vi.fn()
 
 /** A plan thin enough to render and real enough to approve. */
 const PLAN = {
@@ -60,6 +61,9 @@ vi.mock("../../../../lib/api", () => {
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
+      // SLOW ON PURPOSE, so a tab can actually be observed mid-hydration. The
+      // restore has to wait for this and then RUN.
+      listTurns: (...a: unknown[]) => listTurns(...a),
     },
     goalAnalysisApi: {
       list: (...a: unknown[]) => listRuns(...a),
@@ -229,6 +233,8 @@ beforeEach(() => {
   crucible = true
   listRuns.mockReset()
   listRuns.mockResolvedValue({ runs: [] })
+  listTurns.mockReset()
+  listTurns.mockResolvedValue({ turns: [] })
   getRun.mockReset()
   confirmRun.mockReset()
   approveRun.mockReset()
@@ -606,6 +612,34 @@ describe("the guards around the restore", () => {
     expect(turn.goalGate ?? null).toBeNull()
   })
 
+  it("restores a gate on a tab whose thread was still being fetched", async () => {
+    // Bailing on a hydrating tab without listing it as a dependency meant
+    // bailing FOREVER — nothing else in the effect's deps changes when the
+    // fetch lands. Opening a live-gate conversation from the history rail
+    // therefore never restored its gate.
+    //
+    // Reaching it needs the resume flow: `sprntly_resume_conv` spawns the tab
+    // and `listTurns` fills it, and while that call is open the tab is
+    // `hydrating`.
+    listTurns.mockReturnValue(
+      new Promise((r) => setTimeout(() => r({ turns: [] }), 150)))
+    listRuns.mockResolvedValue({
+      runs: [{ id: 99, conversation_id: 7, status: "awaiting_confirmation" }],
+    })
+    getRun.mockResolvedValue({
+      id: 99, status: "awaiting_confirmation", goal_text: "raise NRR",
+      prioritisation: { ask: "What counts as retained?" },
+    })
+    localStorage.setItem("sprntly_resume_conv",
+      JSON.stringify({ dbId: 7, title: "raise NRR" }))
+    mountApp()
+
+    await waitFor(
+      () => expect(screen.queryByTestId("goal-gate-definition")).not.toBeNull(),
+      { timeout: 4000 })
+    expect(screen.getByRole("button", { name: /confirm and plan/i })).toBeTruthy()
+  })
+
   // NOT TESTED HERE, deliberately, rather than tested falsely: the restore must
   // re-run once a hydrating tab's thread fetch lands (`activeTabHydrating` is a
   // dependency for exactly that). `hydrating` is set only by the history-rail
@@ -613,6 +647,44 @@ describe("the guards around the restore", () => {
   // can seed reaches it — a test written against it passed identically with the
   // dependency removed, which is worse than no test. Reaching it needs the
   // resume flow wired into this harness.
+
+  it("a run that dies mid-approve is not reported as started", async () => {
+    // `awaitGoalRun` also returns on `failed`/`cancelled` — a verdict, not a
+    // destination. Treating any non-null answer as "it started" opened the
+    // panel onto a dead run and told the reader it was running.
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, thread: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
+    await startAGoal("raise NRR")
+    await waitFor(() => expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+
+    // Confirm through to the PLAN gate, but stop there — the approve is what
+    // this test is about.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("What this goal means"),
+        { target: { value: "NRR, 90 days" } })
+    })
+    getRun.mockResolvedValue({
+      id: 99, status: "awaiting_approval", prioritisation: { plan: PLAN },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
+    })
+    await waitFor(() => expect(screen.getByTestId("goal-gate-plan")).toBeTruthy())
+
+    // The approve response is lost, and the run turns out to have died.
+    approveRun.mockRejectedValue(new Error("connection lost"))
+    getRun.mockResolvedValue({ id: 99, status: "failed", prioritisation: {} })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    })
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("stopped before it could read"))
+  })
 
   it("does not mark an innocent tab as already-opened", async () => {
     // The other half of the same bug: a claim misfiled against tab A marks it

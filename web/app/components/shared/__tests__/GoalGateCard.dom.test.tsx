@@ -113,14 +113,19 @@ describe("a failure that lands after the gate was answered", () => {
     expect(document.body.textContent).toContain("stopped before it could read")
   })
 
-  it("renders a wholly failed gate with its reason", () => {
+  it("states a wholly failed gate's reason ONCE, not twice", () => {
+    // `endGoalTurn` used to write the same sentence to both the failed record
+    // and the note beside it, so the card printed it twice: "Analysis stopped /
+    // That analysis stopped… / That analysis stopped…". It writes one or the
+    // other now, and this pins that.
     render(
       <GoalGateCard
         gate={definitionGate}
         resolved={{ kind: "failed", reason: "Goal Analysis is not enabled." }}
       />,
     )
-    expect(screen.getByTestId("goal-gate-failed").textContent)
-      .toContain("not enabled")
+    const card = screen.getByTestId("goal-gate-failed")
+    expect(card.textContent).toContain("not enabled")
+    expect(card.textContent?.match(/not enabled/g)?.length).toBe(1)
   })
 })
