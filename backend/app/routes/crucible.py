@@ -412,6 +412,29 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
         row = runs_db.get(run_id, company_id)
         if not row or row.get("artifact_id"):
             return
+
+        # ONE DOCUMENT PER GOAL, not one per run. `custom_artifacts` is
+        # COMPANY-SHARED, so a PM iterating on phrasing — three runs of "reduce
+        # churn" while they get the definition right — would leave three
+        # near-identical team-visible documents that nobody can tell apart, and
+        # the panel offers no way to delete one. Exploration is the normal use
+        # of this feature, so it must not litter a shared library.
+        #
+        # KEYED ON THE GOAL TEXT, because that is what a reader would be
+        # comparing. A rerun still produces a full run with its own findings and
+        # its own report in the panel; what it does not do is file a second copy
+        # for the team. The earlier run keeps the document, which is the
+        # conservative direction: it is the one someone may already have opened.
+        goal_text = (row.get("goal_text") or "").strip()
+        if goal_text:
+            for other in runs_db.list_for_company(company_id) or []:
+                if (other.get("id") != run_id
+                        and other.get("artifact_id")
+                        and (other.get("goal_text") or "").strip() == goal_text):
+                    logger.info(
+                        "crucible: run %s reuses run %s's document for the same "
+                        "goal", run_id, other.get("id"))
+                    return
         html = _body_or_413(_render_document_html(row, company_id), run_id)
         artifact = create_artifact(
             company_id,

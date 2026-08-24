@@ -86,11 +86,22 @@ def test_the_confirmation_shows_the_definition_and_says_it_is_theirs():
 
 def test_no_definition_anywhere_asks_rather_than_inventing_one():
     """The staging test tenant has no KPI tree at all, so this is the path the
-    live verification will actually take."""
+    live verification will actually take.
+
+    PINS THE BEHAVIOUR, NOT THE SPELLING. This asserted `"can't find" in
+    out.ask`, which is the wording rather than the rule — so it broke on an
+    intentional copy change (§5 requirement 1: the ask must not OPEN with what
+    was not found, because the search block above it has already said so) while
+    never having checked the thing it is named for. What matters is that
+    nothing was invented and that the user is asked."""
     out = resolve_with(KpiTreeSource(None), goal="improve activation")
     assert out.status == "needs_input"
     assert out.definition is None
-    assert "can't find" in out.ask
+    assert out.ask, "a miss has to produce a question"
+    # It must not open with the gap — that is the defect §5 req 1 names.
+    assert not out.ask.lower().startswith("i can't find")
+    # And it must ask for the parts a definition actually needs.
+    assert "what is counted" in out.ask.lower()
 
 
 def test_the_ask_says_why_guessing_would_be_worse():

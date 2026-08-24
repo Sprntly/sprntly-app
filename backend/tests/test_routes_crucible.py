@@ -1773,3 +1773,98 @@ def test_a_definition_conflict_is_not_offered_a_way_around_itself(ctx, monkeypat
         "a conflict must not be offered a way around itself")
     # The conflict question itself still renders.
     assert meta["ask"]
+
+
+def test_the_ask_does_not_restate_the_absence_the_search_block_just_showed(ctx):
+    """§5: "Never open with what you do not know. Open with what you looked at."
+
+    THE SENTENCE WAS THE BUG, and an earlier attempt at this PR moved a "where I
+    looked" block above it while leaving the words alone — so the panel said
+    "nothing, nothing" in two bullets and then restated the same absence as a
+    failure claim in prose. More to read, same outcome, and the specific copy
+    the PR set out to fix still shipping."""
+    run_id = _start(ctx).json()["id"]
+    ask = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["ask"]
+
+    assert ask
+    lowered = ask.lower()
+    # It must not OPEN with the gap.
+    assert not lowered.startswith("i can't find"), ask
+    assert "defined anywhere in your systems" not in lowered, ask
+    # It must move to the decision the user is being asked to make.
+    assert "what is counted" in lowered
+    assert "population" in lowered and "window" in lowered
+    # And it keeps the reason asking beats guessing — that part was right.
+    assert "rather ask than guess" in lowered
+
+
+def test_rerunning_a_goal_does_not_file_a_second_team_document(ctx):
+    """`custom_artifacts` is COMPANY-SHARED. A PM iterating on phrasing would
+    otherwise leave three near-identical team-visible documents that nobody can
+    tell apart, with no delete on this surface. Exploration is the normal use of
+    this feature."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    ids = []
+    for _ in range(3):
+        rid = _start(ctx, goal="reduce customer churn").json()["id"]
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+        ids.append(rid)
+
+    rows = [ctx.client.get(f"/v1/crucible/{r}").json() for r in ids]
+    assert all(r["status"] == "ready" for r in rows), (
+        "a rerun must still produce a full run")
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, (
+        f"three runs of one goal filed {len(reports)} team documents")
+    # Exactly one run holds the document; the others ran and reported in-panel.
+    assert sum(1 for r in rows if r.get("artifact_id")) == 1
+
+
+def test_a_different_goal_still_gets_its_own_document(ctx):
+    """The dedup is keyed on the goal text, so it must not swallow a genuinely
+    different analysis."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    for goal in ("reduce customer churn", "grow activation"):
+        rid = _start(ctx, goal=goal).json()["id"]
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 2, f"two goals should file two documents, got {len(reports)}"
+
+
+def test_nothing_in_the_run_reads_the_metric_registry():
+    """THE CANARY FOR `_method_note`.
+
+    The note tells the user "the analysis reads your documents, tickets and
+    conversations against it, not a metric series". That is true only while
+    nothing in the run reads `metric_points` — and `metric_candidates`' own
+    docstring says the registry "lights up the moment it is populated", so
+    somebody wiring it into sizing is expected. The existing tests assert
+    substrings of the note and would keep passing on a stale string.
+
+    This fails instead, and points at the note."""
+    import inspect
+
+    from app.routes import crucible as mod
+
+    src = inspect.getsource(mod.execute_run)
+    for forbidden in ("metric_points", "list_metric_points", "distinct_metrics"):
+        assert forbidden not in src, (
+            f"`execute_run` now touches {forbidden}. `_method_note` promises the "
+            f"run reads documents rather than a metric series — rewrite that "
+            f"sentence before wiring the registry into the analysis."
+        )

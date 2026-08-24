@@ -459,13 +459,30 @@ def _ambiguous_metric_ask(candidates: Sequence[MetricCandidate]) -> str:
 
 
 def _no_definition_ask(goal_text: str) -> str:
+    """The ask when nothing was found. §5, and the ORDER of the two ideas in it
+    is the requirement.
+
+    THIS SENTENCE WAS THE BUG, and a previous attempt at fixing it moved a
+    "where I looked" block ABOVE it while leaving the words alone — so the panel
+    said "nothing, nothing" in two bullets and then restated the same absence as
+    a failure claim in prose, which is more to read for the same outcome. §5:
+    "Never open with what you do not know. Open with what you looked at."
+
+    So it no longer opens with what is missing, and it does not repeat what the
+    search block directly above it has already shown. It opens with the one
+    thing that IS established — that the search ran — and moves straight to the
+    decision the user is being asked to make. `goal_text` is quoted so the
+    question is unmistakably about their goal and not a generic prompt.
+    """
     return (
-        f"I can't find \"{goal_text}\" defined anywhere in your systems, so I "
-        f"want to check what I'm optimising before I start.\n\n"
-        f"Describe what you'd want to see move and I'll find the closest thing "
-        f"you actually measure. I'd rather ask than guess: a definition I "
-        f"invented would give you a confident answer to a question you didn't "
-        f"ask, and you wouldn't be able to tell from the output."
+        f"Your systems don't record a definition for \"{goal_text}\" yet, so "
+        f"the definition is yours to state — and stating it is the whole of "
+        f"what I need.\n\n"
+        f"Write what you'd want to see move: what is counted, over what "
+        f"population, over what window. I'd rather ask than guess, because a "
+        f"definition I invented would give you a confident answer to a "
+        f"question you didn't ask, and you wouldn't be able to tell from the "
+        f"output."
     )
 
 
