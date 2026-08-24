@@ -35,6 +35,11 @@ import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
  *  re-render (or a restore) rebuilds the card from data rather than from a
  *  component that happened to still be mounted. */
 export type GoalGate =
+  /** Started, not yet asking. A run is born `resolving_goal` and reaches its
+   *  first question a moment later; without a gate on the turn for that window
+   *  the thread ran the ordinary no-reply ladder and printed "No response was
+   *  generated for this message." over a run that was working perfectly. */
+  | { kind: "pending"; goalText: string }
   | {
       kind: "definition"
       runId: number
@@ -66,21 +71,37 @@ export function GoalGateCard({
   gate,
   resolved,
   busy,
+  error,
   onConfirmDefinition,
   onApprovePlan,
 }: {
-  gate: GoalGate
+  gate?: GoalGate
   resolved?: GoalGateResolved
   busy?: boolean
+  /** A refusal the user can act on. Rendered BESIDE the still-live controls,
+   *  never instead of them: the run is usually still sitting at its gate
+   *  server-side, so destroying the card turns a retryable error into a dead
+   *  end. */
+  error?: string
   onConfirmDefinition?: (definition: string) => void
   onApprovePlan?: (decision: PlanDecision) => void
 }) {
   if (resolved) return <GoalGateSettled resolved={resolved} />
+  if (!gate) return null
+  if (gate.kind === "pending") {
+    return (
+      <div className="ggc" data-testid="goal-gate-pending">
+        <p className="ggc-note">Working out what this goal means…</p>
+        {error ? <p className="ggc-error" role="status">{error}</p> : null}
+      </div>
+    )
+  }
   if (gate.kind === "definition") {
     return (
       <GoalDefinitionGate
         gate={gate}
         busy={busy}
+        error={error}
         onConfirm={onConfirmDefinition}
       />
     )
@@ -92,6 +113,7 @@ export function GoalGateCard({
         approving={!!busy}
         onApprove={(decision) => onApprovePlan?.(decision)}
       />
+      {error ? <p className="ggc-error" role="status">{error}</p> : null}
     </div>
   )
 }
@@ -99,10 +121,12 @@ export function GoalGateCard({
 function GoalDefinitionGate({
   gate,
   busy,
+  error,
   onConfirm,
 }: {
   gate: Extract<GoalGate, { kind: "definition" }>
   busy?: boolean
+  error?: string
   onConfirm?: (definition: string) => void
 }) {
   const [definition, setDefinition] = useState(gate.proposedDefinition ?? "")
@@ -147,6 +171,10 @@ function GoalDefinitionGate({
       >
         {busy ? "Starting…" : "Confirm and plan"}
       </button>
+      {/* BESIDE the button, not instead of it. A refused confirm usually leaves
+          the run exactly where it was, so the reader has to be able to try
+          again — replacing the card with the error made that impossible. */}
+      {error ? <p className="ggc-error" role="status">{error}</p> : null}
     </div>
   )
 }

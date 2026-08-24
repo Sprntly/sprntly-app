@@ -21,6 +21,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { GoalGateCard } from "../GoalGateCard"
+import { MAX_HYPOTHESIS_CHARS } from "../GoalAnalysisPlan"
 import type { GoalRunPlan } from "../../../lib/api"
 
 const PLAN = {
@@ -151,5 +152,61 @@ describe("the engine's name never reaches the screen", () => {
       />,
     )
     expect(document.body.textContent?.toLowerCase()).not.toContain("crucible")
+  })
+})
+
+describe("a hypothesis longer than the API accepts", () => {
+  // Caught HERE, where the offending line can be named, rather than as a 422
+  // the reader has to decode. Carried over from the retired panel file.
+  it("is caught before approve, and names the problem", () => {
+    const onApprove = renderPlan()
+    fireEvent.change(screen.getByLabelText("What you already believe"), {
+      target: { value: "x".repeat(MAX_HYPOTHESIS_CHARS + 1) },
+    })
+    expect(screen.getByTestId("goal-plan-hypothesis-too-long")).toBeTruthy()
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    expect(onApprove).not.toHaveBeenCalled()
+  })
+
+  it("lets an ordinary hypothesis through untouched", () => {
+    const onApprove = renderPlan()
+    fireEvent.change(screen.getByLabelText("What you already believe"), {
+      target: { value: "onboarding is where they drop" },
+    })
+    expect(screen.queryByTestId("goal-plan-hypothesis-too-long")).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    expect(onApprove).toHaveBeenCalledWith({
+      excluded_sources: [], hypotheses: ["onboarding is where they drop"],
+    })
+  })
+})
+
+describe("a refusal leaves the gate answerable", () => {
+  it("shows the reason WITHOUT destroying the controls", () => {
+    // A 422 means the server refused the body before claiming anything, so the
+    // run is still sitting at its gate. Replacing the card with the error is
+    // what turns a retryable refusal into a dead end.
+    renderPlan()
+    cleanup()
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 7, plan: PLAN }}
+        error="That was not accepted. Shorten what you wrote and try again."
+        onApprovePlan={vi.fn()}
+      />,
+    )
+    expect(document.body.textContent).toContain("Shorten what you wrote")
+    expect(screen.getByRole("button", { name: /approve and run/i })).toBeTruthy()
+  })
+})
+
+describe("the window before the first question", () => {
+  it("says it is working, not that nothing was generated", () => {
+    // A run is born `resolving_goal`. With no gate on the turn for that window
+    // the thread ran its ordinary no-reply ladder and printed "No response was
+    // generated for this message." over a run that was working perfectly.
+    render(<GoalGateCard gate={{ kind: "pending", goalText: "raise NRR" }} />)
+    expect(screen.getByTestId("goal-gate-pending")).toBeTruthy()
+    expect(document.body.textContent).not.toContain("No response was generated")
   })
 })

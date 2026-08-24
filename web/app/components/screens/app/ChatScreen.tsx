@@ -53,7 +53,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -177,6 +177,11 @@ export type ThreadTurn = {
   /** What the user actually agreed to. Its presence flips the card to its
    *  settled form and is what keeps the record in the thread. */
   goalGateResolved?: GoalGateResolved
+  /** A refusal the reader can act on, shown BESIDE the live gate. Not `error`:
+   *  that renders the thread's generic "There was an interruption, try again."
+   *  and discards the message, and it replaces the card — turning a run still
+   *  sitting at its gate server-side into a dead end with no retry. */
+  goalGateError?: string
   clarify?: ClarifyQuestion[]
   /** How the batch above was settled — answers given, or the assumptions each
    *  unanswered question fell back to. Its presence is what flips the card from
@@ -3684,10 +3689,14 @@ export function ChatScreen() {
   // turn into the active tab (append / rename) or a fresh tab, then persist it
   // client+server. A project surface supplies its own `emitTurn` (engine turns +
   // server-only persist); the action bodies never learn which.
-  const emitCommandTurn = useCallback((turn: ThreadTurn) => {
+  const emitCommandTurn = useCallback((turn: ThreadTurn, intoTabId?: string) => {
     const seedQuery = turn.query
     const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
-    const activeId = activeTabIdRef.current
+    // `intoTabId` PINS THE DESTINATION. Without it this lands on whatever tab is
+    // active when it runs — and a Goal Analysis plan turn is emitted minutes
+    // after its gate was answered, so a reader who switched tabs meanwhile got
+    // another conversation's plan grafted into their thread.
+    const activeId = intoTabId ?? activeTabIdRef.current
     const inTab = activeId && activeId !== BRIEF_TAB_ID
       ? tabsRef.current.find((t) => t.id === activeId)
       : undefined
@@ -4629,6 +4638,47 @@ export function ChatScreen() {
         if (goalRunRef.current != null) return
         goalRunRef.current = mine.id
         setContent({ goalRunId: mine.id })
+
+        // RE-ARM AN UNANSWERED GATE. `goalGate` lives on the thread, which
+        // lives in sessionStorage — so a new browser session (or any tab whose
+        // thread was not persisted) came back with the run sitting at its gate
+        // and NOTHING anywhere to answer it: the panel had handed the gates to
+        // the chat, and the chat had no card. The run was stuck for good.
+        //
+        // Rebuilt from the run itself, which is the durable copy.
+        if (mine.status !== "awaiting_confirmation"
+            && mine.status !== "awaiting_approval") return
+        const tabId = activeTabIdRef.current
+        if (!tabId) return
+        const already = (tabsRef.current.find((t) => t.id === tabId)?.thread ?? [])
+          .some((tn) => tn.goalGate != null || tn.goalGateResolved != null)
+        if (already) return
+        const detail = await goalAnalysisApi.get(mine.id)
+        if (!live) return
+        if (detail.status === "awaiting_confirmation") {
+          emitCommandTurn({
+            id: `goal-restored-${mine.id}`,
+            query: "",
+            goalGate: {
+              kind: "definition",
+              runId: mine.id,
+              goalText: detail.goal_text ?? "",
+              ask: detail.prioritisation?.ask
+                || "Before this runs, confirm what this goal means.",
+              proposedDefinition: detail.prioritisation?.proposed_definition,
+              proposedSource: detail.prioritisation?.proposed_source,
+              methodNote: detail.prioritisation?.method_note,
+            },
+          }, tabId)
+        } else if (detail.prioritisation?.plan) {
+          emitCommandTurn({
+            id: `goal-plan-${mine.id}`,
+            query: "",
+            goalGate: {
+              kind: "plan", runId: mine.id, plan: detail.prioritisation.plan,
+            },
+          }, tabId)
+        }
       } catch {
         // A failed restore is a missing panel, not a broken chat. The run row
         // survives and the listing will be tried again on the next switch.
@@ -4639,7 +4689,7 @@ export function ChatScreen() {
     // id, so without it this effect does not re-run on the switch — the reset
     // clears the panel, the restore never fires again, and switching back does
     // not recover it.
-  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+  }, [goalAnalysisOn, activeConvId, activeTabId, setContent, emitCommandTurn])
 
   // ...AND PUT IT ON SCREEN.
   //
@@ -4770,17 +4820,61 @@ export function ChatScreen() {
     [],
   )
 
+  /** A REJECTED request is not a LOST one, and they need opposite handling.
+   *
+   *  422/413 mean the server refused the body BEFORE claiming anything: the run
+   *  is still sitting at its gate, nothing is running, and the reader has to be
+   *  able to fix what they wrote and try again. Say what the server said.
+   *
+   *  Anything else may have been lost AFTER the claim — the server claims the
+   *  row before it does any work — so the run may well be going with nothing
+   *  watching it. Telling the reader to click again would 409 forever against
+   *  their own successful claim; the caller polls instead and lets the run say
+   *  what happened. Carried over from the panel, which owned these gates
+   *  before they moved into the thread.
+   */
+  const goalRefusalMessage = useCallback((e: unknown): string | null => {
+    // STRUCTURAL, not `instanceof`. The error crosses a module boundary (and,
+    // under a mocked `lib/api`, a second copy of the class), so an identity
+    // check silently answers "not a refusal" and sends a plain 422 down the
+    // lost-response path — the reader is told we are checking, forever, about
+    // a request the server already rejected outright.
+    const raw = (e as { status?: unknown })?.status
+    const status = typeof raw === "number" ? raw : 0
+    if (status !== 422 && status !== 413) return null
+    const body = (e as { body?: unknown })?.body
+    const msg = body == null || typeof apiErrorMessage !== "function"
+      ? "" : apiErrorMessage(status, body)
+    return (msg && msg !== `Request failed (${status})` ? msg.trim() : "")
+      || "That was not accepted. Shorten what you wrote and try again."
+  }, [])
+
+  /** The run itself is over — there is nothing to retry, so the gate goes and
+   *  the reason stays in the thread. Distinct from `failGoalTurn`, which is for
+   *  a refused ACTION against a run still sitting at its gate. */
+  const endGoalTurn = useCallback(
+    (tabId: string, turnId: string, reason: string) => {
+      goalGateBusyTurnRef.current = null
+      setGoalGateBusyTurnId(null)
+      patchTurn(tabId, turnId, {
+        goalGate: undefined,
+        goalGateResolved: { kind: "failed", reason },
+      })
+    },
+    [patchTurn],
+  )
+
   const failGoalTurn = useCallback(
     (tabId: string, turnId: string, message: string) => {
       goalGateBusyTurnRef.current = null
       setGoalGateBusyTurnId(null)
-      // NOT `error`: the thread's generic failed-turn renderer shows "There was
-      // an interruption, try again." and discards the message entirely, so the
-      // one thing the reader needs — why — would be thrown away. Settling the
-      // gate as failed keeps the reason in the conversation.
-      patchTurn(tabId, turnId, {
-        goalGateResolved: { kind: "failed", reason: message },
-      })
+      // KEEPS THE GATE. A refused confirm or approve usually leaves the run
+      // exactly where it was server-side, so the card has to stay answerable —
+      // clearing it locked the reader out of a run that was still waiting for
+      // them. `error` is wrong for the same reason and worse: it renders the
+      // generic "There was an interruption, try again." and throws the reason
+      // away entirely.
+      patchTurn(tabId, turnId, { goalGateError: message })
     },
     [patchTurn],
   )
@@ -4806,27 +4900,49 @@ export function ChatScreen() {
         })
         const detail = await awaitGoalRun(runId, ["awaiting_approval"])
         if (!detail || detail.status !== "awaiting_approval") {
-          failGoalTurn(tabId, turnId,
+          endGoalTurn(tabId, turnId,
             "The analysis could not build a plan for this goal.")
           return
         }
         if (detail.prioritisation?.plan) {
           // A NEW turn: the plan is the run's next thing to say, and a reply
           // belongs beside the question it answers rather than replacing it.
+          // PINNED to the tab that asked — minutes may have passed and the
+          // reader may be somewhere else entirely.
           emitCommandTurn({
             id: `goal-plan-${runId}`,
             query: "",
             goalGate: { kind: "plan", runId, plan: detail.prioritisation.plan },
-          })
+          }, tabId)
         }
       } catch (e) {
-        failGoalTurn(tabId, turnId, e instanceof Error ? e.message : String(e))
+        const refused = goalRefusalMessage(e)
+        if (refused) {
+          // Retryable: the run never moved, so the card stays answerable.
+          failGoalTurn(tabId, turnId, refused)
+          return
+        }
+        failGoalTurn(tabId, turnId,
+          "We could not tell whether that started. Checking…")
+        const after = await awaitGoalRun(runId, ["awaiting_approval"])
+        if (after?.status === "awaiting_approval" && after.prioritisation?.plan) {
+          patchTurn(tabId, turnId, {
+            goalGateError: undefined,
+            goalGateResolved: { kind: "definition", definition },
+          })
+          emitCommandTurn({
+            id: `goal-plan-${runId}`,
+            query: "",
+            goalGate: { kind: "plan", runId, plan: after.prioritisation.plan },
+          }, tabId)
+        }
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
       }
     },
-    [awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn],
+    [awaitGoalRun, emitCommandTurn, endGoalTurn, failGoalTurn,
+     goalRefusalMessage, patchTurn],
   )
 
   // Gate 2 → the run. Only here does anything get read, and only here does the
@@ -4853,13 +4969,18 @@ export function ChatScreen() {
         goalAutoOpenedRef.current.add(tabId)
         openContentPanel("goal")
       } catch (e) {
-        failGoalTurn(tabId, turnId, e instanceof Error ? e.message : String(e))
+        const refused = goalRefusalMessage(e)
+        // Either way the card stays: a refusal is retryable, and a lost
+        // response leaves a run that may already be going — neither is a reason
+        // to lock the reader out of it.
+        failGoalTurn(tabId, turnId, refused
+          || "We could not tell whether that started. Checking…")
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
       }
     },
-    [failGoalTurn, patchTurn, setContent, openContentPanel],
+    [failGoalTurn, goalRefusalMessage, patchTurn, setContent, openContentPanel],
   )
 
   // The entry point: start the run, then put its FIRST question in the thread.
@@ -4874,7 +4995,18 @@ export function ChatScreen() {
     // build does today, observed on staging (goal typed, panel opens, thread
     // shows an empty "New chat"). Emitting first means the worst case is a turn
     // carrying an error, which is still a conversation.
-    emitCommandTurn({ id: turnId, query: goalText })
+    emitCommandTurn({
+      id: turnId,
+      query: goalText,
+      // A GATE FROM THE FIRST FRAME. The run spends a beat in `resolving_goal`
+      // before it has a question, and a turn with no gate and no reply runs the
+      // ordinary no-reply ladder — which printed "No response was generated for
+      // this message." over a run that was working perfectly.
+      goalGate: { kind: "pending", goalText },
+    })
+    // AFTER the emit: on a fresh or brief surface `emitCommandTurn` spawns the
+    // tab, so reading this first returned the tab the reader was leaving (or
+    // null, silently abandoning a turn already on screen).
     const tabId = activeTabIdRef.current
     if (!tabId) return
     try {
@@ -4885,7 +5017,7 @@ export function ChatScreen() {
       // A run is born `resolving_goal` and reaches the gate a moment later.
       const detail = await awaitGoalRun(run.id, ["awaiting_confirmation"])
       if (!detail || detail.status !== "awaiting_confirmation") {
-        failGoalTurn(tabId, turnId,
+        endGoalTurn(tabId, turnId,
           "The analysis could not start for this goal.")
         return
       }
@@ -4912,12 +5044,13 @@ export function ChatScreen() {
           ? "This is an experimental feature and your company is not enrolled yet."
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
-      // The toast is transient and the thread is not.
-      failGoalTurn(tabId, turnId, denied
+      // The toast is transient and the thread is not. There is no run to go
+      // back to here, so this ends the turn rather than offering a retry.
+      endGoalTurn(tabId, turnId, denied
         ? "Goal Analysis is not enabled for this workspace yet."
         : "That analysis could not be started.")
     }
-  }, [activeConvId, awaitGoalRun, emitCommandTurn, failGoalTurn, patchTurn,
+  }, [activeConvId, awaitGoalRun, emitCommandTurn, endGoalTurn, patchTurn,
       showToast])
 
   // Republished on every render so the dispatcher always calls the current
@@ -5908,6 +6041,7 @@ export function ChatScreen() {
               // short-circuited through `confirmGoalDefinition?.(…)` — the
               // second independent way this feature shipped inert.
               goalGateBusyTurnId,
+              goalGateErrorTurnId: null,
               confirmGoalDefinition,
               approveGoalPlan,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,

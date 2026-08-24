@@ -25015,6 +25015,9 @@
   text-transform: uppercase; opacity: 0.6;
 }
 .ggc-settled-body { margin: 0; line-height: 1.5; }
+/* Beside the live controls, never instead of them — a refused gate is usually
+   retryable, and the run is still waiting server-side. */
+.ggc-error { margin: 0; color: var(--danger, #b42318); line-height: 1.5; }
 .ga-error { color: var(--danger, #b42318); margin: 0; }
 
 /* Coverage sits ABOVE the findings: a note that a third of the evidence was

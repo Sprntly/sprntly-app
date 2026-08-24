@@ -52,6 +52,8 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    apiErrorMessage: (_s: number, b: unknown) =>
+      (b as { detail?: string })?.detail || "",
     skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
@@ -468,11 +470,13 @@ describe("the guards around the restore", () => {
     expect(panelProbe()).toBe("closed")
   })
 
-  it("a refused confirm surfaces on the turn instead of vanishing", async () => {
-    // Moved here with the gate. The panel used to own this: a confirm that the
-    // server refused had to say so rather than leave a dead button. Now the
-    // gate is a turn, so the failure belongs on that turn — a toast is
-    // transient and the thread is not.
+  it("a refused confirm says why AND leaves the gate answerable", async () => {
+    // Moved here with the gate, and asserting the opposite of what it used to.
+    // A 422 means the server refused the BODY before claiming anything: the run
+    // is still sitting at its gate, so the card has to stay answerable. An
+    // earlier version of this test asserted the card was gone, which locked in
+    // exactly the dead end it should have caught — a run still waiting for the
+    // reader, with nothing on screen to answer it.
     listRuns.mockResolvedValue({ runs: [] })
     seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, messages: [] }, "t1")
     mountApp()
@@ -483,7 +487,11 @@ describe("the guards around the restore", () => {
     await startAGoal("raise net revenue retention")
     await waitFor(() => expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
 
-    confirmRun.mockRejectedValue(new Error("the run had already moved on"))
+    // A refusal as it actually arrives — `status` and `body` on the error. The
+    // local mock's `ApiError` hardcodes `status = 0` and would not be one.
+    confirmRun.mockRejectedValue(Object.assign(new Error("refused"), {
+      status: 422, body: { detail: "That definition is too long." },
+    }))
     await act(async () => {
       fireEvent.change(screen.getByLabelText("What this goal means"),
         { target: { value: "NRR, all paying accounts" } })
@@ -492,11 +500,15 @@ describe("the guards around the restore", () => {
       fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
     })
 
-    // The card is gone and the reason is on the turn — not a silent no-op.
+    // The reason is on the turn...
     await waitFor(() =>
-      expect(screen.queryByTestId("goal-gate-definition")).toBeNull())
-    await waitFor(() =>
-      expect(document.body.textContent).toContain("already moved on"))
+      expect(document.body.textContent).toContain("too long"))
+    // ...and the gate is still there to answer.
+    expect(screen.getByTestId("goal-gate-definition")).toBeTruthy()
+    expect(
+      (screen.getByRole("button", { name: /confirm and plan/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false)
   })
 
   it("does not mark an innocent tab as already-opened", async () => {

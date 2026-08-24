@@ -38,7 +38,6 @@ import {
   type GoalRunDetail,
   apiErrorMessage,
 } from "../../lib/api"
-import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
@@ -105,9 +104,6 @@ function _detailOf(e: unknown): string {
 export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [definition, setDefinition] = useState("")
-  const [confirming, setConfirming] = useState(false)
-  const [approving, setApproving] = useState(false)
   // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
   // has not changed, so without this the effect never re-runs and the panel
   // stays on the last status it saw.
@@ -118,7 +114,6 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // The user's edit must survive a poll landing underneath it. Without this
   // the textarea is reset every three seconds and a long definition is
   // impossible to type.
-  const touched = useRef(false)
 
   // ── The report as a document ────────────────────────────────────────────
   //
@@ -144,9 +139,6 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       failures.current = 0
       setError(null)              // a recovered poll clears the warning
       setRun(detail)
-      if (!touched.current) {
-        setDefinition(detail.prioritisation?.proposed_definition ?? "")
-      }
       return detail.status
     } catch {
       failures.current += 1
@@ -181,66 +173,11 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     }
   }, [load, pollKey])
 
-  const confirm = async () => {
-    if (!definition.trim() || confirming) return
-    setConfirming(true)
-    try {
-      await goalAnalysisApi.confirm(runId, definition.trim())
-      touched.current = false
-      failures.current = 0
-      // Re-arm. The run has just left `awaiting_confirmation`, and nothing
-      // else would ever ask it again.
-      setPollKey((k) => k + 1)
-    } catch {
-      // The most important click in the feature. A silent no-op here reads as
-      // a dead button.
-      //
-      // AND RE-ARM THE POLL. The server claims the row before it does anything
-      // else, so a response lost after that claim means the run IS going —
-      // and `awaiting_confirmation` is terminal, so nothing was watching. The
-      // old copy told the user to confirm again, which would 409 forever
-      // against their own successful claim. Poll instead and let the run say
-      // what happened.
-      setError("We could not tell whether that started. Checking…")
-      setPollKey((k) => k + 1)
-    } finally {
-      setConfirming(false)
-    }
-  }
-
-  const approve = async (decision: PlanDecision) => {
-    if (approving) return
-    setApproving(true)
-    try {
-      await goalAnalysisApi.approve(runId, decision)
-      failures.current = 0
-      // Re-arm: `awaiting_approval` is terminal for the poller, so nothing
-      // else would ever look at this run again.
-      setPollKey((k) => k + 1)
-    } catch (e) {
-      // A REJECTED request is not a LOST one, and they need opposite handling.
-      // 422/413 mean the server refused the body before claiming anything: the
-      // run is still `awaiting_approval` and nothing is running. Polling would
-      // say "Checking…" forever while the user retypes the same over-long
-      // hypothesis, never learning why. Say what the server said instead.
-      const status = (e as { status?: unknown })?.status
-      if (status === 422 || status === 413) {
-        setError(
-          _detailOf(e) ||
-            "That was not accepted. Shorten what you wrote and try again.",
-        )
-        return
-      }
-      // Otherwise: the server CLAIMS the row before it starts work, so a
-      // response lost after that claim means the run is going and nothing is
-      // watching it. Telling the user to approve again would 409 forever
-      // against their own successful approval, so poll and let the run speak.
-      setError("We could not tell whether that started. Checking…")
-      setPollKey((k) => k + 1)
-    } finally {
-      setApproving(false)
-    }
-  }
+  // `confirm` and `approve` lived here and are gone with the gates they served:
+  // both are answered in the chat thread now (`GoalGateCard`), and the 422/413
+  // vs lost-response distinction they carried moved to `confirmGoalDefinition` /
+  // `approveGoalPlan` in ChatScreen with its reasoning intact. Leaving them
+  // here would have been ~80 lines nothing could reach.
 
   // Load the report document, if this run already has one. GATED ON
   // `artifact_id` rather than fired unconditionally: most runs never have a

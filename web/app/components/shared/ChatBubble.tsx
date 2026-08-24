@@ -194,6 +194,8 @@ export interface ChatBubbleProps {
   goalGate?: GoalGate | null
   goalGateResolved?: GoalGateResolved
   goalGateBusy?: boolean
+  /** A refusal the reader can act on, shown beside the live controls. */
+  goalGateError?: string
   onConfirmGoalDefinition?: (definition: string) => void
   onApproveGoalPlan?: (decision: PlanDecision) => void
   clarify?: ClarifyQuestion[] | null
@@ -447,6 +449,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     goalGate,
     goalGateResolved,
     goalGateBusy,
+    goalGateError,
     onConfirmGoalDefinition,
     onApproveGoalPlan,
     clarify,
@@ -704,7 +707,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                       no-reply ladder ran beside it and printed "No response was
                       generated for this message." directly above a live
                       question. */}
-                  {!reply && !error && !stopped && !goalGate ? (
+                  {!reply && !error && !stopped && !goalGate && !goalGateResolved ? (
                     summaryPending ? (
                       <div data-testid="summary-pending">
                         <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />
@@ -759,11 +762,12 @@ export function ChatBubble(props: ChatBubbleProps) {
                       <div className="bc-stopped">No response was generated for this message.</div>
                     )
                   ) : null}
-                  {goalGate ? (
+                  {goalGate || goalGateResolved ? (
                     <GoalGateCard
-                      gate={goalGate}
+                      gate={goalGate ?? undefined}
                       resolved={goalGateResolved}
                       busy={goalGateBusy}
+                      error={goalGateError}
                       onConfirmDefinition={(d) => onConfirmGoalDefinition?.(d)}
                       onApprovePlan={(d) => onApproveGoalPlan?.(d)}
                     />
