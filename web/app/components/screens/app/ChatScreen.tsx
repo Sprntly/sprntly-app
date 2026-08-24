@@ -182,10 +182,6 @@ export type ThreadTurn = {
    *  and discards the message, and it replaces the card — turning a run still
    *  sitting at its gate server-side into a dead end with no retry. */
   goalGateError?: string
-  /** The RUN this turn was carrying a live gate for when the page went away.
-   *  Set by `_thawThread`, matched by the restore so a rebuilt gate lands on
-   *  the turn it belongs to rather than the first marked one it finds. */
-  goalGateRearm?: number
   clarify?: ClarifyQuestion[]
   /** How the batch above was settled — answers given, or the assumptions each
    *  unanswered question fell back to. Its presence is what flips the card from
@@ -706,31 +702,8 @@ const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
  *  settled definition or plan is a record, not an indicator.
  */
 function _thawThread(thread: ThreadTurn[] | undefined): ThreadTurn[] {
-  return (thread ?? []).map((tn) => (tn.goalGate?.kind === "pending"
-    // SAYS SOMETHING TRUE, and says which run it is about.
-    //
-    // Simply clearing the gate left a turn with no gate, no reply and no
-    // record — exactly what the no-reply ladder renders "No response was
-    // generated for this message." for, the one string the pending gate exists
-    // to prevent. A bare boolean marker was worse: it carried no run id, so the
-    // FIRST marked turn captured whichever run restored next — one goal's
-    // question rendering under another goal's message — and it was cleared on
-    // only one of the restore's exits, so every other path orphaned a
-    // permanently blank turn into sessionStorage.
-    //
-    // A settled record instead: it renders on its own, it names its run so the
-    // restore can match it, and if the run is genuinely gone it degrades to
-    // something honest rather than to a blank.
-    ? {
-        ...tn,
-        goalGate: undefined,
-        goalGateRearm: tn.goalGate.runId,
-        goalGateResolved: {
-          kind: "failed" as const,
-          reason: "This analysis was interrupted. Reopening it…",
-        },
-      }
-    : tn))
+  return (thread ?? []).map((tn) =>
+    (tn.goalGate?.kind === "pending" ? { ...tn, goalGate: undefined } : tn))
 }
 
 export function ChatScreen() {
@@ -4755,36 +4728,17 @@ export function ChatScreen() {
         if (alreadyOnScreen) return
         const detail = await goalAnalysisApi.get(mine.id)
         if (!live) return
-        // Hang it back on the turn that was carrying it — matched by RUN, so a
-        // marker left by a different goal cannot capture this one's gate.
-        const rearmTurn = tab.thread.find((tn) => tn.goalGateRearm === mine.id)
-        const rebuilt: GoalGate | null =
-          detail.status === "awaiting_confirmation"
-            ? {
-                kind: "definition",
-                runId: mine.id,
-                goalText: detail.goal_text ?? "",
-                ask: detail.prioritisation?.ask
-                  || "Before this runs, confirm what this goal means.",
-                proposedDefinition: detail.prioritisation?.proposed_definition,
-                proposedSource: detail.prioritisation?.proposed_source,
-                methodNote: detail.prioritisation?.method_note,
-              }
-            : detail.prioritisation?.plan
-              ? { kind: "plan", runId: mine.id, plan: detail.prioritisation.plan }
-              : null
-        if (!rebuilt) return
-        if (rearmTurn) {
-          // BOTH statuses land here, and the marker is cleared on every exit —
-          // it used to be cleared in one branch only, orphaning a turn that
-          // rendered nothing, forever, in every future session.
-          setTabsGoalGate(tabId, rearmTurn.id, {
-            goalGateRearm: undefined,
-            goalGateResolved: undefined,
-            goalGate: rebuilt,
-          })
-          return
-        }
+        // APPENDS a fresh gate turn. An earlier version tried to hang the
+        // rebuilt gate back on the turn that had been carrying one, to keep the
+        // card next to the reader's own words. That cosmetic nicety needed a
+        // marker on the turn, and the marker produced five separate Criticals
+        // in one review round: unkeyed it captured another run's gate, keyed it
+        // was empty at the moment it mattered, and every exit that failed to
+        // clear it orphaned a permanently blank turn into sessionStorage.
+        //
+        // Appending is what the code already did before any of that, it has no
+        // state of its own to get wrong, and nobody has ever complained that a
+        // restored card came back a message lower.
         if (detail.status === "awaiting_confirmation") {
           emitCommandTurn({
             id: `goal-restored-${mine.id}`,
@@ -4993,13 +4947,20 @@ export function ChatScreen() {
                   ...tn,
                   goalGate: undefined,
                   // EITHER the record OR the note, never both with the same
-                  // text. A settled record already on the turn is preserved and
-                  // the failure rides beside it; with nothing to preserve, the
-                  // failure IS the record. Writing both printed the sentence
-                  // twice, on three of the four paths that end a run.
+                  // text — writing both printed the sentence twice on three of
+                  // the four paths that end a run.
+                  //
+                  // And the note is CLEARED when the failure becomes the
+                  // record, because `failGoalTurn` may have left a "Checking…"
+                  // there moments earlier: without this, a run that turned out
+                  // to be dead rendered its verdict directly above the promise
+                  // to keep checking that the verdict just answered.
                   ...(tn.goalGateResolved
                     ? { goalGateError: reason }
-                    : { goalGateResolved: { kind: "failed" as const, reason } }),
+                    : {
+                        goalGateError: undefined,
+                        goalGateResolved: { kind: "failed" as const, reason },
+                      }),
                 }
               : tn)),
           }
@@ -5204,12 +5165,6 @@ export function ChatScreen() {
         ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
       })
       goalRunRef.current = run.id
-      // The pending gate learns its run id, so a thaw can say WHICH run the
-      // turn was carrying and the restore can match it rather than grabbing
-      // the first marked turn it finds.
-      patchTurn(tabId, turnId, {
-        goalGate: { kind: "pending", goalText, runId: run.id },
-      })
       // A run is born `resolving_goal` and reaches the gate a moment later.
       const detail = await awaitGoalRun(run.id, ["awaiting_confirmation"])
       if (!detail || detail.status !== "awaiting_confirmation") {

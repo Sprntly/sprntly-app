@@ -684,6 +684,9 @@ describe("the guards around the restore", () => {
     })
     await waitFor(() =>
       expect(document.body.textContent).toContain("stopped before it could read"))
+    // ...and the promise to keep checking, which that verdict just answered,
+    // does not survive next to it.
+    expect(document.body.textContent).not.toContain("Checking…")
   })
 
   it("does not mark an innocent tab as already-opened", async () => {

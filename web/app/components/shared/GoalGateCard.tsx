@@ -39,7 +39,7 @@ export type GoalGate =
    *  first question a moment later; without a gate on the turn for that window
    *  the thread ran the ordinary no-reply ladder and printed "No response was
    *  generated for this message." over a run that was working perfectly. */
-  | { kind: "pending"; goalText: string; runId?: number }
+  | { kind: "pending"; goalText: string }
   | {
       kind: "definition"
       runId: number
