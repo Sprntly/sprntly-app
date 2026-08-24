@@ -248,76 +248,90 @@ describe("briefToBriefV2State — card body (bodyFor)", () => {
     return out.hero?.body ?? ""
   }
 
-  it("joins a non-terminated subtitle to the recommendation with an em-dash", () => {
-    const body = bodyOf({
-      subtitle: "$15k deal stalled, root cause deductible step",
-      recommendation: "Ship the two-tap deductible fix this sprint",
-    })
-    expect(body).toBe(
-      "$15k deal stalled, root cause deductible step — " +
-        "Ship the two-tap deductible fix this sprint",
-    )
-    // no bare-space run-on between the teaser and the imperative
-    expect(body).not.toContain("step Ship")
+  const SKILL_BODY =
+    "A checkout failure has been live three weeks. It is costing about $2.2M a " +
+    "year across 2.3M monthly users. Drawn from 340 support tickets, three " +
+    "interviews, and a public thread."
+
+  it("renders the skill's own card body verbatim", () => {
+    expect(bodyOf({ _card: { body: SKILL_BODY } })).toBe(SKILL_BODY)
   })
 
-  it("uses a plain space when the subtitle already ends a sentence", () => {
+  it("NEVER appends the recommendation to the body", () => {
+    // The brief reports the finding; it does not prescribe the fix. The
+    // recommendation stays in the payload (it seeds the PRD goal) but must not
+    // reach the card the PM reads.
     const body = bodyOf({
+      _card: { body: SKILL_BODY },
+      subtitle: "$15k deal stalled at the deductible step.",
+      recommendation: "Ship the two-tap deductible fix this sprint.",
+    })
+    expect(body).toBe(SKILL_BODY)
+    expect(body).not.toContain("Ship the two-tap")
+    expect(body).not.toContain("$15k deal stalled")
+  })
+
+  it("prefers the skill body over the subtitle when both exist", () => {
+    const body = bodyOf({ _card: { body: SKILL_BODY }, subtitle: "A shorter teaser." })
+    expect(body).toBe(SKILL_BODY)
+  })
+
+  it("falls back to the subtitle ALONE on a legacy brief with no _card", () => {
+    const body = bodyOf({
+      _card: undefined,
       subtitle: "$15k deal stalled at the deductible step.",
       recommendation: "Ship the two-tap fix.",
     })
-    expect(body).toBe(
-      "$15k deal stalled at the deductible step. Ship the two-tap fix.",
-    )
-    expect(body).not.toContain(" — ")
+    expect(body).toBe("$15k deal stalled at the deductible step.")
+    expect(body).not.toContain("Ship the two-tap fix")
   })
 
-  it("treats a colon-terminated subtitle as already-punctuated (plain space)", () => {
+  it("falls back to the subtitle when _card exists but carries no body", () => {
     const body = bodyOf({
-      subtitle: "Three signals converge on checkout:",
-      recommendation: "Fix the deductible step.",
+      _card: { type: "reliability", body: "   " },
+      subtitle: "Three signals converge on checkout.",
     })
-    expect(body).toBe("Three signals converge on checkout: Fix the deductible step.")
+    expect(body).toBe("Three signals converge on checkout.")
   })
 
-  it("renders a long subtitle+recommendation IN FULL without a mid-word cut", () => {
-    const subtitle =
+  it("renders a long skill body IN FULL without a mid-word cut", () => {
+    const long =
       "Checkout abandonment hit 57% at the deductible step, up from 41% last " +
       "quarter, putting an estimated $2.3M of annualized recurring revenue at " +
-      "risk across 2.3M monthly active users on the flagship account"
-    const recommendation =
-      "Ship the redesigned two-tap deductible flow this sprint and instrument " +
-      "step-level drop-off so the team can confirm recovery within two weeks"
-    const body = bodyOf({ subtitle, recommendation })
-    // Full text present — nothing truncated, no ellipsis in the common case.
-    expect(body).toContain(subtitle)
-    expect(body).toContain(recommendation)
+      "risk across 2.3M monthly active users on the flagship account. Drawn " +
+      "from 340 support tickets, three interviews, and one public thread"
+    const body = bodyOf({ _card: { body: long } })
+    expect(body).toBe(long)
     expect(body.endsWith("…")).toBe(false)
-    // Does not end on a chopped partial word.
-    expect(body.endsWith("within two weeks")).toBe(true)
+    expect(body.endsWith("one public thread")).toBe(true)
   })
 
   it("only truncates pathologically long text, and never mid-word", () => {
     // Build a >900-char body out of whole sentences.
     const sentence = "The deductible step is the single biggest drop-off point. "
-    const subtitle = sentence.repeat(20).trim() // ~1140 chars, all whole words
-    const body = bodyOf({ subtitle, recommendation: "" })
+    const long = sentence.repeat(20).trim() // ~1140 chars, all whole words
+    const body = bodyOf({ _card: { body: long } })
     expect(body.length).toBeLessThanOrEqual(902) // cap + trailing " …"
     expect(body.endsWith("…")).toBe(true)
     // Truncation lands on a sentence boundary, not mid-word: drop the trailing
     // " …" and confirm the kept text closes a whole sentence/word.
     const kept = body.replace(/\s*…$/, "")
     expect(kept.endsWith("point.")).toBe(true)
-    // And every retained sentence is a complete copy of the source sentence.
-    expect(subtitle.startsWith(kept.replace(/\.$/, "."))).toBe(true)
+    expect(long.startsWith(kept)).toBe(true)
   })
 
-  it("falls back to headline then title when subtitle and recommendation are empty", () => {
-    expect(bodyOf({ subtitle: "", recommendation: "", headline: "Hero line" })).toBe(
-      "Hero line",
-    )
+  it("falls back to headline then title when the body and subtitle are empty", () => {
     expect(
-      bodyOf({ subtitle: "", recommendation: "", headline: "", title: "Just a title" }),
+      bodyOf({ _card: { body: "" }, subtitle: "", recommendation: "", headline: "Hero line" }),
+    ).toBe("Hero line")
+    expect(
+      bodyOf({
+        _card: undefined,
+        subtitle: "",
+        recommendation: "",
+        headline: "",
+        title: "Just a title",
+      }),
     ).toBe("Just a title")
   })
 })
