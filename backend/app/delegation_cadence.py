@@ -24,7 +24,12 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 # ── LOCKED cadence caps (spec §2) ───────────────────────────────────────
-MIN_INTERVAL = timedelta(hours=24)  # floor: never re-ping a task sooner than this
+MIN_INTERVAL = timedelta(hours=24)  # floor for MODEL-proposed re-pings — unchanged
+# A human-stated timeline is a first-class consent signal — honor it for the
+# FIRST check-in, floored only by this small interval (NOT the 24h MIN_INTERVAL).
+# Tunes spec §2 for the stated-timeline case only (documented deviation,
+# tunable). Model-proposed re-pings keep MIN_INTERVAL (auto-revert).
+STATED_TIMELINE_MIN_INTERVAL = timedelta(minutes=5)
 PER_PERSON_DAILY_CAP = 1  # at most 1 outbound send/day per person, across all their tasks
 PER_PERSON_WEEKLY_CAP = 3  # at most 3 outbound sends/week per person
 QUIET_START_HOUR = 20  # no sends 8pm-8am recipient-local, or on a weekend
@@ -37,11 +42,13 @@ QUIET_END_HOUR = 8
 _OPEN_STATUSES: frozenset[str] = frozenset({"assigned", "in_progress"})
 
 
-def _floor(*, last_checked_in: datetime | None, now: datetime) -> datetime:
-    """The earliest a task may next be checked in on: `MIN_INTERVAL` after
-    whichever is later of `now` and `last_checked_in`."""
+def _floor(
+    *, last_checked_in: datetime | None, now: datetime, interval: timedelta = MIN_INTERVAL
+) -> datetime:
+    """The earliest a task may next be checked in on: `interval` (default
+    `MIN_INTERVAL`) after whichever is later of `now` and `last_checked_in`."""
     base = max(now, last_checked_in) if last_checked_in is not None else now
-    return base + MIN_INTERVAL
+    return base + interval
 
 
 def clamp_next_check_in(
@@ -64,11 +71,14 @@ def respect_stated_timeline(
     now: datetime,
     last_checked_in: datetime | None,
 ) -> datetime:
-    """If the human stated a timeline, `next_check_in` = that instant
-    (clamped to the floor) — never before it. Falls back to `proposed`
-    (clamped) when `stated` is None."""
+    """If the human stated a timeline, `next_check_in` = that instant,
+    floored only by `STATED_TIMELINE_MIN_INTERVAL` (not the 24h
+    `MIN_INTERVAL`) — never before it. Falls back to `proposed` (clamped to
+    `MIN_INTERVAL`) when `stated` is None."""
     if stated is not None:
-        floor = _floor(last_checked_in=last_checked_in, now=now)
+        floor = _floor(
+            last_checked_in=last_checked_in, now=now, interval=STATED_TIMELINE_MIN_INTERVAL
+        )
         return stated if stated > floor else floor
     return clamp_next_check_in(proposed, last_checked_in=last_checked_in, now=now)
 
