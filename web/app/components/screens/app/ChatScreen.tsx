@@ -3787,7 +3787,8 @@ export function ChatScreen() {
   // hundred lines ABOVE that function's declaration. Kept in a ref rather than
   // reordering the hook setup, and republished on every render (below) so the
   // dispatcher always calls the current closure rather than the first one.
-  const startGoalAnalysisRef = useRef<((goalText: string) => void) | null>(null)
+  const startGoalAnalysisRef =
+    useRef<((goalText: string) => void | Promise<void>) | null>(null)
 
 
   // ── The per-conversation store seam ───────────────────────────────────────
@@ -3807,7 +3808,7 @@ export function ChatScreen() {
   } = useConversation({
       // A REF, because `startGoalAnalysis` is declared several hundred lines
       // below this call and a direct reference is a use-before-declaration.
-      // The wrapper is stable, so the hook never re-runs on its account.
+      //
       // Reports whether it ACTED. Every other optional executor slot keeps
       // "the slot exists" and "the slot will act" together; optional-chaining
       // to a silent no-op separates them, and `handled: true` on a no-op would

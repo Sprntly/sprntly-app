@@ -465,7 +465,10 @@ describe("a goal typed into chat reaches Goal Analysis", () => {
 
   it("hands the goal to the panel", () => {
     const seen: string[] = []
-    const ex = { ...executors(), onAnalyseGoal: (g: string) => seen.push(g) }
+    const ex = {
+      ...executors(),
+      onAnalyseGoal: (g: string) => { seen.push(g); return true },
+    }
     const out = dispatchChatIntent(goal(), ctx(), ex)
     expect(out).toEqual({ handled: true })
     expect(seen).toEqual(["increase revenue by 5%"])
