@@ -93,3 +93,34 @@ describe("GoalGateCard — the settled plan", () => {
       .toMatch(/every connected source/i)
   })
 })
+
+
+describe("a failure that lands after the gate was answered", () => {
+  // `endGoalTurn` writes `goalGateError` alongside an existing settled record —
+  // the run dying between gate 1 and gate 2. The settled card is the only thing
+  // that renders once a gate is answered, so for a while that reason had
+  // nowhere to appear at all and this pair had no test anywhere.
+  it("shows the reason beside what was agreed, not instead of it", () => {
+    render(
+      <GoalGateCard
+        gate={definitionGate}
+        resolved={{ kind: "definition", definition: "NRR, trailing 90 days" }}
+        error="That analysis stopped before it could read anything."
+      />,
+    )
+    expect(screen.getByTestId("goal-gate-definition-done").textContent)
+      .toContain("NRR, trailing 90 days")
+    expect(document.body.textContent).toContain("stopped before it could read")
+  })
+
+  it("renders a wholly failed gate with its reason", () => {
+    render(
+      <GoalGateCard
+        gate={definitionGate}
+        resolved={{ kind: "failed", reason: "Goal Analysis is not enabled." }}
+      />,
+    )
+    expect(screen.getByTestId("goal-gate-failed").textContent)
+      .toContain("not enabled")
+  })
+})

@@ -182,6 +182,10 @@ export type ThreadTurn = {
    *  and discards the message, and it replaces the card — turning a run still
    *  sitting at its gate server-side into a dead end with no retry. */
   goalGateError?: string
+  /** This turn HAD a live gate when the page went away. Set by `_thawThread`;
+   *  cleared when the restore hangs the rebuilt gate back on it. Keeps the turn
+   *  out of the no-reply ladder in between. */
+  goalGateRearm?: boolean
   clarify?: ClarifyQuestion[]
   /** How the batch above was settled — answers given, or the assumptions each
    *  unanswered question fell back to. Its presence is what flips the card from
@@ -702,8 +706,16 @@ const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
  *  settled definition or plan is a record, not an indicator.
  */
 function _thawThread(thread: ThreadTurn[] | undefined): ThreadTurn[] {
-  return (thread ?? []).map((tn) =>
-    (tn.goalGate?.kind === "pending" ? { ...tn, goalGate: undefined } : tn))
+  return (thread ?? []).map((tn) => (tn.goalGate?.kind === "pending"
+    // MARKED, not merely emptied. Stripping the gate left a turn with no gate,
+    // no reply and no settled record — which is precisely what the thread's
+    // no-reply ladder renders "No response was generated for this message."
+    // for, the one string the pending gate exists to prevent. The marker keeps
+    // the turn out of that ladder and tells the restore which turn to hang the
+    // rebuilt gate on, so the reader's own words keep their card rather than
+    // getting a second, orphaned one below them.
+    ? { ...tn, goalGate: undefined, goalGateRearm: true }
+    : tn))
 }
 
 export function ChatScreen() {
@@ -929,6 +941,25 @@ export function ChatScreen() {
   // the chat landing/thread + composer.
   const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
+  /** Whether the active tab's thread is still being fetched. A dependency of
+   *  the Goal Analysis restore, which must wait for hydration and then RUN —
+   *  not bail once and never look again. */
+  const activeTabHydrating = !!activeTab?.hydrating
+
+  /** Patch one turn in one tab. Declared up here because the Goal Analysis
+   *  restore effect runs above the gate handlers that share it. */
+  const setTabsGoalGate = useCallback(
+    (tabId: string, turnId: string, patch: Partial<ThreadTurn>) => {
+      setTabs((prev) => prev.map((t) => (t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) =>
+              (tn.id === turnId ? { ...tn, ...patch } : tn)),
+          }
+        : t)))
+    },
+    [],
+  )
   const thread = activeTab?.thread ?? []
   // The last turn a REPLY could still land on. A pending artifact-summary
   // placeholder is transparent here: it is appended the moment the artifact
@@ -4709,7 +4740,26 @@ export function ChatScreen() {
         if (alreadyOnScreen) return
         const detail = await goalAnalysisApi.get(mine.id)
         if (!live) return
-        if (detail.status === "awaiting_confirmation") {
+        // Hang it back on the turn that was carrying it, when there is one.
+        const rearmTurn = tab.thread.find((tn) => tn.goalGateRearm)
+        if (detail.status === "awaiting_confirmation" && rearmTurn) {
+          // `setTabs` directly: `patchTurn` is declared below this effect, and
+          // hoisting it here for one call would move a helper away from the two
+          // handlers it belongs with.
+          setTabsGoalGate(tabId, rearmTurn.id, {
+            goalGateRearm: undefined,
+            goalGate: {
+              kind: "definition",
+              runId: mine.id,
+              goalText: detail.goal_text ?? "",
+              ask: detail.prioritisation?.ask
+                || "Before this runs, confirm what this goal means.",
+              proposedDefinition: detail.prioritisation?.proposed_definition,
+              proposedSource: detail.prioritisation?.proposed_source,
+              methodNote: detail.prioritisation?.method_note,
+            },
+          })
+        } else if (detail.status === "awaiting_confirmation") {
           emitCommandTurn({
             id: `goal-restored-${mine.id}`,
             query: "",
@@ -4743,7 +4793,13 @@ export function ChatScreen() {
     // id, so without it this effect does not re-run on the switch — the reset
     // clears the panel, the restore never fires again, and switching back does
     // not recover it.
-  }, [goalAnalysisOn, activeConvId, activeTabId, setContent, emitCommandTurn])
+    // `activeTabHydrating` IS A DEPENDENCY, and it is the whole of finding 2:
+    // bailing on a hydrating tab without it meant bailing forever, because
+    // nothing else in this list changes when the thread fetch lands. Opening a
+    // conversation with a live gate from the history rail therefore never
+    // restored it. Listed here, the effect re-runs the moment hydration ends.
+  }, [goalAnalysisOn, activeConvId, activeTabId, activeTabHydrating, setContent,
+      emitCommandTurn, setTabsGoalGate])
 
   // ...AND PUT IT ON SCREEN.
   //
@@ -4820,18 +4876,7 @@ export function ChatScreen() {
   // id, so the same conversation open in two tabs holds the same id twice —
   // patching every tab's thread would answer both. It also rebuilt every tab
   // object on every patch for no reason.
-  const patchTurn = useCallback(
-    (tabId: string, turnId: string, patch: Partial<ThreadTurn>) => {
-      setTabs((prev) => prev.map((t) => (t.id === tabId
-        ? {
-            ...t,
-            thread: t.thread.map((tn) =>
-              (tn.id === turnId ? { ...tn, ...patch } : tn)),
-          }
-        : t)))
-    },
-    [setTabs],
-  )
+  const patchTurn = setTabsGoalGate
 
   /** Poll one run until it reaches one of `until`, or dies. Returns null when
    *  it failed, was cancelled, the component unmounted, or the ceiling was hit.
@@ -4963,7 +5008,14 @@ export function ChatScreen() {
       try {
         await goalAnalysisApi.confirm(runId, definition)
         // The record of what was agreed stays in the thread.
+        // CLEARS THE GATE, not just settles it. `GoalGateCard` renders the
+        // settled card before it looks at `gate`, so a leftover `goalGate` is
+        // invisible — but the restore's guard reads exactly that field, so an
+        // answered definition went on claiming "this run is already on screen"
+        // and blocked the rebuild of the PLAN gate. The dead end simply moved
+        // from gate 1 to gate 2, and only needed an unmount to reach.
         patchTurn(tabId, turnId, {
+          goalGate: undefined,
           goalGateResolved: { kind: "definition", definition },
         })
         const detail = await awaitGoalRun(runId, ["awaiting_approval"])
@@ -4995,6 +5047,7 @@ export function ChatScreen() {
         const after = await awaitGoalRun(runId, ["awaiting_approval"])
         if (after?.status === "awaiting_approval" && after.prioritisation?.plan) {
           patchTurn(tabId, turnId, {
+            goalGate: undefined,
             goalGateError: undefined,
             goalGateResolved: { kind: "definition", definition },
           })
@@ -5026,6 +5079,7 @@ export function ChatScreen() {
           hypotheses: decision.hypotheses,
         })
         patchTurn(tabId, turnId, {
+          goalGate: undefined,
           goalGateResolved: {
             kind: "plan",
             excludedSources: decision.excluded_sources,
@@ -5051,7 +5105,15 @@ export function ChatScreen() {
         failGoalTurn(tabId, turnId,
           "We could not tell whether that started. Checking…")
         const after = await awaitGoalRun(runId, ["running", "ready"])
-        if (!after) return
+        // `awaitGoalRun` also returns on `failed`/`cancelled` — that is a
+        // verdict, not a destination. Treating any non-null answer as "it
+        // started" reported a dead run as a running one and opened the panel
+        // onto it.
+        if (!after || (after.status !== "running" && after.status !== "ready")) {
+          endGoalTurn(tabId, turnId,
+            "That analysis stopped before it could read anything.")
+          return
+        }
         patchTurn(tabId, turnId, {
           goalGateError: undefined,
           goalGateResolved: {
@@ -5069,8 +5131,8 @@ export function ChatScreen() {
         setGoalGateBusyTurnId(null)
       }
     },
-    [awaitGoalRun, failGoalTurn, goalRefusalMessage, patchTurn, setContent,
-     openContentPanel],
+    [awaitGoalRun, endGoalTurn, failGoalTurn, goalRefusalMessage, patchTurn,
+     setContent, openContentPanel],
   )
 
   // The entry point: start the run, then put its FIRST question in the thread.

@@ -566,6 +566,54 @@ describe("the guards around the restore", () => {
     expect(screen.queryByTestId("goal-gate-pending")).toBeNull()
   })
 
+  it("re-arms the PLAN gate after the definition was already answered", async () => {
+    // Drives the REAL confirm, because the bug is in what confirm LEAVES
+    // BEHIND: it settled the turn but kept `goalGate` set — invisible, since
+    // the settled card renders first — and the restore's run-keyed guard reads
+    // exactly that field. An answered definition therefore went on claiming
+    // "this run is already on screen" and blocked the plan gate's rebuild.
+    // Seeding the post-confirm state by hand would encode the FIXED shape and
+    // test nothing.
+    listRuns.mockResolvedValue({ runs: [] })
+    seedPersistedTab({ id: "t1", title: "chat", dbConvId: 7, thread: [] }, "t1")
+    mountApp()
+    await waitFor(() => expect(listRuns).toHaveBeenCalled())
+
+    startRun.mockResolvedValue({ id: 99, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 99, status: "awaiting_confirmation", prioritisation: {} })
+    await startAGoal("raise NRR")
+    await waitFor(() => expect(screen.getByTestId("goal-gate-definition")).toBeTruthy())
+
+    // Confirm, but the plan never arrives in this session — the run moves on
+    // server-side while nothing is watching. `getRun` stays at
+    // `awaiting_confirmation` so `awaitGoalRun` never resolves a plan here.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("What this goal means"),
+        { target: { value: "NRR, 90 days" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("goal-gate-definition-done")).toBeTruthy())
+
+    // The persisted thread is what the next session sees. The stale gate, if
+    // confirm left one, blocks the restore below.
+    const persisted = JSON.parse(
+      sessionStorage.getItem("sprntly_chat_tabs_anon_acme") ?? "[]")
+    const turn = persisted[0].thread.find(
+      (t: Record<string, unknown>) => t.goalGateResolved)
+    expect(turn.goalGate ?? null).toBeNull()
+  })
+
+  // NOT TESTED HERE, deliberately, rather than tested falsely: the restore must
+  // re-run once a hydrating tab's thread fetch lands (`activeTabHydrating` is a
+  // dependency for exactly that). `hydrating` is set only by the history-rail
+  // resume flow and is stripped from the persisted tab, so nothing this fixture
+  // can seed reaches it — a test written against it passed identically with the
+  // dependency removed, which is worse than no test. Reaching it needs the
+  // resume flow wired into this harness.
+
   it("does not mark an innocent tab as already-opened", async () => {
     // The other half of the same bug: a claim misfiled against tab A marks it
     // as already-auto-opened, so A's OWN restored analysis never opens when

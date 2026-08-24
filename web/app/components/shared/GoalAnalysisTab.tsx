@@ -294,9 +294,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
         <p className="ga-ask">
+          {/* "the chat it was started in", not "the chat": two tabs can share a
+              conversation and only one holds the gate, so a reader looking at
+              the other one was told to answer something that is not there. */}
           {run.status === "awaiting_confirmation"
-            ? "Confirm what this goal means in the chat to start the analysis."
-            : "Approve the plan in the chat to start reading."}
+            ? "Confirm what this goal means in the chat it was started in, to "
+              + "begin the analysis."
+            : "Approve the plan in the chat it was started in, to start reading."}
         </p>
       </div>
     )

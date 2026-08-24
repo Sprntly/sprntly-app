@@ -297,6 +297,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       goalGate: turn.goalGate,
       goalGateResolved: turn.goalGateResolved,
       goalGateError: turn.goalGateError,
+      goalGateRearm: turn.goalGateRearm,
       // Busy is per-TURN, not per-thread: two gates can sit in one thread (the
       // definition above, the plan below) and a thread-wide flag would grey out
       // the settled one as well as the live one.

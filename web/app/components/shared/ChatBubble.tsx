@@ -194,6 +194,8 @@ export interface ChatBubbleProps {
   goalGate?: GoalGate | null
   goalGateResolved?: GoalGateResolved
   goalGateBusy?: boolean
+  /** This turn is waiting for its gate to be rebuilt after a reload. */
+  goalGateRearm?: boolean
   /** A refusal the reader can act on, shown beside the live controls. */
   goalGateError?: string
   onConfirmGoalDefinition?: (definition: string) => void
@@ -449,6 +451,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     goalGate,
     goalGateResolved,
     goalGateBusy,
+    goalGateRearm,
     goalGateError,
     onConfirmGoalDefinition,
     onApproveGoalPlan,
@@ -707,7 +710,8 @@ export function ChatBubble(props: ChatBubbleProps) {
                       no-reply ladder ran beside it and printed "No response was
                       generated for this message." directly above a live
                       question. */}
-                  {!reply && !error && !stopped && !goalGate && !goalGateResolved ? (
+                  {!reply && !error && !stopped && !goalGate && !goalGateResolved
+                    && !goalGateRearm ? (
                     summaryPending ? (
                       <div data-testid="summary-pending">
                         <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />

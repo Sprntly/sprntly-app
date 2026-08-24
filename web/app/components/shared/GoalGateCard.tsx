@@ -86,7 +86,7 @@ export function GoalGateCard({
   onConfirmDefinition?: (definition: string) => void
   onApprovePlan?: (decision: PlanDecision) => void
 }) {
-  if (resolved) return <GoalGateSettled resolved={resolved} />
+  if (resolved) return <GoalGateSettled resolved={resolved} error={error} />
   if (!gate) return null
   if (gate.kind === "pending") {
     return (
@@ -179,12 +179,22 @@ function GoalDefinitionGate({
   )
 }
 
-function GoalGateSettled({ resolved }: { resolved: GoalGateResolved }) {
+function GoalGateSettled({
+  resolved, error,
+}: { resolved: GoalGateResolved; error?: string }) {
+  // The settled card is the ONLY thing that renders once a gate is answered, so
+  // a failure arriving afterwards — the run dying between gates — had nowhere
+  // to appear at all. `endGoalTurn` writes exactly that pair, and it was the
+  // only case it was ever written for.
+  const note = error
+    ? <p className="ggc-error" role="status">{error}</p>
+    : null
   if (resolved.kind === "failed") {
     return (
       <div className="ggc ggc-settled" data-testid="goal-gate-failed">
         <p className="ggc-settled-label">Analysis stopped</p>
         <p className="ggc-settled-body">{resolved.reason}</p>
+        {note}
       </div>
     )
   }
@@ -193,6 +203,7 @@ function GoalGateSettled({ resolved }: { resolved: GoalGateResolved }) {
       <div className="ggc ggc-settled" data-testid="goal-gate-definition-done">
         <p className="ggc-settled-label">Analysing against</p>
         <p className="ggc-settled-body">{resolved.definition}</p>
+        {note}
       </div>
     )
   }
@@ -215,6 +226,7 @@ function GoalGateSettled({ resolved }: { resolved: GoalGateResolved }) {
           {hypotheses.join(" · ")}
         </p>
       ) : null}
+      {note}
     </div>
   )
 }
