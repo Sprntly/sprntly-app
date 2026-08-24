@@ -2005,3 +2005,51 @@ def test_the_goal_dedup_is_not_bounded_by_a_page_of_recent_runs(ctx):
         "the dedup is paging recent runs again; it must filter by goal in the "
         "query or it degrades silently past the page limit")
     assert "documented_run_for_goal" in src
+
+
+def test_an_edited_rival_document_is_never_deleted_by_the_eviction(ctx):
+    """A PERSON'S EDITS OUTRANK THE DUPLICATE.
+
+    The eviction branch deletes ANOTHER run's document. That document is not
+    invisible — it sits in the Artifacts library, where somebody can open it and
+    write to it. Deleting an edited one destroys unrecoverable work to fix a
+    duplicate, which is a tidiness problem a human can resolve in a click.
+
+    `sweep_stranded_documents` already states the rule this asserts: delete only
+    what is PROVABLY UNTOUCHED, `version == 1`. The eviction path did not honour
+    it, so an edited report was hard-deleted with no version check at all.
+    """
+    from app.db.custom_artifacts import get_artifact, update_artifact
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    lower = _start(ctx, goal="reduce churn").json()["id"]
+    higher = _start(ctx, goal="reduce churn").json()["id"]
+
+    # The HIGHER run files first, and then a human edits what it filed. By run
+    # id the lower run owns the goal, so without the guard it evicts this.
+    _confirm(ctx, higher)
+    ctx.client.post(f"/v1/crucible/{higher}/approve", json={})
+    edited = ctx.client.get(f"/v1/crucible/{higher}").json()["artifact_id"]
+    update_artifact(ctx.company_id, edited,
+                    body_html="<p>a person's own words</p>")
+    assert int(get_artifact(ctx.company_id, edited)["version"]) > 1, (
+        "the fixture never actually edited the document, so this test would "
+        "pass against the unguarded eviction too"
+    )
+
+    _confirm(ctx, lower)
+    ctx.client.post(f"/v1/crucible/{lower}/approve", json={})
+
+    surviving = get_artifact(ctx.company_id, edited)
+    assert surviving is not None, (
+        "the eviction deleted a document a person had edited"
+    )
+    assert "a person's own words" in (surviving.get("body_html") or ""), (
+        "the edit itself was lost"
+    )
+    # The owner stands down instead, so exactly one report remains and it is
+    # the edited one — convergence is preserved, only the disposal changes.
+    assert ctx.client.get(f"/v1/crucible/{higher}").json()["artifact_id"] == edited
+    assert not ctx.client.get(f"/v1/crucible/{lower}").json().get("artifact_id")

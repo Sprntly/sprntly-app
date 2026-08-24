@@ -405,7 +405,9 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
     findings must not be marked failed because a convenience write did. On any
     error the report is still on the run and the button still works.
     """
-    from app.db.custom_artifacts import create_artifact, delete_artifact
+    from app.db.custom_artifacts import (
+        create_artifact, delete_artifact, get_artifact,
+    )
     from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
 
     try:
@@ -512,14 +514,44 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
                 # We are the rightful owner and a later run already filed one.
                 # Unlink it before deleting, so the sweep never sees a run
                 # pointing at an artifact that no longer exists.
-                logger.info(
-                    "crucible: run %s evicts run %s's duplicate document for "
-                    "the same goal", run_id, rival_id)
+                #
+                # DELETE ONLY WHAT IS PROVABLY UNTOUCHED — `version == 1`, the
+                # same rule `sweep_stranded_documents` already states and for
+                # the same reason. A report document is not invisible: it lands
+                # in the Artifacts library, where somebody can open it and edit
+                # it. This branch deletes ANOTHER run's document, so unlike the
+                # stand-down branch above — which removes the row we ourselves
+                # created moments earlier and nobody has seen — the thing being
+                # destroyed here may carry a person's edits.
+                #
+                # Losing those is far worse than the duplicate this is trying to
+                # prevent: a duplicate is a tidiness problem a human can resolve,
+                # an overwritten edit is unrecoverable work. So an edited rival
+                # WINS and we stand down instead, leaving both rows for a human
+                # to reconcile. Convergence is unaffected — the outcome is still
+                # decided by run id, never by timing; only the disposal of an
+                # edited document changes.
                 rival_artifact = rival.get("artifact_id")
-                runs_db.update(rival_id, company_id, artifact_id=None,
-                               report_body_hash=None)
-                if rival_artifact:
-                    delete_artifact(company_id, rival_artifact)
+                rival_doc = (
+                    get_artifact(company_id, rival_artifact)
+                    if rival_artifact else None
+                )
+                if rival_doc and int(rival_doc.get("version") or 1) > 1:
+                    logger.info(
+                        "crucible: run %s keeps run %s's EDITED document for "
+                        "the same goal and stands down instead", run_id,
+                        rival_id)
+                    runs_db.update(run_id, company_id, artifact_id=None,
+                                   report_body_hash=None)
+                    delete_artifact(company_id, artifact["id"])
+                else:
+                    logger.info(
+                        "crucible: run %s evicts run %s's duplicate document "
+                        "for the same goal", run_id, rival_id)
+                    runs_db.update(rival_id, company_id, artifact_id=None,
+                                   report_body_hash=None)
+                    if rival_artifact:
+                        delete_artifact(company_id, rival_artifact)
     except Exception:  # noqa: BLE001 — see the docstring; convenience only.
         logger.warning("crucible: could not autosave the report for run %s",
                        run_id, exc_info=True)
