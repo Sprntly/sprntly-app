@@ -425,12 +425,21 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
         # its own report in the panel; what it does not do is file a second copy
         # for the team. The earlier run keeps the document, which is the
         # conservative direction: it is the one someone may already have opened.
-        goal_text = row.get("goal_text") or ""
+        # `.strip()` — dropped in a previous edit, which made "reduce churn"
+        # and "reduce churn " two different goals for dedup purposes while the
+        # equality query below is exact.
+        goal_text = (row.get("goal_text") or "").strip()
+        # SAME OWNERSHIP RULE AS THE POST-LINK CHECK BELOW, and it has to be:
+        # standing down for ANY existing rival made this a short-circuit, so a
+        # lower-id run whose rival finished first returned here and never
+        # reached the eviction that makes the outcome converge. The lowest id
+        # owns the document, whoever happened to finish first.
         if goal_text:
-            if runs_db.documented_run_for_goal(
-                    company_id, goal_text, excluding_run_id=run_id):
-                logger.info("crucible: run %s leaves the document to an earlier "
-                            "run of the same goal", run_id)
+            holder = runs_db.documented_run_for_goal(
+                company_id, goal_text, excluding_run_id=run_id)
+            if holder and (holder.get("id") or 0) < run_id:
+                logger.info("crucible: run %s leaves the document to run %s for "
+                            "the same goal", run_id, holder.get("id"))
                 return
         html = _body_or_413(_render_document_html(row, company_id), run_id)
         artifact = create_artifact(
@@ -455,31 +464,62 @@ def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
             delete_artifact(company_id, artifact["id"])
             return
 
-        # THE CHECK-THEN-WRITE RACE, CLOSED AFTER THE FACT.
+        # THE RACE, RESOLVED BY CONVERGENCE RATHER THAN BY TIMING.
         #
         # `link_document`'s `artifact_id IS NULL` claim guards ONE ROW AGAINST
-        # ITSELF — it makes re-invocation for the same run idempotent. It does
-        # nothing about two DIFFERENT runs of the same goal: both scans run
-        # before either link lands, both see no document, both file one. Two
-        # near-simultaneous runs is the ordinary way to produce that (a
-        # double-click, or a rerun started before the first finished — the
-        # exploratory pattern this dedup exists for).
+        # ITSELF — it makes re-invocation for the same run idempotent and says
+        # nothing about two DIFFERENT runs of the same goal. Two near-
+        # simultaneous finishes (a double-click, or a rerun started before the
+        # first ended — the exploratory pattern this dedup exists for) can both
+        # pass the pre-flight scan and both file.
         #
-        # There is no unique constraint on `(company_id, goal_text)` to lean on,
-        # and adding one is a migration. So the window is closed the same way
-        # the manual-save collision above is: look again AFTER linking, and if
-        # someone else got there first, stand down and remove our copy. The
-        # tie-break is the lower run id, so both racers reach the same verdict
-        # rather than each deferring to the other and deleting both.
+        # A "stand down if someone beat me" check does NOT close it, and the
+        # first attempt at this got that wrong. It only works if the other
+        # racer has already linked by the time you look, which nothing
+        # enforces: if run 7 links and checks before run 5 has created its
+        # artifact, 7 sees no rival and keeps; 5 links later, sees 7, and
+        # `7 < 5` is false so 5 keeps as well. BOTH SURVIVE — the exact
+        # duplicate this exists to prevent, reached by a different interleaving.
+        #
+        # So the rule is not "who got here first" (timing, unknowable) but "who
+        # SHOULD own it" (the lowest run id, a total order that every racer
+        # computes identically):
+        #
+        #   rival is LOWER  -> they own it. Stand down and remove ours.
+        #   rival is HIGHER -> we own it. Evict theirs.
+        #
+        # That converges from any interleaving, because exactly one run has the
+        # lowest id: it can never stand down, and every higher one is either
+        # removed by it or stands down on its own. Only the lower run evicts, so
+        # two racers cannot delete each other.
+        #
+        # There is no unique constraint on `(company_id, goal_text)` to lean on
+        # and adding one is a migration — this is the strongest guarantee
+        # available without one, and unlike the previous attempt it does not
+        # depend on who ran first.
         rival = runs_db.documented_run_for_goal(
             company_id, goal_text, excluding_run_id=run_id) if goal_text else None
-        if rival and (rival.get("id") or 0) < run_id:
-            logger.info(
-                "crucible: run %s lost a same-goal race to run %s; removing the "
-                "duplicate document", run_id, rival.get("id"))
-            runs_db.update(run_id, company_id, artifact_id=None,
-                           report_body_hash=None)
-            delete_artifact(company_id, artifact["id"])
+        if rival:
+            rival_id = rival.get("id") or 0
+            if rival_id < run_id:
+                logger.info(
+                    "crucible: run %s defers to run %s for the same goal; "
+                    "removing the duplicate document", run_id, rival_id)
+                runs_db.update(run_id, company_id, artifact_id=None,
+                               report_body_hash=None)
+                delete_artifact(company_id, artifact["id"])
+            else:
+                # We are the rightful owner and a later run already filed one.
+                # Unlink it before deleting, so the sweep never sees a run
+                # pointing at an artifact that no longer exists.
+                logger.info(
+                    "crucible: run %s evicts run %s's duplicate document for "
+                    "the same goal", run_id, rival_id)
+                rival_artifact = rival.get("artifact_id")
+                runs_db.update(rival_id, company_id, artifact_id=None,
+                               report_body_hash=None)
+                if rival_artifact:
+                    delete_artifact(company_id, rival_artifact)
     except Exception:  # noqa: BLE001 — see the docstring; convenience only.
         logger.warning("crucible: could not autosave the report for run %s",
                        run_id, exc_info=True)

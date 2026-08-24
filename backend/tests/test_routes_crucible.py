@@ -1898,60 +1898,96 @@ def test_nothing_in_the_run_reads_the_metric_registry():
     )
 
 
-def test_two_concurrent_runs_of_one_goal_leave_one_document(ctx, monkeypatch):
-    """THE RACE THE SEQUENTIAL TEST CANNOT SEE.
+def test_the_later_run_finishing_first_still_leaves_one_document(ctx):
+    """THE INTERLEAVING THE PREVIOUS TEST COULD NOT SEE, and its docstring
+    wrongly claimed it did.
 
-    `link_document`'s `artifact_id IS NULL` claim guards one row against
-    ITSELF; it says nothing about two different runs. Both scans can run before
-    either link lands, both see no document, and both file one — reintroducing
-    the duplicate the dedup exists to prevent. A double-click, or a rerun
-    started before the first finished, is the ordinary way to produce it.
+    A "stand down if someone beat me" check does not close this race: it only
+    works when the other racer has already linked by the time you look. If the
+    HIGHER-id run finishes first it sees no rival and keeps its document; the
+    lower-id run links later, sees the higher one, and `higher < lower` is false
+    so it keeps too — BOTH survive.
 
-    Simulated deterministically by making the FIRST run's pre-flight scan see
-    nothing (as it would in the race) and letting the after-the-fact re-check
-    do the work.
+    The old test ran A to full completion before B started, so B always found A
+    already linked and the broken branch was unreachable. This drives the real
+    order: the higher id finishes FIRST.
     """
     from app.crucible.report import ARTIFACT_KIND
     from app.db.custom_artifacts import list_artifacts_for_company
-    import app.routes.crucible as mod
 
     for i in range(5):
         _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
 
-    # Run A completes normally and files the document.
-    a = _start(ctx, goal="reduce customer churn").json()["id"]
-    _confirm(ctx, a)
-    ctx.client.post(f"/v1/crucible/{a}/approve", json={})
-    assert ctx.client.get(f"/v1/crucible/{a}").json()["artifact_id"]
+    # Two runs of one goal, created in id order, then finished in REVERSE.
+    lower = _start(ctx, goal="reduce customer churn").json()["id"]
+    higher = _start(ctx, goal="reduce customer churn").json()["id"]
+    assert higher > lower
 
-    # Run B: blind its PRE-FLIGHT scan only, which is exactly what the race
-    # does — B looked before A's link landed. The post-link re-check must still
-    # catch it.
-    real = mod.runs_db.documented_run_for_goal
-    calls = {"n": 0}
+    _confirm(ctx, higher)
+    ctx.client.post(f"/v1/crucible/{higher}/approve", json={})
+    assert ctx.client.get(f"/v1/crucible/{higher}").json()["artifact_id"], (
+        "the first to finish should file one")
 
-    def blind_first(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return None          # the race: B sees no document yet
-        return real(*args, **kwargs)
+    _confirm(ctx, lower)
+    ctx.client.post(f"/v1/crucible/{lower}/approve", json={})
 
-    monkeypatch.setattr(mod.runs_db, "documented_run_for_goal", blind_first)
-
-    b = _start(ctx, goal="reduce customer churn").json()["id"]
-    _confirm(ctx, b)
-    ctx.client.post(f"/v1/crucible/{b}/approve", json={})
-
-    assert calls["n"] >= 2, "the post-link re-check never ran"
     reports = [x for x in (list_artifacts_for_company(ctx.company_id) or [])
                if x.get("kind") == ARTIFACT_KIND]
     assert len(reports) == 1, (
-        f"the race filed {len(reports)} documents for one goal")
-    # A keeps it (lower run id wins), and B stood down cleanly.
-    assert ctx.client.get(f"/v1/crucible/{a}").json()["artifact_id"]
-    assert not ctx.client.get(f"/v1/crucible/{b}").json().get("artifact_id")
-    assert ctx.client.get(f"/v1/crucible/{b}").json()["status"] == "ready", (
-        "standing down must not fail the run")
+        f"the later-first interleaving filed {len(reports)} documents")
+    # The LOWEST id owns it, whichever finished first — that is what makes the
+    # outcome independent of timing.
+    assert ctx.client.get(f"/v1/crucible/{lower}").json()["artifact_id"]
+    assert not ctx.client.get(f"/v1/crucible/{higher}").json().get("artifact_id")
+    # And evicting must not fail the run that lost its document.
+    assert ctx.client.get(f"/v1/crucible/{higher}").json()["status"] == "ready"
+
+
+def test_the_earlier_run_finishing_first_also_leaves_one_document(ctx):
+    """The other order, so the convergence is pinned from both directions."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    lower = _start(ctx, goal="grow activation").json()["id"]
+    higher = _start(ctx, goal="grow activation").json()["id"]
+
+    for rid in (lower, higher):
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+
+    reports = [x for x in (list_artifacts_for_company(ctx.company_id) or [])
+               if x.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1
+    assert ctx.client.get(f"/v1/crucible/{lower}").json()["artifact_id"]
+    assert not ctx.client.get(f"/v1/crucible/{higher}").json().get("artifact_id")
+
+
+def test_an_evicted_run_never_points_at_a_deleted_artifact(ctx):
+    """The eviction unlinks BEFORE deleting, so the stranded-document sweep and
+    any reader never see a run pointing at an artifact that is gone."""
+    from app.db.custom_artifacts import get_artifact
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    lower = _start(ctx, goal="reduce churn").json()["id"]
+    higher = _start(ctx, goal="reduce churn").json()["id"]
+
+    _confirm(ctx, higher)
+    ctx.client.post(f"/v1/crucible/{higher}/approve", json={})
+    evicted_artifact = ctx.client.get(
+        f"/v1/crucible/{higher}").json()["artifact_id"]
+
+    _confirm(ctx, lower)
+    ctx.client.post(f"/v1/crucible/{lower}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{higher}").json()
+    assert not row.get("artifact_id"), "the evicted run still points somewhere"
+    assert get_artifact(ctx.company_id, evicted_artifact) is None, (
+        "the evicted artifact is still in the shared library")
 
 
 def test_the_goal_dedup_is_not_bounded_by_a_page_of_recent_runs(ctx):
