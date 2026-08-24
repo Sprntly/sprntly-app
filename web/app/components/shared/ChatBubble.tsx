@@ -138,8 +138,8 @@ export interface ChatBubbleProps {
   humanAlign?: "start" | "end"
 
   agentName: string
-  /** Badge text next to the agent name ("Product Coworker", "AGENT"). Omit
-   *  to render no badge. */
+  /** Badge text next to the agent name ("DS COWORKER"). Omit to render no
+   *  badge — which is what every PM-agent surface now does. */
   agentBadge?: string | null
   agentTimestamp?: string | null
   agentHeadExtra?: ReactNode

@@ -86,7 +86,7 @@ describe("mapMainTurns", () => {
 
     // agent identity is constant across turns
     for (const t of out) {
-      expect(t.agentBadge).toBe("Product Coworker")
+      expect(t.agentBadge).toBeUndefined()
       expect(t.user?.name).toBe("Ada")
       expect(t.user?.initials).toBe("A")
       // direct pass-throughs (identity), proving the wiring is verbatim

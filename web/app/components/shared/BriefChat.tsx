@@ -1315,10 +1315,6 @@ export function BriefChat() {
                   <IconSparkle size={14} />
                 </span>
                 <span className="bc-agent-name">{AGENT_NAME}</span>
-                <span className="bc-agent-badge">
-                  <IconSparkle size={10} />
-                  Product Coworker
-                </span>
                 {briefTimeLabel ? (
                   <span className="bc-agent-status">Top Insights · {briefTimeLabel}</span>
                 ) : null}
@@ -1440,7 +1436,10 @@ function AgentTurn({
   busy: boolean
 }) {
   const personaName = turn.persona === "pm" ? AGENT_NAME : "DS Agent"
-  const badge = turn.persona === "pm" ? "Product Coworker" : "DS COWORKER"
+  // The PM agent shows its name alone — the "Product Coworker" role pill was
+  // removed (owner, 2026-08-24). The DS agent keeps its badge: it is a second
+  // persona in the same thread and the name alone does not tell them apart.
+  const badge = turn.persona === "pm" ? null : "DS COWORKER"
   return (
     <div className="bc-turn">
       <div className="bc-agent-head">
@@ -1448,10 +1447,12 @@ function AgentTurn({
           <IconSparkle size={14} />
         </span>
         <span className="bc-agent-name">{personaName}</span>
-        <span className="bc-agent-badge">
-          <IconSparkle size={10} />
-          {badge}
-        </span>
+        {badge ? (
+          <span className="bc-agent-badge">
+            <IconSparkle size={10} />
+            {badge}
+          </span>
+        ) : null}
         {turn.status ? <span className="bc-agent-status">{turn.status}</span> : null}
       </div>
       <div className="bc-agent-body">

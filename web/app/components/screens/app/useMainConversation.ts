@@ -32,7 +32,7 @@ import {
 import { ApiError, askApi, type AskResponse } from "../../../lib/api"
 import { GROUNDED_PROGRESS_ENABLED } from "../../../lib/friendlyPhase"
 import { providerNoticeTitle, type ProviderNotice } from "../../../lib/providerLimitNotice"
-import { WAIT_FAILED_TITLE } from "../../shared/AssistantWaitState"
+import { WAIT_FAILED } from "../../shared/AssistantWaitState"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
 import type { ConversationHandle, ResolveAskParams } from "./conversationCore"
 import type { ThreadTurn } from "./ChatScreen"
@@ -336,7 +336,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // 404 the tenant gate raises must not tell a foreign tenant that the
           // row it asked for exists somewhere.
           finalizeConversationTurn(id, { error: msg }, tabId)
-          showToast("Ask failed", WAIT_FAILED_TITLE)
+          showToast("Interrupted", WAIT_FAILED)
         },
       })
     },

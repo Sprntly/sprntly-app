@@ -123,9 +123,11 @@ export const WAIT_NOTE_RESUMED = "This answer was already running before you rel
 export const WAIT_STOPPED = "You stopped this response."
 export const WAIT_TIMED_OUT =
   "This is taking longer than expected. It's still running on our side — reload and it will pick up where it left off."
-export const WAIT_FAILED_TITLE = "That answer didn't come through."
-export const WAIT_FAILED_BODY =
-  "Nothing was saved. Send the question again, or try it with fewer files attached."
+// One line for EVERY failure kind — a dropped connection, a backend 500, a
+// tenant-gate 404. The person cannot act on the difference between them, and
+// the old copy guessed wrong about the common case: it blamed attachments when
+// what usually happened is the connection cutting out mid-answer.
+export const WAIT_FAILED = "There was an interruption, try again."
 
 // ── Rung thresholds ─────────────────────────────────────────────────────────
 /** Rung 0 → 1. Below this an indicator only flickers on a fast answer. */
@@ -445,14 +447,13 @@ export function WaitTimedOutState({
  *
  *  The copy is FIXED. The raw error is deliberately not rendered: a backend
  *  detail string is meaningless to the person reading it, and the 404 the tenant
- *  gate raises must read as "didn't come through" with no hint that the row
- *  exists somewhere else. */
+ *  gate raises must read as an interruption with no hint that the row exists
+ *  somewhere else. */
 export function WaitFailedState({ onAskAgain }: { onAskAgain?: () => void }) {
   return (
     <div className="cw">
-      <div className="cw-err bc-error" role="alert">
-        <b>{WAIT_FAILED_TITLE}</b>
-        {WAIT_FAILED_BODY}
+      <div className="bc-error" role="alert">
+        {WAIT_FAILED}
       </div>
       {onAskAgain ? (
         <div className="cw-actions">

@@ -646,9 +646,9 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
  *
  *  This settles the deferred ack as ORDINARY PROSE rather than routing through
  *  failDeferredAck's error state, because it is neither a failure nor a
- *  generation: the shared error card says "That answer didn't come through.
- *  Nothing was saved." — three claims that are all false about an open that
- *  simply found the document busy. */
+ *  generation: the shared error card says "There was an interruption, try
+ *  again." — which is not what happened to an open that simply found the
+ *  document busy. */
 function openFailureReply(detail: string): AskResponse {
   const reason = detail.trim().replace(/[.\s]+$/, "")
   return {
@@ -1786,8 +1786,8 @@ export function ChatScreen() {
           if (deferAck && source.kind === "load" && seedTurn) {
             // An OPEN that found the document busy is a refusal we can explain,
             // not a failed generation — so it settles as prose. The error card
-            // the other kinds get would claim the answer didn't come through
-            // and that nothing was saved, neither of which happened here.
+            // the other kinds get would claim an interruption, which is not
+            // what happened here.
             settleCommandAck(tabId, seedTurn.id, openFailureReply(result.message))
           } else {
             failDeferredAck(tabId, seedTurn?.id, result.message)
@@ -5072,7 +5072,6 @@ export function ChatScreen() {
       wrapperClassName="bc-turn bc-turn--insight"
       dataTestId="chat-insight-msg"
       agentName={AGENT_NAME}
-      agentBadge="Product Coworker"
       agentBodyNode={
         <>
           <div className="bc-insight-msg">

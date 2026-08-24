@@ -10888,22 +10888,6 @@
     font-style: italic;
   }
 
-  .cw-err {
-    padding: 11px 13px;
-    border-radius: var(--radius-sm);
-    background: var(--danger-soft);
-    border: 1px solid var(--danger-border);
-    color: var(--danger-ink);
-    font-size: 13px;
-    line-height: 1.5;
-  }
-
-  .cw-err b {
-    display: block;
-    font-weight: 600;
-    margin-bottom: 2px;
-  }
-
   /* Streamed text held after the live preview dropped — marked as frozen rather
      than left looking live. */
   .cw-partial {

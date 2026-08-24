@@ -237,8 +237,8 @@ export interface ChatSurfaceDescriptor {
   // ── Transcript ────────────────────────────────────────────────────────────
   transcript: {
     agentName: string
-    /** One label everywhere: main renders "Product Coworker" and both
-     *  project surfaces pass the shared `AGENT_BADGE` constant. */
+    /** Role pill next to the agent name. The PM agent renders none since the
+     *  "Product Coworker" pill was removed (owner, 2026-08-24). */
     agentBadge?: string | null
     /** project-group: speaker heads, role chips, avatars, start-aligned
      *  non-self turns (mirrors `SurfaceScope.multi_party`). */
