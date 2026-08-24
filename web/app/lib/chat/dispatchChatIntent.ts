@@ -59,6 +59,18 @@ export interface DispatchChatIntentContext {
  *  rendering, tab mutation) exactly as it did before the extraction. */
 export interface ChatIntentExecutors {
   onEditPrd: (instruction: string, prdId: number | null) => void
+  /** Change the REPORT or DOCUMENT open beside this chat. The target rides the
+   *  envelope (`open_artifact`, re-read server-side under the caller's
+   *  company), not the caller's own state, because the same server read is
+   *  what the planner was told about when it chose this action — resolving it
+   *  again here could edit a document the decision was never about.
+   *
+   *  Optional: a surface with no side panel (the project group chat) has
+   *  nothing to open and falls through to its grounded ask. */
+  onEditArtifact?: (
+    instruction: string,
+    target: { kind: string; id: number; title?: string | null },
+  ) => void
   /** Carries the doc-vs-existing-PRD-vs-standalone decision to the executor
    *  (never made here) — the caller's own inline state (an attached file, an
    *  already-open PRD) decides which of its flows to run. */
@@ -179,6 +191,21 @@ export function dispatchChatIntent(
       }
       executors.onAnswer()
       return { handled: false }
+
+    case "edit_artifact": {
+      // Both halves are re-checked here for the reason every other branch
+      // re-checks its argument: the endpoint gates them too, and a dispatch
+      // with a missing argument is worse than no dispatch — it would claim an
+      // edit nobody could make. Falling through to `onAnswer` lets the chat
+      // ask which document, or what to change.
+      const target = envelope.open_artifact
+      if (executors.onEditArtifact && envelope.instruction && target?.id) {
+        executors.onEditArtifact(envelope.instruction, target)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
+    }
 
     case "open_artifact":
       if (envelope.open) {

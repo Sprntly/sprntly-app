@@ -465,6 +465,44 @@ async def generate(
     return _public(row)
 
 
+class DocumentEdit(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/{artifact_id}/chat-edit")
+async def chat_edit_document(
+    artifact_id: int,
+    body: DocumentEdit,
+    company: CompanyContext = Depends(require_company),
+):
+    """Apply a free-form chat instruction to this document.
+
+    THE TARGET IS THE URL'S DOCUMENT, NOT AN ARGUMENT — the client names the one
+    the user has open, and nothing in the body can redirect the write. See
+    `app/artifact_chat_edit.py` for why that rule is absolute here.
+
+    Sibling of the Goal Analysis editor (`POST /v1/crucible/{run}/document/
+    chat-edit`), which stays separate on purpose: that one refuses any document
+    that is not an analysis report, so a tool aimed at the analysis panel can
+    only ever touch the analysis panel's document. This one is the chat's, and
+    the chat's target is whatever the user has open.
+
+    409 when a colleague saved between the read and the write: the edit was
+    written about text that has since moved, so it is refused rather than
+    replayed onto a document it was not about.
+    """
+    from app.artifact_chat_edit import edit_document_scoped
+
+    result = await asyncio.to_thread(
+        edit_document_scoped, artifact_id, body.instruction, company
+    )
+    return {
+        "artifact": _public(result["artifact"]),
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
+    }
+
+
 @router.delete("/{artifact_id}")
 def remove(
     artifact_id: int,

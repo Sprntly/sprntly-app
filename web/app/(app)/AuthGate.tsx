@@ -4,13 +4,14 @@ import { Suspense, useEffect } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useAuth } from "../lib/auth"
 import { ArtifactShareGate } from "../components/shared/ArtifactShareGate"
+import { AppLoading } from "./AppLoading"
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   // useSearchParams() requires a Suspense boundary (Next 15 CSR-bailout rule).
   // Wrapping here (rather than pushing this requirement onto every caller of
   // AuthGate) keeps the `(app)` layout's own shape untouched.
   return (
-    <Suspense fallback={<AuthLoading />}>
+    <Suspense fallback={<AppLoading />}>
       <AuthGateInner>{children}</AuthGateInner>
     </Suspense>
   )
@@ -64,29 +65,15 @@ function AuthGateInner({ children }: { children: React.ReactNode }) {
 
   if (auth.kind !== "authed") {
     return (
-      <AuthLoading />
+      <AppLoading />
     )
   }
 
   return <>{children}</>
 }
 
-export function AuthLoading() {
-  return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "#FFFFFF",
-        color: "#000000",
-        fontFamily: "Geist, system-ui, sans-serif",
-        fontSize: 15,
-        fontWeight: 500,
-      }}
-    >
-      Loading…
-    </div>
-  )
-}
+/** Kept as a named re-export: this is where the loading shell used to live, and
+ *  `AuthGate` itself renders it. The component moved to its own module so a
+ *  consumer importing a spinner no longer pulls the whole auth-screen tree in
+ *  with it. */
+export { AppLoading as AuthLoading }

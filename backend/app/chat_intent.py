@@ -625,6 +625,13 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # comment records: this set is the wire, and an action missing from it is
     # a silent half-feature, not an error.
     "assign_tickets",
+    # Change the report or document open beside the chat. Listed here for the
+    # reason `create_artifact`'s comment above records at length: THIS SET IS
+    # THE WIRE. An action the planner can decide and an endpoint can execute,
+    # but which is missing here, falls through `_fallback("unknown action")` to
+    # a plain answer — so the chat would reply in prose describing an edit it
+    # never made, which is precisely the failure being fixed.
+    "edit_artifact",
     # The tickets counterpart of change_prd_template — dispatches
     # POST /v1/stories/change-template with the envelope's
     # `artifact_template_id`. The TARGET is resolved client-side (the thread's
@@ -686,7 +693,9 @@ def _is_report_pipeline(pipeline_id: Optional[str]) -> bool:
         return False
 
 
-def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
+def _plan_to_envelope(
+    plan, *, prd_id: Optional[int], open_artifact: Optional[dict] = None
+) -> dict:
     """A gated `ask_planner.Plan` in this module's envelope vocabulary.
 
     Three of this module's own downgrade rules are re-applied HERE rather than
@@ -798,6 +807,12 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         # a name that fell out of one and not the other would open a panel for
         # an answer, or print a report into the chat.
         "report": _is_report_pipeline(plan.pipeline_id),
+        # `edit_artifact` only: WHICH document the edit targets — the report or
+        # team document the tab has open, re-read server-side. The client
+        # already knows what its own panel is showing; this is echoed so the
+        # reducer acts on the SAME artifact the decision was grounded on, the
+        # way `prd_id`/`prd_title` are echoed for `edit_prd`.
+        "open_artifact": open_artifact,
     }
     # A FORMAT WE COULD NOT FIND STOPS THE BUILD (owner's decision, 2026-08-10).
     # `template_query` is only ever set when the user named a format and nothing
@@ -824,6 +839,18 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
         envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "edit_artifact" and (
+        not envelope["instruction"] or not open_artifact
+    ):
+        # The same two re-applications `edit_prd` gets, for the same reasons:
+        # an edit with nothing to apply has nothing to do, and a TARGET is a
+        # tenant-scoped fact the planner cannot check (it is told what is open,
+        # but the id it would act on is resolved here). `answer` is the
+        # recoverable landing — it can ask which document, or what to change.
+        envelope.update(
+            intent="answer",
+            source="no_instruction" if not envelope["instruction"] else "no_target_artifact",
+        )
     if envelope["intent"] == "assign_tickets" and not envelope["instruction"]:
         # Same rule as edit_prd: an assignment with nobody named and nothing
         # targeted is a dispatch with nothing to execute. The planner gates
@@ -858,6 +885,7 @@ def _resolve_via_planner(
     *,
     prd_id: Optional[int],
     prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
 ) -> Optional[dict]:
     """The planner's verdict as an envelope, or None to use the call below.
 
@@ -879,7 +907,7 @@ def _resolve_via_planner(
     )
     if plan is None:
         return None
-    envelope = _plan_to_envelope(plan, prd_id=prd_id)
+    envelope = _plan_to_envelope(plan, prd_id=prd_id, open_artifact=open_artifact)
     # The full gated plan rides along under `plan`, for the browser console.
     # Everything on it was already decided server-side and is already visible in
     # the backend log; this only saves someone testing from having to watch
@@ -904,6 +932,7 @@ def resolve_chat_intent(
     prd_id: Optional[int] = None,
     prd_title: Optional[str] = None,
     has_attachments: bool = False,
+    open_artifact: Optional[dict] = None,
 ) -> dict:
     """Decide the action envelope for one chat message, in context.
 

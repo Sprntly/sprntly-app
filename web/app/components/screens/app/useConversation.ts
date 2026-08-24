@@ -195,6 +195,68 @@ export type Conversation = MainConversation &
     handleComposerKeyDown: (e: ReactKeyboardEvent<HTMLTextAreaElement>) => void
   }
 
+/** The report or document the side panel is SHOWING, as the classify call's
+ *  `open_artifact` — the referent for "the report", "that document", "it".
+ *
+ *  This MIRRORS `ReportsTab`'s own selection rule and has to: reading
+ *  `reportFocusId` alone said "nothing is open" while a report sat on screen,
+ *  because a thread with exactly ONE report opens straight into it and never
+ *  sets the pointer (`onlyReport` there). The planner then chose `edit_artifact`
+ *  at 0.95 confidence and the endpoint downgraded it to `answer` for want of a
+ *  target — so "remove the product-feedback description" came back as the
+ *  rewritten section printed into the chat, with the report unchanged.
+ *
+ *  Null when the panel is on a LIST of several reports with none picked: the
+ *  reader has not chosen one, so neither has this. The endpoint's gate turns
+ *  that into an answer, which can ask which report they mean.
+ *
+ *  The rows are only trusted when they describe THIS thread — the list is
+ *  fetched globally (`useThreadReportsSync`) and can lag a thread switch by a
+ *  commit, and naming another thread's report here would point an edit at it.
+ */
+export function openArtifactForPanel(
+  content: AppContentState,
+  conversationId: number | null,
+): { kind: "report" | "document"; id: number } | null {
+  if (content.documentId != null) {
+    return { kind: "document", id: content.documentId }
+  }
+  const rows =
+    conversationId != null && content.threadReportsConversationId === conversationId
+      ? content.threadReports ?? []
+      : []
+  const shown =
+    content.reportFocusId ?? (rows.length === 1 ? rows[0].id : null)
+  return shown != null ? { kind: "report", id: shown } : null
+}
+
+/** What the chat says when the editor decided the message was a QUESTION about
+ *  the open document rather than an instruction to change it. Nothing was
+ *  written server-side, so the turn must not read as though something was. */
+const NO_EDIT_NEEDED =
+  "That reads as a question about the document rather than a change to make, so I've left it as it is. Tell me what to change and I'll edit it."
+
+/** The turn a completed edit leaves behind: what changed, and where to look.
+ *  The section names come from the editor itself, so this can never claim a
+ *  section it did not touch. */
+function editedReply(summary: string, sections: string[]): string {
+  const what = summary.trim() || "Applied your edit."
+  const where =
+    sections.length === 1
+      ? `Updated **${sections[0]}**`
+      : `Updated ${sections.length} sections — ${sections.map((s) => `**${s}**`).join(", ")}`
+  return `${what}\n\n${where}. It's open on the right.`
+}
+
+/** An `AskResponse` carrying prose and nothing else — an action turn's reply,
+ *  not a generated answer. */
+function plainReply(answer: string): AskResponse {
+  return {
+    answer,
+    key_points: [], citations: [], confidence: 1, unanswered: "",
+  } as AskResponse
+}
+
 export function useConversation(adapter: MainConversationAdapter): Conversation {
   // Only consumer today is the create-project executor, which OPENS the project
   // it just made (the owner's call). Client-side nav, same as the create modal's
@@ -578,6 +640,15 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               conversationId: activeTab?.dbConvId ?? null,
               prdId: tabPrdId,
               hasAttachments: attachments.length > 0,
+              // What the side panel is SHOWING — the referent for "the report",
+              // "that document", "it". Without it the planner had no way to
+              // know an artifact was open at all, so an edit request was
+              // answered by printing the rewritten section into the chat.
+              //
+              // A document wins over a report when both are set: `documentId`
+              // is only ever set by the document flow, while a report focus can
+              // outlive its panel. The backend re-reads whichever it is told.
+              openArtifact: openArtifactForPanel(content, activeTab?.dbConvId ?? null),
             }),
           )
           .catch(() => null)
@@ -639,6 +710,45 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                   runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
                   contextIds: { prdId },
                   onArtifactUpdated: (u) => applyPrdArtifactInTab(tabId, u),
+                })
+                settlePendingSend()
+              },
+              // Change the report or document open in the panel. The TARGET
+              // comes off the envelope (re-read server-side under this
+              // company), never from local state: it is the same read the
+              // planner was told about when it chose this action, and
+              // re-resolving here could edit a document the decision was not
+              // about.
+              onEditArtifact: (instruction, target) => {
+                const tabId = activeTab?.id ?? targetTabId
+                void runActionTurnInTab(tabId, trimmed, async () => {
+                  const { reportsApi, customArtifactsApi } = await import("../../../lib/api")
+                  if (target.kind === "report") {
+                    const res = await reportsApi.chatEdit(target.id, instruction)
+                    if (res.sections_changed.length === 0) {
+                      // The editor judged this was a question, not an edit, and
+                      // wrote NOTHING. Say what it found rather than claiming a
+                      // change that did not happen.
+                      return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
+                    }
+                    // The panel re-reads the thread's reports and lands on this
+                    // one — the body it is showing is now stale by exactly this
+                    // edit.
+                    setContent({
+                      reportFocusId: target.id,
+                      reportFocusStandalone: false,
+                      reportsRefreshKey: Date.now(),
+                    })
+                    openContentPanel("reports")
+                    return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
+                  }
+                  const res = await customArtifactsApi.chatEdit(target.id, instruction)
+                  if (res.sections_changed.length === 0) {
+                    return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
+                  }
+                  setContent({ documentId: target.id, documentGenerating: false })
+                  openContentPanel("document")
+                  return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                 })
                 settlePendingSend()
               },
@@ -817,7 +927,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     [
       attachments, activeTabId, nextPrompts, setPendingSend, tabsRef, interceptBeforeIntent,
       setDraft, openContentPanel, showToast, importPrdCommandFlow, prdCommandFlow,
-      applyPrdArtifactInTab, shareRefFor, setContent, content.reportFocusId, setAttachments,
+      applyPrdArtifactInTab, shareRefFor, setContent, content, setAttachments,
       setBusyTabs, askingTabsRef, stoppedTabsRef, askStartRef, resolveSendTarget, setActiveTabId,
       emitCommandTurn, runActionTurnInTab, runConversationAsk,
       ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,

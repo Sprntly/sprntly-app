@@ -87,6 +87,39 @@ def save_report(
 
 
 @retry_on_disconnect
+def update_report_body(
+    report_id: int, company_id: str, *, html: str, title: str | None = None
+) -> dict | None:
+    """Replace a report's stored body; return the updated row, or None when the
+    id is absent OR belongs to another company.
+
+    Company-filtered in the UPDATE itself rather than after a read, so a foreign
+    id matches zero rows and the route turns that into the same 404 a missing
+    one gets — never a 403, and never a write that landed before the check.
+
+    No compare-and-set: `reports` carries no `version`, because until now a
+    report was written once by a pipeline and only ever read. The one writer is
+    the chat editor (`app.artifact_chat_edit`), whose losing race is two edits
+    of the SAME report in flight on one thread at once. A hand editor for
+    reports would need a version column before it needs this function.
+    """
+    patch: dict[str, Any] = {"html": html or ""}
+    if title is not None:
+        patch["title"] = title
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .update(patch)
+        .eq("id", report_id)
+        .eq("company_id", company_id)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return get_report(report_id, company_id)
+
+
+@retry_on_disconnect
 def get_report(report_id: int, company_id: str) -> dict | None:
     """One report by id, scoped to its company — the caller's tenant gate.
 

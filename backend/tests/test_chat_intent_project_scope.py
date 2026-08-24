@@ -100,7 +100,7 @@ def _open_envelope(monkeypatch, query: str):
     import app.routes.chat as chat_route
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False):
+                 prd_title=None, has_attachments=False, open_artifact=None):
         return {
             "intent": "open_artifact", "confidence": 0.95, "task": None,
             "instruction": None, "artifact_type": "prd",
@@ -118,7 +118,7 @@ def _edit_envelope(monkeypatch):
     seen: dict = {}
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False):
+                 prd_title=None, has_attachments=False, open_artifact=None):
         seen["prd_id"] = prd_id
         return {
             "intent": "edit_prd", "confidence": 0.92, "task": None,
