@@ -81,3 +81,47 @@ def test_the_action_is_in_the_schema_the_model_sees(crucible_on):
     # a metric. Without this the planner sends "what is our churn?" to a run.
     assert "analyse_goal" in described
     assert "what is our churn" in described.lower()
+
+
+# ── The non-entitled tenant must be affected NOT AT ALL ──────────────────────
+
+def test_a_workspace_without_the_module_is_told_before_the_model_chooses():
+    """Finding 4: the gate alone made non-entitled tenants WORSE off.
+
+    `_PLANNER_SYSTEM` tells the model that for any action other than `answer` it
+    should not also pick a pipeline or sources. `apply_gates` runs after that,
+    so dropping `analyse_goal` back to `answer` left `pipeline_id` and `sources`
+    already emptied — a thinner answer than the same message got before the
+    action existed. Telling the model up front is what keeps it a true no-op.
+    """
+    import app.ask_planner as ap
+
+    text = ap._goal_analysis_block(False)
+    assert "Never choose" in text and "analyse_goal" in text
+    # It must also repair the instruction it is overriding, not just forbid the
+    # action — otherwise the model still skips the pipeline it would have picked.
+    assert "pipeline" in text and "sources" in text
+
+
+def test_a_workspace_with_the_module_gets_no_block_at_all():
+    """Empty, so the entitled path's prompt is byte-identical to before."""
+    import app.ask_planner as ap
+
+    assert ap._goal_analysis_block(True) == ""
+
+
+def test_the_capability_line_rides_the_uncached_input_not_the_system_block():
+    """PER-COMPANY DATA NEVER GOES IN `_PLANNER_SYSTEM`.
+
+    The system block is tenant-invariant so one Anthropic cache entry serves
+    every company; this module states that rule for three other blocks already.
+    A boolean leaks no customer text, but it would still fork the shared entry.
+    """
+    import app.ask_planner as ap
+
+    assert "Goal Analysis is not available" not in ap._PLANNER_SYSTEM
+    built = ap._build_input(
+        "increase revenue by 5%", connected=[], custom_block="",
+        keyword_prior="", history=None, goal_analysis_available=False,
+    )
+    assert "Goal Analysis is not available" in built

@@ -183,7 +183,13 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 # pooling them is still correct. A bump would fragment the decision log for a
 # change that cannot move a routing decision. Anything that alters what the
 # prompt ASKS still bumps.
-_PROMPT_VERSION = "ask-planner-v11"
+#   v12: the action menu gained `analyse_goal` (a business goal to move, handed
+#     to Goal Analysis) and `edit_artifact` before it. A v11 row could choose
+#     neither, so pooling v11 with v12 mixes two different action menus and any
+#     routing-accuracy query over the pair measures nothing. `edit_artifact`
+#     landed in #1316 without a bump and `analyse_goal` in #1321 without one
+#     either; both are covered by this bump rather than left uncounted.
+_PROMPT_VERSION = "ask-planner-v12"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -471,9 +477,11 @@ _PLANNER_SCHEMA: dict = {
             "type": "string",
             "description": (
                 "generate_prd / generate_tickets / generate_prototype / "
-                "create_artifact only: a self-contained brief for the thing to "
-                "build, synthesized from the WHOLE conversation, not the words "
-                "of the last message."
+                "create_artifact / analyse_goal only: a self-contained brief "
+                "for the thing to build, synthesized from the WHOLE "
+                "conversation, not the words of the last message. For "
+                "analyse_goal it is the GOAL in the user's own words, number "
+                "included."
             ),
         },
         "instruction": {
@@ -821,6 +829,18 @@ or wants an answer.
   generate_prd, whichever fits. Only the container is this action, and a
   question about projects ("what is a project", "what projects do I have") is
   `answer` with include_projects=true.
+- analyse_goal — a business GOAL the user wants MOVED: "increase revenue by
+  5%", "reduce churn", "improve activation this quarter", "get retention up".
+  Set `task` to the goal in the USER'S OWN WORDS, including any number they
+  gave ("increase revenue by 5%", not "revenue"). The number is part of the
+  goal and Goal Analysis asks about it.
+  A GOAL IS NOT A QUESTION ABOUT A METRIC. "what is our churn?", "how did
+  revenue move last quarter?", "show me activation" all REPORT a number and
+  are `answer`. This action is for wanting the number to CHANGE.
+  Choose it even when you could attempt an answer yourself. Goal Analysis
+  stops and asks what the metric means, states what it will read, and runs
+  only once the user approves — a goal answered directly skips the
+  confirmation the user needs in order to defend the result.
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -1590,6 +1610,25 @@ def _open_artifact_block(
     return "\n".join(lines) + "\n\n" if lines else ""
 
 
+def _goal_analysis_available(enterprise_id: str) -> bool:
+    """Is Goal Analysis enabled for this company? FAILS CLOSED.
+
+    One helper so the two places that need the answer — the prompt block that
+    stops the model choosing the action, and `apply_gates` which refuses it —
+    can never disagree. `read_feature_flags` is TTL-cached with write
+    invalidation, so the second read in a turn costs nothing.
+    """
+    try:
+        from app.entitlements import crucible_enabled, feature_flags_for_company
+        return crucible_enabled(feature_flags_for_company(enterprise_id))
+    except Exception:
+        logger.exception(
+            "[planner] crucible entitlement lookup failed for %s — "
+            "treating Goal Analysis as unavailable", enterprise_id,
+        )
+        return False
+
+
 def _build_input(
     question: str,
     *,
@@ -1600,6 +1639,12 @@ def _build_input(
     document_block: str = "",
     template_block: str = "",
     open_prd_block: str = "",
+    # DEFAULTS CLOSED, like the feature it describes. A default of True means
+    # any caller that forgets the argument silently offers the action to a
+    # workspace that does not have it — fail-open plumbing under a fail-closed
+    # gate. `plan()` always passes the real value; every other caller (tests,
+    # future ones) gets the safe answer for free.
+    goal_analysis_available: bool = False,
 ) -> str:
     """The uncached half of the call, assembled in ASK_PLANNER_PROMPT.md §3's
     order: date, company skills, company formats, connected sources,
@@ -1622,6 +1667,9 @@ def _build_input(
         # user's point of view — a team's own method and a team's own form —
         # and a question about one is usually a question about both.
         + template_block
+        # A capability line, beside the sources block for the same reason: both
+        # say what this workspace CAN reach. Empty for a workspace that has it.
+        + _goal_analysis_block(goal_analysis_available)
         + _sources_block(connected)
         # After the sources it belongs with — a document IS a source — and still
         # ahead of the history and the question, which stay last so the thing
@@ -1633,6 +1681,39 @@ def _build_input(
         + open_prd_block
         + _render_history_via_qa(history)
         + f"Question: {question}"
+    )
+
+
+def _goal_analysis_block(available: bool) -> str:
+    """Tell the model when Goal Analysis is NOT available to this workspace.
+
+    ON THE UNCACHED `input`, never `_PLANNER_SYSTEM`, and this file states the
+    rule three times already for `_custom_skill_block`, `_document_block` and
+    `_template_block`: the system block is tenant-invariant so one Anthropic
+    cache entry serves every company. Unlike those three this carries no
+    customer text — it is one boolean, so there is no cross-tenant leak to worry
+    about — but it is still per-company, and putting it in the system block
+    would fork the shared entry in two for no reason when the uncached half
+    costs nothing.
+
+    WHY THE MODEL IS TOLD AT ALL, rather than leaving `apply_gates` to drop the
+    action. The gate runs AFTER the model has obeyed `_PLANNER_SYSTEM`'s "when
+    the action is anything other than `answer` … do not also pick a pipeline or
+    sources". So a non-entitled tenant typing a goal got the action dropped back
+    to `answer` with `pipeline_id` and `sources` already emptied — an answer
+    thinner than the one the same message got before `analyse_goal` existed.
+    A tenant without the feature must be affected NOT AT ALL, so the model has
+    to know before it chooses, not after.
+
+    `apply_gates` still refuses the action independently. This is what makes the
+    common path correct; that is what makes it safe."""
+    if available:
+        return ""
+    return (
+        "Goal Analysis is not available in this workspace. Never choose "
+        "`analyse_goal`; treat a goal the user wants moved as a question to "
+        "`answer`, and pick the pipeline and sources for it as you would for "
+        "any other question.\n\n"
     )
 
 
@@ -1993,18 +2074,7 @@ def apply_gates(
     # is still the enforcing boundary — this never grants access the route would
     # refuse, it only avoids routing into a refusal.
     if action == ACTION_ANALYSE_GOAL:
-        try:
-            from app.entitlements import (
-                crucible_enabled, feature_flags_for_company,
-            )
-            allowed = crucible_enabled(feature_flags_for_company(enterprise_id))
-        except Exception:
-            logger.exception(
-                "[planner] crucible entitlement lookup failed for %s — "
-                "dropping analyse_goal to answer", enterprise_id,
-            )
-            allowed = False
-        if not allowed:
+        if not _goal_analysis_available(enterprise_id):
             logger.info(
                 "[planner] analyse_goal dropped to answer: crucible off for %s",
                 enterprise_id,
@@ -2250,6 +2320,7 @@ def plan(
         keyword_prior=keyword_prior,
         history=history,
         open_prd_block=_open_artifact_block(prd_id, prd_title, open_artifact),
+        goal_analysis_available=_goal_analysis_available(enterprise_id),
     )
     # BEFORE the call, deliberately: a prompt that made the model fail — a 400,
     # a refusal, junk output — is exactly the prompt you most need to have seen.

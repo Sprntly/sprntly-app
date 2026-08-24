@@ -696,9 +696,17 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               // `startGoalAnalysis` already opens the panel on the RUN ID
               // rather than on a result, because the first thing a run does is
               // stop and ask what the goal means.
+              //
+              // NO `settlePendingSend()` here, unlike most siblings: this send
+              // already settled at `:577`, unconditionally and before the
+              // classify await, so the placeholder is long since handed off. A
+              // second call would be harmless and misleading — it would read as
+              // the thing keeping the composer alive when it is not.
+              //
+              // `goalText` is always non-empty (the dispatcher guards on it).
               ...(startGoalAnalysis
                 ? { onAnalyseGoal: (goalText: string) =>
-                      void startGoalAnalysis(goalText || trimmed) }
+                      void startGoalAnalysis(goalText) }
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {

@@ -632,6 +632,20 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # a plain answer — so the chat would reply in prose describing an edit it
     # never made, which is precisely the failure being fixed.
     "edit_artifact",
+    # A business GOAL to move — hands off to Goal Analysis, which asks what the
+    # metric means, states what it will read, and waits for approval.
+    #
+    # THE WIRE AGAIN, and this one was shipped cut. #1321 taught `ask_planner`
+    # the `analyse_goal` action and added the client's dispatch case, and
+    # omitted this line — so the planner decided correctly, `_plan_to_envelope`
+    # hit `_fallback("unknown action")`, and the client received `answer`. A
+    # user asking to increase revenue by 5% still got a list of opportunities:
+    # the exact bug the PR was written to fix, shipped as a no-op.
+    #
+    # The subset assertion in `test_ask_planner.py` (`_CLIENT_INTENTS <=
+    # _ACTIONS`) cannot catch this — it points the other way. The membership
+    # test that can lives beside this file's other intents.
+    "analyse_goal",
     # The tickets counterpart of change_prd_template — dispatches
     # POST /v1/stories/change-template with the envelope's
     # `artifact_template_id`. The TARGET is resolved client-side (the thread's

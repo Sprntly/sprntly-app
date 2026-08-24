@@ -3787,7 +3787,8 @@ export function ChatScreen() {
   // hundred lines ABOVE that function's declaration. Kept in a ref rather than
   // reordering the hook setup, and republished on every render (below) so the
   // dispatcher always calls the current closure rather than the first one.
-  const startGoalAnalysisRef = useRef<((goalText: string) => void) | null>(null)
+  const startGoalAnalysisRef =
+    useRef<((goalText: string) => void | Promise<void>) | null>(null)
 
 
   // ── The per-conversation store seam ───────────────────────────────────────
@@ -3807,9 +3808,15 @@ export function ChatScreen() {
   } = useConversation({
       // A REF, because `startGoalAnalysis` is declared several hundred lines
       // below this call and a direct reference is a use-before-declaration.
-      // The wrapper is stable, so the hook never re-runs on its account.
-      startGoalAnalysis: (goalText: string) =>
-        startGoalAnalysisRef.current?.(goalText),
+      //
+      // The slot must exist unconditionally and must ACT, because the
+      // dispatcher decides `handled` from presence alone (its peek pass stubs
+      // every body to a no-op, so a return value cannot be read). The ref is
+      // written during the same render that declares the callback, above any
+      // interaction, so it is never null when this runs.
+      startGoalAnalysis: (goalText: string) => {
+        startGoalAnalysisRef.current?.(goalText)
+      },
       tabsRef,
       activeTabId,
       activeTabIdRef,
@@ -4716,11 +4723,13 @@ export function ChatScreen() {
     // hides its own restored analysis on the next visit.
   }, [activeConvId, activeTabId, setContent, openContentPanel, showToast])
 
-  // Republished during render, not in an effect, because the dispatcher can
-  // fire on the SAME render that a new `startGoalAnalysis` closure is created
-  // — an effect would leave it one render stale and a goal typed right after a
-  // tab switch would run against the previous tab. The write is idempotent, so
-  // a double render (StrictMode, concurrent) stores the same value twice.
+  // Republished on every render so the dispatcher always calls the current
+  // closure. An effect would work equally well here — `dispatchChatIntent`
+  // runs in `submitAsk`'s continuation after an await, so it is always past
+  // commit — and the only reason this is a bare assignment is that there is
+  // nothing to clean up and no dependency list to keep honest. The write is
+  // idempotent, so a discarded or doubled render (StrictMode, concurrent)
+  // stores the same value twice and nothing observes the difference.
   startGoalAnalysisRef.current = startGoalAnalysis
 
   // Goal mode intercepts the composer submit BEFORE the ask path: a run takes

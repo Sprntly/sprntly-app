@@ -465,7 +465,7 @@ describe("a goal typed into chat reaches Goal Analysis", () => {
 
   it("hands the goal to the panel", () => {
     const seen: string[] = []
-    const ex = { ...executors(), onAnalyseGoal: (g: string) => seen.push(g) }
+    const ex = { ...executors(), onAnalyseGoal: (g: string) => { seen.push(g) } }
     const out = dispatchChatIntent(goal(), ctx(), ex)
     expect(out).toEqual({ handled: true })
     expect(seen).toEqual(["increase revenue by 5%"])
@@ -479,6 +479,20 @@ describe("a goal typed into chat reaches Goal Analysis", () => {
     const out = dispatchChatIntent(goal(), ctx(), ex)
     expect(out).toEqual({ handled: false })
     expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("survives the caller's side-effect-free PEEK pass", () => {
+    // THE BUG THIS PINS. `useConversation` calls the dispatcher twice: once
+    // with every executor body replaced by `() => {}` to ask "would this be
+    // handled?", and only then for real. A case that decides `handled` from
+    // the executor's return value reads `undefined` from the stub, answers
+    // false, and is never dispatched — the feature goes silently inert with
+    // every other test still green.
+    const stubbed = Object.fromEntries(
+      Object.entries({ ...executors(), onAnalyseGoal: () => {} })
+        .map(([k, v]) => [k, typeof v === "function" ? () => {} : v]),
+    ) as unknown as Parameters<typeof dispatchChatIntent>[2]
+    expect(dispatchChatIntent(goal(), ctx(), stubbed)).toEqual({ handled: true })
   })
 
   it("answers rather than starting a run with no goal text", () => {
