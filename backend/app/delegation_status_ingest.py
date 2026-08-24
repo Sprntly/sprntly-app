@@ -247,6 +247,26 @@ def _route_to_requester(project_id: int, delegation_id: int, text: str) -> None:
     _post_to_own_chat(project_id, assigner_id, text)
 
 
+def notify_requester_task_completed(
+    project_id: int, delegation_id: int, *, assignee_user_id: str, task_summary: str | None
+) -> None:
+    """Post ONE low-noise completion notice to the requester's (assigner's)
+    private project chat. Best-effort / never raises: a failed post must not
+    roll back a durably-recorded completion (mirrors the delegation handler's
+    non-fatal posture). Reuses `_route_to_requester` (loads the assigner +
+    posts) + `_display_first_name` (the completer's first name)."""
+    try:
+        name = _display_first_name(project_id, assignee_user_id)
+        summary = (task_summary or "").strip()
+        text = f"✓ {name} finished: {summary}" if summary else f"✓ {name} finished the task."
+        _route_to_requester(project_id, delegation_id, text)
+    except Exception:  # noqa: BLE001 — best-effort, never blocks a recorded completion
+        logger.warning(
+            "delegation_completion_notice_failed project_id=%s delegation_id=%s",
+            project_id, delegation_id,
+        )
+
+
 def _apply_classification(
     *,
     project_id: int,
@@ -278,9 +298,14 @@ def _apply_classification(
             pending_done_since=None,
         )
     elif intent == "done_explicit":
-        delegation_events_db.record_event(
-            delegation_id=delegation_id, event="completed", actor_user_id=replier_user_id
-        )
+        if delegation_events_db.is_legal_transition(row["status"], "completed"):
+            delegation_events_db.record_event(
+                delegation_id=delegation_id, event="completed", actor_user_id=replier_user_id
+            )
+            notify_requester_task_completed(
+                project_id, delegation_id,
+                assignee_user_id=replier_user_id, task_summary=row.get("task_summary"),
+            )
         delegation_followups_db.upsert_followup(delegation_id, pending_done_since=None)
     elif intent == "done_inferred":
         delegation_followups_db.upsert_followup(

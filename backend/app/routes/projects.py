@@ -51,7 +51,7 @@ from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
 from app.project_origin_seed import seed_project_origin_memory
 from app.project_title import generate_project_title
-from app.delegation_status_ingest import maybe_ingest_status
+from app.delegation_status_ingest import maybe_ingest_status, notify_requester_task_completed
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
@@ -1145,6 +1145,22 @@ def emit_delegation_event_route(
         "delegation_event_emitted delegation_id=%s event=%s actor=%s",
         delegation_id, payload.event, ctx.user_id,
     )  # ids only, never note text
+    if payload.event == "completed":
+        # Best-effort, non-fatal (mirrors the publish block's own posture
+        # immediately below): a `status_dto` read failure here must not turn
+        # an already-durably-recorded completion into a client-visible 500.
+        try:
+            dto = delegation_events_db.status_dto(delegation_id)
+            notify_requester_task_completed(
+                project_id, delegation_id,
+                assignee_user_id=deleg["assignee_user_id"],
+                task_summary=(dto or {}).get("task_summary"),
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, see comment above
+            logger.warning(
+                "delegation_completion_notice_prep_failed delegation_id=%s error_class=%s",
+                delegation_id, type(exc).__name__,
+            )
     # Live dual per-user publish (AD-P30/AD-P22) — best-effort: the event is
     # already recorded, so a publish failure never fails the emit and the
     # response body is identical whether the publish succeeds or not. The DTO
