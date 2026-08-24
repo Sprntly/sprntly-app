@@ -5161,8 +5161,22 @@ export function ChatScreen() {
     const tabId = activeTabIdRef.current
     if (!tabId) return
     try {
+      // WAIT FOR THE CONVERSATION ROW, briefly. On the first message of a brand
+      // new chat there is no `dbConvId` yet — `emitCommandTurn` has only just
+      // queued its creation — so the run was started with no `conversation_id`
+      // and stayed orphaned from its own chat forever: the restore matches runs
+      // by conversation, so that run could never come back to the thread it was
+      // started in. Reading it from the tab after the emit costs a moment on a
+      // path that is already a second from its first question, and only on a
+      // first message.
+      let convId = activeConvId
+      for (let i = 0; convId == null && i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        if (!mountedRef.current) return
+        convId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      }
       const run = await goalAnalysisApi.start(goalText, {
-        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+        ...(convId != null ? { conversation_id: convId } : {}),
       })
       goalRunRef.current = run.id
       // A run is born `resolving_goal` and reaches the gate a moment later.

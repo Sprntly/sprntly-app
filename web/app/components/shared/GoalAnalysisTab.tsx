@@ -56,11 +56,14 @@ const MAX_CONSECUTIVE_FAILURES = 3
  *  confirmed and then watched "Reading 0 claims…" forever while the run
  *  finished on the server. */
 const TERMINAL = new Set([
+  // A GATE IS NO LONGER TERMINAL FOR THIS PANEL. Both gates moved to the chat
+  // thread, so the click that releases them happens somewhere this component
+  // cannot see — and `pollKey`, the re-arm this set was written around, has no
+  // caller left here. Treating a gate as terminal meant a panel opened on one
+  // stopped polling and never advanced to the report, however long the reader
+  // waited. It keeps watching instead, which is the only way it can now learn
+  // that the thread released the run.
   "ready", "failed", "cancelled",
-  // BOTH human gates. A run waiting on a person will wait forever, and polling
-  // it is load with no possible new information; the click that releases it
-  // re-arms the poll itself.
-  "awaiting_confirmation", "awaiting_approval",
 ])
 
 /** Error codes the backend may return, in the user's language. Anything not
@@ -107,7 +110,11 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
   // has not changed, so without this the effect never re-runs and the panel
   // stays on the last status it saw.
-  const [pollKey, setPollKey] = useState(0)
+  // `pollKey` used to be bumped by this panel's own confirm/approve buttons to
+  // re-arm a poll that a gate had stopped. Both are gone with the gates; the
+  // state stays only as the effect's dependency, and nothing re-arms because
+  // nothing stops.
+  const [pollKey] = useState(0)
   // How many consecutive polls failed. One 502 on one tick of a multi-minute
   // run must not brick the panel — a transient error is a retry, not a state.
   const failures = useRef(0)

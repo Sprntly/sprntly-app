@@ -14,25 +14,36 @@ Sorted by what I would fix first.
 
 ---
 
-## 1. A reloaded turn briefly reads "No response was generated"
+## 1. Reloading before the first question strands the run — PERMANENTLY
 
-**What happens.** A `pending` gate is stripped from the thread on save and on
-load (`_thawThread`), because the poll that would replace it died with the page.
-That leaves the reader's own message with no card under it until the restore
-appends a rebuilt one, and in that window the ordinary no-reply ladder renders
-"No response was generated for this message."
+**Corrected 2026-08-24.** This entry previously called it "a flash, not a dead
+end." That was wrong, and it was the most load-bearing sentence in this file:
+the whole point of the document is to let us defer these knowingly, and an
+edge described as cosmetic when it is terminal is worse than an edge nobody
+wrote down. Review reproduced it — `goalAnalysisApi.get` is called **zero**
+times and no gate is ever rebuilt.
 
-**How to reach it.** Reload while a run is still `resolving_goal` — the second
-or so between sending a goal and the definition question appearing.
+**What happens.** A `pending` gate is stripped on save and on load
+(`_thawThread`), because the poll that would replace it died with the page.
+The restore is what should rebuild it, but on this path it does not run at all,
+so the turn keeps "No response was generated for this message." permanently
+while the panel points at a live run nothing can answer. In the branch where
+the restore DOES run, the ladder line is not replaced either — it sits above
+the appended card.
 
-**Why deferred.** It is a flash, not a dead end: the gate appears immediately
-after. Two attempts to suppress it (a marker on the turn, then a synthetic
-"interrupted" record) each produced worse bugs than the flash — see §7.
+**How to reach it.** Reload during `resolving_goal` — the second or so between
+sending a goal and the definition question appearing.
 
-**Fix direction.** Do not add a field to the turn. Derive the whole gate from
-the server row (§8) and the window disappears with the shadow state.
+**Severity.** The run is unreachable from the UI. The user must start again;
+the abandoned run stays at its gate server-side.
 
----
+**Why still deferred.** It needs a reload inside a one-second window, on an
+allowlist-only feature, and the recovery is retyping one sentence. It is
+recorded here as terminal rather than cosmetic so the next person prices it
+correctly.
+
+**Fix direction.** §8. Do not add another field to the turn — two attempts to
+paper over this window (§7) each produced worse bugs than the window.
 
 ## 2. The rebuilt gate appends instead of returning to its own turn
 
@@ -81,13 +92,11 @@ the user retypes one sentence. Explicitly accepted rather than fixed.
 
 ---
 
-## 6. `goalGateResolved: undefined` in the re-arm path
+## 6. (retired) — the re-arm path this described no longer exists
 
-**What happens.** The restore clears a settled record when it attaches a rebuilt
-gate. Review could not construct a path where that destroys a real record, but
-nothing prevents it either — it is an undocumented invariant, not a live bug.
-
----
+Kept as a numbered heading so the section numbers in commit messages and review
+comments still line up. `goalGateResolved: undefined` was deleted along with
+the whole re-arm marker; there is no such write anywhere now.
 
 ## 7. Two fixes that were tried and reverted — do not retry as written
 
@@ -106,6 +115,15 @@ Both were attempts to hide §1. Neither is worth repeating against the current
 shape; both disappear under §8.
 
 ---
+
+## 7b. A goal as the FIRST message of a brand-new chat — FIXED 2026-08-24
+
+Listed because this file missed it and review found it: the run was started
+before the conversation row existed, so it carried no `conversation_id` and was
+orphaned from its own chat forever — the restore matches runs by conversation,
+so it could never return to the thread it came from. Now the start waits
+briefly for the tab's `dbConvId`. Recorded rather than quietly fixed, because
+"the doc listed every known edge" was itself one of the claims that was wrong.
 
 ## 8. The structural fix, when this is worth doing properly
 
