@@ -9,7 +9,13 @@ import {
   type SaveState,
   type Scheduler,
 } from "../../lib/documentSave"
+import type { Editor } from "@tiptap/react"
 import { DocumentEditor } from "../../(app)/artifacts/doc/DocumentEditor"
+import { PrdToolbar } from "./PrdMarkdownEditor"
+import {
+  UNSUPPORTED_DOCUMENT_COMMANDS,
+  execDocumentCommand,
+} from "../../lib/documentToolbarExec"
 import { documentFailureCopy } from "../../lib/documentFailure"
 
 // ── The chat panel's Document tab ────────────────────────────────────────────
@@ -245,6 +251,12 @@ export function DocumentTab({
     }
   }, [load])
 
+  // The live editor, handed over by `DocumentEditor` on mount. The pinned
+  // toolbar drives THIS — the bar is outside the editor now, so it needs a way
+  // back in. Held in state rather than a ref so the bar re-renders (and stops
+  // reading "No draft") the moment there is a document to format.
+  const [editor, setEditor] = useState<Editor | null>(null)
+
   if (loading) return <div style={S.muted}>Loading document…</div>
   if (failed || !doc) return <div style={S.muted}>This document could not be loaded.</div>
 
@@ -255,6 +267,37 @@ export function DocumentTab({
         <SaveIndicator state={saveState} />
       </div>
       {doc.kind.trim() && <div style={S.kind}>{doc.kind.trim()}</div>}
+
+      {/* Pinned above the document, the posture the PRD panel already takes: the
+          controls stay put while the text scrolls under them. It was inside the
+          editor, so it scrolled away with the first paragraph.
+
+          The SAME `PrdToolbar` the PRD uses — one formatting control for both
+          documents in this panel, rather than two bars that drift apart. Its
+          commands are execCommand names (it was built for a contenteditable);
+          `execDocumentCommand` translates them for this schema-backed editor,
+          and the four with no extension behind them are omitted rather than
+          rendered inert. */}
+      {doc.status === "ready" && (
+        <div style={S.toolbar}>
+          <PrdToolbar
+            hasDoc={!!editor}
+            // The bar carries the same save word this tab already shows beside the
+            // title. "error" and "conflict" read as UNSAVED here on purpose: the
+            // detail is spelled out below, and a bar that said "Saved" over an
+            // unsaved document would be the one lie a save indicator cannot tell.
+            saveStatus={
+              saveState.kind === "saving"
+                ? "saving"
+                : saveState.kind === "error" || saveState.kind === "conflict"
+                  ? "unsaved"
+                  : "saved"
+            }
+            omit={UNSUPPORTED_DOCUMENT_COMMANDS}
+            exec={(cmd, value) => { if (editor) execDocumentCommand(editor, cmd, value) }}
+          />
+        </div>
+      )}
 
       {doc.status === "generating" && (
         <div data-document-writing style={S.notice}>Writing this document…</div>
@@ -323,6 +366,9 @@ export function DocumentTab({
             editable={doc.status === "ready"}
             onChange={onChange}
             onBlur={() => void schedulerRef.current?.flush()}
+            onReady={setEditor}
+            // The bar is pinned above the scroll area instead — see the header.
+            hideToolbar
           />
         </>
       )}
@@ -381,6 +427,14 @@ const S: Record<string, React.CSSProperties> = {
   btnPrimary: {
     fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 6,
     border: "none", background: "var(--accent, #179463)", color: "#fff", cursor: "pointer",
+  },
+  // The bar sits above the document and STAYS there: `position: sticky` against
+  // the panel's own scroll container, so scrolling the text does not scroll the
+  // controls away — which is the whole point of moving it out of the editor.
+  toolbar: {
+    position: "sticky", top: 0, zIndex: 5,
+    background: "var(--surface, #fff)",
+    margin: "0 0 10px",
   },
   body: { fontSize: 14, lineHeight: 1.7, color: "var(--ink, #1A1A17)" },
   muted: { fontSize: 13, color: "var(--ink-3, #8C8A84)" },

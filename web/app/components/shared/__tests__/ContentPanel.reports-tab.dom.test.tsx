@@ -238,3 +238,46 @@ describe("ContentPanel — a report being written", () => {
     expect(document.querySelector("[data-testid='reports-generating']")).toBeNull()
   })
 })
+
+// ── A report is a rich document, edited in the panel ────────────────────────
+// It is the same editor and the same toolbar a team document gets — that is
+// what "edit the report in the panel" means, and a report that behaved
+// differently from the document beside it was the report this closes.
+describe("ContentPanel — editing a report", () => {
+  const MD_DOC = {
+    ...ROW,
+    html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
+  }
+
+  it("reads without an editor until editing is asked for", async () => {
+    reportGet.mockResolvedValue(MD_DOC)
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(screen.getByTestId("report-document")).toBeTruthy())
+    // The bar belongs to edit mode: a reader is not shown formatting controls
+    // for a document they are not changing.
+    expect(document.querySelector(".prd-toolbar")).toBeNull()
+    expect(screen.getByTestId("reports-edit-toggle").textContent).toBe("Edit")
+  })
+
+  it("shows the same toolbar the PRD uses once editing", async () => {
+    reportGet.mockResolvedValue(MD_DOC)
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(screen.getByTestId("reports-edit-toggle")).toBeTruthy())
+    await act(async () => { screen.getByTestId("reports-edit-toggle").click() })
+    expect(document.querySelector(".prd-toolbar")).not.toBeNull()
+    expect(screen.getByTestId("reports-edit-toggle").textContent).toBe("Done")
+  })
+
+  it("offers no edit on a legacy self-contained document", async () => {
+    // Those carry their own <head> and <style> and read in a sandboxed iframe:
+    // they own their rendering, so they are shown, not edited.
+    reportGet.mockResolvedValue({
+      ...ROW,
+      html: "<!doctype html><html><head><title>VoC</title></head><body><h1>VoC</h1></body></html>",
+    })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector("iframe")).toBeTruthy())
+    expect(screen.queryByTestId("reports-edit-toggle")).toBeNull()
+    expect(screen.queryByTestId("report-document")).toBeNull()
+  })
+})

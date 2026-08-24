@@ -111,7 +111,10 @@ async def test_project_report_turn_captures_and_attaches(monkeypatch):
 
     assert len(calls["save"]) == 1, "one row, not one per consumer"
     saved = calls["save"][0]
-    assert saved["html"] == _REPORT_BODY
+    # Stored as HTML — a report is a rich document, and the pipelines answer in
+    # markdown, so capture converts once for every reader downstream.
+    assert saved["html"].startswith("<h2>Voice of customer themes</h2>")
+    assert "Onboarding friction" in saved["html"]
     assert saved["company_id"] == "c1"
     assert saved["workspace_id"] is None
     assert saved["conversation_id"] == 5, "attached to the chat it ran in"
