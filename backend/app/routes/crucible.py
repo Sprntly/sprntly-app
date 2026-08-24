@@ -388,6 +388,26 @@ _METRIC_CONVENTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+def _company_context(company_id: str) -> dict:
+    """The company's own prioritisation rubric, if it states one (§10b).
+
+    Read here rather than inside `framework_for` so that function stays pure and
+    testable without a database.
+    """
+    try:
+        from app.db.client import require_client
+
+        rows = (require_client().table("companies")
+                .select("prioritization_framework")
+                .eq("id", company_id).limit(1).execute()).data or []
+        return rows[0] if rows else {}
+    except Exception:  # noqa: BLE001 — no rubric read means RICE, which is the
+        # documented default rather than a degraded state.
+        logger.warning("crucible: could not read the prioritisation rubric for %s",
+                       company_id)
+        return {}
+
+
 def _method_note(goal_text: str) -> str:
     """§6's one sentence: the calculation, stated and editable.
 
@@ -1009,6 +1029,38 @@ def execute_run(
             "label": r.label, "reason": r.reason,
             "stopped_at_stage": r.stopped_at, "claim_ids": list(r.claim_ids),
         } for r in result.rejected]
+
+        # ── Stage 10b + 11. Ordering, then the decision it supports. ───────
+        #
+        # AFTER scoring and reading only what scoring produced (I10). Effort is
+        # derived per candidate and is `None` on every tenant today — nothing
+        # records how long comparable work took — so this normally produces an
+        # unrankable set and a withheld recommendation, both of which SAY why.
+        # That is I7 working, not a gap: a fabricated effort would launder a
+        # guess into an ordering.
+        try:
+            from app.crucible.decide import decide
+            from app.crucible.invariants import derive_effort
+            from app.crucible.prioritise import framework_for, prioritise
+
+            deep = [(f"f-{i}", result.impacts[i], result.confidences[i],
+                     derive_effort([], surface=result.findings[i].statement[:40]))
+                    for i in range(min(result.deep_count, len(result.findings)))]
+            company_row = (runs_db.get(run_id, company_id) or {})
+            prio = prioritise(deep, framework=framework_for(_company_context(company_id)))
+            decision = decide(prio, [
+                {"id": f"f-{i}", "statement": result.findings[i].statement}
+                for i in range(len(result.findings))
+            ])
+            meta = dict(_meta_of(run_id, company_id))
+            meta["prioritisation_v2"] = prio.to_json()
+            meta["decision"] = decision.to_json()
+            runs_db.update(run_id, company_id, prioritisation=meta)
+        except Exception:  # noqa: BLE001 — ordering is a READ over frozen
+            # scores; a failure here must not cost the findings that are
+            # already computed. The report renders without the decision.
+            logger.exception("crucible: prioritisation/decision failed for run %s",
+                             run_id)
 
         runs_db.save_findings(run_id, company_id, rows, ledger)
         runs_db.update(
