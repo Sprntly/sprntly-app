@@ -1457,3 +1457,83 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
     # auditor is not left computing it from the claim count.
     assert p["ungroupable_groups"] == 2, p
     assert p["groups"] == p["themes"] + p["ungroupable_groups"], p
+
+
+
+# ─── §6: the calculation, stated in the same step ───────────────────────────
+
+def test_the_method_note_does_not_promise_what_the_engine_does_not_do(ctx):
+    """§6's sentence has to be TRUE of the run.
+
+    A first version said "I will use your own recorded numbers for whichever
+    metric you name, exactly as they are stored". That is false — `execute_run`
+    reads `kg_signal`, and nothing in the pipeline reads `metric_points`, so no
+    registry number enters the sizing. A method note that misstates the method
+    is the overpromise `plan.py` has been burned by twice, one gate earlier.
+
+    The note is a CONSTANT for every company and goal, deliberately: the
+    mechanism it describes does not vary, so branching on anything would imply
+    the run behaves differently when it does not."""
+    run_id = _start(ctx).json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert note
+    # It must not claim the run consumes stored metric numbers.
+    assert "recorded numbers" not in note
+    assert "exactly as they are stored" not in note
+    # It must say what the run DOES read, and what it reports instead.
+    assert "reads your documents" in note
+    assert "how much of your book" in note
+
+
+def test_nothing_in_the_run_reads_the_metric_registry():
+    """THE CANARY FOR `_method_note`.
+
+    The note tells the user "the analysis reads your documents, tickets and
+    conversations against it, not a metric series". That is true only while
+    nothing in the run reads `metric_points` — and `metric_candidates`' own
+    docstring says the registry "lights up the moment it is populated", so
+    somebody wiring it into sizing is expected. The existing tests assert
+    substrings of the note and would keep passing on a stale string.
+
+    This fails instead, and points at the note."""
+    import pathlib
+    import re
+
+    # THE WHOLE PIPELINE, not one function's body. Greping
+    # `inspect.getsource(execute_run)` was trivially defeated by ordinary
+    # refactoring: a `_size_with_registry(...)` helper defined elsewhere and
+    # called from `execute_run` puts none of these names in `execute_run`'s own
+    # source, and this file already factors work out that way — so the guard
+    # would have been silently defeated by whoever does that work next rather
+    # than by anyone trying to dodge it.
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    watched = [root / "crucible" / f for f in
+               ("pipeline.py", "claims.py", "scoring.py", "cluster.py",
+                "kg_themes.py", "report.py")]
+    watched.append(root / "routes" / "crucible.py")
+
+    offenders = []
+    for path in watched:
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if path.name == "crucible.py" and path.parent.name == "routes":
+            # `_method_note` and the ask's candidate scan legitimately read the
+            # registry; the ANALYSIS must not. Strip the two known-good readers
+            # before looking.
+            text = re.sub(r"def (_method_note|_autosave_document)\b.*?(?=\ndef )",
+                          "", text, flags=re.S)
+            text = text.replace("from app.crucible.metric_candidates import", "")
+        for forbidden in ("metric_points", "list_metric_points",
+                          "distinct_metrics"):
+            if forbidden in text:
+                offenders.append(f"{path.name}: {forbidden}")
+
+    assert not offenders, (
+        f"the analysis now touches the metric registry ({offenders}). "
+        f"`_method_note` promises the run reads your documents, tickets and "
+        f"conversations rather than a metric series — rewrite that sentence "
+        f"before wiring the registry into sizing."
+    )
+

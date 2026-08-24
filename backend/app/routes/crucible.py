@@ -348,6 +348,43 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
+def _method_note(company_id: str) -> str:
+    """§6's one sentence: the calculation, stated and editable.
+
+    A metric NAME is not a definition — "revenue" can be recognised or booked,
+    "active" can mean logged in or took an action, and none of that is visible
+    in the name while all of it resizes every recommendation. §6's rule is to
+    surface the company's own computation, not to reconstruct it or interrogate
+    the user about it, and to state a convention where none is found.
+
+    Nothing in this codebase reads a dbt model or a metric layer yet, AND
+    nothing in the pipeline reads the metric registry either — so there is no
+    computation to surface and only one honest sentence to write: state what
+    the definition will be taken to mean, state that nothing is filled in on
+    the user's behalf, and state what the run actually reads.
+
+    `company_id` is unused and kept so the signature does not have to change
+    when a metric layer does become readable.
+    """
+    # ONE SENTENCE, AND IT HAS TO BE TRUE OF THE RUN. The first version said
+    # "I will use your own recorded numbers for whichever metric you name,
+    # exactly as they are stored — I do not recompute them". That is false:
+    # `execute_run` reads `kg_signal` and nothing in the pipeline reads
+    # `metric_points` at all, so no number from the registry enters the sizing.
+    # A method note that promises the engine's behaviour wrongly is the exact
+    # overpromise `plan.py` has already been burned by twice, arriving one gate
+    # earlier — and here it would be a false statement about METHOD, which is
+    # the thing §6 exists to pin down.
+    return (
+        "This sentence is the whole definition I will work to — what is "
+        "counted, over what population, over what window. I do not recompute "
+        "it and I do not fill in the parts you leave out. The analysis then "
+        "reads your documents, tickets and conversations against it, not a "
+        "metric series, so it reports how much of your book each theme touches "
+        "rather than a movement in this number."
+    )
+
+
 def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
@@ -678,6 +715,14 @@ def execute_run(
              "b": {"source": c.source_b, "definition": c.definition_b}}
                         for c in resolution.conflicts
                     ],
+                    # §6, IN THE SAME STEP. "If no computation is found, state
+                    # the common convention you are assuming for that metric,
+                    # in one sentence, and let them change it." Identity without
+                    # method is README F4's "half of this that gets missed" —
+                    # two teams can point at the same metric name and mean
+                    # recognised versus booked, and none of that is visible in
+                    # the name while all of it resizes every recommendation.
+                    "method_note": _method_note(company_id),
                 },
             )
             _remember(run_id, resolution)
