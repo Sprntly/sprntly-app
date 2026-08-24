@@ -257,4 +257,19 @@ describe("mapSyncFailure", () => {
     expect(mapSyncFailure(null)).toBe("Sprntly could not reach Zoom")
     expect(mapSyncFailure("")).toBe("Sprntly could not reach Zoom")
   })
+
+  it("blames the AI provider, not Zoom, when the LLM account is out of credits", () => {
+    // The backend stamps llm_errors.user_message(PROVIDER_LIMIT) into
+    // last_sync_error when kg_ingest aborts a sync on a dead LLM account. That
+    // sentence contains the words "rate limited", so a looser `includes("rate")`
+    // check ahead of this branch would report "Zoom rate-limited the sync" for
+    // a billing problem that has nothing to do with Zoom.
+    const providerLimit =
+      "Sprntly's AI provider has hit a usage limit — the account is out of " +
+      "credits or rate limited, so requests can't be processed right now. An " +
+      "admin needs to top up or raise the limit; nothing you did caused this, " +
+      "and nothing was lost."
+    expect(mapSyncFailure(providerLimit)).not.toBe("Zoom rate-limited the sync")
+    expect(mapSyncFailure(providerLimit)).toContain("AI provider")
+  })
 })

@@ -208,15 +208,25 @@ export function lastSyncState(
  * A stamped sync error → a sentence a person can act on.
  *
  * The stored string is whatever the puller or the provider produced, and it is
- * not copy: it can be a stack-shaped fragment or a raw provider message. Two
- * known shapes get real guidance and everything else degrades to a neutral
- * phrase rather than being printed verbatim.
+ * not copy: it can be a stack-shaped fragment or a raw provider message. Known
+ * shapes get real guidance and everything else degrades to a neutral phrase
+ * rather than being printed verbatim.
+ *
+ * ORDER MATTERS. The AI-provider branch is checked BEFORE the rate-limit one:
+ * the backend now stamps `llm_errors.user_message(PROVIDER_LIMIT)` here when a
+ * sync aborts because the LLM account is out of credits, and that sentence
+ * contains the words "rate limited" — so the looser `includes("rate")` test
+ * below would otherwise blame Zoom for a billing problem that has nothing to
+ * do with Zoom.
  */
 export function mapSyncFailure(raw: string | null | undefined): string {
   const text = (raw || "").toLowerCase()
   if (!text) return "Sprntly could not reach Zoom"
   if (text.includes("reconnect") || text.includes("authorization expired")) {
     return "Zoom access expired and needs reconnecting"
+  }
+  if (text.includes("ai provider") || text.includes("out of credits")) {
+    return "Sprntly's AI provider hit a usage limit — the sync stopped early and will resume once it is topped up"
   }
   if (text.includes("rate") || text.includes("429")) {
     return "Zoom rate-limited the sync"

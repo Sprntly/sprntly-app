@@ -17,6 +17,14 @@ extracts ONLY records not seen before; hashes are recorded per batch that
 extracted successfully, so a failed batch is retried on the next sync. The
 ledger is advisory and fails open — any ledger error degrades to extracting
 everything, never to skipping unextracted data.
+
+ONE BOUND on that retry-forever property: a provider LIMIT error (out of
+credits, over quota) ABORTS the run instead of being isolated per batch.
+Per-batch isolation is right for one bad record and exactly wrong for a dead
+account — every remaining batch fails identically, and since none of them
+reach the ledger, the next sync re-attempts the ENTIRE corpus. The failure
+compounds rather than decaying. See the guard in `sync_provider`'s batch loop
+for the measured cost of not having it.
 """
 from __future__ import annotations
 
@@ -177,6 +185,10 @@ def sync_provider(
         provider, enterprise_id, len(fresh), len(records),
         totals["deduped"],
     )
+    # Lazy — keeps app.llm_errors off this module's import path, matching the
+    # lazy-import style synthesis_brief uses for the same classifier.
+    from app.llm_errors import PROVIDER_LIMIT, classify_provider_error, user_message
+
     errors: list[str] = []
     for i, batch in enumerate(_batches(fresh)):
         text = "\n\n".join(r.render() for r in batch)
@@ -212,6 +224,42 @@ def sync_provider(
                 enterprise_id, provider, [hashes[id(rec)] for rec in batch]
             )
         except Exception as e:  # noqa: BLE001 — error-isolation per batch
+            # A dead account is not a per-batch problem. Isolating it makes
+            # every REMAINING batch fail identically, and because a failed
+            # batch deliberately keeps its hashes out of the ledger (see the
+            # module docstring), the whole corpus is re-attempted on the very
+            # next sync — so the failure does not decay, it repeats in full
+            # every tick. `app.synthesis_brief._seed_from_corpus` already
+            # learned this on the corpus path and aborts there for the same
+            # reason; this is the connector path, which was still isolating.
+            #
+            # Measured before this guard: one company whose BYOK key ran out
+            # of credits drove ~57k failed calls a day across
+            # extract_document + ingest_triage (98.6% of ALL extract_document
+            # traffic), climbing from ~8k/day as its corpus grew. The tokens
+            # were free — a 400 bills nothing — but each attempt still took a
+            # slot in the process-wide LLM concurrency gate (cap 6) that every
+            # interactive request queues behind.
+            #
+            # Breaking rather than raising keeps the counts and the ledger
+            # progress from the batches that DID succeed.
+            #
+            # `errors` is what `auto_sync._run_sync` stamps into
+            # last_sync_error, and `routes/connectors.py` serves that straight
+            # to the connector UI -- so this string lands on a CUSTOMER's
+            # screen. It is therefore the fixed sentence from `llm_errors`,
+            # never `str(e)`: a provider error body is untrusted output that
+            # carries request ids, org names, key prefixes and billing detail.
+            # The raw text goes to the log (warning below) and stops there.
+            if classify_provider_error(e) == PROVIDER_LIMIT:
+                logger.warning(
+                    "kg-ingest: aborting %s sync for %s after a provider limit "
+                    "error on batch %d — the remaining batches would fail "
+                    "identically (%d batches extracted first): %s",
+                    provider, enterprise_id, i, totals["batches"], e,
+                )
+                errors.append(user_message(PROVIDER_LIMIT))
+                break
             logger.exception("extraction failed: %s batch %d", provider, i)
             errors.append(f"batch {i}: {e}")
     return {**totals, "errors": errors}
