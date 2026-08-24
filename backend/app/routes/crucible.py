@@ -357,28 +357,31 @@ def _method_note(company_id: str) -> str:
     surface the company's own computation, not to reconstruct it or interrogate
     the user about it, and to state a convention where none is found.
 
-    Nothing in this codebase reads a dbt model or a metric layer yet, so the
-    honest branch is the second one: say what is being assumed, in one sentence,
-    and let the user overwrite it in the box directly beneath.
-    """
-    try:
-        from app.db.metric_points import distinct_metrics
+    Nothing in this codebase reads a dbt model or a metric layer yet, AND
+    nothing in the pipeline reads the metric registry either — so there is no
+    computation to surface and only one honest sentence to write: state what
+    the definition will be taken to mean, state that nothing is filled in on
+    the user's behalf, and state what the run actually reads.
 
-        if distinct_metrics(company_id):
-            return (
-                "I will use your own recorded numbers for whichever metric you "
-                "name, exactly as they are stored — I do not recompute them. "
-                "If the calculation behind them is not the one you steer by, "
-                "say so in the box and I will use your wording instead."
-            )
-    except Exception:  # noqa: BLE001 — fall through to the no-registry wording.
-        logger.warning("crucible: could not read the metric registry for %s",
-                       company_id)
+    `company_id` is unused and kept so the signature does not have to change
+    when a metric layer does become readable.
+    """
+    # ONE SENTENCE, AND IT HAS TO BE TRUE OF THE RUN. The first version said
+    # "I will use your own recorded numbers for whichever metric you name,
+    # exactly as they are stored — I do not recompute them". That is false:
+    # `execute_run` reads `kg_signal` and nothing in the pipeline reads
+    # `metric_points` at all, so no number from the registry enters the sizing.
+    # A method note that promises the engine's behaviour wrongly is the exact
+    # overpromise `plan.py` has already been burned by twice, arriving one gate
+    # earlier — and here it would be a false statement about METHOD, which is
+    # the thing §6 exists to pin down.
     return (
-        "Nothing here carries a stored calculation for this goal, so I will "
-        "take the sentence below as the whole definition — what is counted, "
-        "over what population, over what window. Anything you leave out, I "
-        "will not assume."
+        "This sentence is the whole definition I will work to — what is "
+        "counted, over what population, over what window. I do not recompute "
+        "it and I do not fill in the parts you leave out. The analysis then "
+        "reads your documents, tickets and conversations against it, not a "
+        "metric series, so it reports how much of your book each theme touches "
+        "rather than a movement in this number."
     )
 
 

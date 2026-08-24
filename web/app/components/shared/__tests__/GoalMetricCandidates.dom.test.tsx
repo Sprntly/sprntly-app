@@ -11,7 +11,11 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
-import { GoalMetricCandidates, seedFromCandidate } from "../GoalMetricCandidates"
+import {
+  GoalMetricCandidates,
+  MAX_DEFINITION_CHARS,
+  seedFromCandidate,
+} from "../GoalMetricCandidates"
 
 afterEach(cleanup)
 
@@ -127,5 +131,15 @@ describe("the seed is deliberately incomplete", () => {
     expect(seed.trim().endsWith(".")).toBe(true)
     expect(seed.toLowerCase()).not.toContain("means")
     expect(seed.toLowerCase()).not.toContain("defined as")
+  })
+})
+
+describe("the append is bounded", () => {
+  it("mirrors the API's definition cap so a 422 cannot strand the panel", () => {
+    // `ConfirmGoal.definition_text` is max_length=4000 and a 422 on confirm is
+    // unrecoverable here — the run stays awaiting_confirmation and the user
+    // retries the same text forever. Same failure the plan gate guards for
+    // hypotheses.
+    expect(MAX_DEFINITION_CHARS).toBe(4000)
   })
 })

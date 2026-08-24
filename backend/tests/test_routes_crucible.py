@@ -1666,3 +1666,72 @@ def test_an_autosave_failure_never_fails_a_finished_run(ctx, monkeypatch):
     row = ctx.client.get(f"/v1/crucible/{run_id}").json()
     assert row["status"] == "ready", f"a convenience write failed the run: {row}"
     assert not row.get("artifact_id")
+
+
+def test_the_method_note_does_not_promise_what_the_engine_does_not_do(ctx):
+    """§6's sentence has to be TRUE of the run.
+
+    The first version said "I will use your own recorded numbers for whichever
+    metric you name, exactly as they are stored". It is false — `execute_run`
+    reads `kg_signal` and nothing in the pipeline reads `metric_points`, so no
+    registry number enters the sizing. A method note that misstates the method
+    is the overpromise `plan.py` has been burned by twice, one gate earlier."""
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx).json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert note
+    # It must not claim the run consumes the registry's numbers.
+    assert "recorded numbers" not in note
+    assert "exactly as they are stored" not in note
+    # It must say what the run DOES read, and what it reports instead.
+    assert "reads your documents" in note
+    assert "how much of your book" in note
+
+
+def test_the_method_note_is_the_same_whether_or_not_a_registry_exists(ctx):
+    """There is only one honest sentence, because nothing in the pipeline reads
+    the registry either way. Branching on its presence implied the run behaved
+    differently when it does not."""
+    empty = ctx.client.get(
+        f"/v1/crucible/{_start(ctx).json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+    filled = ctx.client.get(
+        f"/v1/crucible/{_start(ctx).json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    assert empty == filled
+
+
+def test_the_panel_and_the_api_agree_on_the_definition_cap():
+    """CROSS-BOUNDARY, and the precedent is two tests above this one. The panel
+    refuses an append past its own constant; if that constant drifts from
+    `ConfirmGoal.definition_text`'s `max_length`, the panel starts posting text
+    the API rejects with a 422 it cannot recover from."""
+    import pathlib
+    import re
+
+    panel = (pathlib.Path(__file__).resolve().parents[2]
+             / "web/app/components/shared/GoalMetricCandidates.tsx")
+    if not panel.exists():
+        pytest.fail(f"{panel} is gone — move this contract test with it")
+    m = re.search(r"MAX_DEFINITION_CHARS\s*=\s*([\d_]+)", panel.read_text())
+    if not m:
+        pytest.fail("MAX_DEFINITION_CHARS is gone from the panel — update this test")
+
+    from app.routes.crucible import ConfirmGoal
+
+    # The field carries MinLen and MaxLen as separate metadata entries, in no
+    # guaranteed order — pick the one that actually declares a maximum.
+    caps = [getattr(c, "max_length", None)
+            for c in ConfirmGoal.model_fields["definition_text"].metadata]
+    api_cap = next((c for c in caps if c is not None), None)
+    assert api_cap is not None, "ConfirmGoal.definition_text declares no maximum"
+    assert int(m.group(1).replace("_", "")) == api_cap, (
+        f"the panel's cap ({m.group(1)}) and the API's max_length ({api_cap}) "
+        f"have drifted")

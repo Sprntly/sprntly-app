@@ -41,7 +41,7 @@ import {
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
-import { GoalMetricCandidates } from "./GoalMetricCandidates"
+import { GoalMetricCandidates, MAX_DEFINITION_CHARS } from "./GoalMetricCandidates"
 import { GoalReportDocument } from "./GoalReportDocument"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
@@ -366,7 +366,17 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
             // definition with no undo (`touched` also disables the poll's
             // restore), which is §10's "restating the definition in different
             // words" with the paraphrase supplied by us.
-            setDefinition((prev) => (prev.trim() ? `${prev.trim()} ${seed}` : seed))
+            //
+            // BOUNDED, because appending can run past the API's cap.
+            // `ConfirmGoal.definition_text` is `max_length=4000`, and a 422 on
+            // confirm is unrecoverable from this panel — the run stays
+            // `awaiting_confirmation` and the user retries the same text
+            // forever. Same failure the plan gate already guards for
+            // hypotheses; caught here, where the click can simply be ignored.
+            setDefinition((prev) => {
+              const next = prev.trim() ? `${prev.trim()} ${seed}` : seed
+              return next.length > MAX_DEFINITION_CHARS ? prev : next
+            })
           }}
         />
         <p className="ga-ask">
@@ -391,11 +401,18 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
           aria-label="What this goal means"
           value={definition}
           rows={4}
+          maxLength={MAX_DEFINITION_CHARS}
           onChange={(e) => {
             touched.current = true
             setDefinition(e.target.value)
           }}
         />
+        {definition.length >= MAX_DEFINITION_CHARS ? (
+          <p className="ga-doc-note" data-testid="goal-definition-at-cap">
+            That is as long as a definition can be ({MAX_DEFINITION_CHARS}{" "}
+            characters). Shorten it before adding anything else.
+          </p>
+        ) : null}
         <button
           type="button"
           className="ga-confirm"

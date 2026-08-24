@@ -40,6 +40,11 @@ import type { GoalMetricCandidate, GoalAskSearched } from "../../lib/api"
 
 const n = (v: number) => v.toLocaleString()
 
+/** Mirrors `ConfirmGoal.definition_text`'s `max_length=4000` in
+ *  `backend/app/routes/crucible.py`. One place it can drift, stated here rather
+ *  than discovered as a 422 the panel cannot recover from. */
+export const MAX_DEFINITION_CHARS = 4_000
+
 /** The sentence a pick seeds into the box. Deliberately incomplete — it names
  *  the metric and its live value and then stops, because the parts a definition
  *  needs (what is counted, over what population, over what window) are exactly
