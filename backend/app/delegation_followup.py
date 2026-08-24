@@ -42,6 +42,7 @@ from app.delegation_cadence import (
     should_escalate,
 )
 from app.delegation_followup_email import send_followup_email
+from app.delegation_status_ingest import notify_requester_task_completed
 from app.llm import DEFAULT_MODEL, call_json
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
@@ -255,6 +256,10 @@ def _process_one(row: dict, *, now: datetime, tz_map: dict[str, str], summary: d
     if row.get("pending_done_since"):
         delegation_events_db.record_event(
             delegation_id=delegation_id, event="completed", actor_user_id=assigner_user_id,
+        )
+        notify_requester_task_completed(
+            project_id, delegation_id,
+            assignee_user_id=assignee_user_id, task_summary=task_summary,
         )
         delegation_followups_db.upsert_followup(delegation_id, pending_done_since=None)
         summary["finalized"] += 1
