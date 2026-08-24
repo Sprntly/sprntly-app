@@ -139,7 +139,7 @@ export interface ChatIntentExecutors {
   /** Start a Goal Analysis run and open its panel. OPTIONAL, so a surface that
    *  has no panel to open (the brief chat, the AI bar) falls through to
    *  `onAnswer` rather than silently swallowing the goal. */
-  onAnalyseGoal?: (goalText: string) => void
+  onAnalyseGoal?: (goalText: string) => boolean
 }
 
 export type DispatchChatIntentResult = { handled: true } | { handled: false }
@@ -199,9 +199,12 @@ export function dispatchChatIntent(
     // a run with no goal text has nothing to establish, and `onAnswer` can ask
     // for one where a blank run cannot.
     case "analyse_goal":
+      // `handled` follows what the executor DID, not merely that it exists.
+      // `handled: true` rolls back the optimistic turn and returns, so
+      // reporting it for a call that did nothing would delete the user's
+      // message and start no run.
       if (executors.onAnalyseGoal && envelope.task) {
-        executors.onAnalyseGoal(envelope.task)
-        return { handled: true }
+        if (executors.onAnalyseGoal(envelope.task)) return { handled: true }
       }
       executors.onAnswer()
       return { handled: false }

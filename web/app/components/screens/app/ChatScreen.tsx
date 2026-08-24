@@ -3808,8 +3808,18 @@ export function ChatScreen() {
       // A REF, because `startGoalAnalysis` is declared several hundred lines
       // below this call and a direct reference is a use-before-declaration.
       // The wrapper is stable, so the hook never re-runs on its account.
-      startGoalAnalysis: (goalText: string) =>
-        startGoalAnalysisRef.current?.(goalText),
+      // Reports whether it ACTED. Every other optional executor slot keeps
+      // "the slot exists" and "the slot will act" together; optional-chaining
+      // to a silent no-op separates them, and `handled: true` on a no-op would
+      // roll back the user's turn and do nothing with it. Not reachable today
+      // — the ref is written during the same render that declares the callback
+      // — but the dispatcher should not have to assume that.
+      startGoalAnalysis: (goalText: string) => {
+        const start = startGoalAnalysisRef.current
+        if (!start) return false
+        start(goalText)
+        return true
+      },
       tabsRef,
       activeTabId,
       activeTabIdRef,
@@ -4716,11 +4726,13 @@ export function ChatScreen() {
     // hides its own restored analysis on the next visit.
   }, [activeConvId, activeTabId, setContent, openContentPanel, showToast])
 
-  // Republished during render, not in an effect, because the dispatcher can
-  // fire on the SAME render that a new `startGoalAnalysis` closure is created
-  // — an effect would leave it one render stale and a goal typed right after a
-  // tab switch would run against the previous tab. The write is idempotent, so
-  // a double render (StrictMode, concurrent) stores the same value twice.
+  // Republished on every render so the dispatcher always calls the current
+  // closure. An effect would work equally well here — `dispatchChatIntent`
+  // runs in `submitAsk`'s continuation after an await, so it is always past
+  // commit — and the only reason this is a bare assignment is that there is
+  // nothing to clean up and no dependency list to keep honest. The write is
+  // idempotent, so a discarded or doubled render (StrictMode, concurrent)
+  // stores the same value twice and nothing observes the difference.
   startGoalAnalysisRef.current = startGoalAnalysis
 
   // Goal mode intercepts the composer submit BEFORE the ask path: a run takes

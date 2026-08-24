@@ -481,6 +481,17 @@ describe("a goal typed into chat reaches Goal Analysis", () => {
     expect(ex.onAnswer).toHaveBeenCalled()
   })
 
+  it("answers when the executor declines to act", () => {
+    // `handled` follows what the executor DID. The panel slot optional-chains
+    // through a ref; if that ref were ever null the call would be a silent
+    // no-op, and reporting `handled: true` would roll back the user's turn and
+    // start nothing — the message would simply vanish.
+    const ex = { ...executors(), onAnalyseGoal: () => false }
+    const out = dispatchChatIntent(goal(), ctx(), ex)
+    expect(out).toEqual({ handled: false })
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
   it("answers rather than starting a run with no goal text", () => {
     const ex = { ...executors(), onAnalyseGoal: vi.fn() }
     const out = dispatchChatIntent(

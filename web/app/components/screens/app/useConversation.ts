@@ -121,8 +121,10 @@ export interface MainConversationAdapter {
   threadContextFor: (key: string) => string
   /** Start a Goal Analysis run for a goal typed into chat and open its panel.
    *  OPTIONAL: a surface without the module (or without the panel) omits it and
-   *  a goal falls through to the ask path rather than vanishing. */
-  startGoalAnalysis?: (goalText: string) => void | Promise<void>
+   *  a goal falls through to the ask path rather than vanishing.
+   *  Returns whether it ACTED, so the dispatcher never reports `handled` for
+   *  a call that did nothing. */
+  startGoalAnalysis?: (goalText: string) => boolean
   openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
   postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
   markTicketSetAutoOpened: (key: string) => void
@@ -696,9 +698,25 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               // `startGoalAnalysis` already opens the panel on the RUN ID
               // rather than on a result, because the first thing a run does is
               // stop and ask what the goal means.
+              //
+              // `settlePendingSend()` like every sibling executor, and it is
+              // not optional: `rollbackOptimistic` clears the busy flag and the
+              // optimistic turn but deliberately leaves `pendingSend` set, and
+              // both composer submit paths early-return on `if (pendingSend)`.
+              // Without this call the first goal typed into a tab left the
+              // placeholder bubble on screen and killed the composer for the
+              // rest of the session — every later message silently swallowed
+              // until a reload.
+              //
+              // `goalText` is always non-empty (the dispatcher guards on it),
+              // so it is passed straight through rather than through a fallback
+              // that reads like a verified guard and is really dead code.
               ...(startGoalAnalysis
-                ? { onAnalyseGoal: (goalText: string) =>
-                      void startGoalAnalysis(goalText || trimmed) }
+                ? { onAnalyseGoal: (goalText: string) => {
+                      const started = startGoalAnalysis(goalText)
+                      if (started) settlePendingSend()
+                      return started
+                    } }
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {
