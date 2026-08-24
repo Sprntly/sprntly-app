@@ -358,6 +358,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
             Edit it if that is not what you meant.
           </p>
         ) : null}
+        {/* §6: the calculation, stated in the SAME step and editable. Identity
+            without method is F4's "half of this that gets missed". */}
+        {run.prioritisation?.method_note ? (
+          <p className="ga-doc-note" data-testid="goal-method-note">
+            {run.prioritisation.method_note}
+          </p>
+        ) : null}
         <textarea
           className="ga-definition"
           aria-label="What this goal means"

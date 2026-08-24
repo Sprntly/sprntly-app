@@ -1457,3 +1457,173 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
     # auditor is not left computing it from the claim count.
     assert p["ungroupable_groups"] == 2, p
     assert p["groups"] == p["themes"] + p["ungroupable_groups"], p
+
+
+
+# ─── §6: the calculation, stated in the same step ───────────────────────────
+
+def test_the_method_note_does_not_promise_what_the_engine_does_not_do(ctx):
+    """§6's sentence has to be TRUE of the run.
+
+    A first version said "I will use your own recorded numbers for whichever
+    metric you name, exactly as they are stored". That is false — `execute_run`
+    reads `kg_signal`, and nothing in the pipeline reads `metric_points`, so no
+    registry number enters the sizing. A method note that misstates the method
+    is the overpromise `plan.py` has been burned by twice, one gate earlier.
+
+    The note is a CONSTANT for every company and goal, deliberately: the
+    mechanism it describes does not vary, so branching on anything would imply
+    the run behaves differently when it does not."""
+    run_id = _start(ctx).json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert note
+    # It must not claim the run consumes stored metric numbers.
+    assert "recorded numbers" not in note
+    assert "exactly as they are stored" not in note
+    # It must say what the run DOES read, and what it reports instead.
+    assert "reads your documents" in note
+    assert "how much of your book" in note
+
+
+def test_nothing_in_the_run_reads_the_metric_registry():
+    """THE CANARY FOR `_method_note`.
+
+    The note tells the user "the analysis reads your documents, tickets and
+    conversations against it, not a metric series". That is true only while
+    nothing in the run reads `metric_points` — and `metric_candidates`' own
+    docstring says the registry "lights up the moment it is populated", so
+    somebody wiring it into sizing is expected. The existing tests assert
+    substrings of the note and would keep passing on a stale string.
+
+    This fails instead, and points at the note."""
+    import pathlib
+    import re
+
+    # THE WHOLE PIPELINE, not one function's body. Greping
+    # `inspect.getsource(execute_run)` was trivially defeated by ordinary
+    # refactoring: a `_size_with_registry(...)` helper defined elsewhere and
+    # called from `execute_run` puts none of these names in `execute_run`'s own
+    # source, and this file already factors work out that way — so the guard
+    # would have been silently defeated by whoever does that work next rather
+    # than by anyone trying to dodge it.
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    watched = [root / "crucible" / f for f in
+               ("pipeline.py", "claims.py", "scoring.py", "cluster.py",
+                "kg_themes.py", "report.py")]
+    watched.append(root / "routes" / "crucible.py")
+
+    offenders = []
+    for path in watched:
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if path.name == "crucible.py" and path.parent.name == "routes":
+            # `_method_note` and the ask's candidate scan legitimately read the
+            # registry; the ANALYSIS must not. Strip the two known-good readers
+            # before looking.
+            text = re.sub(r"def (_method_note|_autosave_document)\b.*?(?=\ndef )",
+                          "", text, flags=re.S)
+            text = text.replace("from app.crucible.metric_candidates import", "")
+        for forbidden in ("metric_points", "list_metric_points",
+                          "distinct_metrics"):
+            if forbidden in text:
+                offenders.append(f"{path.name}: {forbidden}")
+
+    assert not offenders, (
+        f"the analysis now touches the metric registry ({offenders}). "
+        f"`_method_note` promises the run reads your documents, tickets and "
+        f"conversations rather than a metric series — rewrite that sentence "
+        f"before wiring the registry into sizing."
+    )
+
+
+
+def test_the_ask_and_the_method_note_do_not_repeat_each_other(ctx):
+    """They render back to back on the same screen.
+
+    Both originally ended with "what is counted, over what population, over
+    what window" — the identical clause in consecutive paragraphs, which is the
+    exact redundancy the ask rewrite exists to remove, reintroduced one element
+    lower. The ask asks for the parts; the note says what will be done with
+    them."""
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    ask, note = meta["ask"], meta["method_note"]
+
+    # The ask owns the instruction.
+    assert "what is counted" in ask.lower()
+    # The note must not restate it.
+    assert "what is counted" not in note.lower()
+
+    # And no long phrase should appear in both. Cheap n-gram overlap check, so
+    # this catches the next accidental echo rather than only this one.
+    def grams(text: str, n: int = 6) -> set[str]:
+        words = [w.strip(".,:;—\"'") for w in text.lower().split()]
+        return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+    shared = grams(ask) & grams(note)
+    assert not shared, f"ask and method note share phrasing: {sorted(shared)[:3]}"
+
+
+# ─── §6: the convention, stated per metric and correctable ───────────────────
+
+def test_the_method_note_states_the_convention_for_the_metric_named(ctx):
+    """§6: "If no computation is found, state the common convention you are
+    assuming for that metric, in one sentence, and let them change it."
+
+    An earlier version answered a different question — what the ANALYSIS reads
+    — while citing §6 and F4 ("two teams both say revenue and mean recognised
+    versus booked") as its justification. True sentence, wrong question, §6's
+    citation on it."""
+    run_id = _start(ctx, goal="reduce customer churn").json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    # It names the fork it is choosing, because the fork is what resizes every
+    # recommendation.
+    assert "logo churn" in note.lower()
+    assert "revenue churn" in note.lower()
+    # And it is offered for correction, not asserted.
+    assert "say otherwise" in note.lower()
+
+
+def test_the_convention_follows_the_goal_not_the_company(ctx):
+    """Keyed on the GOAL's words. A per-company convention would be the
+    cross-customer contamination README F11 bars."""
+    churn = ctx.client.get(
+        f"/v1/crucible/{_start(ctx, goal='reduce churn').json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+    revenue = ctx.client.get(
+        f"/v1/crucible/{_start(ctx, goal='grow revenue').json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    assert "logo churn" in churn.lower()
+    assert "recognised" in revenue.lower() and "booked" in revenue.lower()
+    assert churn != revenue, "the convention must follow the metric named"
+
+
+def test_an_unrecognised_goal_gets_no_invented_convention(ctx):
+    """§10 forbids inferring a definition. Where the goal names no metric family
+    there is no convention to state, and making one up would be exactly that."""
+    run_id = _start(ctx, goal="make the widget frobnicate better").json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert "I will read" not in note, f"invented a convention: {note}"
+    # It still says what the run does, which is what it always was.
+    assert "reads your documents" in note
+
+
+def test_the_convention_never_reaches_a_definition_on_its_own(ctx):
+    """It is an assumption offered for correction. Nothing here may end up in
+    `crucible_goal_definitions` unless the user leaves it in their own text."""
+    run_id = _start(ctx, goal="reduce customer churn").json()["id"]
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "accounts that cancel in a quarter"})
+
+    from app.db.client import require_client
+
+    rows = (require_client().table("crucible_goal_definitions")
+            .select("definition_text").execute()).data or []
+    for r in rows:
+        assert "I will read" not in (r.get("definition_text") or ""), (
+            "the convention leaked into a stored definition")

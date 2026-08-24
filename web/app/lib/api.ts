@@ -765,6 +765,8 @@ export type GoalRunDetail = GoalRun & {
     proposed_definition?: string
     proposed_source?: string | null
     conflicts?: unknown[]
+    /** §6: the calculation being assumed, in one sentence, editable. */
+    method_note?: string
     plan?: GoalRunPlan
     progress?: GoalRunProgress
   }
