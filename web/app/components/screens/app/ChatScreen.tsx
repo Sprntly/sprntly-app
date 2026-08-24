@@ -3809,17 +3809,13 @@ export function ChatScreen() {
       // A REF, because `startGoalAnalysis` is declared several hundred lines
       // below this call and a direct reference is a use-before-declaration.
       //
-      // Reports whether it ACTED. Every other optional executor slot keeps
-      // "the slot exists" and "the slot will act" together; optional-chaining
-      // to a silent no-op separates them, and `handled: true` on a no-op would
-      // roll back the user's turn and do nothing with it. Not reachable today
-      // — the ref is written during the same render that declares the callback
-      // — but the dispatcher should not have to assume that.
+      // The slot must exist unconditionally and must ACT, because the
+      // dispatcher decides `handled` from presence alone (its peek pass stubs
+      // every body to a no-op, so a return value cannot be read). The ref is
+      // written during the same render that declares the callback, above any
+      // interaction, so it is never null when this runs.
       startGoalAnalysis: (goalText: string) => {
-        const start = startGoalAnalysisRef.current
-        if (!start) return false
-        start(goalText)
-        return true
+        startGoalAnalysisRef.current?.(goalText)
       },
       tabsRef,
       activeTabId,

@@ -139,7 +139,7 @@ export interface ChatIntentExecutors {
   /** Start a Goal Analysis run and open its panel. OPTIONAL, so a surface that
    *  has no panel to open (the brief chat, the AI bar) falls through to
    *  `onAnswer` rather than silently swallowing the goal. */
-  onAnalyseGoal?: (goalText: string) => boolean
+  onAnalyseGoal?: (goalText: string) => void
 }
 
 export type DispatchChatIntentResult = { handled: true } | { handled: false }
@@ -199,12 +199,18 @@ export function dispatchChatIntent(
     // a run with no goal text has nothing to establish, and `onAnswer` can ask
     // for one where a blank run cannot.
     case "analyse_goal":
-      // `handled` follows what the executor DID, not merely that it exists.
-      // `handled: true` rolls back the optimistic turn and returns, so
-      // reporting it for a call that did nothing would delete the user's
-      // message and start no run.
+      // `handled` follows the executor's PRESENCE, never its return value, and
+      // that is load-bearing rather than lazy. `useConversation` calls this
+      // function TWICE: first as a side-effect-free PEEK with every executor
+      // body swapped for `() => {}`, and only if that peek says `handled` does
+      // it roll back the optimistic turn and dispatch for real. A no-op stub
+      // returns `undefined`, so any case deciding `handled` from a return value
+      // reports false on the peek, never reaches the real dispatch, and is
+      // silently inert — which is exactly what happened when this case was
+      // briefly written that way.
       if (executors.onAnalyseGoal && envelope.task) {
-        if (executors.onAnalyseGoal(envelope.task)) return { handled: true }
+        executors.onAnalyseGoal(envelope.task)
+        return { handled: true }
       }
       executors.onAnswer()
       return { handled: false }

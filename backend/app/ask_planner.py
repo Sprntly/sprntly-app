@@ -1639,7 +1639,12 @@ def _build_input(
     document_block: str = "",
     template_block: str = "",
     open_prd_block: str = "",
-    goal_analysis_available: bool = True,
+    # DEFAULTS CLOSED, like the feature it describes. A default of True means
+    # any caller that forgets the argument silently offers the action to a
+    # workspace that does not have it — fail-open plumbing under a fail-closed
+    # gate. `plan()` always passes the real value; every other caller (tests,
+    # future ones) gets the safe answer for free.
+    goal_analysis_available: bool = False,
 ) -> str:
     """The uncached half of the call, assembled in ASK_PLANNER_PROMPT.md §3's
     order: date, company skills, company formats, connected sources,
