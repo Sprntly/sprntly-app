@@ -203,6 +203,10 @@ def llm_call(
     temperature: Optional[float] = None,
     on_delta=None,
     batch: bool = False,
+    # How long to wait for a batch before cancelling it and running the call
+    # live. None takes app.llm_batch.DEFAULT_DEADLINE_S. A caller with a real
+    # delivery slot (the brief's 3h GENERATION_LEAD) passes its own.
+    batch_deadline_s: Optional[float] = None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -304,6 +308,7 @@ def llm_call(
                 # is identical, which is why the switch lives here rather than
                 # in a parallel code path.
                 batch=batch, batch_label=f"{agent}.{purpose}",
+                batch_deadline_s=batch_deadline_s,
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
                 cache_ttl=cache_ttl,
@@ -322,6 +327,7 @@ def llm_call(
                 # refuses and falls back on — threaded anyway so `batch=True`
                 # is never a silent no-op on this branch.
                 batch=batch, batch_label=f"{agent}.{purpose}",
+                batch_deadline_s=batch_deadline_s,
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 user_cacheable_prefix=user_cacheable_prefix,
                 cache_ttl=cache_ttl,

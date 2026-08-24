@@ -467,6 +467,19 @@ def run_synthesis(
     dataset_slug: str,
     agent: str = "synthesis",
     deliver: bool = True,
+    # Half-price Message Batches, for the SCHEDULED callers only. The brief has
+    # a three-hour GENERATION_LEAD before delivery, so minutes of batch latency
+    # are free there -- but `routes/synthesis.py POST /brief` and
+    # `routes/brief.py` are synchronous user-facing routes where a person is
+    # watching a spinner, so this defaults OFF and only the scheduler opts in.
+    batch: bool = False,
+    # How long to wait before cancelling the batch and running the call live.
+    # CALLER-SUPPLIED, because the right bound depends on what the caller is
+    # doing: the brief tick generates ONE company 3h before delivery and can
+    # afford 45 minutes, while the all-company cycles walk 21 tenants
+    # SEQUENTIALLY, where a long per-company bound multiplies into hours. They
+    # leave this None and take app.llm_batch's shorter default.
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Generate + persist a KG-driven brief. Returns the brief payload.
 
@@ -643,6 +656,13 @@ def run_synthesis(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_top_insights",
         model=DEEP_MODEL,
+        # This is the single most expensive call in the product (~$486/mo of a
+        # ~$2,731/mo run-rate: opus, a 32k-token method block, one call per
+        # company per period), and when nothing is waiting on it it is also the
+        # best candidate for the 50% batch discount. Whatever the bound, the
+        # seam cancels the batch and runs the call live when it expires, so a
+        # slow batch can never make a brief miss its delivery slot.
+        batch=batch, batch_deadline_s=batch_deadline_s,
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
         input=(strategic + roadmap_block + bizctx_block + skill_request
                + "\n\nCANDIDATE EVIDENCE (for the structured render fields):\n"

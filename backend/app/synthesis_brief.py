@@ -482,7 +482,9 @@ def generate_all_synthesis_briefs() -> None:
         if not slug:
             continue
         try:
-            generate_brief_for(slug)
+            # Startup/background pass: nobody is waiting, so take the
+            # half-price batch path.
+            generate_brief_for(slug, batch=True)
             warm_synthesis_drilldowns(slug)
         except EmptyKnowledgeGraphError:
             # Benign: this company simply has no themes/signals yet (nothing
@@ -496,7 +498,14 @@ def generate_all_synthesis_briefs() -> None:
 
 
 def generate_brief_for(
-    company_id_or_slug: str, *, deliver: bool = True, force: bool = False
+    company_id_or_slug: str, *, deliver: bool = True, force: bool = False,
+    # Passed straight to run_synthesis. OFF by default because two user-facing
+    # routes reach this function (`routes/brief.py`, and `routes/synthesis.py`
+    # via run_synthesis); only the scheduler's background passes opt in.
+    batch: bool = False,
+    # Passed through to run_synthesis — see the note there on why the bound is
+    # the caller's to choose.
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Generate + persist the KG-driven Top Insights brief for one company.
 
@@ -588,4 +597,5 @@ def generate_brief_for(
         prior["_from_cache"] = True
         return prior
 
-    return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver)
+    return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver,
+                         batch=batch, batch_deadline_s=batch_deadline_s)
