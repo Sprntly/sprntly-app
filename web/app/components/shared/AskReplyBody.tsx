@@ -6,7 +6,7 @@ import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
 import { stripAnswerHtmlChrome } from "../../lib/answerHtmlChrome"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
-import { reportKindLabel, reportTitleFromHtml } from "../../lib/reportKind"
+import { reportKindLabel, reportTitleFromDoc } from "../../lib/reportKind"
 import {
   columnKinds,
   labelColumnClasses,
@@ -95,15 +95,16 @@ const askMarkdownComponents: Components = {
  * meant scrolling past the same report twice to find the conversation.
  */
 function ReportAnswerCard({
-  html,
+  doc,
   skill,
   onOpen,
 }: {
-  html: string
+  /** The report document itself — HTML or markdown; the title is read from it. */
+  doc: string
   skill?: string | null
   onOpen: (title: string) => void
 }) {
-  const title = reportTitleFromHtml(html, skill)
+  const title = reportTitleFromDoc(doc, skill)
   // `reportKindLabel` falls back to a bare "Report" when the turn carries no
   // skill (persisted turns don't), and "Report report" is nonsense — say it once.
   const kind = reportKindLabel(skill)
@@ -190,22 +191,41 @@ export function AskReplyBody({
 }) {
   const { visible, done, isStreaming } = useAnswerSimulatedStream(reply.answer, simulateTyping)
 
-  // A skill answer that IS a self-contained HTML document (e.g. the
-  // voice-of-customer-report) renders in a sandboxed iframe — ReactMarkdown would
-  // escape the tags. The report is self-contained, so we skip the simulated-typing
-  // stream and the citations chrome below it.
-  if (looksLikeHtmlBrief(reply.answer)) {
-    const reportTitle =
-      REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
-    const report = onOpenReport ? (
+  // A REPORT answer is an artifact, not a chat message: on a surface with the
+  // content panel it renders as a card that opens the document there, instead of
+  // printing the whole report into the thread (where it appeared twice, once
+  // inline and once in the panel, and buried the conversation).
+  //
+  // Two shapes qualify, for the same reason `report_capture` captures two: the
+  // engines' own `_report` marker — which is what every current report carries,
+  // since they all answer in markdown — and a self-contained HTML document, the
+  // shape reports had before the pinned templates were removed. Gating on the
+  // HTML sniff ALONE is how this card silently stopped appearing for every
+  // report the product actually produces.
+  const isHtmlDoc = looksLikeHtmlBrief(reply.answer)
+  if ((isHtmlDoc || reply._report === true) && onOpenReport) {
+    const card = (
       <ReportAnswerCard
-        html={reply.answer}
+        doc={reply.answer}
         skill={reply._skill}
         onOpen={onOpenReport}
       />
-    ) : (
-      <HtmlReportView html={reply.answer} title={reportTitle} />
     )
+    return animateIn ? (
+      <div className="ask-reply-body ask-reply-body--enter">{card}</div>
+    ) : (
+      card
+    )
+  }
+
+  // No panel to open it in (the staff transcript viewer, the AI rail): an HTML
+  // document still renders in its sandboxed iframe — ReactMarkdown would escape
+  // the tags — skipping the simulated-typing stream and the citations chrome.
+  // A markdown report falls through and reads inline, as it always did there.
+  if (isHtmlDoc) {
+    const reportTitle =
+      REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
+    const report = <HtmlReportView html={reply.answer} title={reportTitle} />
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>
     ) : (

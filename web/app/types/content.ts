@@ -752,6 +752,22 @@ export interface AppContentState {
    *  first ask persists). Reading that null as "standalone" is what used to
    *  render the PREVIOUS thread's document inside an empty new chat. */
   reportFocusStandalone: boolean
+  /** A report is being WRITTEN for this thread right now.
+   *
+   *  A report is an artifact, so it generates where artifacts generate — in the
+   *  panel, the same posture a PRD build takes (`prdGenerating`) — not as text
+   *  scrolling through the chat it is about to appear beside. Set at send time
+   *  from the intent envelope's `report` flag, which is the planner's own
+   *  pipeline pick, and cleared when the answer settles (or fails, or is
+   *  stopped) whatever it turned out to be: a report pipeline can still degrade
+   *  to an apology, and a panel left generating over one would never resolve. */
+  reportGenerating: boolean
+  /** The report text as it streams, or null before the first delta.
+   *
+   *  Same role `prdPartialHtml` plays for a PRD: it is a PREVIEW, replaced by
+   *  the captured document the moment the row exists. Markdown, because that is
+   *  what every report pipeline answers in. */
+  reportPartialMd: string | null
   /** The team document (custom artifact) open in the panel's Document tab, or
    *  null when this thread has none — which is the normal state, and what
    *  keeps the tab hidden. Set by the chat's `create_artifact` dispatch. */
@@ -788,6 +804,15 @@ export interface AppContentState {
    *  The Reports tab hides only on a KNOWN-empty thread, so a failed load never
    *  makes the tab vanish. */
   threadReportsStatus: "idle" | "loading" | "ready" | "error"
+  /** Bumped when an answer that IS a report lands, so the one fetcher above
+   *  re-reads the thread's list.
+   *
+   *  Capture happens SERVER-side after the answer completes (`report_capture`),
+   *  so the list fetched when the thread opened is one report short of the truth
+   *  the moment the user watches one arrive — and nothing else in this content
+   *  changes to say so. Any changing value works; the writer stamps a
+   *  timestamp rather than reading a counter back out. */
+  reportsRefreshKey?: number
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

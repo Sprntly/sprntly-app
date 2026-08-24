@@ -68,6 +68,15 @@ vi.mock("../../../../lib/runAskGeneration", () => ({
   runAskGeneration: vi.fn(),
   resumeAskGeneration: vi.fn(),
   getPendingAsk: vi.fn(() => null),
+  // The ask outcome classes have to come along even though this file never
+  // makes one: `onError` sorts the outcomes with `instanceof`, so a factory
+  // that omits them turns any error on the ask path into an unhandled
+  // "No X export is defined on the mock" rejection — which vitest reports as
+  // a run failure while every test still passes. Same three as
+  // ChatScreen.answer-streaming.dom.test.tsx.
+  AskCancelledError: class AskCancelledError extends Error {},
+  AskStoppedError: class AskStoppedError extends Error {},
+  AskTimeoutError: class AskTimeoutError extends Error {},
 }))
 
 vi.mock("../../../../lib/usePipelineStatus", () => ({

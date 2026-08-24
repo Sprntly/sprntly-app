@@ -503,6 +503,10 @@ export type AskResponse = {
   unanswered: string
   /** Skill id the backend attributed the answer to (e.g. voice-of-customer-report). */
   _skill?: string | null
+  /** True when this answer IS a report document (not a pointed answer or a
+   *  degraded apology from the same pipeline). The backend stamps it on the one
+   *  return that is a document, and `report_capture` gates on the same field. */
+  _report?: boolean
   /** Present only when the Jira agent proposed a change awaiting confirmation. */
   _pending_jira_change?: PendingJiraChange
   /** Present only when the ticket-update agent proposed a rewrite awaiting
@@ -1342,6 +1346,15 @@ export type ChatIntentEnvelope = {
    *  writing in. Never send this back — it is for the user, not the executor. */
   artifact_template_name: string | null
   reason: string
+  /** True when this turn will answer with a REPORT DOCUMENT — the planner
+   *  resolved one of the report pipelines (voice-of-customer, public feedback,
+   *  competitive / market intelligence, company research).
+   *
+   *  The intent stays `answer`: the ask path runs it exactly as before. What
+   *  changes is WHERE the document is written — the panel's Reports tab, in its
+   *  generating state, the same posture a PRD build takes — instead of streaming
+   *  a report through the chat thread it is about to appear beside. */
+  report?: boolean
   /** Set ONLY when the intent decision failed because the LLM provider refused
    *  the request (out of credits, rate limited, overloaded).
    *

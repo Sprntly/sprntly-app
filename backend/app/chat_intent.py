@@ -665,6 +665,27 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
 }
 
 
+def _is_report_pipeline(pipeline_id: Optional[str]) -> bool:
+    """Does this plan's pipeline WRITE A REPORT DOCUMENT?
+
+    `qa_agent._REPORT_PIPELINE_IDS` is the set the answer path itself dispatches
+    on, so it is the one read here — a second list would drift and the drift
+    would be invisible until a report printed itself into a chat thread.
+
+    Imported lazily: `qa_agent` is a heavy module and this endpoint is on the
+    send path, which imports `ask_planner` the same way one function below.
+    """
+    if not pipeline_id:
+        return False
+    try:
+        from app.qa_agent import _REPORT_PIPELINE_IDS
+
+        return pipeline_id in _REPORT_PIPELINE_IDS
+    except Exception:  # noqa: BLE001 — never break the verdict over a hint
+        logger.exception("report-pipeline check failed for %s", pipeline_id)
+        return False
+
+
 def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     """A gated `ask_planner.Plan` in this module's envelope vocabulary.
 
@@ -766,6 +787,17 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         ),
         "reason": plan.reason or "",
         "source": "planner",
+        # The answer this turn produces is a REPORT DOCUMENT, not a chat reply:
+        # the planner resolved one of the report pipelines and the gate accepted
+        # it. The client opens the panel's Reports tab in its generating state
+        # and streams the document THERE — the posture a PRD build already takes
+        # — instead of printing a report into the thread it is about to appear
+        # beside. False is the ordinary case and reads as "an answer".
+        #
+        # Read from the SAME set `qa_agent` dispatches on, never a second list:
+        # a name that fell out of one and not the other would open a panel for
+        # an answer, or print a report into the chat.
+        "report": _is_report_pipeline(plan.pipeline_id),
     }
     # A FORMAT WE COULD NOT FIND STOPS THE BUILD (owner's decision, 2026-08-10).
     # `template_query` is only ever set when the user named a format and nothing
@@ -825,6 +857,7 @@ def _resolve_via_planner(
     history: Optional[list[dict]],
     *,
     prd_id: Optional[int],
+    prd_title: Optional[str] = None,
 ) -> Optional[dict]:
     """The planner's verdict as an envelope, or None to use the call below.
 
@@ -835,7 +868,14 @@ def _resolve_via_planner(
     from app import ask_planner
 
     plan = ask_planner.plan_for_answer(
-        enterprise_id=enterprise_id, question=message, history=history
+        enterprise_id=enterprise_id,
+        question=message,
+        history=history,
+        # The thread's open PRD is an INPUT to the plan, not just an after-the-
+        # fact gate on its verdict: without it the planner answered "build a
+        # report from this prd" with "no PRD is open or identified in the thread".
+        prd_id=prd_id,
+        prd_title=prd_title,
     )
     if plan is None:
         return None
@@ -911,7 +951,7 @@ def resolve_chat_intent(
     # send path, and a planner import or flag read must never break a send.
     try:
         planned = _resolve_via_planner(
-            enterprise_id, message, history, prd_id=prd_id
+            enterprise_id, message, history, prd_id=prd_id, prd_title=prd_title
         )
         if planned is not None:
             return planned

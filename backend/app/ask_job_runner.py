@@ -385,7 +385,13 @@ def _run_sync(
         from app import ask_planner
 
         ask_plan = ask_planner.plan_for_answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            # Same context the intent endpoint planned with, so the memo hit is a
+            # real reuse of THIS turn's plan rather than a differently-keyed
+            # second opinion.
+            prd_id=prd_id,
         )
 
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
@@ -605,9 +611,12 @@ async def run_ask_job(
         # self-swallowing, so it can only ever ADD a durable artifact/memory
         # entry, never delay or break the already-stored answer.
         payload = outcome.response
-        # A report skill answers with a self-contained HTML document; capture
-        # it as a durable `reports` artifact (no-op for a markdown answer).
-        capture_report(
+        # A report answer is a durable artifact, not just a chat reply: capture
+        # it into `reports` with the originating ask's `conversation_id`, which
+        # is what lets /artifacts open a report over the thread that produced it
+        # and what the thread's own Reports panel lists on. A no-op for an
+        # ordinary answer.
+        report_id = capture_report(
             payload,
             company_id=enterprise_id,
             question=question,
@@ -617,29 +626,17 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
-        # A report GENERATED within a project chat auto-attaches to that
-        # project's own artifact list — the same standing rule the other
-        # five artifact types already follow (prd/evidence/ticket_set/
-        # prototype/custom_artifact: "any artifact made in a project lands
-        # in the project"). `capture_report` above is a NO-OP here: it only
-        # captures a self-contained HTML-DOCUMENT answer, and report
-        # pipelines answer in markdown now — `report_capture.py`'s own
-        # docstring records that the HTML sniff "self-disables" for VoC/
-        # CIR/public-feedback since the pinned HTML templates were removed
-        # — so trusting ITS return id would silently never attach for a real
-        # report. Mint the row ourselves instead, reusing the SAME pair the
-        # manual "Save to project" button already calls (`routes/projects.
-        # py:save_chat_artifact` → `save_chat_output_as_report` then
-        # `add_artifact`) rather than reinventing report persistence.
-        #
-        # `_skill` is the report-decision signal already riding on the
-        # payload: every report-pipeline module tags its OWN `_skill` before
-        # returning (`call_digest.answer` → "voice-of-customer-report" for
-        # both the VoC ask and the bare call-digest entry point, `market_
-        # intel.answer` → "market-intelligence-report", and so on) — reading
-        # it here against `qa_agent._REPORT_PIPELINE_IDS` reuses the EXACT
-        # set the sixth-branch report-deferral gate already reads, never a
-        # second "is this a report" definition to keep in sync.
+        # A report GENERATED within a project chat also auto-attaches to that
+        # project's own artifact list — the same standing rule the other five
+        # artifact types already follow (prd/evidence/ticket_set/prototype/
+        # custom_artifact: "any artifact made in a project lands in the
+        # project"). It attaches the row `capture_report` just wrote rather
+        # than minting a second one: this block used to call
+        # `save_chat_output_as_report` itself, because capture was a no-op for
+        # every markdown report (see report_capture.py's docstring on the
+        # regression that made it one) — that workaround filed project reports
+        # under the `saved-chat` skill and, being project-only, left main chat
+        # with no report row at all.
         #
         # Gated STRICTLY on `context_source["kind"] == "project"` — never a
         # top-level `project_id` fallback, which project chat never sends
@@ -650,30 +647,18 @@ async def run_ask_job(
         # a failure here can only fail to ADD an artifact ref — it can never
         # delay or break the answer, already durably stored above.
         if (
-            context_source
+            report_id is not None
+            and context_source
             and context_source.get("kind") == "project"
-            and payload.get("_skill") in qa_agent._REPORT_PIPELINE_IDS
         ):
             _report_project_id = (context_source.get("params") or {}).get("project_id")
             if _report_project_id is not None:
                 try:
-                    answer_text = payload.get("answer") or ""
-                    if answer_text.strip():
-                        from app.db import projects as projects_db
-                        from app.project_artifact_capture import (
-                            save_chat_output_as_report,
-                        )
+                    from app.db import projects as projects_db
 
-                        _report_id = save_chat_output_as_report(
-                            content=answer_text,
-                            company_id=enterprise_id,
-                            workspace_id=workspace_id,
-                            conversation_id=conversation_id,
-                        )
-                        if _report_id is not None:
-                            projects_db.add_artifact(
-                                int(_report_project_id), "report", _report_id
-                            )
+                    projects_db.add_artifact(
+                        int(_report_project_id), "report", report_id
+                    )
                 except Exception:  # noqa: BLE001 — best-effort, never fail the answer
                     logger.warning(
                         "project report auto-attach failed ask_id=%s project_id=%s",

@@ -2105,6 +2105,13 @@ def answer(
     # records the desync that made it a rule.
     payload.update({
         "_skill": _VOC_SKILL,
+        # This IS the VoC report document, so it is captured as a `reports`
+        # artifact and hangs off the chat that produced it. `_skill` cannot
+        # carry that meaning — `_plain_payload` stamps it on the not-connected
+        # / no-calls / error apologies too, and query mode stamps it on pointed
+        # answers read off the corpus. Same marker, same reason, as
+        # `competitive_intel` / `market_intel` / `public_feedback`.
+        "_report": True,
         "_skill_action": f"Voice of customer · {sources} · {window.label}",
         "_skill_source": "call-digest",
     })
