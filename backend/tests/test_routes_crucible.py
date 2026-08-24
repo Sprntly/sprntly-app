@@ -1293,17 +1293,36 @@ def test_the_headline_is_themes_not_the_balancing_total(ctx):
 
 
 def test_the_balance_identity_is_exercised_with_real_drops(ctx):
-    """The identity was only ever checked as `3 == 3 + 0 + 0`. Seed a corpus
-    where a group is actually refuted, so the subtraction is exercised."""
+    """THE PRODUCTION SHAPE: real themes AND ungroupable claims AND a real
+    group-level drop, all non-zero at once.
+
+    The two earlier tests for this arithmetic sat at the degenerate ends — one
+    all-ungroupable, one with none — and between them `themes` was green under
+    `max(0, groups - 2 * ungroupable)`, which on a real corpus publishes 414
+    where the truth is 622. The only shape that pins the coefficient is the one
+    where both terms are non-zero, and it existed in no test. Third round of
+    "the fixture does not contain the condition" on this PR."""
     from app.crucible.pipeline import NARRATED_DROPS
     from app.db.client import require_client
 
+    # Themed and embeddable -> real findings.
     for i in range(6):
         _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
     _theme(ctx.company_id, "ent-a", "Exports", ["sig-0000", "sig-0001", "sig-0002"])
     # A lone claim on its own theme -> an anecdote drop.
     _signal(ctx.company_id, 90, embedding=str([0.9] * 4))
     _theme(ctx.company_id, "ent-solo", "Billing", ["sig-0090"])
+    # UNEMBEDDABLE and unthemed -> ungroupable, so the subtraction is real.
+    for j in range(2):
+        require_client().table("kg_signal").insert({
+            "id": f"sig-noemb-{j}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"unembeddable {j}", "properties": {"customer": f"Ungr{j}"},
+            "provenance": {"doc": "doc-z"},
+            "valid_at": f"2026-0{2 + j}-05T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
 
     run_id = _start(ctx).json()["id"]
     _confirm(ctx, run_id)
@@ -1313,9 +1332,17 @@ def test_the_balance_identity_is_exercised_with_real_drops(ctx):
     group_drops = sum(
         p["dropped"][c] for c in NARRATED_DROPS if c != "ungroupable"
     )
-    assert group_drops > 0, f"no group-level drop was exercised: {p}"
+    # ALL THREE non-zero, or this test is back at a degenerate end and proves
+    # nothing about the coefficient.
+    assert group_drops > 0, f"no group-level drop exercised: {p}"
+    assert p["dropped"]["ungroupable"] > 0, f"no ungroupable claim: {p}"
+    assert p["themes"] > 0, f"no real theme survived: {p}"
+
+    # The pin. `themes` must be the theme count, not the balancing total and
+    # not any multiple of the correction.
     assert p["themes"] == p["findings"] + group_drops, p
-    assert p["groups"] == p["themes"] + p["dropped"]["ungroupable"], p
+    assert p["groups"] > p["themes"], (
+        "groups must exceed themes when claims were ungroupable", p)
 
 
 def test_every_engine_drop_code_has_panel_copy():
@@ -1326,15 +1353,32 @@ def test_every_engine_drop_code_has_panel_copy():
     import pathlib
     import re
 
+    import pytest
+
     from app.crucible.pipeline import NARRATED_DROPS
 
-    src = (pathlib.Path(__file__).resolve().parents[2]
-           / "web/app/components/shared/GoalRunNarration.tsx").read_text()
+    path = (pathlib.Path(__file__).resolve().parents[2]
+            / "web/app/components/shared/GoalRunNarration.tsx")
+    # FAIL AS A CONTRACT BREAK, not as a stack trace. A moved file or a renamed
+    # constant would otherwise surface as FileNotFoundError/ValueError from a
+    # test named "every engine drop code has panel copy", which reads as a
+    # broken test — and the cheapest way to green a broken test is to delete it.
+    if not path.exists():
+        pytest.fail(f"panel copy lives at {path}, which no longer exists — "
+                    f"move this test with it rather than dropping the contract")
+    src = path.read_text()
+    for marker in ("const DROP_COPY", "const DROP_ORDER", "const n ="):
+        if marker not in src:
+            pytest.fail(f"`{marker}` is gone from {path.name}; the drop-copy "
+                        f"contract cannot be checked — update this test")
     copy_block = src[src.index("const DROP_COPY"):src.index("const DROP_ORDER")]
     order_block = src[src.index("const DROP_ORDER"):src.index("const n =")]
     for code in NARRATED_DROPS:
-        assert re.search(rf"\b{code}\b", copy_block), (
-            f"{code} has no panel copy — it would render as a raw code"
+        # ANCHORED AS A KEY, not merely present. `\bcode\b` also matched the
+        # word inside a comment, so commenting an entry OUT left this green
+        # while the panel rendered the raw code.
+        assert re.search(rf"^\s*{code}:", copy_block, re.M), (
+            f"{code} has no panel copy KEY — it would render as a raw code"
         )
         assert re.search(rf'"{code}"', order_block), (
             f"{code} is missing from DROP_ORDER — it would render out of funnel order"

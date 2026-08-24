@@ -719,8 +719,14 @@ export type GoalRunProgress = {
   claims_themed?: number
   claims_unthemed?: number
   /** THE BALANCING TOTAL — includes one pseudo-group per ungroupable claim,
-   *  because `_cluster` keys each of those as its own cluster. Use it for the
-   *  identity `groups === themes + ungroupable`, never as a theme count. */
+   *  because `_cluster` keys each of those as its own cluster.
+   *
+   *  DELIBERATELY RENDERED NOWHERE. It exists so the funnel stays checkable
+   *  (`groups === themes + ungroupable`, and `themes === findings + drops`)
+   *  from stored data, by a test or by anyone auditing a run — showing it
+   *  beside `themes` would put two theme-shaped numbers on one screen, which
+   *  is the confusion this field's own history is made of. Do not add a render
+   *  site; use `themes`. */
   groups?: number
   /** What a reader means by a theme: `groups` minus the ungroupable claims.
    *  This is the number the headline shows. */
