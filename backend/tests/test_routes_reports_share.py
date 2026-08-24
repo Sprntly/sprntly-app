@@ -242,9 +242,16 @@ def test_public_projection_leaks_nothing_internal(isolated_settings, monkeypatch
         assert leaked not in body
 
 
-def test_public_projection_carries_the_saved_chat_discriminator(isolated_settings, monkeypatch):
-    """A saved-chat report's `html` holds raw markdown, not a document — the
-    public viewer needs `skill` to know to render it that way."""
+def test_public_projection_serves_a_markdown_row_as_html(isolated_settings, monkeypatch):
+    """A report is a rich document, so the public link serves HTML — the same
+    shape, from the same converter, that the in-app viewer gets.
+
+    The rows written before reports became documents hold markdown. Converting
+    them on the way out is what keeps a link handed to someone outside the
+    company working: they see the rendered document, not a wall of source.
+    `skill` still rides along as the render-mode discriminator for the legacy
+    self-contained documents, which own their rendering and are left untouched.
+    """
     ctx = company_client(monkeypatch)
     rid = _seed_report(
         company_id=ctx.company_id,
@@ -257,7 +264,7 @@ def test_public_projection_carries_the_saved_chat_discriminator(isolated_setting
     body = ctx.client.get(f"/v1/public/reports/{token}").json()
     assert body["skill"] == "saved-chat"
     assert body["kind"] == "Saved chat"
-    assert body["html"] == "## Prioritization\n\n- Ship A first"
+    assert body["html"] == "<h2>Prioritization</h2>\n<ul>\n<li>Ship A first</li>\n</ul>"
 
 
 def test_unknown_token_404s(isolated_settings, monkeypatch):
