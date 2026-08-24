@@ -759,7 +759,16 @@ def execute_run(
             candidates: list = []
             cand_stats: dict = {}
             searched: list = []
-            if resolution.definition is None:
+            # NOT ON A CONFLICT EITHER, and `definition is None` covers three
+            # different statuses so it had to be said explicitly. `goal.py`:
+            # "two authoritative systems disagreeing about what a metric means
+            # is worth more than either answer" and "picking one silently is the
+            # failure". A pick-list of unrelated registry metrics beside that
+            # question is a one-click way to walk past the conflict — the two
+            # sides that caused it are never referenced again — which is the
+            # silent pick arriving through the user's hand instead of ours.
+            # A conflict has to be answered, so it gets the conflict ask alone.
+            if resolution.definition is None and resolution.status != "conflict":
                 try:
                     from app.crucible.metric_candidates import (
                         candidates_for_goal, searched_summary,

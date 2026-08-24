@@ -60,10 +60,26 @@ logger = logging.getLogger(__name__)
 #: pointing; a list of forty is a search results page, not a decision.
 MAX_CANDIDATES = 6
 
-#: Below this many points a metric is one reading, not something anyone steers
-#: by. It is still counted in "what I looked at" — §5 requirement 1 is about
-#: showing the effort, not only the hits.
-MIN_POINTS = 2
+#: Below this many periods a metric is not a series.
+#:
+#: MEASURED IN PERIODS, and worth being precise about why that is currently the
+#: same as counting rows. The registry's unique key is
+#: `(enterprise_id, metric, period_start, source)`, and this module groups on
+#: `(metric, source)` — so within one group `period_start` is unique and the two
+#: counts cannot diverge. Mutating the check to `len(group)` passes every test,
+#: because it is not a reachable difference.
+#:
+#: It is kept in period form because that is what the number MEANS ("how many
+#: periods have we measured"), and because the divergence becomes reachable the
+#: moment the grouping or the unique key changes — which is exactly what the
+#: first version of this module got wrong: grouped on the metric name alone, two
+#: trackers writing the same week cleared a row-count bar with zero historical
+#: depth. `test_the_unique_key_is_what_makes_rows_and_periods_agree` pins the
+#: premise rather than the unreachable branch.
+#:
+#: A metric below the bar is still counted in "what I looked at": §5
+#: requirement 1 is about showing the effort, not only the hits.
+MIN_PERIODS = 2
 
 
 @dataclass(frozen=True)
@@ -174,20 +190,41 @@ def candidates_for_goal(
         return [], {"registry_readable": False, "points": 0,
                     "distinct_metrics": 0, "offered": 0}
 
-    grouped: dict[str, list[dict]] = {}
+    # KEYED ON (metric, source), NOT metric ALONE, and this is not fussiness.
+    # `ds/analyses.py` gives ClickUp and Jira the SAME metric tuple on purpose
+    # ("both trackers feed the identical DS series/views"), so a tenant with
+    # both connected writes two `tasks_open` rows for the same week — a normal
+    # shape, not a corrupt one. Grouped on the name alone they collapse into one
+    # series whose "current value" is whichever row the store happened to return
+    # last, silently reporting one tracker's number as the company's while a
+    # disagreeing source for the same week goes unmentioned.
+    #
+    # Two providers measuring the same thing are two candidates. Which one
+    # governs is the user's call, which is the entire point of the ask.
+    grouped: dict[tuple[str, str], list[dict]] = {}
     for row in rows:
         key = row.get("metric")
         if key:
-            grouped.setdefault(str(key), []).append(row)
+            grouped.setdefault((str(key), str(row.get("source") or "")), []).append(row)
+
+    # Which metric NAMES have more than one provider writing them. Only those
+    # need the source in the label: appending it unconditionally clutters the
+    # ordinary single-source case, and the point is to disambiguate, not to
+    # annotate.
+    sources_per_metric: dict[str, set[str]] = {}
+    for metric_name, src in grouped:
+        sources_per_metric.setdefault(metric_name, set()).add(src)
 
     goal_tokens = set(_tokens(goal_text))
     built: list[tuple[int, int, MetricCandidate]] = []
-    for key, group in grouped.items():
-        if len(group) < MIN_POINTS:
+    for (key, source), group in grouped.items():
+        # DISTINCT PERIODS, not rows — see MIN_PERIODS.
+        periods = sorted({str(r.get("period_start") or "") for r in group})
+        if len(periods) < MIN_PERIODS:
             continue
-        # `list_metric_points` already sorts ascending by a NORMALISED period,
-        # so the last row is the newest. The version this replaced sorted the
-        # raw string, which put "Sep 2025" after "Nov 2025".
+        # `list_metric_points` sorts ascending by a NORMALISED period. Within one
+        # (metric, source) the period is unique by the table's own key, so there
+        # is no tie left for row order to decide.
         latest, earliest = group[-1], group[0]
         raw = latest.get("value")
         # `bool` is an `int` in Python, so it is excluded explicitly. NOT a
@@ -197,31 +234,37 @@ def candidates_for_goal(
         # zero" contract and this keeps that true if the store ever loosens.
         value = (float(raw) if isinstance(raw, (int, float))
                  and not isinstance(raw, bool) else None)
-        source = str(latest.get("source") or "")
         source_label = source.replace("_", " ") if source else ""
         first_p = str(earliest.get("period_start") or "")
         last_p = str(latest.get("period_start") or "")
         overlap = len(goal_tokens & set(_tokens(key.replace("_", " "))))
-        built.append((overlap, len(group), MetricCandidate(
+        built.append((overlap, len(periods), MetricCandidate(
             key=key,
-            label=_humanise(key),
+            # THE SOURCE IS IN THE LABEL only when two providers measure the
+            # same thing — otherwise the list shows one name twice, with
+            # different numbers and no way to tell them apart.
+            label=(f"{_humanise(key)} · {source_label}"
+                   if source_label and len(sources_per_metric.get(key, ())) > 1
+                   else _humanise(key)),
             source=source,
             source_label=source_label,
-            points=len(group),
+            points=len(periods),
             current_value=value,
             current_period=last_p,
             first_period=first_p,
             last_period=last_p,
-            consequence=_consequence(len(group), first_p, last_p, source_label),
+            consequence=_consequence(len(periods), first_p, last_p, source_label),
         )))
 
-    # Best name match first, then the longest series — a metric measured for a
-    # year is a better thing to steer by than one measured twice.
-    built.sort(key=lambda t: (-t[0], -t[1], t[2].key))
+    # Best name match first, then the longest series BY DISTINCT PERIODS — a
+    # metric measured for a year is a better thing to steer by than one read
+    # twice in the same week by two trackers.
+    built.sort(key=lambda t: (-t[0], -t[1], t[2].key, t[2].source))
     stats = {
         "registry_readable": True,
         "points": len(rows),
-        "distinct_metrics": len(grouped),
+        "distinct_metrics": len({k for k, _ in grouped}),
+        "distinct_series": len(grouped),
         "offered": min(len(built), MAX_CANDIDATES),
     }
     return [c for _, _, c in built[:MAX_CANDIDATES]], stats

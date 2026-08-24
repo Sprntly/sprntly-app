@@ -1735,3 +1735,41 @@ def test_the_panel_and_the_api_agree_on_the_definition_cap():
     assert int(m.group(1).replace("_", "")) == api_cap, (
         f"the panel's cap ({m.group(1)}) and the API's max_length ({api_cap}) "
         f"have drifted")
+
+
+def test_a_definition_conflict_is_not_offered_a_way_around_itself(ctx, monkeypatch):
+    """`goal.py`: "two authoritative systems disagreeing about what a metric
+    means is worth more than either answer", and "picking one silently is the
+    failure". A pick-list of unrelated registry metrics beside the conflict ask
+    is a one-click route past it — the two conflicting sides are never
+    referenced again — so a conflict gets the ask alone.
+
+    `definition is None` is true on THREE statuses, which is how the conflict
+    path acquired a pick-list by accident."""
+    from app.crucible.types import DefinitionConflict
+
+    class _Conflicted:
+        status = "conflict"
+        ask = "Two systems define this differently. Which one governs?"
+        definition = None
+        conflicts = [DefinitionConflict(
+            metric_name="tasks_open",
+            source_a="clickup", definition_a="open tasks in ClickUp",
+            source_b="jira", definition_b="unresolved issues in Jira",
+        )]
+
+    import app.routes.crucible as mod
+
+    monkeypatch.setattr(mod, "resolve", lambda **kw: _Conflicted())
+    # A registry with something in it, so an empty list cannot pass vacuously.
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+
+    assert meta["conflicts"], "the fixture did not reach a conflict"
+    assert (meta.get("candidates") or []) == [], (
+        "a conflict must not be offered a way around itself")
+    # The conflict question itself still renders.
+    assert meta["ask"]

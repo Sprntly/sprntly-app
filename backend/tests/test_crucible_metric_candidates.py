@@ -23,7 +23,7 @@ from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 
 from app.crucible.metric_candidates import (
     MAX_CANDIDATES,
-    MIN_POINTS,
+    MIN_PERIODS,
     candidates_for_goal,
     searched_summary,
 )
@@ -116,10 +116,67 @@ def test_a_metric_with_one_point_is_not_something_to_steer_by(db):
     cands, stats = candidates_for_goal(CID, "anything")
     keys = {c.key for c in cands}
     assert "real_series" in keys
-    assert "one_off" not in keys and "one_reading" not in keys, (
-        f"below MIN_POINTS={MIN_POINTS}")
+    assert "one_reading" not in keys, f"below MIN_PERIODS={MIN_PERIODS}"
     # But it was still SEARCHED — §5 req 1 shows effort, not only hits.
     assert stats["distinct_metrics"] == 2
+
+
+# ── Two trackers, one metric name ────────────────────────────────────────────
+#
+# `ds/analyses.py` gives ClickUp and Jira the SAME metric tuple on purpose, so
+# a tenant with both connected writes two `tasks_open` rows for the same week.
+# That is a normal shape, and grouping on the metric name alone got it wrong in
+# two ways at once.
+
+def test_two_providers_writing_one_metric_are_two_candidates(db):
+    """Grouped on the name alone they collapsed into one series whose "current
+    value" was whichever row the store returned last — reporting one tracker's
+    number as the company's while a disagreeing source for the same week went
+    unmentioned."""
+    for p in ("2026-08-03", "2026-08-10", "2026-08-17"):
+        _point(db, "tasks_open", p, 40, source="clickup")
+        _point(db, "tasks_open", p, 15, source="jira")
+
+    cands, stats = candidates_for_goal(CID, "reduce open tasks")
+    by_source = {c.source: c for c in cands}
+    assert set(by_source) == {"clickup", "jira"}, (
+        "two providers measuring the same thing are two candidates")
+    assert by_source["clickup"].current_value == 40
+    assert by_source["jira"].current_value == 15
+    # The label has to distinguish them or the list shows one name twice with
+    # different numbers and no way to tell which is which.
+    assert by_source["clickup"].label != by_source["jira"].label
+    assert "clickup" in by_source["clickup"].label
+    # One metric NAME, two series.
+    assert stats["distinct_metrics"] == 1 and stats["distinct_series"] == 2
+
+
+def test_two_trackers_reading_the_same_week_is_not_a_two_point_series(db):
+    """`MIN_PERIODS` counts DISTINCT PERIODS. Counting rows let two simultaneous
+    readings of one week clear the bar with zero historical depth, render as
+    "2 points" beside genuine multi-week series, and outrank them because the
+    tie-break prefers the longer list."""
+    _point(db, "tasks_open", "2026-08-17", 40, source="clickup")
+    _point(db, "tasks_open", "2026-08-17", 15, source="jira")
+    # A real series to be outranked by it.
+    for p in ("2026-05-04", "2026-06-01", "2026-07-06"):
+        _point(db, "tasks_open_real", p, 1, source="clickup")
+
+    cands, _ = candidates_for_goal(CID, "tasks")
+    keys = {(c.key, c.source) for c in cands}
+    assert ("tasks_open", "clickup") not in keys, (
+        "one week read twice is not a series")
+    assert ("tasks_open", "jira") not in keys
+    assert ("tasks_open_real", "clickup") in keys
+
+
+def test_a_multi_source_metric_still_reports_its_own_span(db):
+    for p in ("2026-08-03", "2026-08-10"):
+        _point(db, "bugs_open", p, 7, source="clickup")
+    c = next(c for c in candidates_for_goal(CID, "bugs")[0]
+             if c.source == "clickup")
+    assert c.points == 2
+    assert c.first_period == "2026-08-03" and c.last_period == "2026-08-10"
 
 
 def test_a_goal_that_matches_nothing_still_gets_something_to_point_at(db):
@@ -218,3 +275,41 @@ def test_the_search_summary_says_so_when_the_registry_is_unreadable(db):
     reg = next(r for r in rungs if r["rung"] == "your measured metrics")
     assert "could not be read" in reg["detail"], (
         "an unreadable rung must not report as an empty one")
+
+
+def test_the_unique_key_is_what_makes_rows_and_periods_agree(db):
+    """PINS THE PREMISE, not an unreachable branch.
+
+    `MIN_PERIODS` counts distinct periods, and mutating it to count rows passes
+    every test — because grouping on `(metric, source)` plus the table's unique
+    key `(enterprise_id, metric, period_start, source)` makes `period_start`
+    unique inside a group. That invariant is the reason the two counts agree,
+    so it is what is worth asserting: if a future change to the grouping or the
+    key breaks it, THIS fails and names the reason, rather than a candidate
+    quietly reporting a depth it does not have.
+    """
+    import sqlite3
+
+    from app.db.metric_points import list_metric_points
+
+    for p in ("2026-08-03", "2026-08-10"):
+        _point(db, "tasks_open", p, 40, source="clickup")
+        _point(db, "tasks_open", p, 15, source="jira")
+
+    # THE GUARANTEE ITSELF: a second row for the same (metric, period, source)
+    # is refused by the unique key. That refusal is why rows and periods cannot
+    # diverge inside a group.
+    with pytest.raises(sqlite3.IntegrityError):
+        _point(db, "tasks_open", "2026-08-10", 99, source="clickup")
+
+    # And two SOURCES for one week are fine — that is the shape the grouping
+    # change exists to separate.
+    rows = list_metric_points(CID)
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for r in rows:
+        grouped.setdefault((r["metric"], r["source"]), []).append(r["period_start"])
+    assert len(grouped) == 2, "two providers should be two series"
+    for (metric, source), periods in grouped.items():
+        assert len(periods) == len(set(periods)), (
+            f"{metric}/{source} has a repeated period — rows and periods can "
+            f"now diverge, so MIN_PERIODS must stay counted in periods")
