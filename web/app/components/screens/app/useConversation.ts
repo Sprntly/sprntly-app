@@ -119,6 +119,10 @@ export interface MainConversationAdapter {
   emitCommandTurn: (turn: ThreadTurn) => void
   seedGenerationTurn: (seedTurn: ThreadTurn) => { tabId: string; dbConvId: number | null }
   threadContextFor: (key: string) => string
+  /** Start a Goal Analysis run for a goal typed into chat and open its panel.
+   *  OPTIONAL: a surface without the module (or without the panel) omits it and
+   *  a goal falls through to the ask path rather than vanishing. */
+  startGoalAnalysis?: (goalText: string) => void | Promise<void>
   openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
   postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
   markTicketSetAutoOpened: (key: string) => void
@@ -282,6 +286,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     emitCommandTurn,
     seedGenerationTurn,
     threadContextFor,
+    startGoalAnalysis,
     openArtifactInPanel,
     postOpenArtifactReply,
     markTicketSetAutoOpened,
@@ -681,6 +686,20 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             ticketsTarget,
           }
           const executors = useChatIntentExecutors({
+              // A GOAL TYPED INTO CHAT REACHES GOAL ANALYSIS. Without this
+              // slot the planner routed the intent correctly and the client
+              // dropped it to `onAnswer` — which is the failure the whole
+              // feature exists to replace: a user asked to increase revenue by
+              // 5% and got a list of opportunities, with no definition
+              // confirmed, no plan shown and nothing approved.
+              //
+              // `startGoalAnalysis` already opens the panel on the RUN ID
+              // rather than on a result, because the first thing a run does is
+              // stop and ask what the goal means.
+              ...(startGoalAnalysis
+                ? { onAnalyseGoal: (goalText: string) =>
+                      void startGoalAnalysis(goalText || trimmed) }
+                : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {
                   setAttachments([])

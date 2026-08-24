@@ -136,6 +136,10 @@ export interface ChatIntentExecutors {
    *  target, a lookup-less open_artifact, or `answer`/low-confidence/unknown/
    *  `generate_prototype`). */
   onAnswer: () => void
+  /** Start a Goal Analysis run and open its panel. OPTIONAL, so a surface that
+   *  has no panel to open (the brief chat, the AI bar) falls through to
+   *  `onAnswer` rather than silently swallowing the goal. */
+  onAnalyseGoal?: (goalText: string) => void
 }
 
 export type DispatchChatIntentResult = { handled: true } | { handled: false }
@@ -180,6 +184,28 @@ export function dispatchChatIntent(
   executors: ChatIntentExecutors,
 ): DispatchChatIntentResult {
   switch (envelope.intent) {
+    // A BUSINESS GOAL — "increase revenue by 5%", "reduce churn". Handed to
+    // Goal Analysis, which stops and asks what the metric means, states what it
+    // will read, and waits for approval before reading anything.
+    //
+    // WITHOUT THIS CASE THE BACKEND ROUTES CORRECTLY AND NOTHING OPENS. The
+    // planner learned the action first and the client ignored it, so a goal
+    // typed into chat still fell through to `onAnswer` — which is the exact
+    // behaviour this whole feature exists to replace: a user asked to increase
+    // revenue by 5% and got a list of opportunities with no definition
+    // confirmed and nothing approved.
+    //
+    // Guarded on a non-empty `task` for the same reason every other builder is:
+    // a run with no goal text has nothing to establish, and `onAnswer` can ask
+    // for one where a blank run cannot.
+    case "analyse_goal":
+      if (executors.onAnalyseGoal && envelope.task) {
+        executors.onAnalyseGoal(envelope.task)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
+
     case "generate_tickets":
       executors.onGenerateTickets(envelope)
       return { handled: true }
