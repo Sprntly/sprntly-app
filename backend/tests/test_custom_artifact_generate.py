@@ -582,6 +582,61 @@ def test_grounding_with_an_empty_qa_answer_changes_nothing(gen_env, monkeypatch)
     assert "CONTEXT: none was supplied" in captured["input"]
 
 
+def test_a_hung_grounding_call_times_out_instead_of_blocking_forever(
+    gen_env, monkeypatch
+):
+    """THE SECOND BUG, caught the same day live-verifying the plan fix: fixing
+    the plan surfaced that a PLANNED call can resolve to a live-fetch pipeline
+    (call digest) that hangs far past any normal answer's latency —
+    18+ minutes with zero progress, observed live, on a workspace with no real
+    call connector for it to read. `qa_agent.answer` takes no timeout of its
+    own, so a hang there used to mean `generate_into` hung too — turning the
+    ORIGINAL failure mode (an honest, ~15-20s empty document) into something
+    strictly worse: a document that never finishes.
+
+    A grounding call that legitimately takes longer than `_GROUNDING_TIMEOUT_S`
+    must give up and fall back to the honest-empty-context path — the same
+    outcome as any other grounding failure — rather than block the whole
+    generation. `time.sleep`, not a mock that returns instantly, because a
+    threading-timeout bug is exactly the kind of bug a same-thread mock cannot
+    exercise: the fake has to actually occupy a thread for the wait to mean
+    anything."""
+    import time as time_mod
+    from app import ask_planner, qa_agent
+
+    def _slow_plan(**kw):
+        time_mod.sleep(2)
+        return object()
+
+    def _hangs_forever(**kw):
+        time_mod.sleep(3600)  # never returns within the test's lifetime
+        return {"answer": "should never be reached"}
+
+    monkeypatch.setattr(gen, "_GROUNDING_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(ask_planner, "plan_for_answer", _slow_plan)
+    monkeypatch.setattr(qa_agent, "answer", _hangs_forever)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    started = time_mod.monotonic()
+    doc_id = _pending(gen_env)
+    gen.generate_into(
+        company_id=gen_env, artifact_id=doc_id,
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+    elapsed = time_mod.monotonic() - started
+
+    # Returned near the 1s timeout, not after the plan's 2s sleep and
+    # DEFINITELY not after the answer's 3600s hang.
+    assert elapsed < 5, f"generate_into blocked for {elapsed:.1f}s — the timeout did not bound it"
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
 def test_grounding_must_plan_before_answering_not_answer_unplanned(
     gen_env, monkeypatch
 ):

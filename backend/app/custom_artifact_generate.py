@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.client import require_client, retry_on_disconnect
@@ -200,6 +201,28 @@ def _title_from(html: str, fallback: str) -> str:
 _THIN_CONTEXT_CHARS = 300
 
 
+# BOUNDS the grounding call independently of anything `qa_agent.answer` does
+# internally. Its own pipelines (call digest, a live web sweep) can legitimately
+# run for MINUTES — fine when a person is watching a chat turn, not fine as an
+# unbounded prelude to writing a document, because `generate_into` has no
+# retry/backoff signal of its own to shorten it and the ORIGINAL failure mode
+# this whole fallback replaces was a document that failed HONEST AND FAST
+# (~15-20s). A hang here must degrade to that failure mode, never to something
+# strictly worse than it. 45s is comfortably above every normal grounding call
+# observed (15-20s) and far short of a stuck live-fetch pipeline.
+_GROUNDING_TIMEOUT_S = 45.0
+
+# A single, tiny, dedicated pool — never the shared default executor a wedged
+# call could starve for everyone else's blocking work (`asyncio.to_thread`
+# sites elsewhere in this codebase share one; see routes/custom_artifacts.py's
+# own reasoning for why `_GENERATION_POOL` is dedicated, same argument here at
+# smaller scale). A call that times out is NOT cancelled — Python cannot
+# preempt a running thread — it keeps running to completion in the background
+# and its result is discarded; this bounds how long GENERATION waits, not how
+# long the underlying call itself takes.
+_GROUNDING_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="artifact-ground")
+
+
 def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
     """A real answer for `task`, via the SAME retrieval `answer` already uses.
 
@@ -217,7 +240,7 @@ def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
     This closes that gap for the one case it's safe to close it in: `context`
     thin enough that there was plainly nothing to resolve from.
 
-    MUST BUILD A REAL PLAN FIRST. The first cut of this call passed
+    MUST BUILD A REAL PLAN FIRST. An earlier cut of this call passed
     `plan=None` on the theory that `qa_agent.answer(plan=None)` is "the same
     router every unplanned chat question goes through" — quoting the docstring
     out of context. Every LIVE caller of `qa_agent.answer` (routes/ask.py via
@@ -229,10 +252,22 @@ def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
     `plan=None`, returned nothing — the missing plan, not the retrieval, was
     the gap. `plan_for_answer` never raises (a planner outage returns None,
     the documented fail-open), so this stays best-effort either way.
+
+    MUST BE TIME-BOUNDED. Fixing the plan surfaced a second, worse failure:
+    a planned call CAN resolve to a live-fetch pipeline (call digest) that
+    hangs far past any normal answer's latency — observed live, over 18
+    minutes with zero progress, on a workspace with no real call connector for
+    it to read. `qa_agent.answer` takes no timeout of its own, so this wraps
+    the call in `_GROUNDING_POOL` and gives up waiting after
+    `_GROUNDING_TIMEOUT_S` — see that constant for why 45s and why a dedicated
+    pool. A timeout is exactly one more shape of "grounding produced nothing
+    usable": same return value, same fallback, as every other failure path
+    here.
     """
     if not dataset or not task.strip():
         return ""
-    try:
+
+    def _run() -> str:
         from app import ask_planner, qa_agent
 
         plan = ask_planner.plan_for_answer(
@@ -244,13 +279,22 @@ def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
             dataset=dataset,
             plan=plan,
         )
+        return str(result.get("answer") or "").strip()
+
+    future = _GROUNDING_POOL.submit(_run)
+    try:
+        return future.result(timeout=_GROUNDING_TIMEOUT_S)
+    except FutureTimeoutError:
+        logger.warning(
+            "custom artifact grounding timed out after %ss for company_id=%s",
+            _GROUNDING_TIMEOUT_S, company_id,
+        )
+        return ""
     except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
         logger.exception(
             "custom artifact grounding answer failed for company_id=%s", company_id
         )
         return ""
-    answer = str(result.get("answer") or "").strip()
-    return answer
 
 
 def generate_into(
