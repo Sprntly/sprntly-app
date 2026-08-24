@@ -73,6 +73,10 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         # turns it on, and the client reads it to open the panel that writes the
         # document instead of letting a report scroll through the thread.
         "report": False,
+        # WHICH document an `edit_artifact` targets — the report or team
+        # document the tab has open, re-read server-side. None on every other
+        # verdict, on the same present-on-every-verdict terms as the rest.
+        "open_artifact": None,
     }
 
 

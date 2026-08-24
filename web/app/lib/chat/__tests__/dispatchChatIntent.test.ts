@@ -47,6 +47,7 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onCreateArtifact: vi.fn(),
     onAssignTickets: vi.fn(),
     onListArtifacts: vi.fn(),
+    onEditArtifact: vi.fn(),
     onAnswer: vi.fn(),
     // Deliberately omitted from the default fixture — `onClarify` is
     // OPTIONAL (main-chat callers never supply it) — see the two `clarify`
@@ -404,5 +405,54 @@ describe("dispatchChatIntent — share_to_slack", () => {
     const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
+  })
+})
+
+// ── edit_artifact: the report or document open beside the chat ──────────────
+// The target rides the ENVELOPE (re-read server-side under the caller's
+// company), not the caller's own state — it is the same read the planner was
+// told about when it chose this action, so resolving it again on the client
+// could edit a document the decision was never about.
+describe("dispatchChatIntent — edit_artifact", () => {
+  const target = { kind: "report", id: 12, title: "Voice of customer" }
+
+  it("hits onEditArtifact with the instruction and the envelope's target", () => {
+    const ex = executors()
+    const env = envelope({
+      intent: "edit_artifact",
+      instruction: "convert the RICE section into a table",
+      open_artifact: target,
+    })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(true)
+    expect(ex.onEditArtifact).toHaveBeenCalledWith(
+      "convert the RICE section into a table", target,
+    )
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+  })
+
+  it("falls through to the ask when nothing is open", () => {
+    const ex = executors()
+    const env = envelope({ intent: "edit_artifact", instruction: "shorten it" })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+    expect(ex.onEditArtifact).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("falls through to the ask with nothing to apply", () => {
+    const ex = executors()
+    const env = envelope({ intent: "edit_artifact", open_artifact: target })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("falls through on a surface with no panel to edit in", () => {
+    // The project group chat omits the executor entirely; an intent it cannot
+    // act on must answer rather than report an edit that never happened.
+    const ex = { ...executors(), onEditArtifact: undefined }
+    const env = envelope({
+      intent: "edit_artifact", instruction: "cut the appendix", open_artifact: target,
+    })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+    expect(ex.onAnswer).toHaveBeenCalled()
   })
 })

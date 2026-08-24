@@ -26,6 +26,7 @@ report library (see app/report_capture.py and db/reports.py).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -112,6 +113,49 @@ def read_report(
         # The token rides along only when sharing is actually on.
         "share_mode": row.get("share_mode") or "private",
         "share_token": row.get("share_token") if row.get("share_mode") != "private" else None,
+    }
+
+
+class ReportEdit(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/{report_id}/chat-edit")
+async def chat_edit_report(
+    report_id: int,
+    body: ReportEdit,
+    company: CompanyContext = Depends(require_company),
+):
+    """Apply a free-form chat instruction to this report.
+
+    THE TARGET IS THE URL'S REPORT, NOT AN ARGUMENT. The client names the report
+    the user has open beside the chat; nothing in the request body can redirect
+    the write. Same rule as `edit_prd` and the Goal Analysis report editor, same
+    reason: a model — or a prompt-injected instruction sitting inside a
+    customer's own document — must not be able to edit a document the user is
+    not looking at.
+
+    Live on call, no confirm gate: that gate was retired for PRDs in e05577dc,
+    and two documents that read in the same panel should not be on two
+    contracts.
+
+    An instruction the editor judges is NOT an edit (a question about the
+    report) writes nothing and comes back with `sections_changed: []`, which is
+    what lets the chat answer instead of claiming a change it did not make.
+    """
+    from app.artifact_chat_edit import edit_report_scoped
+
+    result = await asyncio.to_thread(
+        edit_report_scoped, report_id, body.instruction, company
+    )
+    row = result["report"]
+    return {
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "skill": row.get("skill") or "",
+        "html": row.get("html") or "",
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
     }
 
 

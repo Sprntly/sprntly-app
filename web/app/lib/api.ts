@@ -1244,6 +1244,14 @@ export type ChatIntentEnvelope = {
     | "answer"
     | "generate_prd"
     | "edit_prd"
+    /** Change the REPORT or DOCUMENT open beside this chat — dispatches
+     *  POST /v1/reports/{id}/chat-edit or
+     *  POST /v1/custom-artifacts/{id}/chat-edit with `instruction`. The target
+     *  rides `open_artifact`, re-read server-side; the client never picks it,
+     *  for the reason `artifact_chat_edit.py` states at length. Downgraded to
+     *  `answer` server-side when nothing is open or nothing was asked to
+     *  change. */
+    | "edit_artifact"
     | "generate_tickets"
     | "generate_prototype"
     | "multi_agent"
@@ -1346,6 +1354,11 @@ export type ChatIntentEnvelope = {
    *  writing in. Never send this back — it is for the user, not the executor. */
   artifact_template_name: string | null
   reason: string
+  /** `edit_artifact` only — WHICH document the edit targets: the report or
+   *  team document the tab said it had open, re-read under the caller's
+   *  company so the title is the stored one and the id is provably theirs.
+   *  Null on every other verdict. */
+  open_artifact?: { kind: string; id: number; title?: string | null } | null
   /** True when this turn will answer with a REPORT DOCUMENT — the planner
    *  resolved one of the report pipelines (voice-of-customer, public feedback,
    *  competitive / market intelligence, company research).
@@ -1534,6 +1547,12 @@ export const chatIntentApi = {
        *  every leg workspace-wide — the request body is byte-identical to
        *  before. */
       contextSource?: { kind: string; params: Record<string, unknown> } | null
+      /** The report or team document the side panel is CURRENTLY showing, so
+       *  "the report" and "that document" have a referent. The backend re-reads
+       *  it under the caller's company — the title that reaches the planner's
+       *  prompt and the id an edit acts on both come from the stored row, never
+       *  from here. Omitted when the panel is closed or on a PRD. */
+      openArtifact?: { kind: "report" | "document"; id: number } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -1542,6 +1561,10 @@ export const chatIntentApi = {
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
       ...(opts?.contextSource ? { context_source: opts.contextSource } : {}),
+      // What the side panel is showing besides a PRD. The planner is told about
+      // it, which is what gives "convert that section into a table" a referent
+      // instead of an answer that prints the rewritten section into the chat.
+      ...(opts?.openArtifact ? { open_artifact: opts.openArtifact } : {}),
     })
     // Guarded so a console-less environment (SSR, a jsdom run without one)
     // can never turn a diagnostic into a broken send.
@@ -5848,6 +5871,20 @@ export const customArtifactsApi = {
       .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
       .then((r) => r.artifacts),
   get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** Apply a chat instruction to this document and return the saved row.
+   *
+   *  Target is the URL, never a body field — see `reportsApi.chatEdit`. 409
+   *  when a colleague (or the user's own editor tab) saved while the edit was
+   *  running: the instruction was written about text that has since moved, so
+   *  it is refused rather than replayed onto a document it was not about.
+   *
+   *  `sections_changed: []` means it was a question, and nothing was written. */
+  chatEdit: (id: number, instruction: string) =>
+    api.post<{
+      artifact: CustomArtifactDoc
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/custom-artifacts/${id}/chat-edit`, { instruction }),
   /** The documents born in one chat, newest first — what re-attaches a thread's
    *  document to its panel after a reload. Bodies omitted; opening one fetches
    *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
@@ -5894,6 +5931,26 @@ export const reportsApi = {
   /** One captured report including its HTML body. The artifact listing omits the
    *  body (it would carry N full documents), so the viewer fetches it on open. */
   get: (reportId: number) => api.get<ReportDoc>(`/v1/reports/${reportId}`),
+
+  /** Apply a chat instruction to this report and return the new body.
+   *
+   *  The TARGET IS THE URL, never a body field: the caller names the report the
+   *  user has open, and nothing in the request can redirect the write. Same
+   *  rule as the PRD's chat-edit, same reason — see backend
+   *  `app/artifact_chat_edit.py`.
+   *
+   *  `sections_changed: []` means the editor judged the instruction was a
+   *  question rather than an edit, and NOTHING was written — the caller says so
+   *  instead of claiming a change. */
+  chatEdit: (reportId: number, instruction: string) =>
+    api.post<{
+      id: number
+      title: string
+      skill: string
+      html: string
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/reports/${reportId}/chat-edit`, { instruction }),
 
   /** Every report captured in one chat thread, newest first — what the chat
    *  panel's Reports tab lists. Bodies are omitted; opening a row fetches that
