@@ -1935,6 +1935,58 @@ def _skip_project_connectors(
     return not names_source
 
 
+#: The pipeline ids that generate a REPORT — always company-wide, never
+#: project-scoped (`call_digest.answer`, `public_feedback.answer`,
+#: `company_research.answer`, `market_intel.answer`, and the pinned VoC path
+#: all key off `enterprise_id` alone; none takes a `project_id`). Deferring
+#: to one of these is never a project-scoping decision — it is standing the
+#: connector-blind project tool loop DOWN so the turn reaches the same
+#: company-wide report main chat already produces for the identical
+#: phrasing. Five `PIPELINE_SKILLS` report ids plus `call-digest` (the
+#: machinery id the live call-window fetch resolves to) — every other
+#: `_MACHINERY_IDS` member (`call-listing`, `single-call-read`,
+#: `data-analysis`, `tracker-lookup`, `ticket-update`) is excluded on
+#: purpose: those are lookups/utilities, not report generation.
+_REPORT_PIPELINE_IDS: frozenset[str] = PIPELINE_SKILLS | frozenset({"call-digest"})
+
+
+def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    report-generation pipeline at high confidence — the mirror of
+    `_skip_project_connectors`, one more narrow AND-clause on the sixth
+    branch's own claim rather than a new mechanism.
+
+    Root cause this closes: a report-phrased ask on a project surface
+    ("how have my customers been saying? give me a voice-of-customer
+    report") lexically matches `is_project_content_request` (a leading
+    interrogative plus a content noun) just as readily as a genuine
+    project-content question does, so the connector-blind project tool
+    loop claimed it and declined — it has no report-generation tool at
+    all. When the planner has already named a report pipeline for this
+    exact turn, that claim is wrong on its face: defer instead, so the
+    turn reaches the SAME company-wide report path
+    (`call_digest.answer` / `public_feedback.answer` / etc.) main chat's
+    identical phrasing already produces.
+
+    `plan.pipeline_id` is `None` unless it already cleared
+    `ask_planner._gate_pipeline`'s confidence bar (`_PLANNER_THRESHOLD`) —
+    reading its mere presence as "high confidence" needs no second
+    threshold to keep in sync with the planner's own gate. Restricted to
+    `plan.is_answer`: a `create_artifact`/`list_artifacts`/other non-answer
+    action turn (e.g. "show me the reports list", a listing of the
+    project's OWN artifacts) must never be read as a report-generation
+    request just because a stray `pipeline_id` happened to ride along.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan) leaves the
+    sixth branch's admission exactly as the gates above already decide it."""
+    return bool(
+        plan is not None
+        and plan.is_answer
+        and plan.pipeline_id in _REPORT_PIPELINE_IDS
+    )
+
+
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
     """Render prior turns + the new question into the sixth branch's tool-loop
     user message — relocated VERBATIM from
@@ -2448,6 +2500,16 @@ def answer(
         # admits. One predicate now governs both this gate and the connector
         # skip → guaranteed symmetry.
         and _skip_project_connectors(scope, routing_text, history)
+        # Yield to the report pipeline when the planner has ALREADY resolved
+        # this turn to one at high confidence — same shape as the connector
+        # clause above, mirrored rather than reinvented. A report-phrased ask
+        # ("give me a voice-of-customer report") lexically satisfies
+        # `is_project_content_request` just like a genuine project-content
+        # question does, but the project tool loop has no report-generation
+        # tool and would only decline it. `plan` is already resolved by the
+        # caller (`ask_job_runner.run_ask_job`) before `answer()` ever runs,
+        # so this reads it rather than reordering anything below.
+        and not _defers_to_report_pipeline(plan)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
