@@ -444,8 +444,11 @@ async def _generate_brief_for_company(slug: str) -> None:
     from app.synthesis_brief import generate_brief_for
 
     # Generation runs GENERATION_LEAD (3h) before delivery and delivers
-    # separately, so minutes of batch latency cost nothing here.
-    await asyncio.to_thread(generate_brief_for, slug, deliver=False, batch=True)
+    # separately, so minutes of batch latency cost nothing here. 45 minutes is
+    # well inside that lead and this path handles ONE company, so the bound does
+    # not multiply the way it would in the all-company cycles.
+    await asyncio.to_thread(generate_brief_for, slug, deliver=False,
+                            batch=True, batch_deadline_s=45 * 60)
     # Warm evidence/PRD/Ask drill-downs so the first user click is instant.
     # Error-isolated in the helper.
     warm_synthesis_drilldowns(slug)

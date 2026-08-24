@@ -396,7 +396,8 @@ def test_scheduled_generation_suppresses_inline_delivery():
         asyncio.run(sched_mod._generate_brief_for_company("acme"))
     # `batch=True` is the scheduled path taking the half-price Batches route;
     # generation runs 3h before delivery, so the latency is free here.
-    assert calls == [("acme", {"deliver": False, "batch": True})]
+    assert calls == [("acme", {"deliver": False, "batch": True,
+                               "batch_deadline_s": 45 * 60})]
 
 
 def test_deliver_top_insights_pushes_current_brief():

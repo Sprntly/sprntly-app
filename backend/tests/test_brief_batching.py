@@ -75,17 +75,41 @@ def test_user_facing_routes_never_ask_for_batching():
     assert "batch=True" not in inspect.getsource(brief_route)
 
 
-def test_batch_deadline_sits_well_inside_the_generation_lead():
+def test_the_brief_tick_bounds_its_batch_well_inside_the_generation_lead():
     """A slow batch must never make a brief miss its slot. The seam cancels and
-    runs live at the deadline, so the deadline has to be comfortably shorter
-    than the lead the scheduler generates on."""
+    runs live at the deadline, so the bound has to be comfortably shorter than
+    the lead the scheduler generates on."""
+    from app import scheduler
     from app.brief_schedule import GENERATION_LEAD
 
-    src = inspect.getsource(synth_agent.run_synthesis)
+    src = inspect.getsource(scheduler._generate_brief_for_company)
     assert "batch_deadline_s=45 * 60" in src
     assert 45 * 60 < GENERATION_LEAD.total_seconds() / 2, (
         "the batch deadline should leave at least half the lead as slack"
     )
+
+
+def test_all_company_cycles_do_not_pin_a_long_deadline():
+    """The two all-company passes walk 21 tenants SEQUENTIALLY, so a long
+    per-company bound multiplies into hours of a background pass that used to
+    take minutes. They must leave the bound unset and take llm_batch's shorter
+    default rather than inherit the tick's 45 minutes."""
+    from app import scheduler
+
+    for src in (inspect.getsource(scheduler._run_synthesis_for_all_companies),
+                inspect.getsource(synthesis_brief.generate_all_synthesis_briefs)):
+        assert "batch=True" in src, "the cycle should still take the discount"
+        assert "batch_deadline_s" not in src, (
+            "a sequential all-company loop must not pin a long deadline"
+        )
+
+
+def test_run_synthesis_deadline_is_caller_supplied_not_hardcoded():
+    """Hardcoding it inside run_synthesis is what made the tick's bound leak
+    into the sequential cycles in the first place."""
+    params = inspect.signature(synth_agent.run_synthesis).parameters
+    assert "batch_deadline_s" in params
+    assert params["batch_deadline_s"].default is None
 
 
 def test_gateway_accepts_every_batch_argument_the_callers_pass():

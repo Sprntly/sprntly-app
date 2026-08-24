@@ -503,6 +503,9 @@ def generate_brief_for(
     # routes reach this function (`routes/brief.py`, and `routes/synthesis.py`
     # via run_synthesis); only the scheduler's background passes opt in.
     batch: bool = False,
+    # Passed through to run_synthesis — see the note there on why the bound is
+    # the caller's to choose.
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Generate + persist the KG-driven Top Insights brief for one company.
 
@@ -595,4 +598,4 @@ def generate_brief_for(
         return prior
 
     return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver,
-                         batch=batch)
+                         batch=batch, batch_deadline_s=batch_deadline_s)
