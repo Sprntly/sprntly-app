@@ -41,6 +41,7 @@ import {
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
+import { GoalMetricCandidates } from "./GoalMetricCandidates"
 import { GoalReportDocument } from "./GoalReportDocument"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
@@ -358,6 +359,26 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
             Edit it if that is not what you meant.
           </p>
         ) : null}
+        {/* GOAL-RESOLUTION §5, requirements 1-3: the search, then candidates
+            carrying live numbers, each naming what changes if it is picked.
+            Absent on older runs and when the scan failed, and the box below
+            stands alone in that case — which is requirement 4 either way. */}
+        <GoalMetricCandidates
+          searched={run.prioritisation?.searched}
+          candidates={run.prioritisation?.candidates}
+          onPick={(seed) => {
+            touched.current = true
+            setDefinition(seed)
+          }}
+        />
+        {/* 4. THE DOOR, ALWAYS OPEN — never conditional on the list being
+            empty. At an enterprise the real definition frequently lives in a
+            team's head and on no list we can produce. */}
+        <p className="ga-doc-note">
+          Or write it yourself. What gets locked is your sentence, whether or
+          not you started from one above — nothing here is adopted as a
+          definition on your behalf.
+        </p>
         <textarea
           className="ga-definition"
           aria-label="What this goal means"

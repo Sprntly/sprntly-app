@@ -348,6 +348,59 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
+def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
+    """Put the finished report in the Artifacts panel, without being asked.
+
+    WHY AUTOMATIC. The report was only ever a document if somebody pressed
+    "Save as document". Until they did, the analysis lived in a panel that
+    closes on reload, does not appear in Chat history, and cannot be reached
+    from the Artifacts library at all — so the one artifact a PM actually
+    circulates was the one thing the feature did not produce. A reader handed a
+    link to a document can check it, edit it, and take it into a room; a reader
+    who has to know to click a button mostly does not.
+
+    IDEMPOTENT BY THE SAME CLAIM the manual route uses. `link_document` puts
+    `artifact_id IS NULL` in its WHERE clause, so if a user pressed the button
+    while this was running, one of the two loses and the loser deletes the
+    orphan it made. Nothing is silently replaced.
+
+    TOTAL, like `_progress` and for the same reason: a run that produced real
+    findings must not be marked failed because a convenience write did. On any
+    error the report is still on the run and the button still works.
+    """
+    from app.db.custom_artifacts import create_artifact, delete_artifact
+    from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
+
+    try:
+        row = runs_db.get(run_id, company_id)
+        if not row or row.get("artifact_id"):
+            return
+        html = _body_or_413(_render_document_html(row, company_id), run_id)
+        artifact = create_artifact(
+            company_id,
+            kind=ARTIFACT_KIND,
+            title=report_title(row),
+            body_html=html,
+            # NO conversation_id — same reason as the manual path: the
+            # thread-resume probe would grow a phantom Document tab beside
+            # every run, holding the report the analysis tab already shows.
+            created_by=user_id or "",
+        )
+        linked = runs_db.link_document(
+            run_id, company_id,
+            artifact_id=artifact["id"],
+            body_hash=body_fingerprint(artifact.get("body_html") or ""),
+        )
+        if linked is None:
+            # A concurrent manual save won the claim. Drop ours: nobody holds
+            # its id, so nothing is lost, and leaving it would put a second
+            # copy of the same report in the shared library.
+            delete_artifact(company_id, artifact["id"])
+    except Exception:  # noqa: BLE001 — see the docstring; convenience only.
+        logger.warning("crucible: could not autosave the report for run %s",
+                       run_id, exc_info=True)
+
+
 def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
@@ -654,6 +707,23 @@ def execute_run(
                 company_id=company_id, raw_goal_text=goal_text,
                 currency="accounts", sources=[KpiTreeSource(tree)],
             )
+            # GROUNDING FOR THE ASK (§5). Total by contract: a failure here
+            # costs the candidate list, never the run — the panel falls back to
+            # the open-door branch, which is exactly the behaviour that shipped
+            # before this existed.
+            candidates: list = []
+            cand_stats: dict = {}
+            searched: list = []
+            try:
+                from app.crucible.metric_candidates import (
+                    candidates_for_goal, searched_summary,
+                )
+
+                candidates, cand_stats = candidates_for_goal(company_id, goal_text)
+                searched = searched_summary(company_id)
+            except Exception:  # noqa: BLE001 — see above.
+                logger.exception(
+                    "crucible: could not ground the ask for %s", company_id)
             proposed = (
                 resolution.definition.definition_text
                 if resolution.definition is not None else ""
@@ -678,6 +748,25 @@ def execute_run(
              "b": {"source": c.source_b, "definition": c.definition_b}}
                         for c in resolution.conflicts
                     ],
+                    # ── GOAL-RESOLUTION §5: the four things an ask must do ──
+                    #
+                    # The shipped ask did none of them. It opened with what it
+                    # could not find, asked an open question, named no
+                    # consequence, and handed over an empty box. §5: "Asking is
+                    # not a failure state, it is a normal step, and the quality
+                    # of the ask is what makes it feel competent rather than
+                    # helpless."
+                    #
+                    # 1. SHOW THE SEARCH BEFORE THE GAP.
+                    "searched": searched,
+                    # 2. CANDIDATES WITH LIVE NUMBERS, so the user can answer
+                    #    by pointing rather than by composing.
+                    "candidates": [c.to_json() for c in candidates],
+                    "candidate_stats": cand_stats,
+                    # 3 is carried per-candidate as `consequence`; 4 (the open
+                    # door) is copy the panel always renders, never conditional
+                    # — at an enterprise the real definition is often in
+                    # somebody's head and on no list we can produce.
                 },
             )
             _remember(run_id, resolution)
@@ -931,6 +1020,10 @@ def execute_run(
             finished_at=datetime.now(timezone.utc).isoformat(),
             coverage_notes=_coverage_notes(stats, result.stats),
         )
+        # AFTER `ready`, and the order is load-bearing: the renderer reads the
+        # findings back out of the database, so autosaving before they are
+        # stored would file an empty report in the shared library.
+        _autosave_document(run_id, company_id, confirmed_by or "")
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))

@@ -748,6 +748,32 @@ export type GoalRunProgress = {
   echo_check_skipped?: boolean
 }
 
+/** One thing the company already measures, with the grounding
+ *  `CRUCIBLE-GOAL-RESOLUTION.md` §5 requires of every candidate in an ask:
+ *  a live value, how long it has been measured, and where it lives. */
+export type GoalMetricCandidate = {
+  key: string
+  label: string
+  source_type: string
+  source_label: string
+  observations: number
+  /** null when the newest observation recorded no numeric value — rendered as
+   *  absent, never as 0. */
+  current_value: number | null
+  current_period: string
+  first_period: string
+  last_period: string
+  /** §5 requirement 3: what changes about the analysis if this is picked. */
+  consequence: string
+}
+
+/** §5 requirement 1: what was looked at, shown BEFORE what is missing. */
+export type GoalAskSearched = {
+  label: string
+  signal_count: number
+  source_type: string
+}
+
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
@@ -761,6 +787,12 @@ export type GoalRunDetail = GoalRun & {
     proposed_definition?: string
     proposed_source?: string | null
     conflicts?: unknown[]
+    /** Grounding for the Stage 0 ask. Absent on older runs and whenever the
+     *  scan failed — the panel then falls back to the open-door box alone,
+     *  which is the behaviour that shipped before §5 was implemented. */
+    searched?: GoalAskSearched[]
+    candidates?: GoalMetricCandidate[]
+    candidate_stats?: Record<string, number>
     plan?: GoalRunPlan
     progress?: GoalRunProgress
   }

@@ -1457,3 +1457,160 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
     # auditor is not left computing it from the claim count.
     assert p["ungroupable_groups"] == 2, p
     assert p["groups"] == p["themes"] + p["ungroupable_groups"], p
+
+
+# ─── GOAL-RESOLUTION §5: the ask arrives after effort ────────────────────────
+
+def _metric_signal(company_id: str, i: int, *, metric: str, value, period: str,
+                   source_type: str = "revenue") -> None:
+    from app.db.client import require_client
+
+    require_client().table("kg_signal").insert({
+        "id": f"mm-{i:04d}", "enterprise_id": company_id, "kind": "metric_anomaly",
+        "source_type": source_type, "content": f"{metric} for {period}",
+        "properties": {"customer": f"Acct{i}", "metric": metric,
+                       "value": value, "period": period},
+        "provenance": {"doc": "ledger"},
+        "valid_at": f"{period}-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+
+def test_the_ask_carries_the_search_and_candidates_with_live_numbers(ctx):
+    """§5's four requirements. The shipped ask met NONE of them: it opened with
+    what it could not find, asked an open question, named no consequence, and
+    handed over an empty box."""
+    for i, p in enumerate(["2025-09", "2025-10", "2025-11", "2025-12"]):
+        _metric_signal(ctx.company_id, i, metric="interchange_revenue_usd",
+                       value=2_264_810 - i * 25_000, period=p)
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+
+    # 1. the search, before the gap
+    assert meta.get("searched"), "the ask does not say what was looked at"
+    assert sum(s["signal_count"] for s in meta["searched"]) >= 4
+
+    # 2. candidates carrying a live value
+    cands = meta.get("candidates") or []
+    assert cands, "the ask offers nothing to point at"
+    top = cands[0]
+    assert top["key"] == "interchange_revenue_usd"
+    assert top["current_value"] == 2_264_810 - 3 * 25_000
+    assert top["current_period"] == "2025-12"
+    assert top["observations"] == 4
+    # 3. the consequence of picking it
+    assert top["consequence"]
+
+
+def test_the_ask_still_works_when_the_company_measures_nothing(ctx):
+    """§5 requirement 4 is unconditional. A tenant with no metric series still
+    gets a question it can answer — the open door is the whole path there."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx).json()["id"]
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "awaiting_confirmation"
+    assert (row["prioritisation"].get("candidates") or []) == []
+    # And confirming by hand still locks, which is the behaviour that shipped
+    # before any of this existed.
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "my own sentence"})
+    assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] != "awaiting_confirmation"
+
+
+def test_a_failed_candidate_scan_never_blocks_the_ask(ctx, monkeypatch):
+    """Grounding is a convenience. A run must still be answerable when it
+    cannot be produced."""
+    import app.crucible.metric_candidates as mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("metric scan unavailable")
+
+    monkeypatch.setattr(mod, "candidates_for_goal", boom)
+
+    run_id = _start(ctx).json()["id"]
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "awaiting_confirmation", "the ask died with the scan"
+    assert not (row["prioritisation"].get("candidates") or [])
+
+
+def test_the_candidates_are_scoped_to_this_company(ctx):
+    """Tenancy, at the ask. Another company's metric names are a disclosure."""
+    _metric_signal("some-other-company", 1, metric="their_secret_metric",
+                   value=1, period="2026-01")
+    _metric_signal("some-other-company", 2, metric="their_secret_metric",
+                   value=2, period="2026-02")
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    keys = {c["key"] for c in (meta.get("candidates") or [])}
+    assert "their_secret_metric" not in keys
+
+
+# ─── The report lands in the Artifacts panel by itself ───────────────────────
+
+def test_a_finished_run_files_its_report_as_an_editable_document(ctx):
+    """The report was only ever a document if somebody pressed a button — so
+    the one artifact a PM circulates was the one thing the feature did not
+    produce."""
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready"
+    assert row["artifact_id"], "the finished report is not in the library"
+
+    doc = ctx.client.get(f"/v1/crucible/{run_id}/document")
+    assert doc.status_code == 200, doc.text
+    body = doc.json()
+    assert body.get("body_html"), "the filed document has no body"
+    assert not body.get("detached"), "a freshly filed report reads as edited"
+
+
+def test_the_autosave_does_not_fight_a_manual_save(ctx):
+    """`link_document` claims with `artifact_id IS NULL` in the WHERE clause, so
+    only one of the two can win and the loser deletes its orphan. Without that
+    a double-save leaves a stray report in the shared library."""
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    # The autosave already filed one; ask for another by hand.
+    again = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert again.status_code in (200, 409), again.text
+
+    from app.crucible.report import ARTIFACT_KIND
+
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, f"duplicate reports in the library: {len(reports)}"
+
+
+def test_an_autosave_failure_never_fails_a_finished_run(ctx, monkeypatch):
+    import app.routes.crucible as mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("artifact store unavailable")
+
+    monkeypatch.setattr(mod, "_render_document_html", boom)
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready", f"a convenience write failed the run: {row}"
+    assert not row.get("artifact_id")
