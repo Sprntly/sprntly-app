@@ -1457,3 +1457,551 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
     # auditor is not left computing it from the claim count.
     assert p["ungroupable_groups"] == 2, p
     assert p["groups"] == p["themes"] + p["ungroupable_groups"], p
+
+
+# ─── GOAL-RESOLUTION §5: the ask arrives after effort ────────────────────────
+#
+# Candidates come from `metric_points`, the real registry — NOT from
+# `kg_signal.properties.metric`, which the first version read and which is the
+# DS anomaly log plus unfiltered LLM extraction. Fixtures are synthetic per
+# CONVENTIONS' public-repo hygiene.
+
+def _point(company_id: str, metric: str, period: str, value: float,
+           source: str = "amplitude") -> None:
+    from app.db.client import require_client
+
+    require_client().table("metric_points").insert({
+        "enterprise_id": company_id, "metric": metric,
+        "period_start": period, "value": value, "source": source,
+    }).execute()
+
+
+def test_the_ask_carries_the_search_and_candidates_with_live_numbers(ctx):
+    """§5's four requirements. The shipped ask met NONE of them: it opened with
+    what it could not find, asked an open question, named no consequence, and
+    handed over an empty box."""
+    for i, p in enumerate(["2026-02-02", "2026-03-02", "2026-04-06", "2026-05-04"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 4000 + i * 32)
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+
+    # 1. the search — the DEFINITION ladder's rungs, not the corpus inventory.
+    rungs = meta.get("searched") or []
+    assert rungs, "the ask does not say where it looked"
+    labels = [r["rung"] for r in rungs]
+    assert "your KPI tree" in labels and "your measured metrics" in labels
+
+    # 2. candidates carrying a live value
+    cands = meta.get("candidates") or []
+    assert cands, "the ask offers nothing to point at"
+    top = cands[0]
+    assert top["key"] == "weekly_signups_count"
+    assert top["current_value"] == 4000 + 3 * 32
+    assert top["current_period"] == "2026-05-04"
+    assert top["points"] == 4
+    # 3. the consequence, and not the old broken prose
+    assert top["consequence"]
+    assert "recorded, never counted" not in top["consequence"]
+    # §6: the calculation, stated in the same step.
+    assert meta.get("method_note"), "identity without method is F4"
+
+
+def test_the_ask_still_works_when_the_registry_is_empty(ctx):
+    """§5 requirement 4 is unconditional, and the registry is empty on every
+    real tenant today — so this is the NORMAL path, not the edge case."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx).json()["id"]
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "awaiting_confirmation"
+    assert (row["prioritisation"].get("candidates") or []) == []
+    # The rungs still report — an empty rung is the evidence of looking.
+    assert row["prioritisation"].get("searched")
+    assert row["prioritisation"].get("method_note")
+    # And confirming by hand still locks.
+    ctx.client.post(f"/v1/crucible/{run_id}/confirm",
+                    json={"definition_text": "my own sentence"})
+    assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] != "awaiting_confirmation"
+
+
+def test_a_clean_adoption_is_not_handed_a_pick_list(ctx, monkeypatch):
+    """§7: when Step 2 found a definition the confirmation "is not a question,
+    it is a statement with an escape hatch, and it should take two seconds to
+    clear". A six-item pick-list beside an adopted verbatim definition invites
+    the user to replace it with our paraphrase — which §10 forbids, and the
+    panel's pick used to be a REPLACE with no undo.
+
+    DRIVEN THROUGH THE REAL RESOLVER, not a stub. An earlier version of this
+    test monkeypatched `resolve` to return a fake object, which `_remember`
+    then stored in the module-level `_pending_definitions` dict — keyed by
+    `run_id`, which restarts at 1 whenever the test DB resets. A LATER test
+    picked the fake up and died in `confirm()` on `definition.id`. The fake
+    was the bug; the real ladder is also the better test.
+    """
+    from app.kpi_tree import KpiTree, NorthStar
+
+    tree = KpiTree(
+        north_star=NorthStar(
+            metric="Net Revenue Retention (NRR)",
+            description="expansion minus churn across renewing accounts",
+        ),
+        primary_metrics=[],
+        secondary_signals=[],
+    )
+    monkeypatch.setattr("app.kpi_tree.load_kpi_tree", lambda cid: tree)
+
+    # A registry with something in it, so an empty list cannot pass vacuously.
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+
+    assert "expansion minus churn" in meta["proposed_definition"], (
+        "the fixture did not actually reach an adoption")
+    assert (meta.get("candidates") or []) == [], (
+        "an adopted definition must not be offered a replacement list")
+
+
+def test_a_registry_metric_is_still_offered_when_nothing_was_adopted(ctx):
+    """The other half of the test above: with no KPI-tree match the SAME
+    registry does produce candidates, so the assertion there is about the
+    adoption and not about an empty registry."""
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    assert not meta.get("proposed_definition")
+    assert [c["key"] for c in (meta.get("candidates") or [])] == [
+        "weekly_signups_count"]
+
+
+def test_a_failed_registry_read_never_blocks_the_ask(ctx, monkeypatch):
+    import app.crucible.metric_candidates as mod
+
+    monkeypatch.setattr(mod, "candidates_for_goal",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+
+    run_id = _start(ctx).json()["id"]
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "awaiting_confirmation", "the ask died with the scan"
+    assert not (row["prioritisation"].get("candidates") or [])
+
+
+def test_the_candidates_are_scoped_to_this_company(ctx):
+    """Tenancy, at the ask. Another company's metric names are a disclosure."""
+    for p in ("2026-01-05", "2026-01-12"):
+        _point("some-other-company", "their_secret_metric", p, 1)
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    keys = {c["key"] for c in (meta.get("candidates") or [])}
+    assert "their_secret_metric" not in keys
+
+
+# ─── The report lands in the Artifacts panel by itself ───────────────────────
+
+def test_a_finished_run_files_its_report_as_an_editable_document(ctx):
+    """The report was only ever a document if somebody pressed a button — so
+    the one artifact a PM circulates was the one thing the feature did not
+    produce."""
+    for i in range(6):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready"
+    assert row["artifact_id"], "the finished report is not in the library"
+
+    doc = ctx.client.get(f"/v1/crucible/{run_id}/document")
+    assert doc.status_code == 200, doc.text
+    body = doc.json()
+    assert body.get("body_html"), "the filed document has no body"
+    assert not body.get("detached"), "a freshly filed report reads as edited"
+
+
+def test_the_autosave_does_not_fight_a_manual_save(ctx):
+    """`link_document` claims with `artifact_id IS NULL` in the WHERE clause, so
+    only one of the two can win and the loser deletes its orphan. Without that
+    a double-save leaves a stray report in the shared library."""
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    # The autosave already filed one; ask for another by hand.
+    again = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert again.status_code in (200, 409), again.text
+
+    from app.crucible.report import ARTIFACT_KIND
+
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, f"duplicate reports in the library: {len(reports)}"
+
+
+def test_an_autosave_failure_never_fails_a_finished_run(ctx, monkeypatch):
+    import app.routes.crucible as mod
+
+    def boom(*a, **kw):
+        raise RuntimeError("artifact store unavailable")
+
+    monkeypatch.setattr(mod, "_render_document_html", boom)
+
+    for i in range(4):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready", f"a convenience write failed the run: {row}"
+    assert not row.get("artifact_id")
+
+
+def test_the_method_note_does_not_promise_what_the_engine_does_not_do(ctx):
+    """§6's sentence has to be TRUE of the run.
+
+    The first version said "I will use your own recorded numbers for whichever
+    metric you name, exactly as they are stored". It is false — `execute_run`
+    reads `kg_signal` and nothing in the pipeline reads `metric_points`, so no
+    registry number enters the sizing. A method note that misstates the method
+    is the overpromise `plan.py` has been burned by twice, one gate earlier."""
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx).json()["id"]
+    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+
+    assert note
+    # It must not claim the run consumes the registry's numbers.
+    assert "recorded numbers" not in note
+    assert "exactly as they are stored" not in note
+    # It must say what the run DOES read, and what it reports instead.
+    assert "reads your documents" in note
+    assert "how much of your book" in note
+
+
+def test_the_method_note_is_the_same_whether_or_not_a_registry_exists(ctx):
+    """There is only one honest sentence, because nothing in the pipeline reads
+    the registry either way. Branching on its presence implied the run behaved
+    differently when it does not."""
+    empty = ctx.client.get(
+        f"/v1/crucible/{_start(ctx).json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+    filled = ctx.client.get(
+        f"/v1/crucible/{_start(ctx).json()['id']}"
+    ).json()["prioritisation"]["method_note"]
+
+    assert empty == filled
+
+
+def test_the_panel_and_the_api_agree_on_the_definition_cap():
+    """CROSS-BOUNDARY, and the precedent is two tests above this one. The panel
+    refuses an append past its own constant; if that constant drifts from
+    `ConfirmGoal.definition_text`'s `max_length`, the panel starts posting text
+    the API rejects with a 422 it cannot recover from."""
+    import pathlib
+    import re
+
+    panel = (pathlib.Path(__file__).resolve().parents[2]
+             / "web/app/components/shared/GoalMetricCandidates.tsx")
+    if not panel.exists():
+        pytest.fail(f"{panel} is gone — move this contract test with it")
+    m = re.search(r"MAX_DEFINITION_CHARS\s*=\s*([\d_]+)", panel.read_text())
+    if not m:
+        pytest.fail("MAX_DEFINITION_CHARS is gone from the panel — update this test")
+
+    from app.routes.crucible import ConfirmGoal
+
+    # The field carries MinLen and MaxLen as separate metadata entries, in no
+    # guaranteed order — pick the one that actually declares a maximum.
+    caps = [getattr(c, "max_length", None)
+            for c in ConfirmGoal.model_fields["definition_text"].metadata]
+    api_cap = next((c for c in caps if c is not None), None)
+    assert api_cap is not None, "ConfirmGoal.definition_text declares no maximum"
+    assert int(m.group(1).replace("_", "")) == api_cap, (
+        f"the panel's cap ({m.group(1)}) and the API's max_length ({api_cap}) "
+        f"have drifted")
+
+
+def test_a_definition_conflict_is_not_offered_a_way_around_itself(ctx, monkeypatch):
+    """`goal.py`: "two authoritative systems disagreeing about what a metric
+    means is worth more than either answer", and "picking one silently is the
+    failure". A pick-list of unrelated registry metrics beside the conflict ask
+    is a one-click route past it — the two conflicting sides are never
+    referenced again — so a conflict gets the ask alone.
+
+    `definition is None` is true on THREE statuses, which is how the conflict
+    path acquired a pick-list by accident."""
+    from app.crucible.types import DefinitionConflict
+
+    class _Conflicted:
+        status = "conflict"
+        ask = "Two systems define this differently. Which one governs?"
+        definition = None
+        conflicts = [DefinitionConflict(
+            metric_name="tasks_open",
+            source_a="clickup", definition_a="open tasks in ClickUp",
+            source_b="jira", definition_b="unresolved issues in Jira",
+        )]
+
+    import app.routes.crucible as mod
+
+    monkeypatch.setattr(mod, "resolve", lambda **kw: _Conflicted())
+    # A registry with something in it, so an empty list cannot pass vacuously.
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+
+    assert meta["conflicts"], "the fixture did not reach a conflict"
+    assert (meta.get("candidates") or []) == [], (
+        "a conflict must not be offered a way around itself")
+    # The conflict question itself still renders.
+    assert meta["ask"]
+
+
+def test_the_ask_does_not_restate_the_absence_the_search_block_just_showed(ctx):
+    """§5: "Never open with what you do not know. Open with what you looked at."
+
+    THE SENTENCE WAS THE BUG, and an earlier attempt at this PR moved a "where I
+    looked" block above it while leaving the words alone — so the panel said
+    "nothing, nothing" in two bullets and then restated the same absence as a
+    failure claim in prose. More to read, same outcome, and the specific copy
+    the PR set out to fix still shipping."""
+    run_id = _start(ctx).json()["id"]
+    ask = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["ask"]
+
+    assert ask
+    lowered = ask.lower()
+    # It must not OPEN with the gap.
+    assert not lowered.startswith("i can't find"), ask
+    assert "defined anywhere in your systems" not in lowered, ask
+    # It must move to the decision the user is being asked to make.
+    assert "what is counted" in lowered
+    assert "population" in lowered and "window" in lowered
+    # And it keeps the reason asking beats guessing — that part was right.
+    assert "rather ask than guess" in lowered
+
+
+def test_rerunning_a_goal_does_not_file_a_second_team_document(ctx):
+    """`custom_artifacts` is COMPANY-SHARED. A PM iterating on phrasing would
+    otherwise leave three near-identical team-visible documents that nobody can
+    tell apart, with no delete on this surface. Exploration is the normal use of
+    this feature."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    ids = []
+    for _ in range(3):
+        rid = _start(ctx, goal="reduce customer churn").json()["id"]
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+        ids.append(rid)
+
+    rows = [ctx.client.get(f"/v1/crucible/{r}").json() for r in ids]
+    assert all(r["status"] == "ready" for r in rows), (
+        "a rerun must still produce a full run")
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, (
+        f"three runs of one goal filed {len(reports)} team documents")
+    # Exactly one run holds the document; the others ran and reported in-panel.
+    assert sum(1 for r in rows if r.get("artifact_id")) == 1
+
+
+def test_a_different_goal_still_gets_its_own_document(ctx):
+    """The dedup is keyed on the goal text, so it must not swallow a genuinely
+    different analysis."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    for goal in ("reduce customer churn", "grow activation"):
+        rid = _start(ctx, goal=goal).json()["id"]
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+
+    reports = [a for a in (list_artifacts_for_company(ctx.company_id) or [])
+               if a.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 2, f"two goals should file two documents, got {len(reports)}"
+
+
+def test_nothing_in_the_run_reads_the_metric_registry():
+    """THE CANARY FOR `_method_note`.
+
+    The note tells the user "the analysis reads your documents, tickets and
+    conversations against it, not a metric series". That is true only while
+    nothing in the run reads `metric_points` — and `metric_candidates`' own
+    docstring says the registry "lights up the moment it is populated", so
+    somebody wiring it into sizing is expected. The existing tests assert
+    substrings of the note and would keep passing on a stale string.
+
+    This fails instead, and points at the note."""
+    import pathlib
+    import re
+
+    # THE WHOLE PIPELINE, not one function's body. Greping
+    # `inspect.getsource(execute_run)` was trivially defeated by ordinary
+    # refactoring: a `_size_with_registry(...)` helper defined elsewhere and
+    # called from `execute_run` puts none of these names in `execute_run`'s own
+    # source, and this file already factors work out that way — so the guard
+    # would have been silently defeated by whoever does that work next rather
+    # than by anyone trying to dodge it.
+    root = pathlib.Path(__file__).resolve().parents[1] / "app"
+    watched = [root / "crucible" / f for f in
+               ("pipeline.py", "claims.py", "scoring.py", "cluster.py",
+                "kg_themes.py", "report.py")]
+    watched.append(root / "routes" / "crucible.py")
+
+    offenders = []
+    for path in watched:
+        if not path.exists():
+            continue
+        text = path.read_text()
+        if path.name == "crucible.py" and path.parent.name == "routes":
+            # `_method_note` and the ask's candidate scan legitimately read the
+            # registry; the ANALYSIS must not. Strip the two known-good readers
+            # before looking.
+            text = re.sub(r"def (_method_note|_autosave_document)\b.*?(?=\ndef )",
+                          "", text, flags=re.S)
+            text = text.replace("from app.crucible.metric_candidates import", "")
+        for forbidden in ("metric_points", "list_metric_points",
+                          "distinct_metrics"):
+            if forbidden in text:
+                offenders.append(f"{path.name}: {forbidden}")
+
+    assert not offenders, (
+        f"the analysis now touches the metric registry ({offenders}). "
+        f"`_method_note` promises the run reads your documents, tickets and "
+        f"conversations rather than a metric series — rewrite that sentence "
+        f"before wiring the registry into sizing."
+    )
+
+
+def test_the_later_run_finishing_first_still_leaves_one_document(ctx):
+    """THE INTERLEAVING THE PREVIOUS TEST COULD NOT SEE, and its docstring
+    wrongly claimed it did.
+
+    A "stand down if someone beat me" check does not close this race: it only
+    works when the other racer has already linked by the time you look. If the
+    HIGHER-id run finishes first it sees no rival and keeps its document; the
+    lower-id run links later, sees the higher one, and `higher < lower` is false
+    so it keeps too — BOTH survive.
+
+    The old test ran A to full completion before B started, so B always found A
+    already linked and the broken branch was unreachable. This drives the real
+    order: the higher id finishes FIRST.
+    """
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    # Two runs of one goal, created in id order, then finished in REVERSE.
+    lower = _start(ctx, goal="reduce customer churn").json()["id"]
+    higher = _start(ctx, goal="reduce customer churn").json()["id"]
+    assert higher > lower
+
+    _confirm(ctx, higher)
+    ctx.client.post(f"/v1/crucible/{higher}/approve", json={})
+    assert ctx.client.get(f"/v1/crucible/{higher}").json()["artifact_id"], (
+        "the first to finish should file one")
+
+    _confirm(ctx, lower)
+    ctx.client.post(f"/v1/crucible/{lower}/approve", json={})
+
+    reports = [x for x in (list_artifacts_for_company(ctx.company_id) or [])
+               if x.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1, (
+        f"the later-first interleaving filed {len(reports)} documents")
+    # The LOWEST id owns it, whichever finished first — that is what makes the
+    # outcome independent of timing.
+    assert ctx.client.get(f"/v1/crucible/{lower}").json()["artifact_id"]
+    assert not ctx.client.get(f"/v1/crucible/{higher}").json().get("artifact_id")
+    # And evicting must not fail the run that lost its document.
+    assert ctx.client.get(f"/v1/crucible/{higher}").json()["status"] == "ready"
+
+
+def test_the_earlier_run_finishing_first_also_leaves_one_document(ctx):
+    """The other order, so the convergence is pinned from both directions."""
+    from app.crucible.report import ARTIFACT_KIND
+    from app.db.custom_artifacts import list_artifacts_for_company
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    lower = _start(ctx, goal="grow activation").json()["id"]
+    higher = _start(ctx, goal="grow activation").json()["id"]
+
+    for rid in (lower, higher):
+        _confirm(ctx, rid)
+        ctx.client.post(f"/v1/crucible/{rid}/approve", json={})
+
+    reports = [x for x in (list_artifacts_for_company(ctx.company_id) or [])
+               if x.get("kind") == ARTIFACT_KIND]
+    assert len(reports) == 1
+    assert ctx.client.get(f"/v1/crucible/{lower}").json()["artifact_id"]
+    assert not ctx.client.get(f"/v1/crucible/{higher}").json().get("artifact_id")
+
+
+def test_an_evicted_run_never_points_at_a_deleted_artifact(ctx):
+    """The eviction unlinks BEFORE deleting, so the stranded-document sweep and
+    any reader never see a run pointing at an artifact that is gone."""
+    from app.db.custom_artifacts import get_artifact
+
+    for i in range(5):
+        _signal(ctx.company_id, i, embedding=str([0.1 * (i + 1)] * 4))
+
+    lower = _start(ctx, goal="reduce churn").json()["id"]
+    higher = _start(ctx, goal="reduce churn").json()["id"]
+
+    _confirm(ctx, higher)
+    ctx.client.post(f"/v1/crucible/{higher}/approve", json={})
+    evicted_artifact = ctx.client.get(
+        f"/v1/crucible/{higher}").json()["artifact_id"]
+
+    _confirm(ctx, lower)
+    ctx.client.post(f"/v1/crucible/{lower}/approve", json={})
+
+    row = ctx.client.get(f"/v1/crucible/{higher}").json()
+    assert not row.get("artifact_id"), "the evicted run still points somewhere"
+    assert get_artifact(ctx.company_id, evicted_artifact) is None, (
+        "the evicted artifact is still in the shared library")
+
+
+def test_the_goal_dedup_is_not_bounded_by_a_page_of_recent_runs(ctx):
+    """`list_for_company`'s default limit is 50, ordered `created_at DESC`, so
+    scanning it meant that on a company with fifty runs since a goal was last
+    analysed the earlier document fell off the end and a rerun filed a second
+    one — silent degradation on exactly the companies busy enough to have a
+    clutter problem. The lookup is filtered in the query instead."""
+    import inspect
+
+    import app.routes.crucible as mod
+
+    src = inspect.getsource(mod._autosave_document)
+    assert "list_for_company" not in src, (
+        "the dedup is paging recent runs again; it must filter by goal in the "
+        "query or it degrades silently past the page limit")
+    assert "documented_run_for_goal" in src

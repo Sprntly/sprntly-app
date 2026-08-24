@@ -25164,3 +25164,12 @@
 .ga-narration-recap > summary { cursor: pointer; font-size: 12.5px; opacity: 0.72; }
 .ga-narration-recap > summary:hover { opacity: 1; }
 .ga-narration-recap .ga-narration { margin-top: 10px; }
+/* The grounded ask — GOAL-RESOLUTION §5. Candidates are buttons because the
+   requirement is that a user can answer by POINTING rather than composing. */
+.ga-ask-grounded { display: grid; gap: 14px; margin: 10px 0 4px; }
+.ga-ask-candidates { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.ga-ask-candidate { width: 100%; text-align: left; display: grid; gap: 3px; padding: 10px 12px;
+  border: 1px solid var(--border, #e5e5e5); border-radius: 8px; background: transparent; cursor: pointer; }
+.ga-ask-candidate:hover { border-color: var(--accent, #7a9c85); }
+.ga-ask-candidate-head { font-size: 13.5px; }
+.ga-ask-consequence { font-size: 12px; opacity: 0.72; line-height: 1.45; }

@@ -459,13 +459,46 @@ def _ambiguous_metric_ask(candidates: Sequence[MetricCandidate]) -> str:
 
 
 def _no_definition_ask(goal_text: str) -> str:
+    """The ask when nothing was found. §5, and the ORDER of the two ideas in it
+    is the requirement.
+
+    THIS SENTENCE WAS THE BUG, and a previous attempt at fixing it moved a
+    "where I looked" block ABOVE it while leaving the words alone — so the panel
+    said "nothing, nothing" in two bullets and then restated the same absence as
+    a failure claim in prose, which is more to read for the same outcome. §5:
+    "Never open with what you do not know. Open with what you looked at."
+
+    So it no longer opens with what is missing, and it does not repeat what the
+    search block directly above it has already shown. It opens with the one
+    thing that IS established — that a search ran — and only then names the gap,
+    once, before moving to the decision. That is the shape §5's own templates
+    use ("I looked for a complaints metric in Amplitude, Zendesk... There isn't
+    one definition these agree on"). An earlier attempt opened with "Your
+    systems don't record a definition yet", which is still absence-first and
+    echoed the search block's own "nothing recorded yet" almost word for word,
+    so the screen said "nothing here" three times before asking anything.
+
+    IT NAMES NO STORES, and that is a correctness constraint rather than a style
+    choice. `resolve()` is handed ONE source — `KpiTreeSource` — so it never
+    searches the metric registry, and the attempt at fixing the wording above
+    said "I checked your KPI tree and the metrics you record", claiming a search
+    that never happened. It would also have claimed the KPI tree on the path
+    where `load_kpi_tree` raised and the caller passed `None`. A false claim
+    about diligence is worse than a joyless one, so the per-store detail — with
+    its own honest "could not be read" state — belongs to the search block that
+    actually knows, and this sentence asserts only what it did: it looked.
+
+    `goal_text` is quoted so the question is unmistakably about their goal.
+    """
     return (
-        f"I can't find \"{goal_text}\" defined anywhere in your systems, so I "
-        f"want to check what I'm optimising before I start.\n\n"
-        f"Describe what you'd want to see move and I'll find the closest thing "
-        f"you actually measure. I'd rather ask than guess: a definition I "
-        f"invented would give you a confident answer to a question you didn't "
-        f"ask, and you wouldn't be able to tell from the output."
+        f"I looked for an existing definition of \"{goal_text}\" and did not "
+        f"find one to adopt, so this one is yours to state — and stating it is "
+        f"the whole of what I need.\n\n"
+        f"Write what you'd want to see move: what is counted, over what "
+        f"population, over what window. I'd rather ask than guess, because a "
+        f"definition I invented would give you a confident answer to a "
+        f"question you didn't ask, and you wouldn't be able to tell from the "
+        f"output."
     )
 
 

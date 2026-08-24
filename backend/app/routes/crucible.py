@@ -348,6 +348,183 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
+def _method_note(company_id: str) -> str:
+    """§6's one sentence: the calculation, stated and editable.
+
+    A metric NAME is not a definition — "revenue" can be recognised or booked,
+    "active" can mean logged in or took an action, and none of that is visible
+    in the name while all of it resizes every recommendation. §6's rule is to
+    surface the company's own computation, not to reconstruct it or interrogate
+    the user about it, and to state a convention where none is found.
+
+    Nothing in this codebase reads a dbt model or a metric layer yet, AND
+    nothing in the pipeline reads the metric registry either — so there is no
+    computation to surface and only one honest sentence to write: state what
+    the definition will be taken to mean, state that nothing is filled in on
+    the user's behalf, and state what the run actually reads.
+
+    `company_id` is unused and kept so the signature does not have to change
+    when a metric layer does become readable.
+    """
+    # ONE SENTENCE, AND IT HAS TO BE TRUE OF THE RUN. The first version said
+    # "I will use your own recorded numbers for whichever metric you name,
+    # exactly as they are stored — I do not recompute them". That is false:
+    # `execute_run` reads `kg_signal` and nothing in the pipeline reads
+    # `metric_points` at all, so no number from the registry enters the sizing.
+    # A method note that promises the engine's behaviour wrongly is the exact
+    # overpromise `plan.py` has already been burned by twice, arriving one gate
+    # earlier — and here it would be a false statement about METHOD, which is
+    # the thing §6 exists to pin down.
+    return (
+        "This sentence is the whole definition I will work to — what is "
+        "counted, over what population, over what window. I do not recompute "
+        "it and I do not fill in the parts you leave out. The analysis then "
+        "reads your documents, tickets and conversations against it, not a "
+        "metric series, so it reports how much of your book each theme touches "
+        "rather than a movement in this number."
+    )
+
+
+def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
+    """Put the finished report in the Artifacts panel, without being asked.
+
+    WHY AUTOMATIC. The report was only ever a document if somebody pressed
+    "Save as document". Until they did, the analysis lived in a panel that
+    closes on reload, does not appear in Chat history, and cannot be reached
+    from the Artifacts library at all — so the one artifact a PM actually
+    circulates was the one thing the feature did not produce. A reader handed a
+    link to a document can check it, edit it, and take it into a room; a reader
+    who has to know to click a button mostly does not.
+
+    IDEMPOTENT BY THE SAME CLAIM the manual route uses. `link_document` puts
+    `artifact_id IS NULL` in its WHERE clause, so if a user pressed the button
+    while this was running, one of the two loses and the loser deletes the
+    orphan it made. Nothing is silently replaced.
+
+    TOTAL, like `_progress` and for the same reason: a run that produced real
+    findings must not be marked failed because a convenience write did. On any
+    error the report is still on the run and the button still works.
+    """
+    from app.db.custom_artifacts import create_artifact, delete_artifact
+    from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
+
+    try:
+        row = runs_db.get(run_id, company_id)
+        if not row or row.get("artifact_id"):
+            return
+
+        # ONE DOCUMENT PER GOAL, not one per run. `custom_artifacts` is
+        # COMPANY-SHARED, so a PM iterating on phrasing — three runs of "reduce
+        # churn" while they get the definition right — would leave three
+        # near-identical team-visible documents that nobody can tell apart, and
+        # the panel offers no way to delete one. Exploration is the normal use
+        # of this feature, so it must not litter a shared library.
+        #
+        # KEYED ON THE GOAL TEXT, because that is what a reader would be
+        # comparing. A rerun still produces a full run with its own findings and
+        # its own report in the panel; what it does not do is file a second copy
+        # for the team. The earlier run keeps the document, which is the
+        # conservative direction: it is the one someone may already have opened.
+        # `.strip()` — dropped in a previous edit, which made "reduce churn"
+        # and "reduce churn " two different goals for dedup purposes while the
+        # equality query below is exact.
+        goal_text = (row.get("goal_text") or "").strip()
+        # SAME OWNERSHIP RULE AS THE POST-LINK CHECK BELOW, and it has to be:
+        # standing down for ANY existing rival made this a short-circuit, so a
+        # lower-id run whose rival finished first returned here and never
+        # reached the eviction that makes the outcome converge. The lowest id
+        # owns the document, whoever happened to finish first.
+        if goal_text:
+            holder = runs_db.documented_run_for_goal(
+                company_id, goal_text, excluding_run_id=run_id)
+            if holder and (holder.get("id") or 0) < run_id:
+                logger.info("crucible: run %s leaves the document to run %s for "
+                            "the same goal", run_id, holder.get("id"))
+                return
+        html = _body_or_413(_render_document_html(row, company_id), run_id)
+        artifact = create_artifact(
+            company_id,
+            kind=ARTIFACT_KIND,
+            title=report_title(row),
+            body_html=html,
+            # NO conversation_id — same reason as the manual path: the
+            # thread-resume probe would grow a phantom Document tab beside
+            # every run, holding the report the analysis tab already shows.
+            created_by=user_id or "",
+        )
+        linked = runs_db.link_document(
+            run_id, company_id,
+            artifact_id=artifact["id"],
+            body_hash=body_fingerprint(artifact.get("body_html") or ""),
+        )
+        if linked is None:
+            # A concurrent manual save won the claim. Drop ours: nobody holds
+            # its id, so nothing is lost, and leaving it would put a second
+            # copy of the same report in the shared library.
+            delete_artifact(company_id, artifact["id"])
+            return
+
+        # THE RACE, RESOLVED BY CONVERGENCE RATHER THAN BY TIMING.
+        #
+        # `link_document`'s `artifact_id IS NULL` claim guards ONE ROW AGAINST
+        # ITSELF — it makes re-invocation for the same run idempotent and says
+        # nothing about two DIFFERENT runs of the same goal. Two near-
+        # simultaneous finishes (a double-click, or a rerun started before the
+        # first ended — the exploratory pattern this dedup exists for) can both
+        # pass the pre-flight scan and both file.
+        #
+        # A "stand down if someone beat me" check does NOT close it, and the
+        # first attempt at this got that wrong. It only works if the other
+        # racer has already linked by the time you look, which nothing
+        # enforces: if run 7 links and checks before run 5 has created its
+        # artifact, 7 sees no rival and keeps; 5 links later, sees 7, and
+        # `7 < 5` is false so 5 keeps as well. BOTH SURVIVE — the exact
+        # duplicate this exists to prevent, reached by a different interleaving.
+        #
+        # So the rule is not "who got here first" (timing, unknowable) but "who
+        # SHOULD own it" (the lowest run id, a total order that every racer
+        # computes identically):
+        #
+        #   rival is LOWER  -> they own it. Stand down and remove ours.
+        #   rival is HIGHER -> we own it. Evict theirs.
+        #
+        # That converges from any interleaving, because exactly one run has the
+        # lowest id: it can never stand down, and every higher one is either
+        # removed by it or stands down on its own. Only the lower run evicts, so
+        # two racers cannot delete each other.
+        #
+        # There is no unique constraint on `(company_id, goal_text)` to lean on
+        # and adding one is a migration — this is the strongest guarantee
+        # available without one, and unlike the previous attempt it does not
+        # depend on who ran first.
+        rival = runs_db.documented_run_for_goal(
+            company_id, goal_text, excluding_run_id=run_id) if goal_text else None
+        if rival:
+            rival_id = rival.get("id") or 0
+            if rival_id < run_id:
+                logger.info(
+                    "crucible: run %s defers to run %s for the same goal; "
+                    "removing the duplicate document", run_id, rival_id)
+                runs_db.update(run_id, company_id, artifact_id=None,
+                               report_body_hash=None)
+                delete_artifact(company_id, artifact["id"])
+            else:
+                # We are the rightful owner and a later run already filed one.
+                # Unlink it before deleting, so the sweep never sees a run
+                # pointing at an artifact that no longer exists.
+                logger.info(
+                    "crucible: run %s evicts run %s's duplicate document for "
+                    "the same goal", run_id, rival_id)
+                rival_artifact = rival.get("artifact_id")
+                runs_db.update(rival_id, company_id, artifact_id=None,
+                               report_body_hash=None)
+                if rival_artifact:
+                    delete_artifact(company_id, rival_artifact)
+    except Exception:  # noqa: BLE001 — see the docstring; convenience only.
+        logger.warning("crucible: could not autosave the report for run %s",
+                       run_id, exc_info=True)
+
+
 def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
@@ -654,6 +831,43 @@ def execute_run(
                 company_id=company_id, raw_goal_text=goal_text,
                 currency="accounts", sources=[KpiTreeSource(tree)],
             )
+            # GROUNDING FOR THE ASK (§5). Total by contract: a failure here
+            # costs the candidate list, never the run — the panel falls back to
+            # the open-door branch, which is exactly the behaviour that shipped
+            # before this existed.
+            #
+            # ONLY WHEN THERE IS ACTUALLY NOTHING TO ADOPT. §7: when Step 2
+            # found a definition the confirmation "is not a question, it is a
+            # statement with an escape hatch, and it should take two seconds to
+            # clear". Offering a six-item pick-list beside an adopted verbatim
+            # definition invites the user to replace it with our paraphrase,
+            # which is precisely what §10 forbids — and the panel's pick is a
+            # REPLACE with no undo. So a clean adoption gets no candidates.
+            candidates: list = []
+            cand_stats: dict = {}
+            searched: list = []
+            # NOT ON A CONFLICT EITHER, and `definition is None` covers three
+            # different statuses so it had to be said explicitly. `goal.py`:
+            # "two authoritative systems disagreeing about what a metric means
+            # is worth more than either answer" and "picking one silently is the
+            # failure". A pick-list of unrelated registry metrics beside that
+            # question is a one-click way to walk past the conflict — the two
+            # sides that caused it are never referenced again — which is the
+            # silent pick arriving through the user's hand instead of ours.
+            # A conflict has to be answered, so it gets the conflict ask alone.
+            if resolution.definition is None and resolution.status != "conflict":
+                try:
+                    from app.crucible.metric_candidates import (
+                        candidates_for_goal, searched_summary,
+                    )
+
+                    candidates, cand_stats = candidates_for_goal(
+                        company_id, goal_text)
+                    searched = searched_summary(
+                        company_id, registry_stats=cand_stats)
+                except Exception:  # noqa: BLE001 — see above.
+                    logger.exception(
+                        "crucible: could not ground the ask for %s", company_id)
             proposed = (
                 resolution.definition.definition_text
                 if resolution.definition is not None else ""
@@ -678,6 +892,34 @@ def execute_run(
              "b": {"source": c.source_b, "definition": c.definition_b}}
                         for c in resolution.conflicts
                     ],
+                    # ── GOAL-RESOLUTION §5: the four things an ask must do ──
+                    #
+                    # The shipped ask did none of them. It opened with what it
+                    # could not find, asked an open question, named no
+                    # consequence, and handed over an empty box. §5: "Asking is
+                    # not a failure state, it is a normal step, and the quality
+                    # of the ask is what makes it feel competent rather than
+                    # helpless."
+                    #
+                    # 1. SHOW THE SEARCH BEFORE THE GAP.
+                    "searched": searched,
+                    # 2. CANDIDATES WITH LIVE NUMBERS, so the user can answer
+                    #    by pointing rather than by composing.
+                    "candidates": [c.to_json() for c in candidates],
+                    "candidate_stats": cand_stats,
+                    # 3 is carried per-candidate as `consequence`; 4 (the open
+                    # door) is copy the panel always renders, never conditional
+                    # — at an enterprise the real definition is often in
+                    # somebody's head and on no list we can produce.
+                    #
+                    # §6, IN THE SAME STEP. "If no computation is found, state
+                    # the common convention you are assuming for that metric,
+                    # in one sentence, and let them change it." Identity without
+                    # method is README F4's "half of this that gets missed" —
+                    # two teams can point at the same metric name and mean
+                    # recognised versus booked. One sentence, editable, no
+                    # separate methodology round (which §6 explicitly bars).
+                    "method_note": _method_note(company_id),
                 },
             )
             _remember(run_id, resolution)
@@ -931,6 +1173,10 @@ def execute_run(
             finished_at=datetime.now(timezone.utc).isoformat(),
             coverage_notes=_coverage_notes(stats, result.stats),
         )
+        # AFTER `ready`, and the order is load-bearing: the renderer reads the
+        # findings back out of the database, so autosaving before they are
+        # stored would file an empty report in the shared library.
+        _autosave_document(run_id, company_id, confirmed_by or "")
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))

@@ -79,6 +79,32 @@ def list_for_company(company_id: str, limit: int = 50) -> list[dict]:
     return res.data or []
 
 
+def documented_run_for_goal(
+    company_id: str, goal_text: str, *, excluding_run_id: int
+) -> Optional[dict]:
+    """Another run of the SAME goal that already holds a report document.
+
+    FILTERED IN THE QUERY, not paged and filtered in Python. The first version
+    of the caller scanned `list_for_company`, whose default limit is 50 ordered
+    by `created_at DESC` — so on a company with fifty runs since the goal was
+    last analysed the earlier document fell off the end of the scan and a rerun
+    filed a second one. That is silent degradation on exactly the companies busy
+    enough to have a shared-library clutter problem, which is the audience the
+    dedup exists for.
+    """
+    res = (
+        require_client().table(TABLE).select("id,goal_text,artifact_id")
+        .eq("company_id", company_id)
+        .eq("goal_text", goal_text)
+        .not_.is_("artifact_id", "null")
+        .neq("id", excluding_run_id)
+        .order("id")
+        .limit(1)
+        .execute()
+    )
+    return (res.data or [None])[0]
+
+
 def update(run_id: int, company_id: str, **fields: Any) -> Optional[dict]:
     fields["updated_at"] = datetime.now(timezone.utc).isoformat()
     res = (
