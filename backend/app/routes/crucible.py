@@ -348,6 +348,40 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
+def _method_note(company_id: str) -> str:
+    """§6's one sentence: the calculation, stated and editable.
+
+    A metric NAME is not a definition — "revenue" can be recognised or booked,
+    "active" can mean logged in or took an action, and none of that is visible
+    in the name while all of it resizes every recommendation. §6's rule is to
+    surface the company's own computation, not to reconstruct it or interrogate
+    the user about it, and to state a convention where none is found.
+
+    Nothing in this codebase reads a dbt model or a metric layer yet, so the
+    honest branch is the second one: say what is being assumed, in one sentence,
+    and let the user overwrite it in the box directly beneath.
+    """
+    try:
+        from app.db.metric_points import distinct_metrics
+
+        if distinct_metrics(company_id):
+            return (
+                "I will use your own recorded numbers for whichever metric you "
+                "name, exactly as they are stored — I do not recompute them. "
+                "If the calculation behind them is not the one you steer by, "
+                "say so in the box and I will use your wording instead."
+            )
+    except Exception:  # noqa: BLE001 — fall through to the no-registry wording.
+        logger.warning("crucible: could not read the metric registry for %s",
+                       company_id)
+    return (
+        "Nothing here carries a stored calculation for this goal, so I will "
+        "take the sentence below as the whole definition — what is counted, "
+        "over what population, over what window. Anything you leave out, I "
+        "will not assume."
+    )
+
+
 def _autosave_document(run_id: int, company_id: str, user_id: str) -> None:
     """Put the finished report in the Artifacts panel, without being asked.
 
@@ -711,19 +745,30 @@ def execute_run(
             # costs the candidate list, never the run — the panel falls back to
             # the open-door branch, which is exactly the behaviour that shipped
             # before this existed.
+            #
+            # ONLY WHEN THERE IS ACTUALLY NOTHING TO ADOPT. §7: when Step 2
+            # found a definition the confirmation "is not a question, it is a
+            # statement with an escape hatch, and it should take two seconds to
+            # clear". Offering a six-item pick-list beside an adopted verbatim
+            # definition invites the user to replace it with our paraphrase,
+            # which is precisely what §10 forbids — and the panel's pick is a
+            # REPLACE with no undo. So a clean adoption gets no candidates.
             candidates: list = []
             cand_stats: dict = {}
             searched: list = []
-            try:
-                from app.crucible.metric_candidates import (
-                    candidates_for_goal, searched_summary,
-                )
+            if resolution.definition is None:
+                try:
+                    from app.crucible.metric_candidates import (
+                        candidates_for_goal, searched_summary,
+                    )
 
-                candidates, cand_stats = candidates_for_goal(company_id, goal_text)
-                searched = searched_summary(company_id)
-            except Exception:  # noqa: BLE001 — see above.
-                logger.exception(
-                    "crucible: could not ground the ask for %s", company_id)
+                    candidates, cand_stats = candidates_for_goal(
+                        company_id, goal_text)
+                    searched = searched_summary(
+                        company_id, registry_stats=cand_stats)
+                except Exception:  # noqa: BLE001 — see above.
+                    logger.exception(
+                        "crucible: could not ground the ask for %s", company_id)
             proposed = (
                 resolution.definition.definition_text
                 if resolution.definition is not None else ""
@@ -767,6 +812,15 @@ def execute_run(
                     # door) is copy the panel always renders, never conditional
                     # — at an enterprise the real definition is often in
                     # somebody's head and on no list we can produce.
+                    #
+                    # §6, IN THE SAME STEP. "If no computation is found, state
+                    # the common convention you are assuming for that metric,
+                    # in one sentence, and let them change it." Identity without
+                    # method is README F4's "half of this that gets missed" —
+                    # two teams can point at the same metric name and mean
+                    # recognised versus booked. One sentence, editable, no
+                    # separate methodology round (which §6 explicitly bars).
+                    "method_note": _method_note(company_id),
                 },
             )
             _remember(run_id, resolution)

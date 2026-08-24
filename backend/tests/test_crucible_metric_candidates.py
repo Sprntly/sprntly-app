@@ -1,11 +1,19 @@
 """GOAL-RESOLUTION §5 — the ask has to arrive after effort, not instead of it.
 
-The shipped ask met none of §5's four mandatory requirements. What is guarded
-here is the half that makes the other three possible: candidates that carry a
-live value, a history, and a source, derived from the company's own data rather
-than invented.
+WHICH STORE. The first version of this module read `kg_signal.properties.metric`,
+which is written by the DS agent's ANOMALY log (`source_type='agent_inferred'`,
+one row per detected spike) and by the unfiltered LLM extractor. Neither is a
+metric registry: a metric that moves smoothly writes nothing and could never be
+offered, a metric that spiked twice looked like a two-point series whose
+"current value" was a months-old outlier, and an extracted number could be a
+competitor's, lifted out of a competitive analysis and shown to the PM as their
+own. `app/db/metric_points.py` is the registry and is the only store read here.
 
-No network, no LLM. The Supabase client is the suite's SQLite fake.
+Fixtures are SYNTHETIC per CONVENTIONS' public-repo hygiene — the repo is
+public, and a real metric name carrying a real figure is a commercial
+disclosure.
+
+No network, no LLM.
 """
 from __future__ import annotations
 
@@ -15,43 +23,27 @@ from tests._fake_supabase import FakeSupabaseClient, reset_fake_db
 
 from app.crucible.metric_candidates import (
     MAX_CANDIDATES,
-    MIN_OBSERVATIONS,
+    MIN_POINTS,
     candidates_for_goal,
-    scan_metric_observations,
+    searched_summary,
 )
 
-CID = "co-metrics"
-
-
-def _sig(client, i: int, *, metric=None, value=None, period=None,
-         source_type="revenue", company=CID):
-    props = {"customer": f"Acct{i}"}
-    if metric:
-        props.update({"metric": metric, "value": value, "period": period})
-    client.table("kg_signal").insert({
-        "id": f"m-{i:04d}", "enterprise_id": company, "kind": "metric_anomaly",
-        "source_type": source_type, "content": f"observation {i}",
-        "properties": props, "provenance": {"doc": "ledger"},
-        "valid_at": f"{period or '2026-01'}-01T00:00:00+00:00",
-        "created_at": "2026-08-19T00:00:00+00:00",
-        "transaction_at": "2026-08-19T00:00:00+00:00",
-    }).execute()
-
+CID = "co-registry"
 
 _DDL = """
-CREATE TABLE IF NOT EXISTS kg_signal (
-    id             TEXT PRIMARY KEY,
-    enterprise_id  TEXT NOT NULL,
-    source_id      TEXT,
-    source_type    TEXT NOT NULL,
-    kind           TEXT NOT NULL,
-    content        TEXT NOT NULL,
-    properties     TEXT NOT NULL DEFAULT '{}',
-    embedding      TEXT,
-    valid_at       TEXT NOT NULL,
-    transaction_at TEXT NOT NULL,
-    provenance     TEXT NOT NULL DEFAULT '{}',
-    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+CREATE TABLE IF NOT EXISTS metric_points (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    enterprise_id TEXT NOT NULL,
+    metric        TEXT NOT NULL,
+    period_start  TEXT NOT NULL,
+    value         REAL NOT NULL,
+    source        TEXT NOT NULL,
+    computed_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (enterprise_id, metric, period_start, source)
+);
+CREATE TABLE IF NOT EXISTS companies (
+    id            TEXT PRIMARY KEY,
+    kpi_tree      TEXT NOT NULL DEFAULT '{}'
 );
 """
 
@@ -60,69 +52,90 @@ CREATE TABLE IF NOT EXISTS kg_signal (
 def db(monkeypatch):
     reset_fake_db(_DDL)
     client = FakeSupabaseClient()
+    # `metric_points` and `kpi_tree` bind `require_client` at import time, so
+    # patching `app.db.client` alone never reaches them.
     monkeypatch.setattr("app.db.client.require_client", lambda: client)
+    monkeypatch.setattr("app.db.metric_points.require_client", lambda: client,
+                        raising=False)
     return client
 
 
-def test_a_metric_series_becomes_a_candidate_with_its_live_number(db):
-    for i, period in enumerate(["2025-09", "2025-10", "2025-11", "2025-12"]):
-        _sig(db, i, metric="interchange_revenue_usd",
-             value=2_264_810 - i * 25_000, period=period)
+def _point(db, metric: str, period: str, value, *, source="amplitude",
+           company=CID):
+    db.table("metric_points").insert({
+        "enterprise_id": company, "metric": metric, "period_start": period,
+        "value": value, "source": source,
+    }).execute()
 
-    cands, stats = candidates_for_goal(CID, "grow interchange revenue")
+
+def test_a_registry_series_becomes_a_candidate_with_its_live_number(db):
+    for i, p in enumerate(["2026-02-02", "2026-03-02", "2026-04-06", "2026-05-04"]):
+        _point(db, "weekly_signups_count", p, 4000 + i * 32)
+
+    cands, stats = candidates_for_goal(CID, "grow weekly signups")
     assert len(cands) == 1
     c = cands[0]
 
     # §5 requirement 2: a live value, its freshness, its history, its home.
-    assert c.key == "interchange_revenue_usd"
-    assert c.current_value == 2_264_810 - 3 * 25_000, "must be the NEWEST period"
-    assert c.current_period == "2025-12"
-    assert c.first_period == "2025-09" and c.last_period == "2025-12"
-    assert c.observations == 4
-    assert c.source_label, "a candidate with no home cannot be pointed at"
-    # §5 requirement 3.
-    assert c.consequence and "observations" in c.consequence
-    assert stats["distinct_metrics"] == 1
+    assert c.key == "weekly_signups_count"
+    assert c.current_value == 4000 + 3 * 32, "must be the NEWEST period"
+    assert c.current_period == "2026-05-04"
+    assert c.first_period == "2026-02-02"
+    assert c.points == 4
+    assert c.source == "amplitude"
+    # §5 requirement 3, and it must not read like the old broken prose.
+    assert "Picking it fixes what the run is steering by" in c.consequence
+    assert "recorded, never counted" not in c.consequence
+    assert stats["distinct_metrics"] == 1 and stats["registry_readable"] is True
 
 
-def test_the_label_is_readable_but_the_key_is_what_travels(db):
-    for i, p in enumerate(["2026-01", "2026-02"]):
-        _sig(db, i, metric="deposit_volume_usd", value=100 + i, period=p)
+def test_the_newest_point_wins_regardless_of_insert_order(db):
+    """`list_metric_points` sorts by a NORMALISED period. The version this
+    replaced sorted the raw string, which put "Sep 2025" after "Nov 2025"."""
+    _point(db, "active_accounts_count", "2026-05-04", 99)
+    _point(db, "active_accounts_count", "2026-02-02", 11)
+    _point(db, "active_accounts_count", "2026-03-02", 22)
+    c = candidates_for_goal(CID, "accounts")[0][0]
+    assert c.current_value == 99 and c.current_period == "2026-05-04"
+    assert c.first_period == "2026-02-02"
+
+
+def test_the_label_is_a_reading_aid_and_the_key_is_what_travels(db):
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "deposit_volume_usd", p, 100)
     c = candidates_for_goal(CID, "deposits")[0][0]
     assert c.key == "deposit_volume_usd", "the raw key must survive verbatim"
     assert c.label == "Deposit volume (usd)"
 
 
-def test_a_metric_seen_once_is_not_offered_as_something_to_steer_by(db):
-    _sig(db, 0, metric="one_off_number", value=5, period="2026-01")
-    for i, p in enumerate(["2026-01", "2026-02"], start=1):
-        _sig(db, i, metric="real_series", value=10 * i, period=p)
+def test_a_metric_with_one_point_is_not_something_to_steer_by(db):
+    _point(db, "one_reading", "2026-01-05", 5)
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "real_series", p, 10)
 
     cands, stats = candidates_for_goal(CID, "anything")
     keys = {c.key for c in cands}
     assert "real_series" in keys
-    assert "one_off_number" not in keys, f"below MIN_OBSERVATIONS={MIN_OBSERVATIONS}"
-    # But it was still SEARCHED — §5 req 1 shows the effort, not just the hits.
+    assert "one_off" not in keys and "one_reading" not in keys, (
+        f"below MIN_POINTS={MIN_POINTS}")
+    # But it was still SEARCHED — §5 req 1 shows effort, not only hits.
     assert stats["distinct_metrics"] == 2
 
 
 def test_a_goal_that_matches_nothing_still_gets_something_to_point_at(db):
     """RANKED, NOT FILTERED. Filtering to a confident match would be Step 2's
-    'exactly one match' adoption arriving through the back door, without the
-    confirmation I9 requires."""
-    for i, p in enumerate(["2026-01", "2026-02"]):
-        _sig(db, i, metric="deposit_volume_usd", value=1, period=p)
-
+    'exactly one match' adoption without the confirmation I9 requires."""
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "deposit_volume_usd", p, 1)
     cands, _ = candidates_for_goal(CID, "improve nurse scheduling satisfaction")
     assert cands, "an unmatched goal must still be able to point at something"
 
 
 def test_the_best_name_match_leads(db):
-    for i, p in enumerate(["2026-01", "2026-02", "2026-03"]):
-        _sig(db, i, metric="deposit_volume_usd", value=1, period=p)
-    for i, p in enumerate(["2026-01", "2026-02"], start=50):
-        _sig(db, i, metric="churn_rate_pct", value=2, period=p)
-
+    for p in ("2026-01-05", "2026-01-12", "2026-01-19"):
+        _point(db, "deposit_volume_usd", p, 1)
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "churn_rate_pct", p, 2)
     cands, _ = candidates_for_goal(CID, "reduce churn")
     assert cands[0].key == "churn_rate_pct", (
         "token overlap with the goal must outrank a longer series")
@@ -130,34 +143,78 @@ def test_the_best_name_match_leads(db):
 
 def test_the_list_is_short_enough_to_be_a_decision(db):
     for m in range(MAX_CANDIDATES + 4):
-        for i, p in enumerate(["2026-01", "2026-02"]):
-            _sig(db, m * 10 + i, metric=f"metric_{m}", value=1, period=p)
+        for p in ("2026-01-05", "2026-01-12"):
+            _point(db, f"metric_{m}_count", p, 1)
     cands, stats = candidates_for_goal(CID, "anything")
     assert len(cands) == MAX_CANDIDATES
     assert stats["distinct_metrics"] == MAX_CANDIDATES + 4, (
         "the count searched must be the truth even when the list is capped")
 
 
-def test_a_signal_with_no_metric_key_is_not_a_candidate(db):
-    _sig(db, 1)          # ordinary signal, no metric in properties
-    _sig(db, 2)
+def test_another_companys_metrics_never_appear(db):
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "their_secret_metric", p, 1, company="someone-else")
+    cands, stats = candidates_for_goal(CID, "anything")
+    assert cands == [] and stats["distinct_metrics"] == 0
+
+
+def test_the_column_type_is_what_guarantees_a_measurement_is_numeric(db):
+    """HONEST VERSION of a test I first wrote wrong.
+
+    I asserted that a stored `true` renders as "no value". It does not, and it
+    cannot: `metric_points.value` is `REAL NOT NULL`, so the database coerces a
+    bool to 1.0 before anything reads it. The `isinstance(..., bool)` guard in
+    `candidates_for_goal` is defence-in-depth against a future store, not a
+    reachable branch through this one — and a test asserting the unreachable
+    branch is a fixture describing a state the writer cannot produce.
+
+    What IS worth pinning: the value that reaches the panel is a number, so the
+    renderer's "absent, never zero" rule is exercised by absence of the FIELD,
+    not by a non-numeric value in it."""
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "flag_metric", p, True)
+    c = candidates_for_goal(CID, "flag")[0][0]
+    assert isinstance(c.current_value, float), (
+        "REAL NOT NULL means the panel always receives a number here")
+
+
+def test_an_unreadable_registry_costs_candidates_not_the_run(db, monkeypatch):
+    import app.db.metric_points as mp
+
+    monkeypatch.setattr(mp, "list_metric_points",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
     cands, stats = candidates_for_goal(CID, "anything")
     assert cands == []
-    assert stats["metric_bearing"] == 0
-    assert stats["signals_seen"] == 2, "it was still read, and says so"
+    assert stats["registry_readable"] is False
 
 
-def test_another_companys_metrics_never_appear(db):
-    for i, p in enumerate(["2026-01", "2026-02"]):
-        _sig(db, i, metric="theirs", value=1, period=p, company="someone-else")
-    rows, seen = scan_metric_observations(CID)
-    assert rows == [] and seen == 0
+# ── §5 requirement 1: the search, and it must be the DEFINITION search ───────
+
+def test_the_search_summary_reports_the_ladder_not_the_corpus(db):
+    """The first version printed `plan.source_inventory` — every signal per
+    source, i.e. the corpus the RUN will read. It produced lines like "8,412
+    Slack and email", which the definition search never consulted, while
+    omitting the KPI tree, which is the one rung it actually read. Inflating
+    diligence is worse than not claiming it."""
+    db.table("companies").insert({"id": CID, "kpi_tree": {}}).execute()
+    for p in ("2026-01-05", "2026-01-12"):
+        _point(db, "weekly_signups_count", p, 1)
+
+    _cands, stats = candidates_for_goal(CID, "signups")
+    rungs = searched_summary(CID, registry_stats=stats)
+    labels = [r["rung"] for r in rungs]
+
+    assert "your KPI tree" in labels, "the rung actually searched is missing"
+    assert "your measured metrics" in labels
+    # No corpus source types — those are what the RUN reads, not this search.
+    assert not any("Slack" in r["rung"] for r in rungs)
+    # An EMPTY rung still reports, because that is the evidence of looking.
+    tree = next(r for r in rungs if r["rung"] == "your KPI tree")
+    assert tree["found"] == 0 and "no metrics defined" in tree["detail"]
 
 
-def test_a_value_that_is_not_a_number_is_absent_never_zero(db):
-    """I3, at the ask. 'No value recorded' and 'the value is 0' lead to
-    opposite reads of whether the metric is worth steering by."""
-    for i, p in enumerate(["2026-01", "2026-02"]):
-        _sig(db, i, metric="odd_metric", value="n/a", period=p)
-    c = candidates_for_goal(CID, "odd")[0][0]
-    assert c.current_value is None
+def test_the_search_summary_says_so_when_the_registry_is_unreadable(db):
+    rungs = searched_summary(CID, registry_stats={"registry_readable": False})
+    reg = next(r for r in rungs if r["rung"] == "your measured metrics")
+    assert "could not be read" in reg["detail"], (
+        "an unreadable rung must not report as an empty one")

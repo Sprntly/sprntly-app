@@ -349,6 +349,26 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       <div className="ga" data-testid="goal-confirm">
         {banner}
         <p className="ga-goal">{run.goal_text}</p>
+        {/* §5 REQUIREMENT 1 IS AN ORDERING RULE: "Never open with what you do
+            not know. Open with what you looked at." The search block therefore
+            renders ABOVE the ask, not below it — the first version of this put
+            it underneath, so the panel still opened with "I can't find X
+            defined anywhere in your systems" and requirement 1 failed on the
+            screen while passing in a component test that rendered this block in
+            isolation. */}
+        <GoalMetricCandidates
+          searched={run.prioritisation?.searched}
+          candidates={run.prioritisation?.candidates}
+          onPick={(seed) => {
+            touched.current = true
+            // APPEND, NEVER REPLACE, and never onto a definition the user is
+            // already holding. A replace destroyed an adopted verbatim
+            // definition with no undo (`touched` also disables the poll's
+            // restore), which is §10's "restating the definition in different
+            // words" with the paraphrase supplied by us.
+            setDefinition((prev) => (prev.trim() ? `${prev.trim()} ${seed}` : seed))
+          }}
+        />
         <p className="ga-ask">
           {run.prioritisation?.ask ||
             "Before this runs, confirm what this goal means."}
@@ -359,26 +379,13 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
             Edit it if that is not what you meant.
           </p>
         ) : null}
-        {/* GOAL-RESOLUTION §5, requirements 1-3: the search, then candidates
-            carrying live numbers, each naming what changes if it is picked.
-            Absent on older runs and when the scan failed, and the box below
-            stands alone in that case — which is requirement 4 either way. */}
-        <GoalMetricCandidates
-          searched={run.prioritisation?.searched}
-          candidates={run.prioritisation?.candidates}
-          onPick={(seed) => {
-            touched.current = true
-            setDefinition(seed)
-          }}
-        />
-        {/* 4. THE DOOR, ALWAYS OPEN — never conditional on the list being
-            empty. At an enterprise the real definition frequently lives in a
-            team's head and on no list we can produce. */}
-        <p className="ga-doc-note">
-          Or write it yourself. What gets locked is your sentence, whether or
-          not you started from one above — nothing here is adopted as a
-          definition on your behalf.
-        </p>
+        {/* §6: the calculation, stated in the SAME step and editable. Identity
+            without method is F4's "half of this that gets missed". */}
+        {run.prioritisation?.method_note ? (
+          <p className="ga-doc-note" data-testid="goal-method-note">
+            {run.prioritisation.method_note}
+          </p>
+        ) : null}
         <textarea
           className="ga-definition"
           aria-label="What this goal means"

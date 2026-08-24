@@ -752,11 +752,13 @@ export type GoalRunProgress = {
  *  `CRUCIBLE-GOAL-RESOLUTION.md` §5 requires of every candidate in an ask:
  *  a live value, how long it has been measured, and where it lives. */
 export type GoalMetricCandidate = {
+  /** The registry's own metric key, verbatim. The label is a reading aid and
+   *  must never become the definition — the seed carries this too. */
   key: string
   label: string
-  source_type: string
+  source: string
   source_label: string
-  observations: number
+  points: number
   /** null when the newest observation recorded no numeric value — rendered as
    *  absent, never as 0. */
   current_value: number | null
@@ -768,10 +770,13 @@ export type GoalMetricCandidate = {
 }
 
 /** §5 requirement 1: what was looked at, shown BEFORE what is missing. */
+/** §5 requirement 1: the rungs of the definition ladder that were actually
+ *  searched, and what each returned. NOT the corpus inventory — that counts
+ *  what the run will later read, which the definition search never consulted. */
 export type GoalAskSearched = {
-  label: string
-  signal_count: number
-  source_type: string
+  rung: string
+  found: number
+  detail: string
 }
 
 export type GoalRunDetail = GoalRun & {
@@ -792,7 +797,8 @@ export type GoalRunDetail = GoalRun & {
      *  which is the behaviour that shipped before §5 was implemented. */
     searched?: GoalAskSearched[]
     candidates?: GoalMetricCandidate[]
-    candidate_stats?: Record<string, number>
+    /** §6: the calculation being assumed, in one sentence, editable. */
+    method_note?: string
     plan?: GoalRunPlan
     progress?: GoalRunProgress
   }

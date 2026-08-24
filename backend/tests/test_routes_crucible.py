@@ -1460,20 +1460,19 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
 
 
 # ─── GOAL-RESOLUTION §5: the ask arrives after effort ────────────────────────
+#
+# Candidates come from `metric_points`, the real registry — NOT from
+# `kg_signal.properties.metric`, which the first version read and which is the
+# DS anomaly log plus unfiltered LLM extraction. Fixtures are synthetic per
+# CONVENTIONS' public-repo hygiene.
 
-def _metric_signal(company_id: str, i: int, *, metric: str, value, period: str,
-                   source_type: str = "revenue") -> None:
+def _point(company_id: str, metric: str, period: str, value: float,
+           source: str = "amplitude") -> None:
     from app.db.client import require_client
 
-    require_client().table("kg_signal").insert({
-        "id": f"mm-{i:04d}", "enterprise_id": company_id, "kind": "metric_anomaly",
-        "source_type": source_type, "content": f"{metric} for {period}",
-        "properties": {"customer": f"Acct{i}", "metric": metric,
-                       "value": value, "period": period},
-        "provenance": {"doc": "ledger"},
-        "valid_at": f"{period}-01T00:00:00+00:00",
-        "created_at": "2026-08-19T00:00:00+00:00",
-        "transaction_at": "2026-08-19T00:00:00+00:00",
+    require_client().table("metric_points").insert({
+        "enterprise_id": company_id, "metric": metric,
+        "period_start": period, "value": value, "source": source,
     }).execute()
 
 
@@ -1481,32 +1480,36 @@ def test_the_ask_carries_the_search_and_candidates_with_live_numbers(ctx):
     """§5's four requirements. The shipped ask met NONE of them: it opened with
     what it could not find, asked an open question, named no consequence, and
     handed over an empty box."""
-    for i, p in enumerate(["2025-09", "2025-10", "2025-11", "2025-12"]):
-        _metric_signal(ctx.company_id, i, metric="interchange_revenue_usd",
-                       value=2_264_810 - i * 25_000, period=p)
+    for i, p in enumerate(["2026-02-02", "2026-03-02", "2026-04-06", "2026-05-04"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 4000 + i * 32)
 
     run_id = _start(ctx).json()["id"]
     meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
 
-    # 1. the search, before the gap
-    assert meta.get("searched"), "the ask does not say what was looked at"
-    assert sum(s["signal_count"] for s in meta["searched"]) >= 4
+    # 1. the search — the DEFINITION ladder's rungs, not the corpus inventory.
+    rungs = meta.get("searched") or []
+    assert rungs, "the ask does not say where it looked"
+    labels = [r["rung"] for r in rungs]
+    assert "your KPI tree" in labels and "your measured metrics" in labels
 
     # 2. candidates carrying a live value
     cands = meta.get("candidates") or []
     assert cands, "the ask offers nothing to point at"
     top = cands[0]
-    assert top["key"] == "interchange_revenue_usd"
-    assert top["current_value"] == 2_264_810 - 3 * 25_000
-    assert top["current_period"] == "2025-12"
-    assert top["observations"] == 4
-    # 3. the consequence of picking it
+    assert top["key"] == "weekly_signups_count"
+    assert top["current_value"] == 4000 + 3 * 32
+    assert top["current_period"] == "2026-05-04"
+    assert top["points"] == 4
+    # 3. the consequence, and not the old broken prose
     assert top["consequence"]
+    assert "recorded, never counted" not in top["consequence"]
+    # §6: the calculation, stated in the same step.
+    assert meta.get("method_note"), "identity without method is F4"
 
 
-def test_the_ask_still_works_when_the_company_measures_nothing(ctx):
-    """§5 requirement 4 is unconditional. A tenant with no metric series still
-    gets a question it can answer — the open door is the whole path there."""
+def test_the_ask_still_works_when_the_registry_is_empty(ctx):
+    """§5 requirement 4 is unconditional, and the registry is empty on every
+    real tenant today — so this is the NORMAL path, not the edge case."""
     for i in range(3):
         _signal(ctx.company_id, i)
 
@@ -1514,22 +1517,52 @@ def test_the_ask_still_works_when_the_company_measures_nothing(ctx):
     row = ctx.client.get(f"/v1/crucible/{run_id}").json()
     assert row["status"] == "awaiting_confirmation"
     assert (row["prioritisation"].get("candidates") or []) == []
-    # And confirming by hand still locks, which is the behaviour that shipped
-    # before any of this existed.
+    # The rungs still report — an empty rung is the evidence of looking.
+    assert row["prioritisation"].get("searched")
+    assert row["prioritisation"].get("method_note")
+    # And confirming by hand still locks.
     ctx.client.post(f"/v1/crucible/{run_id}/confirm",
                     json={"definition_text": "my own sentence"})
     assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] != "awaiting_confirmation"
 
 
-def test_a_failed_candidate_scan_never_blocks_the_ask(ctx, monkeypatch):
-    """Grounding is a convenience. A run must still be answerable when it
-    cannot be produced."""
+def test_a_clean_adoption_is_not_handed_a_pick_list(ctx, monkeypatch):
+    """§7: when Step 2 found a definition the confirmation "is not a question,
+    it is a statement with an escape hatch, and it should take two seconds to
+    clear". A six-item pick-list beside an adopted verbatim definition invites
+    the user to replace it with our paraphrase — which §10 forbids."""
+    import app.routes.crucible as mod
+
+    for i, p in enumerate(["2026-02-02", "2026-03-02"]):
+        _point(ctx.company_id, "weekly_signups_count", p, 10 + i)
+
+    real = mod.resolve
+
+    class _Adopted:
+        status = "candidate"
+        ask = "Confirm this definition."
+        conflicts: list = []
+
+        class definition:  # noqa: N801 — a stand-in for the resolved object
+            definition_text = "Signups means accounts completing onboarding."
+            definition_source_ref = "kpi_tree"
+
+    monkeypatch.setattr(mod, "resolve", lambda **kw: _Adopted())
+
+    run_id = _start(ctx).json()["id"]
+    meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
+    assert meta["proposed_definition"] == (
+        "Signups means accounts completing onboarding.")
+    assert (meta.get("candidates") or []) == [], (
+        "an adopted definition must not be offered a replacement list")
+    assert real is not None  # keep the reference honest
+
+
+def test_a_failed_registry_read_never_blocks_the_ask(ctx, monkeypatch):
     import app.crucible.metric_candidates as mod
 
-    def boom(*a, **kw):
-        raise RuntimeError("metric scan unavailable")
-
-    monkeypatch.setattr(mod, "candidates_for_goal", boom)
+    monkeypatch.setattr(mod, "candidates_for_goal",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
 
     run_id = _start(ctx).json()["id"]
     row = ctx.client.get(f"/v1/crucible/{run_id}").json()
@@ -1539,10 +1572,8 @@ def test_a_failed_candidate_scan_never_blocks_the_ask(ctx, monkeypatch):
 
 def test_the_candidates_are_scoped_to_this_company(ctx):
     """Tenancy, at the ask. Another company's metric names are a disclosure."""
-    _metric_signal("some-other-company", 1, metric="their_secret_metric",
-                   value=1, period="2026-01")
-    _metric_signal("some-other-company", 2, metric="their_secret_metric",
-                   value=2, period="2026-02")
+    for p in ("2026-01-05", "2026-01-12"):
+        _point("some-other-company", "their_secret_metric", p, 1)
 
     run_id = _start(ctx).json()["id"]
     meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]

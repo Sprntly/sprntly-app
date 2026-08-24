@@ -15,24 +15,28 @@ import { GoalMetricCandidates, seedFromCandidate } from "../GoalMetricCandidates
 
 afterEach(cleanup)
 
+// SYNTHETIC, per CONVENTIONS' public-repo hygiene — the repo is public and
+// real metric names carrying real figures are a commercial disclosure.
 const CAND = {
-  key: "interchange_revenue_usd",
-  label: "Interchange revenue (usd)",
-  source_type: "revenue",
-  source_label: "revenue data",
-  observations: 11,
-  current_value: 2190890,
-  current_period: "2025-12",
-  first_period: "2025-02",
-  last_period: "2025-12",
+  key: "weekly_signups_count",
+  label: "Weekly signups (count)",
+  source: "amplitude",
+  source_label: "amplitude",
+  points: 11,
+  current_value: 4128,
+  current_period: "2026-07-06",
+  first_period: "2026-02-02",
+  last_period: "2026-07-06",
   consequence:
-    "Picking this scopes the run to how much something moved, and in which direction. 11 observations, 2025-02 to 2025-12. Findings are still sized in reach — how many accounts a theme touches — not in this metric's own unit.",
+    "Measured from amplitude: 11 points, 2026-02-02 to 2026-07-06. Picking it fixes what the run is steering by. Findings are still sized in reach — how many accounts a theme touches — not in this metric's own unit.",
 }
 
+// §5 req 1 reports the LADDER's rungs, and an empty rung is still evidence of
+// looking — "no metrics defined" is the sentence that makes the ask read as
+// diligence rather than helplessness.
 const SEARCHED = [
-  { label: "revenue data", signal_count: 28, source_type: "revenue" },
-  { label: "product analytics", signal_count: 197, source_type: "analytics" },
-  { label: "nothing here", signal_count: 0, source_type: "verbal_claim" },
+  { rung: "your KPI tree", found: 0, detail: "no metrics defined" },
+  { rung: "your measured metrics", found: 3, detail: "3 metrics, 33 points" },
 ]
 
 describe("1. show the search before the gap", () => {
@@ -41,10 +45,11 @@ describe("1. show the search before the gap", () => {
       <GoalMetricCandidates searched={SEARCHED} candidates={[CAND]} onPick={() => {}} />,
     )
     const looked = screen.getByTestId("goal-ask-searched").textContent || ""
-    expect(looked).toContain("What I looked at")
-    expect(looked).toContain("197")
-    // A source with nothing in it is not evidence of effort.
-    expect(looked).not.toContain("nothing here")
+    expect(looked).toContain("Where I looked for a definition")
+    expect(looked).toContain("your KPI tree")
+    expect(looked).toContain("3 metrics, 33 points")
+    // An EMPTY rung still renders: it is the evidence that it was searched.
+    expect(looked).toContain("no metrics defined")
   })
 })
 
@@ -52,11 +57,11 @@ describe("2. candidates carry live numbers, so the user can point", () => {
   it("shows the current value, its period, the history and the source", () => {
     render(<GoalMetricCandidates searched={SEARCHED} candidates={[CAND]} onPick={() => {}} />)
     const t = screen.getByTestId("goal-ask-candidates").textContent || ""
-    expect(t).toContain("Interchange revenue (usd)")
-    expect(t).toContain("2,190,890")
-    expect(t).toContain("2025-12")
-    expect(t).toContain("11 observations")
-    expect(t).toContain("revenue data")
+    expect(t).toContain("Weekly signups (count)")
+    expect(t).toContain("4,128")
+    expect(t).toContain("2026-07-06")
+    expect(t).toContain("11 points")
+    expect(t).toContain("amplitude")
   })
 
   it("renders no number at all when the metric recorded none", () => {
@@ -69,8 +74,8 @@ describe("2. candidates carry live numbers, so the user can point", () => {
       />,
     )
     const t = screen.getByTestId("goal-ask-candidates").textContent || ""
-    expect(t).not.toContain("0 · 2025-12")
-    expect(t).toContain("11 observations")
+    expect(t).not.toContain("0 · 2026-07-06")
+    expect(t).toContain("11 points")
   })
 
   it("a pick is answerable by pointing — it seeds the box, it does not lock", () => {
@@ -78,10 +83,13 @@ describe("2. candidates carry live numbers, so the user can point", () => {
     render(
       <GoalMetricCandidates searched={SEARCHED} candidates={[CAND]} onPick={(s) => picked.push(s)} />,
     )
-    fireEvent.click(screen.getByText("Interchange revenue (usd)"))
+    fireEvent.click(screen.getByText("Weekly signups (count)"))
     expect(picked).toHaveLength(1)
-    expect(picked[0]).toContain("Interchange revenue (usd)")
-    expect(picked[0]).toContain("2,190,890")
+    expect(picked[0]).toContain("Weekly signups (count)")
+    expect(picked[0]).toContain("4,128")
+    // The RAW KEY travels too — writing only the humanised label put a
+    // paraphrase of the company's own metric name into the stored definition.
+    expect(picked[0]).toContain("weekly_signups_count")
   })
 })
 
@@ -89,9 +97,12 @@ describe("3. name the consequence of the choice", () => {
   it("every candidate states what changes if it is picked", () => {
     render(<GoalMetricCandidates searched={SEARCHED} candidates={[CAND]} onPick={() => {}} />)
     const t = screen.getByTestId("goal-ask-candidates").textContent || ""
-    expect(t).toContain("Picking this scopes the run")
+    expect(t).toContain("Picking it fixes what the run is steering by")
     // And it must not promise a point estimate the engine cannot produce.
     expect(t).toContain("sized in reach")
+    // The first version read plan._SOURCE_PROSE and rendered, verbatim,
+    // "scopes the run to what nothing — recorded, never counted".
+    expect(t).not.toContain("recorded, never counted")
   })
 })
 
@@ -110,8 +121,9 @@ describe("the seed is deliberately incomplete", () => {
     const seed = seedFromCandidate(CAND)
     // What is counted, over what population, over what window — an observation
     // supplies none of those, so the seed must not pretend to.
-    expect(seed).toContain("Interchange revenue (usd)")
-    expect(seed).toContain("revenue data")
+    expect(seed).toContain("Weekly signups (count)")
+    expect(seed).toContain("weekly_signups_count")
+    expect(seed).toContain("amplitude")
     expect(seed.trim().endsWith(".")).toBe(true)
     expect(seed.toLowerCase()).not.toContain("means")
     expect(seed.toLowerCase()).not.toContain("defined as")
