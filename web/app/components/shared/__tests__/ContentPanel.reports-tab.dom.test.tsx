@@ -244,31 +244,35 @@ describe("ContentPanel — a report being written", () => {
 // what "edit the report in the panel" means, and a report that behaved
 // differently from the document beside it was the report this closes.
 describe("ContentPanel — editing a report", () => {
-  const MD_DOC = {
+  const HTML_DOC = {
     ...ROW,
     html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
   }
 
-  it("reads without an editor until editing is asked for", async () => {
-    reportGet.mockResolvedValue(MD_DOC)
+  it("is editable on sight, with the PRD's toolbar and no mode to enter", async () => {
+    // The PRD and the team document are editable the moment they are open; a
+    // mode you have to ask for is a step between the reader and a typo they can
+    // already see.
+    reportGet.mockResolvedValue(HTML_DOC)
     await renderPanel({ tab: "reports", reports: [ROW] })
     await waitFor(() => expect(screen.getByTestId("report-document")).toBeTruthy())
-    // The bar belongs to edit mode: a reader is not shown formatting controls
-    // for a document they are not changing.
-    expect(document.querySelector(".prd-toolbar")).toBeNull()
-    expect(screen.getByTestId("reports-edit-toggle").textContent).toBe("Edit")
-  })
-
-  it("shows the same toolbar the PRD uses once editing", async () => {
-    reportGet.mockResolvedValue(MD_DOC)
-    await renderPanel({ tab: "reports", reports: [ROW] })
-    await waitFor(() => expect(screen.getByTestId("reports-edit-toggle")).toBeTruthy())
-    await act(async () => { screen.getByTestId("reports-edit-toggle").click() })
     expect(document.querySelector(".prd-toolbar")).not.toBeNull()
-    expect(screen.getByTestId("reports-edit-toggle").textContent).toBe("Done")
+    expect(screen.queryByTestId("reports-edit-toggle")).toBeNull()
   })
 
-  it("offers no edit on a legacy self-contained document", async () => {
+  it("says Saved, not the PRD's Saved · Draft", async () => {
+    // "Draft" is the PRD's word for its own lifecycle state. A report is not a
+    // draft of anything, and telling its reader otherwise is a claim about the
+    // document that nothing made.
+    reportGet.mockResolvedValue(HTML_DOC)
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector(".prd-status")).toBeTruthy())
+    const status = document.querySelector(".prd-status")!.textContent ?? ""
+    expect(status).toContain("Saved")
+    expect(status).not.toContain("Draft")
+  })
+
+  it("shows no editor or toolbar on a legacy self-contained document", async () => {
     // Those carry their own <head> and <style> and read in a sandboxed iframe:
     // they own their rendering, so they are shown, not edited.
     reportGet.mockResolvedValue({
@@ -277,7 +281,47 @@ describe("ContentPanel — editing a report", () => {
     })
     await renderPanel({ tab: "reports", reports: [ROW] })
     await waitFor(() => expect(document.querySelector("iframe")).toBeTruthy())
-    expect(screen.queryByTestId("reports-edit-toggle")).toBeNull()
     expect(screen.queryByTestId("report-document")).toBeNull()
+    expect(document.querySelector(".prd-toolbar")).toBeNull()
+  })
+})
+
+describe("ContentPanel — where the report's toolbar sits", () => {
+  it("puts the bar ahead of the title, first under the artifact tabs", async () => {
+    reportGet.mockResolvedValue({
+      ...ROW,
+      html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
+    })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector(".prd-toolbar")).toBeTruthy())
+
+    const bar = document.querySelector(".prd-toolbar")
+    const title = screen.getByTestId("reports-detail-title")
+    expect(bar).not.toBeNull()
+    // A control you reach for while typing belongs at the top edge, not below
+    // the document's own heading — DOCUMENT_POSITION_FOLLOWING means the title
+    // comes after the bar in document order.
+    expect(bar!.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+  })
+})
+
+describe("ContentPanel — where the report's share menu sits", () => {
+  it("renders it in the panel header, not inside the document", async () => {
+    // Beside where the PRD's share sits. It used to render inside the document
+    // it acts on, which put an action on the artifact rather than on the panel.
+    reportGet.mockResolvedValue({ ...ROW, html: "<h1>VoC</h1><p>body</p>" })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+
+    const slot = await waitFor(() => {
+      const el = screen.getByTestId("cpanel-report-share-slot")
+      expect(el.querySelector("button")).not.toBeNull()
+      return el
+    })
+    // In the HEADER's action row…
+    expect(slot.closest(".cpanel-head-actions")).not.toBeNull()
+    // …and not in the document body.
+    const detail = screen.getByTestId("reports-detail")
+    expect(detail.contains(slot)).toBe(false)
   })
 })

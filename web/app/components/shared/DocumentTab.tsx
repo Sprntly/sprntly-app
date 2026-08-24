@@ -262,30 +262,28 @@ export function DocumentTab({
 
   return (
     <div data-document-tab style={{ padding: "4px 2px 24px" }}>
-      <div style={S.head}>
-        <div style={S.title}>{doc.title.trim() || "Untitled document"}</div>
-        <SaveIndicator state={saveState} />
-      </div>
-      {doc.kind.trim() && <div style={S.kind}>{doc.kind.trim()}</div>}
+      {/* FIRST in the panel, straight after the artifact tabs and ahead of the
+          title: the formatting controls are what you reach for while editing,
+          so they sit at the top edge and stay there — the posture the PRD panel
+          takes. Inside the editor (where this bar used to live) it scrolled
+          away with the first paragraph and was gone by the time there was
+          anything to format.
 
-      {/* Pinned above the document, the posture the PRD panel already takes: the
-          controls stay put while the text scrolls under them. It was inside the
-          editor, so it scrolled away with the first paragraph.
-
-          The SAME `PrdToolbar` the PRD uses — one formatting control for both
-          documents in this panel, rather than two bars that drift apart. Its
-          commands are execCommand names (it was built for a contenteditable);
+          The SAME `PrdToolbar` the PRD uses — one formatting control for every
+          document in this panel, rather than bars that drift apart. Its commands
+          are execCommand names (it was built for a contenteditable);
           `execDocumentCommand` translates them for this schema-backed editor,
-          and the four with no extension behind them are omitted rather than
+          and the ones with no extension behind them are omitted rather than
           rendered inert. */}
       {doc.status === "ready" && (
         <div style={S.toolbar}>
           <PrdToolbar
             hasDoc={!!editor}
-            // The bar carries the same save word this tab already shows beside the
-            // title. "error" and "conflict" read as UNSAVED here on purpose: the
-            // detail is spelled out below, and a bar that said "Saved" over an
-            // unsaved document would be the one lie a save indicator cannot tell.
+            // The bar carries the same save word this tab already shows beside
+            // the title. "error" and "conflict" read as UNSAVED here on purpose:
+            // the detail is spelled out below, and a bar that said "Saved" over
+            // an unsaved document would be the one lie a save indicator cannot
+            // tell.
             saveStatus={
               saveState.kind === "saving"
                 ? "saving"
@@ -294,10 +292,22 @@ export function DocumentTab({
                   : "saved"
             }
             omit={UNSUPPORTED_DOCUMENT_COMMANDS}
+            // Not "Saved · Draft": that is the PRD's word for its own state, and
+            // a team document is not a draft of anything.
+            savedLabel="Saved"
             exec={(cmd, value) => { if (editor) execDocumentCommand(editor, cmd, value) }}
           />
         </div>
       )}
+      {/* NO TITLE ROW. The document opens with its own <h1> -- the generator
+          writes one, and every document in the library has one -- so printing
+          the row's title above it showed the same sentence twice, with the KIND
+          label wedged between them as a third near-copy. The document is the
+          title. Renaming still happens where a document is renamed: the
+          artifacts screen and the full-page editor.
+
+          The save state moved into the toolbar's own status pill, which is the
+          one place in this panel that already reports it. */}
 
       {doc.status === "generating" && (
         <div data-document-writing style={S.notice}>Writing this document…</div>
@@ -386,30 +396,7 @@ function asConflict(err: unknown): ConflictDoc | null | undefined {
   return detail.current ?? null
 }
 
-function SaveIndicator({ state }: { state: SaveState }) {
-  const text =
-    state.kind === "saving" ? "Saving…"
-      : state.kind === "saved" ? "Saved"
-      : state.kind === "error" ? "Not saved — keep typing to retry"
-      : state.kind === "conflict" ? "Someone else edited this"
-      : ""
-  if (!text) return null
-  return (
-    <span data-document-save-state={state.kind} style={{
-      fontSize: 11.5,
-      color: state.kind === "error" || state.kind === "conflict"
-        ? "var(--danger, #DC2626)" : "var(--ink-3, #8C8A84)",
-    }}>{text}</span>
-  )
-}
-
 const S: Record<string, React.CSSProperties> = {
-  head: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 },
-  title: { fontSize: 17, fontWeight: 700, color: "var(--ink, #1A1A17)" },
-  kind: {
-    fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em",
-    color: "var(--ink-3, #8C8A84)", marginBottom: 12,
-  },
   notice: {
     fontSize: 12.5, color: "var(--ink-2, #5A5853)",
     background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",

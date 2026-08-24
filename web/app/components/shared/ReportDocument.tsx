@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import type { Editor } from "@tiptap/react"
 import { reportsApi } from "../../lib/api"
 import { DocumentEditor } from "../../(app)/artifacts/doc/DocumentEditor"
@@ -29,23 +30,33 @@ const SAVE_AFTER_MS = 2000
  * (`app/report_markdown.py`). Saving therefore writes HTML back, which is what
  * upgrades a legacy row the first time someone edits it.
  *
- * READ IS THE RESTING STATE. A report is read far more often than it is
- * changed, so `editing` is asked for; until then this renders the same document
- * with the editor non-editable, which keeps the reading view and the editing
- * view byte-identical instead of two renderers that drift.
+ * EDITABLE ON SIGHT, with no mode to enter first -- the way the PRD and the team
+ * document already are. A report is read far more often than it is changed, but
+ * a mode you have to ask for is a step between the reader and a typo they can
+ * already see, and there is only ever one rendering of the document either way.
  */
 export function ReportDocument({
   reportId,
   html,
-  editing,
   onSaved,
+  toolbarSlot,
 }: {
   reportId: number
   html: string
-  editing: boolean
   /** The saved body, so the tab's copy stays in step — otherwise leaving edit
    *  mode would show the body this report was fetched with. */
   onSaved: (html: string) => void
+  /** Where the formatting bar renders: a slot the TAB owns, at the very top of
+   *  the panel — straight after the artifact tabs and ahead of the title.
+   *
+   *  A portal rather than a lifted component, because everything the bar reads
+   *  (the live editor, the save status) belongs to this component. Hoisting the
+   *  markup would mean hoisting the editor and the save loop with it, for a
+   *  question that is only about where a div appears on screen.
+   *
+   *  Null on the first commit — the slot arrives through a ref callback, so it
+   *  exists one render later — and the bar simply does not render until then. */
+  toolbarSlot: HTMLElement | null
 }) {
   const [editor, setEditor] = useState<Editor | null>(null)
   const [status, setStatus] = useState<PrdSaveStatus>("saved")
@@ -85,26 +96,24 @@ export function ReportDocument({
 
   return (
     <div data-testid="report-document">
-      {editing && (
-        <div style={{
-          position: "sticky", top: 0, zIndex: 5,
-          background: "var(--surface, #fff)", margin: "0 0 10px",
-        }}>
-          <PrdToolbar
-            hasDoc={!!editor}
-            saveStatus={status}
-            omit={UNSUPPORTED_DOCUMENT_COMMANDS}
-            exec={(cmd, value) => { if (editor) execDocumentCommand(editor, cmd, value) }}
-          />
-        </div>
+      {toolbarSlot && createPortal(
+        <PrdToolbar
+          hasDoc={!!editor}
+          saveStatus={status}
+          // Not "Saved · Draft": that is the PRD's word for its own state, and a
+          // report is not a draft of anything.
+          savedLabel="Saved"
+          omit={UNSUPPORTED_DOCUMENT_COMMANDS}
+          exec={(cmd, value) => { if (editor) execDocumentCommand(editor, cmd, value) }}
+        />,
+        toolbarSlot,
       )}
       <DocumentEditor
-        // Re-key on the MODE as well as the report: the editor reads its
-        // editability once per mount, and a reader who pressed Edit on a
-        // document that mounted read-only would type into nothing.
-        key={`${reportId}:${editing ? "edit" : "read"}`}
+        // Keyed on the report so opening another one from the list remounts the
+        // editor on its body rather than leaving the previous document in place.
+        key={reportId}
         initialHtml={html}
-        editable={editing}
+        editable
         onChange={onChange}
         onReady={setEditor}
         onBlur={() => {

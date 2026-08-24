@@ -138,7 +138,7 @@ type MenuEntry = {
  * focus out of the document and collapses the selection the command is supposed
  * to act on — the same reason the HTML PRD's `exec` re-focuses its iframe.
  */
-export function PrdToolbar({ hasDoc, saveStatus, exec, omit }: {
+export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
   hasDoc: boolean
   saveStatus: PrdSaveStatus
   exec: (cmd: string, value?: string) => void
@@ -152,8 +152,18 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit }: {
    *  whole time"). Omitted, not disabled: a disabled control still claims the
    *  feature exists somewhere. Empty/absent for the PRD, whose bar is unchanged. */
   omit?: ReadonlySet<string>
+  /** What the status pill says once everything is written. Defaults to the
+   *  PRD's "Saved · Draft" — a word that means something on a PRD and nothing
+   *  on a report, which is not a draft of anything. */
+  savedLabel?: string
 }) {
-  const statusLabel = saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Unsaved" : "Saved · Draft"
+  // "Draft" is the PRD's own word for its state and means something there. A
+  // team document or a report is not a draft of anything, so those hosts pass
+  // plain "Saved" rather than telling the reader their report is a draft.
+  const statusLabel =
+    saveStatus === "saving" ? "Saving…"
+      : saveStatus === "unsaved" ? "Unsaved"
+        : savedLabel ?? "Saved · Draft"
   const statusColor = saveStatus === "saving" ? "var(--accent)" : saveStatus === "unsaved" ? "var(--ink-3)" : "var(--accent)"
   // WHICH menu is open, not whether one is — opening either must close the
   // other, and two independent booleans would let both sit open at once.

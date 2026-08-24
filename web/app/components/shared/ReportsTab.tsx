@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { createPortal } from "react-dom"
 import { useContent } from "../../context/ContentContext"
 import { useNavigation } from "../../context/NavigationContext"
 import { HtmlReportView } from "./HtmlReportView"
@@ -33,12 +34,19 @@ export function ReportsTab({
   reports,
   loading,
   error,
+  shareSlot,
 }: {
   reports: ReportSummary[]
   loading: boolean
   /** The list fetch failed. The tab says so rather than reading as an empty
    *  thread — "no reports" and "couldn't load them" are different facts. */
   error?: boolean
+  /** The panel HEADER slot this tab's share/PDF menu renders into, so it sits
+   *  where the PRD's does instead of inside the document it acts on. A portal,
+   *  because the menu reads the open report and that document is this tab's.
+   *  Absent / null (a test harness, the first commit before the ref lands) puts
+   *  the menu back inline, which is where it used to live. */
+  shareSlot?: HTMLElement | null
 }) {
   const { content, setContent } = useContent()
   const { showToast } = useNavigation()
@@ -57,10 +65,10 @@ export function ReportsTab({
   // `picked` is the one thing this component owns: a row chosen from ITS list.
   // It wins while set, and Back clears both.
   const [picked, setPicked] = useState<number | null>(null)
-  // Reading or editing. A report is READ far more often than it is changed, so
-  // the rendered document is the resting state and editing is asked for — the
-  // posture the artifacts screen already takes for a document.
-  const [editing, setEditing] = useState(false)
+  // The top-of-panel slot the document's formatting bar portals into: straight
+  // after the artifact tabs, ahead of the crumb and the title. State rather
+  // than a ref so the portal re-renders once the node exists.
+  const [toolbarSlot, setToolbarSlot] = useState<HTMLDivElement | null>(null)
   const focusId = content.reportFocusId
   // A focus set for a DIFFERENT thread is ignored: the panel is global, so a
   // leftover id could otherwise open one thread's report inside another's.
@@ -199,6 +207,16 @@ export function ReportsTab({
     const unavailable = settledKey === fetchKey && !docLoading && !doc && !docError
     return (
       <div className="tkv2-list-wrap reports-panel" data-testid="reports-detail">
+        {/* The formatting bar lands HERE — first thing under the
+            artifact tabs, above the crumb and the title, which is where a
+            control you reach for while typing belongs. It is filled by
+            `ReportDocument` through a portal: everything the bar reads (the
+            live editor, the save status) is that component's. */}
+        <div
+          ref={setToolbarSlot}
+          data-testid="reports-toolbar-slot"
+          style={{ position: "sticky", top: 0, zIndex: 5, background: "var(--surface, #fff)" }}
+        />
         <div style={{
           display: "flex", alignItems: "center", gap: 12,
           justifyContent: "space-between", marginTop: 16,
@@ -226,27 +244,33 @@ export function ReportsTab({
             <span />
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {/* Editing is offered for a MARKDOWN report only. A legacy HTML
-                document reads inside a sandboxed iframe and has no source to
-                put in a textarea, and a control that cannot work is worse than
-                no control. */}
-            {doc && !isFullHtmlDocument(doc.html) && (
-              <button
-                type="button"
-                className="cw-btn"
-                data-testid="reports-edit-toggle"
-                onClick={() => setEditing((v) => !v)}
-              >
-                {editing ? "Done" : "Edit"}
-              </button>
-            )}
-            {/* Download + share only exist once there is a document to act on. */}
-            {doc && (
+            {/* NO EDIT BUTTON. A report is editable the moment it is open, the
+                way the PRD and the team document are: the toolbar is above it
+                and typing saves. A mode you have to ask for is a step between
+                the reader and a typo they can already see.
+
+                A legacy self-contained document is the exception and needs no
+                control to say so — it renders in its own iframe, with no
+                toolbar, because it owns its rendering. */}
+            {/* Download + share only exist once there is a document to act on,
+                and they render in the panel HEADER when this tab was given a
+                slot for them -- beside where the PRD's share sits, rather than
+                inside the document they act on. Inline is the fallback for a
+                host that passed none. */}
+            {doc && !shareSlot && (
               <ReportShareMenu
                 report={doc}
                 onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
                 onToast={showToast}
               />
+            )}
+            {doc && shareSlot && createPortal(
+              <ReportShareMenu
+                report={doc}
+                onShareChange={(next) => setDoc((cur) => (cur ? { ...cur, ...next } : cur))}
+                onToast={showToast}
+              />,
+              shareSlot,
             )}
           </div>
         </div>
@@ -298,7 +322,7 @@ export function ReportsTab({
               key={doc.id}
               reportId={doc.id}
               html={doc.html}
-              editing={editing}
+              toolbarSlot={toolbarSlot}
               onSaved={(html) => setDoc((cur) => (cur ? { ...cur, html } : cur))}
             />
           )

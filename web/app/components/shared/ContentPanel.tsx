@@ -363,6 +363,11 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   // flips it back off. When no project is bound the icon is hidden and this state
   // is inert, so the panel renders byte-identical to before.
   const [projectSectionOpen, setProjectSectionOpen] = useState(false)
+  // The header slot the open report's share/PDF menu portals into, so it sits
+  // where the PRD's does — top right of the panel — instead of inside the
+  // document it acts on. State rather than a ref so the portal re-renders once
+  // the node exists.
+  const [reportShareSlot, setReportShareSlot] = useState<HTMLDivElement | null>(null)
   const hasActiveProject = content.activeProjectId != null
   useEffect(() => {
     // A thread with no bound project can never show the project section — reset
@@ -709,9 +714,15 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                   : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
             </span>
           <div className="cpanel-head-actions">
+            {/* The REPORT's share/PDF menu lands here, in the header beside
+                where the PRD's sits, rather than inside the document it acts
+                on. Filled by `ReportsTab` through a portal: the menu reads the
+                OPEN report, and that document belongs to the tab. Empty on
+                every other tab. */}
+            <div ref={setReportShareSlot} data-testid="cpanel-report-share-slot" />
             {/* The header Share menu exports the Evidence + PRD pair, so it has no
                 meaning on Reports — a report carries its OWN share/PDF actions,
-                on the open document (ReportsTab). Force-disabled in guest mode —
+                which render in the slot above. Force-disabled in guest mode —
                 a guest has no edit/export entitlement (AC15). */}
             {/* Document is excluded for the same reason as Reports: this menu
                 exports the Evidence + PRD pair, which has nothing to do with a
@@ -758,7 +769,12 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
           )}
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
-            <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+            <ReportsTab
+              reports={reports}
+              loading={reportsLoading}
+              error={reportsError}
+              shareSlot={reportShareSlot}
+            />
           )}
           {activeTab === "goal" && content.goalRunId != null && (
             <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading analysis…</div>}>
