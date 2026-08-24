@@ -468,6 +468,7 @@ export function useProjectConversation(
     setContent, openContentPanel, content, showToast,
     openArtifactInPanel, postOpenArtifactReply,
     markTicketSetAutoOpened: () => {}, postSummary: () => {},
+    activeCompany,
   })
 
   // ── Skills palette: the company's own uploaded skills (main parity) ─────────

@@ -48,6 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
+from app.deps.ownership import require_owned_dataset
 from app.custom_artifact_generate import generate_into
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.conversations import conversation_belongs_to_company
@@ -316,6 +317,17 @@ class GenerateIn(BaseModel):
     # which is the same kind of caller-supplied context.
     context: str = Field(default="", max_length=60_000)
     conversation_id: int | None = None
+    # The active workspace's dataset slug — OPTIONAL for backward compat (an
+    # older frontend build omits it and gets exactly today's behavior: no
+    # grounding, the caller's `context` is the only input). When present it is
+    # ownership-gated like every other dataset-keyed route (routes/ask.py's own
+    # `require_owned_dataset` call) and lets `generate_into` fall back to a real
+    # answer — see custom_artifact_generate.py's grounding step — instead of
+    # writing an honest-but-empty document when the thread had nothing to draw
+    # on. See #1306-adjacent bug: "generate a report on X" from a cold thread
+    # produced a document claiming no data existed, while the identical
+    # question without "report" answered correctly via qa_agent's retrieval.
+    dataset: str = Field(default="", max_length=200)
 
 
 @router.post("/generate")
@@ -350,6 +362,16 @@ async def generate(
         conversation_belongs_to_company, body.conversation_id, company.company_id
     ):
         raise HTTPException(404, "Conversation not found")
+
+    # Ownership-gate an explicit dataset exactly like routes/ask.py — 404 (never
+    # 403) on a mismatch so a foreign slug can't be told apart from a
+    # non-existent one, and so a document is never grounded on another
+    # tenant's corpus. No `workspace_id` argument: this route's dependency is
+    # the workspace-unaware `CompanyContext`, matching `require_owned_dataset`'s
+    # own legacy (unbound-dataset) fallback for callers that predate per-
+    # workspace datasets.
+    if body.dataset:
+        await asyncio.to_thread(require_owned_dataset, body.dataset, company.company_id)
 
     row = await asyncio.to_thread(
         create_artifact,
@@ -420,6 +442,7 @@ async def generate(
         kind=body.kind,
         task=body.task,
         context=body.context,
+        dataset=body.dataset,
     )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
