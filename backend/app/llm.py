@@ -452,35 +452,53 @@ def _create_maybe_batched(
 
     Falls back to the ordinary synchronous path whenever batching does not work
     out (`run_batch` returns None: switch off, non-Anthropic key, API error,
-    deadline). Two shapes can never batch and are refused here rather than in
-    `app.llm_batch`, because the reason is local to this module:
+    deadline). ONE shape can never batch, and it is refused here rather than in
+    `app.llm_batch` because the reason is local to this module:
 
-      * STREAMING. A batch returns one finished message; there are no deltas to
-        forward, so a caller that asked for `on_delta`/`on_json_delta` (or the
-        long-output transport) must keep the live path or it would silently stop
-        streaming.
-      * A per-request `timeout`, for the same reason it exists — it bounds a
-        synchronous read, and there is no synchronous read to bound.
+      * PER-DELTA CALLBACKS. A batch returns one finished message; there are no
+        deltas to forward, so a caller that passed `on_delta`/`on_json_delta`
+        must keep the live path or it would silently stop streaming.
 
-    The batched request is byte-identical to the one the sync path would send,
-    which is the point: `_build_base_kwargs` produced it, both paths consume it,
-    and neither can drift from the other.
+    `stream` and a per-request `timeout` do NOT refuse a batch, which they used
+    to. Both exist for one reason — a large generation on the synchronous path
+    trips the HTTP read timeout — and a batch performs no synchronous read, so
+    neither applies to it. Refusing on them meant every long-output skill
+    (`prd-author`, `evidence-brief`, `implementation-spec`,
+    `ideation-prioritize` — see `graph.gateway._LONG_OUTPUT_SKILLS`) had
+    `batch=True` silently downgraded to a full-price live call, which is most of
+    the background generation in the product.
+
+    They are instead dropped for the BATCH attempt and kept for the FALLBACK.
+    That distinction is load-bearing: `run_batch` returns None on a switched-off
+    flag, a non-Anthropic key, an API error or a deadline, and the fallback then
+    runs the very generation the long-output transport exists for — Part B
+    averages ~185s against a 120s default read timeout, so falling back without
+    the streaming transport would trade a batch miss for a guaranteed
+    `httpx.ReadTimeout`.
+
+    `timeout` is also not a Messages-API body parameter — it is an SDK request
+    option — so it could not go into a batch request's `params` even if the
+    semantics fit.
+
+    The batched request is otherwise byte-identical to the one the sync path
+    would send, which is the point: `_build_base_kwargs` produced it, both paths
+    consume it, and neither can drift from the other.
     """
-    can_batch = (
-        batch and not stream and on_delta is None and on_json_delta is None
-        and "timeout" not in kwargs
-    )
+    can_batch = batch and on_delta is None and on_json_delta is None
     if can_batch:
         from app.llm_batch import BatchRequest, run_batch
 
+        # Strip the SDK request option; the body is what a batch carries.
+        batch_kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
         results = run_batch(
-            [BatchRequest("r0", dict(kwargs))],
+            [BatchRequest("r0", batch_kwargs)],
             label=label,
             **({"deadline_s": batch_deadline_s}
                if batch_deadline_s is not None else {}),
         )
         if results and "r0" in results:
             return results["r0"]
+    # Fallback keeps the caller's original transport, timeout included.
     return _create_with_retries(
         client, stream=stream, background=background, on_delta=on_delta,
         on_json_delta=on_json_delta, **kwargs,
@@ -755,11 +773,9 @@ def call_md(
     """Call Claude expecting plain markdown output.
 
     `batch=True` is the same half-price opt-in `call_json` takes — see
-    `_create_maybe_batched`. Threaded here too so `batch=True` is never a
-    SILENT no-op: most markdown callers are long-output (prd-author and
-    friends) and therefore stream, which `_create_maybe_batched` refuses and
-    falls back on — but a future non-streaming markdown caller that opts in
-    would otherwise get no saving, no warning and no error.
+    `_create_maybe_batched`. It matters most on THIS branch: markdown callers
+    are where the long-output skills live (prd-author and friends), and those
+    are exactly the background generations worth batching.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for

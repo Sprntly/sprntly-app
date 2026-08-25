@@ -323,9 +323,10 @@ def llm_call(
             # _build_base_kwargs).
             output = call_md(
                 # Same opt-in as the json branch above. Most markdown callers
-                # are long-output and therefore stream, which the batch seam
-                # refuses and falls back on — threaded anyway so `batch=True`
-                # is never a silent no-op on this branch.
+                # are long-output and therefore stream; the batch seam now
+                # batches those anyway (streaming exists to bound a synchronous
+                # read a batch never performs) and keeps the streaming transport
+                # only for the fallback. See app.llm._create_maybe_batched.
                 batch=batch, batch_label=f"{agent}.{purpose}",
                 batch_deadline_s=batch_deadline_s,
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
