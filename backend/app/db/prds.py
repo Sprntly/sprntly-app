@@ -16,6 +16,92 @@ from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
 
+#: A PRD GENERATED FROM A BRIEF IS AUTO-GENERATED — owner's call, 2026-08-25.
+#:
+#: `source` does not record who pressed the button: `brief` is written by the
+#: pipeline's full-regen fan-out (`routes/brief.py`, one PRD per insight) AND
+#: by a user clicking Generate on a Top Insights card. An earlier version of
+#: this treated that ambiguity as fatal and refused to hide anything without
+#: an explicit marker, which left the 900-odd existing rows exactly as they
+#: were.
+#:
+#: The ambiguity is real; the decision is that it does not matter. Brief-shaped
+#: PRDs are machine-suggested work either way — the insight was chosen by the
+#: pipeline, and clicking Generate on a card it put in front of you is not the
+#: same as writing a document you went looking for. So the whole population is
+#: treated as auto, which also means EVERY EXISTING ROW is covered with no
+#: backfill: `source` is already on all of them.
+#:
+#: `backlog` rides along for the same reason — one PRD per ranked theme the
+#: sweep picked, nobody asked for any of them individually.
+#:
+#: The three that stay: `chat` (they asked in words), `upload` (they brought
+#: the document), `ideation` (they picked the idea off their own list).
+AUTO_SOURCES: frozenset[str] = frozenset({"brief", "backlog"})
+
+
+def is_auto_generated(row: dict) -> bool:
+    """True when this PRD came out of the machine's own suggestions.
+
+    Two ways to be one, and either is enough:
+
+      * `source` says it was generated from a brief or the backlog — see
+        `AUTO_SOURCES`. This is what covers every row already in the table,
+        so no backfill is needed;
+      * `auto_generated` is set, which the brief's full-regen fan-out stamps
+        explicitly. Redundant with the source rule today and kept anyway: it
+        is the only signal that survives if `source` is ever reused for
+        something else, and it is written by the one caller that knows for
+        certain that nobody asked.
+
+    The DEFAULT reads as auto: `brief` is the column default, so a row from
+    before `source` existed is a brief PRD.
+    """
+    return bool(row.get("auto_generated")) or (row.get("source") or "brief") in AUTO_SOURCES
+
+
+def is_hidden_from_library(row: dict) -> bool:
+    """True when this PRD should not appear in a listing of a user's own work.
+
+    Auto-generated AND never opened. Both halves matter: a `chat` PRD is
+    someone's own document however long it sits unread, and an auto PRD that
+    somebody went and read has earned its place in the library.
+
+    Derived rather than stamped — see the migration. No existing row was
+    written to, so this rule is the whole of the behaviour and deleting it is
+    the whole of the revert.
+    """
+    return is_auto_generated(row) and not row.get("first_read_at")
+
+
+@retry_on_disconnect
+def mark_prd_read(prd_id: int) -> None:
+    """Stamp the first time a person opened this PRD. Advance-only, best-effort.
+
+    ADVANCE-ONLY: the update is filtered on `first_read_at is null`, so it is
+    one statement with no read-modify-write race and a second open cannot move
+    the timestamp. This measures whether a document was ever engaged with, not
+    when it was last touched.
+
+    BEST-EFFORT: a failure here costs a PRD its place in the library, which is
+    a listing being wrong. Failing the OPEN — the thing the user actually asked
+    for — to record that they opened it would be the worse trade, so this
+    swallows.
+    """
+    try:
+        from app.db.client import utc_now
+
+        (
+            require_client()
+            .table("prds")
+            .update({"first_read_at": utc_now()})
+            .eq("id", prd_id)
+            .is_("first_read_at", "null")
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — never fail an open to record it
+        logger.warning("could not stamp first_read_at for prd=%s", prd_id, exc_info=True)
+
 
 def prd_source_hash(md: str) -> str:
     """Stable content hash of a human PRD (its `payload_md`).
@@ -48,6 +134,16 @@ def start_prd(
     variant: str = "v1",
     run_id: str | None = None,
     source: str = "brief",
+    #: True ONLY when the pipeline is generating this unbidden — today that is
+    #: the brief's full-regen fan-out, which writes one PRD per insight whether
+    #: or not anyone wanted them. Defaults False so every other caller (all of
+    #: which run because a person clicked something) is unaffected, and so a
+    #: new call site has to opt IN rather than be swept in by a default.
+    #:
+    #: This exists because `source` cannot carry the fact: `brief` is what the
+    #: fan-out AND a user's own "Generate PRD" click both write. See
+    #: `AUTO_SOURCES`.
+    auto_generated: bool = False,
     theme_id: str | None = None,
     question: str | None = None,
     ask_id: int | None = None,
@@ -78,6 +174,7 @@ def start_prd(
         "variant": variant,
         "run_id": run_id,
         "source": source,
+        "auto_generated": auto_generated,
         "theme_id": theme_id,
         "question": question,
         "ask_id": ask_id,

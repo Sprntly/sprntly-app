@@ -184,6 +184,14 @@ async def _generate_downstream_docs(dataset: str) -> None:
                     title=title,
                     template_version=PRD_TEMPLATE_VERSION,
                     variant=PRD_VARIANT,
+                    # THE ONE PLACE THAT KNOWS. This loop writes a PRD for
+                    # every insight in the brief because a brief was saved —
+                    # nobody asked for any of them individually. That fact
+                    # exists here and nowhere else afterwards: the row it
+                    # produces is indistinguishable from one a user made by
+                    # clicking Generate on the same insight, which is exactly
+                    # why the library filter cannot infer it from `source`.
+                    auto_generated=True,
                 )
                 await generate_prd(prd_id, brief_id, idx)
         except Exception:  # noqa: BLE001 — one insight's failure must not abort the rest

@@ -325,7 +325,19 @@ CREATE TABLE prds (
     -- never uploads one. Deliberately NOT a foreign key in either engine: a
     -- format is deletable, and an FK would either erase this PRD's provenance
     -- when the library is tidied or make the format undeletable.
-    artifact_template_id TEXT
+    artifact_template_id TEXT,
+    -- The first time a person opened this PRD (mirrors
+    -- 20260825170000_prds_first_read_at.sql). NULL is the ordinary state and
+    -- the one that carries meaning: an auto-generated PRD nobody has opened
+    -- stays out of the Artifacts library and Projects
+    -- (db.prds.is_hidden_from_library), and this stamp is what claims it back
+    -- in.
+    first_read_at    TEXT,
+    -- Set ONLY by the brief's full-regen fan-out (mirrors the same migration).
+    -- `source` cannot carry this: `brief` is written both by that fan-out and
+    -- by a user clicking Generate on a Top Insights card, so a listing that
+    -- inferred "auto" from it hid people's own documents.
+    auto_generated   INTEGER DEFAULT 0
 );
 
 CREATE TABLE evidences (
