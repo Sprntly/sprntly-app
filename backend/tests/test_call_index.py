@@ -63,6 +63,44 @@ def test_synthesis_requests_are_left_to_the_digest():
         assert not ci.is_listing_request(question), question
 
 
+def test_a_question_about_who_was_on_a_call_is_not_a_listing():
+    """The call is the PLACE, not the thing being asked for.
+
+    The first phrasing is the reported one. `_LISTING_RULE` matches on
+    proximity — a listing verb within forty characters of a call-noun — and
+    "give me" … "the call" clears that bar with the real question sitting in
+    between. It was answered with "548 calls. Showing the 50 most recent:" and
+    a list of call titles: no names, no table, and about every call in the
+    workspace rather than the one the thread was discussing.
+
+    This path renders a date, an account, a duration and a title, so it could
+    never have answered any of these — standing down costs nothing it could
+    have delivered.
+    """
+    for question in (
+        "use a table and give me all the names of folks on the call.",
+        "who was on the call",
+        "who was on that call?",
+        "give me the participants on the Initech call",
+        "list the attendees on this meeting",
+        "what are the names of everyone in the standup",
+        "show me the speakers from our QBR",
+    ):
+        assert not ci.is_listing_request(question), question
+
+
+def test_who_did_we_talk_to_is_still_a_listing():
+    """The stand-down above must not take the window ask with it. "Who did we
+    talk to this week" names no call and reaches for no preposition — it asks
+    ACROSS a window, which is exactly what the listing answers."""
+    for question in (
+        "who did we talk to this week",
+        "who have we spoken with",
+        "who did we meet last month",
+    ):
+        assert ci.is_listing_request(question), question
+
+
 def test_unrelated_questions_are_not_listings():
     for question in (
         "what should we build next quarter",

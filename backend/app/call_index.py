@@ -1071,6 +1071,37 @@ _LISTING_RULE = re.compile(
     re.I,
 )
 
+# THE PEOPLE ON A CALL ARE NOT A LIST OF CALLS.
+#
+# `_LISTING_RULE` matches on PROXIMITY — a listing verb within forty characters
+# of a call-noun — and forty characters is enough room for a whole different
+# question to sit between them. Reported: "use a table and give me all the
+# names of folks on the call." The verb is `give me`, the noun is `call`, and
+# the thirty-one characters between them are the actual request. It was
+# answered with "548 calls. Showing the 50 most recent:" and a bulleted list of
+# call titles — no names, no table, and about every call in the workspace
+# rather than the one the thread was discussing.
+#
+# The grammar is the tell: the call is the PLACE ("on the call"), not the
+# thing being asked for. So a definite single call reached through a
+# preposition, with people as the object, stands the listing down. This path
+# renders `CallRow.render()` — a date, an account, a duration and a title — so
+# it cannot answer a roster question at all; standing down costs nothing it
+# could have delivered.
+#
+# Deliberately NOT matched: "who did we talk to this week", which the rule
+# above claims on purpose. It names no call and reaches for no preposition —
+# it asks across a window, which is a listing.
+_ROSTER_OF_ONE_CALL = re.compile(
+    r"\b(?:who|whom|names?|attendees?|participants?|speakers?|folks|people|"
+    r"everyone|everybody)\b"
+    # The people and the call must be in the same clause — the sentence-final
+    # punctuation bound stops this reaching across two questions.
+    r"[^.?!]{0,60}?"
+    rf"\b(?:on|in|at|from)\s+(?:the|this|that|our)\s+(?:\w+[\s-]+){{0,3}}?{_CALL_NOUN}\b",
+    re.I,
+)
+
 # An explicit count, in either order: "the 5 latest" and "the latest 5" are the
 # same request. Matching only one order silently returned the whole window.
 _COUNT_RULE = re.compile(
@@ -1087,9 +1118,16 @@ def is_listing_request(question: str) -> bool:
     conversations", which matched no existing rule and so fell through to the
     KG — where it correctly but unhelpfully reported that raw transcripts were
     not available, while the index holds exactly what was asked for.
+
+    Two stand-downs, and both are about what the caller actually asked for
+    rather than which words they used: a summary verb means they want the
+    analysis (`_SYNTHESIS_VERB`), and a question about the PEOPLE on a call
+    means the call is the place, not the subject (`_ROSTER_OF_ONE_CALL`).
     """
     text = question or ""
     if _SYNTHESIS_VERB.search(text):
+        return False
+    if _ROSTER_OF_ONE_CALL.search(text):
         return False
     return bool(_LISTING_RULE.search(text))
 

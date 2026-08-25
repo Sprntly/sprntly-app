@@ -367,6 +367,15 @@ voice. Numbers beat adjectives.
 
 FORMAT THE ANSWER AS SCANNABLE MARKDOWN. Specifically:
 
+- **A SHAPE THE READER ASKED FOR WINS OVER EVERY DEFAULT BELOW.** "Use a \
+table", "just give me a list", "one paragraph", "no headings", "bullets only" \
+— these are instructions, not preferences, and the rest of this section is \
+what to do when nobody said. Reported: a reader who wrote "use a table and \
+give me all the names of folks on the call" was handed a bulleted list of \
+call titles. Getting the content right and the shape wrong is still not the \
+answer they asked for. If the shape they named cannot carry what you have to \
+say, use it for the part it fits and say in one sentence why the rest is not \
+in it.
 - **Lead with the answer.** First sentence is the bottom line; back it up \
 with the headline number immediately after.
 - Use a `## Finding` heading for the bottom-line statement followed by 2–5 \
