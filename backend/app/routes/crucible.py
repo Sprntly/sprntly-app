@@ -1182,6 +1182,21 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
     """Every degradation renders. A quietly thinner run is indistinguishable
     from a complete one, which is worse than the failure it replaced."""
     notes = []
+    # SUPERSEDED EVIDENCE, WHICH NOTHING WAS SAYING. `project_signals` counts
+    # two independent drop reasons — `retired` and `no_timestamp` — and only
+    # the second one was ever rendered. A corpus that is mostly superseded
+    # therefore read as fully read: "What was read: 49 signals across 1 source"
+    # over a run whose findings rested on 4, with the section whose entire
+    # purpose is disclosing degradation staying silent about the largest one.
+    # The narration in the same panel knew and printed it, so the panel
+    # contradicted itself.
+    if claim_stats.get("retired"):
+        notes.append({
+            "reason": "superseded evidence",
+            "actual": f"{claim_stats['retired']} of {claim_stats['seen']} "
+                      f"signals have been superseded by a later version and "
+                      f"were not read",
+        })
     if claim_stats.get("no_timestamp"):
         notes.append({
             "reason": "undated evidence",
