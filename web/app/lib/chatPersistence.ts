@@ -20,7 +20,7 @@
 // All API calls stay fire-and-forget resilient: a persistence failure is
 // swallowed (`.catch`) so it never breaks the UI.
 
-import type { conversationsApi as ConversationsApi } from "./api"
+import type { conversationsApi as ConversationsApi, PersistedTurnReply } from "./api"
 
 /** Minimal slice of conversationsApi this module needs (eases mocking in tests). */
 /** `rewindToTurn` is OPTIONAL, unlike the two writers: rewinding is a
@@ -217,8 +217,18 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   /**
    * Persist the assistant reply for `tabId`. Queued behind its user turn (see
    * enqueueAppend) so the pair lands in the order it was written.
+   *
+   * `reply` is everything the turn showed that `replyText` cannot hold — the
+   * listing's clickable rows, above all. Without it a "show me my PRDs" turn
+   * restored as the sentence announcing twelve PRDs with nothing underneath
+   * it. Optional, so a caller with nothing structured to save (and every
+   * existing test double) writes exactly the same row as before.
    */
-  function pushAssistantTurn(tabId: string, replyText: string): Promise<void> {
+  function pushAssistantTurn(
+    tabId: string,
+    replyText: string,
+    reply?: PersistedTurnReply | null,
+  ): Promise<void> {
     return enqueueAppend(tabId, async () => {
       try {
         let convId = currentConvId(tabId)
@@ -228,7 +238,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         }
         if (convId == null) return
         const api = await deps.getApi()
-        await api.addTurn(convId, "assistant", replyText)
+        await api.addTurn(convId, "assistant", replyText, undefined, reply)
       } catch {
         /* fire-and-forget */
       }

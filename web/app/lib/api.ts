@@ -5479,6 +5479,23 @@ export const attachmentsApi = {
     ),
 }
 
+/** The structured reply persisted alongside an assistant turn's `content`.
+ *
+ *  `content` is a string, so for as long as it was the only thing saved, every
+ *  turn lost whatever it showed beyond prose the moment it was written. "Show
+ *  me the PRDs I created" rendered twelve clickable rows live and, on the next
+ *  reload, rendered only the sentence announcing them — an answer promising
+ *  "click one to open it" above nothing. This is what survives instead.
+ *
+ *  `artifact_list` is the listing's own rows, in the backend's wire shape
+ *  (`ChatIntentEnvelope.artifact_list`), so a restored turn hands `ChatBubble`
+ *  exactly what the live turn handed it. Absent/null → the turn restores from
+ *  `content`, exactly as every row written before this did. */
+export type PersistedTurnReply = Partial<AskResponse> & {
+  answer?: string
+  artifact_list?: ChatArtifactItem[] | null
+}
+
 export type ConversationTurn = {
   id: number
   conversation_id: number
@@ -5486,6 +5503,7 @@ export type ConversationTurn = {
   content: string
   created_at: string
   attachments?: TurnAttachment[] | null
+  reply?: PersistedTurnReply | null
 }
 
 export const conversationsApi = {
@@ -5512,17 +5530,24 @@ export const conversationsApi = {
     api.get<{ turns: ConversationTurn[] }>(`/v1/conversations/${conversationId}/turns`),
   /** Add a turn to a conversation. `attachments` carries the extracted text of
    *  files attached to this turn (persisted so a reloaded thread and the
-   *  chat→PRD flow can still ground on documents attached earlier). */
+   *  chat→PRD flow can still ground on documents attached earlier).
+   *
+   *  `reply` is the assistant turn's STRUCTURED payload — everything the turn
+   *  showed beyond its prose, which `content` alone cannot hold (see
+   *  `PersistedTurnReply`). Omitted on user turns, and the backend drops it on
+   *  one regardless. */
   addTurn: (
     conversationId: number,
     role: "user" | "assistant",
     content: string,
     attachments?: TurnAttachment[],
+    reply?: PersistedTurnReply | null,
   ) =>
     api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
       role,
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
+      ...(reply ? { reply } : {}),
     }),
   /** REWIND the conversation to just before `turnId` — deletes that turn and
    *  every turn after it. `turnId` must be a USER turn: you rewind to a
