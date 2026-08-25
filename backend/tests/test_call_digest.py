@@ -955,6 +955,189 @@ def test_apurva_acceptance_phrases_mode_selection():
     assert is_voc_query(complaint_ask)
 
 
+# ── Map-reduce count engine — eligibility ────────────────────────────────────
+# `is_mapreducible_count` is a strict subset of `is_voc_query`: an
+# aggregate/enumeration shape AND a per-item content predicate to classify
+# against. Comparative/over-time, single-subject, and report-shaped asks stay
+# on the existing query/report paths.
+
+def test_is_mapreducible_count_davids_phrasing():
+    from app.call_digest import is_mapreducible_count
+
+    assert is_mapreducible_count(
+        "how many customer calls did I have in the last 30 days that had "
+        "asked for product features or raised product issues."
+    )
+
+
+def test_is_mapreducible_count_which_customers_and_count_shapes():
+    from app.call_digest import is_mapreducible_count
+
+    positives = [
+        "which customers complained about pricing this month",
+        "how many customers raised billing issues this month",
+        "which accounts complained about latency",
+        "how many customers asked about the mobile app",
+    ]
+    for q in positives:
+        assert is_mapreducible_count(q), f"expected eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_comparative_over_time():
+    from app.call_digest import is_mapreducible_count
+
+    negatives = [
+        "did complaints about exports increase this week",
+        "are export complaints getting worse compared to last week",
+        "how many customers raised billing issues this week vs last week",
+    ]
+    for q in negatives:
+        assert not is_mapreducible_count(q), f"expected NOT eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_single_subject():
+    from app.call_digest import is_mapreducible_count
+
+    assert not is_mapreducible_count(
+        "what did Cascade Health say about the dashboard"
+    )
+
+
+def test_is_mapreducible_count_excludes_report_shaped():
+    from app.call_digest import is_mapreducible_count
+
+    negatives = [
+        "give me the summary of customer feedback from today",
+        "summarize the customer calls from last week",
+        "voice of customer report for last month",
+        "what are the themes from this week's calls",
+        "recap yesterday's customer meetings",
+    ]
+    for q in negatives:
+        assert not is_mapreducible_count(q), f"expected NOT eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_bare_headcount_with_no_predicate():
+    from app.call_digest import is_mapreducible_count
+
+    # A pure entity count with no per-item content filter has nothing for the
+    # map step to classify against.
+    assert not is_mapreducible_count("how many customers do we have")
+
+
+# ── Map-reduce count engine — interception in `answer()` ─────────────────────
+# Gated by `settings.voc_count_engine_enabled` (default OFF) AND
+# `is_mapreducible_count`. Any engine exception falls through to the existing,
+# unchanged `_answer_query` path — never a dead end.
+
+def test_count_engine_off_never_runs_query_path_taken(monkeypatch):
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", False)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("the count engine must not run when the flag is off")
+
+    monkeypatch.setattr(cmr, "run", _must_not_run)
+    monkeypatch.setattr(
+        cd, "_answer_query",
+        lambda **kw: {"answer": "from query path", "_skill_source": "voc-query"})
+
+    out = cd.answer(enterprise_id="co",
+                    question="how many customers raised billing issues this month")
+    assert out["_skill_source"] == "voc-query"
+    assert out["answer"] == "from query path"
+
+
+def test_count_engine_on_and_eligible_runs_engine_and_returns_assembled_answer(monkeypatch):
+    import app.corpus_mapreduce as cmr
+
+    calls_list = [_call(1), _call(2)]
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=calls_list, text="=== CALLS ==="))
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=2, unclassified_ids=[])
+    captured: dict = {}
+
+    def _fake_run(spec, **kw):
+        captured["spec"] = spec
+        captured.update(kw)
+        return eng
+
+    monkeypatch.setattr(cmr, "run", _fake_run)
+
+    def _query_must_not_run(**kw):
+        raise AssertionError("the query path must not run when the engine succeeds")
+
+    monkeypatch.setattr(cd, "_answer_query", _query_must_not_run)
+
+    out = cd.answer(enterprise_id="co",
+                    question="how many customers raised billing issues this month")
+    assert out["_skill_source"] == "voc-count-engine"
+    assert "1 of 2 calls" in out["answer"]
+    assert captured["spec"] is cd.VOC_CALLS_SPEC
+    assert captured["items"] is calls_list
+    assert captured["enterprise_id"] == "co"
+
+
+def test_count_engine_exception_falls_through_to_query_path(monkeypatch, caplog):
+    import logging
+
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+
+    def _boom(*a, **k):
+        raise RuntimeError("engine blew up")
+
+    monkeypatch.setattr(cmr, "run", _boom)
+    monkeypatch.setattr(
+        cd, "_answer_query",
+        lambda **kw: {"answer": "fell through to query path",
+                      "_skill_source": "voc-query"})
+
+    with caplog.at_level(logging.ERROR, logger="app.call_digest"):
+        out = cd.answer(enterprise_id="co",
+                        question="how many customers raised billing issues this month")
+    # No user-facing error — the fallback answer, not an exception, comes back.
+    assert out["_skill_source"] == "voc-query"
+    assert out["answer"] == "fell through to query path"
+    assert "voc count engine failed" in caplog.text
+
+
+def test_assemble_count_answer_matches_query_path_response_contract():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=2, hit_ids=["c1", "c2"],
+                           reasons={"c1": "asked for X", "c2": "raised bug Y"},
+                           total_items=5, unclassified_ids=["c3"])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    for key in ("answer", "key_points", "citations", "confidence", "unanswered",
+               "_skill", "_skill_action", "_skill_source"):
+        assert key in out
+    assert isinstance(out["answer"], str) and out["answer"]
+    assert isinstance(out["key_points"], list)
+    assert isinstance(out["citations"], list)
+    assert all(set(c) == {"source", "evidence"} for c in out["citations"])
+    assert isinstance(out["confidence"], float)
+    assert isinstance(out["unanswered"], str) and "c3" in out["unanswered"]
+    assert out["_skill"] == cd._VOC_SKILL
+    assert out["_skill_source"] == "voc-count-engine"
+
+
 # ── Zoom as a second live source ─────────────────────────────────────────────
 #
 # The digest fires on generic call/VoC-shaped questions with NO connector name

@@ -48,6 +48,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from app.config import settings
+from app.corpus_mapreduce import CorpusMapReduceSpec
 from app.prompt_history import clamp_turn_text
 from app.report_phases import ReportPhase, emit_report_phase
 from app.connector_lookup import slack_voc
@@ -1215,6 +1217,61 @@ def is_voc_query(question: str) -> bool:
     return any(p.search(question) for p in _VOC_QUERY_SHAPES)
 
 
+# ── Map-reducible count eligibility ──────────────────────────────────────────
+# The narrow subclass of `is_voc_query` that the concurrent map-reduce count
+# engine (app.corpus_mapreduce) may answer: an aggregate/enumeration shape
+# ("how many", "count", "which/what <calls|accounts|customers|users|clients>")
+# AND a per-item content predicate — some clause that actually filters on WHAT
+# a call/customer said or raised, not just its entity type. Without a content
+# predicate there is nothing for the map step to classify against (a bare
+# "how many customers do we have" is a headcount, not a classification task).
+#
+# Everything `is_voc_query` already routes to a DIFFERENT shape stays
+# ineligible even when it happens to contain an aggregate word: comparative /
+# over-time asks need the report's prior-period bucketing
+# (`_VOC_COMPARATIVE`), and a single-subject "what did X say" probe has
+# nothing to count across a corpus.
+_SINGLE_SUBJECT_QUERY = re.compile(r"\bwhat\s+did\b.{0,40}\bsay\b", re.I | re.S)
+
+_COUNT_AGGREGATE_SHAPE = re.compile(
+    r"\bhow\s+many\b|\bcount\s+(?:of|the)\b|\bnumber\s+of\b"
+    r"|\b(?:which|what)\b.{0,40}\b(?:calls?|accounts?|customers?|users?|"
+    r"clients?)\b",
+    re.I | re.S,
+)
+
+#: A per-item content predicate — the classification bar itself, not the
+#: entity being counted. Deliberately broad (any of these words anywhere in
+#: the question) rather than anchored right after "that/who/which": David's
+#: own phrasing ("...that had asked for product features or raised product
+#: issues") and the plainer "how many customers raised billing issues" both
+#: carry the predicate word directly, with no relative pronoun in between.
+_COUNT_CONTENT_PREDICATE = re.compile(
+    r"\b(?:ask(?:ed|ing)?|rais(?:ed|ing)?|complain(?:ed|ing)?|"
+    r"request(?:ed|ing)?|report(?:ed|ing)?|mention(?:ed|ing)?|"
+    r"flag(?:ged|ging)?|issue|problem|bug|feature|feedback)\b"
+    r"|\b(?:about|regarding)\s+\w",
+    re.I,
+)
+
+
+def is_mapreducible_count(question: str) -> bool:
+    """True for the strict subset of `is_voc_query` the map-reduce count
+    engine may answer — see the block comment above for the eligibility
+    rule. NOT eligible: comparative/over-time, single-subject "what did X
+    say", report-shaped, or an aggregate ask with no content predicate to
+    classify against."""
+    if not is_voc_query(question):
+        return False
+    if _VOC_COMPARATIVE.search(question):
+        return False
+    if _SINGLE_SUBJECT_QUERY.search(question):
+        return False
+    if not _COUNT_AGGREGATE_SHAPE.search(question):
+        return False
+    return bool(_COUNT_CONTENT_PREDICATE.search(question))
+
+
 _QUERY_SYSTEM = (
     "You answer a pointed question about the user's own customer feedback "
     "from the CUSTOMER CALLS / UPLOADED DOCUMENTS / STORED SIGNAL provided — "
@@ -1549,6 +1606,122 @@ def _ensure_answer(payload: dict, result, window: "Window") -> dict:
         **(payload if isinstance(payload, dict) else {}),
         "answer": text,
         "key_points": [], "citations": [], "confidence": 0.0, "unanswered": "",
+    }
+
+
+# ── Map-reduce count engine — the voc_calls domain descriptor ───────────────
+# Dark-ship (see `settings.voc_count_engine_enabled`, default OFF). When
+# eligible AND enabled, `answer()` runs `app.corpus_mapreduce.run` over the
+# SAME already-assembled `corpus.calls` this module's report/query passes
+# read (no new fetch, no new data model), instead of the single big synthesis
+# call — see `app.corpus_mapreduce` for why: a deterministic Python
+# `len(hit_ids)` count structurally cannot disagree with its own enumerated
+# evidence the way a model-narrated aggregate can.
+
+_VOC_COUNT_RUBRIC = (
+    "You are reviewing a batch of customer calls for Sprntly, a "
+    "product-planning tool. For EACH call in the batch (identified by its "
+    "id), decide whether it raised a PRODUCT FEATURE REQUEST or a PRODUCT "
+    "ISSUE:\n"
+    "- A FEATURE REQUEST is an explicit ask for new functionality, an "
+    "integration, an export/import capability, or a change to how the "
+    "product works.\n"
+    "- A PRODUCT ISSUE is a bug, a crash, a broken/missing capability, or "
+    "something that doesn't work as expected.\n"
+    "- Routine scheduling, pricing/contract discussion, relationship/status "
+    "check-ins, and generic \"things are going well\" commentary do NOT "
+    "count, even if the call also has other content.\n"
+    "Return a verdict for EVERY call id shown to you — never omit one and "
+    "never invent an id that was not shown. For a call that meets the bar, "
+    "hit=true and reason is a one-line grounded quote or close paraphrase of "
+    "the specific ask/bug. For a call that does not, hit=false and reason "
+    "may be empty. Do not guess — a call whose content is ambiguous or "
+    "purely relationship/scheduling in nature gets hit=false."
+)
+
+#: See `app.corpus_mapreduce`'s module docstring for the response-shape
+#: contract every domain's `verdict_schema` must honour: a top-level
+#: `verdicts` object keyed by each item's exact id, each entry carrying at
+#: least `hit`/`reason`.
+_VOC_COUNT_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "object",
+            "description": (
+                "Keyed by each call's exact id as shown in the corpus below "
+                "— one entry per id shown, never omitted, never invented."
+            ),
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "hit": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["hit", "reason"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
+
+def _voc_count_fetch(enterprise_id: str, window: "Window", constraints):
+    """`CorpusMapReduceSpec.fetch` for the voc_calls domain — kept for a
+    caller that has no already-assembled corpus in hand. `answer()` itself
+    never calls this: it passes `items=corpus.calls` (already fetched for the
+    report/query passes) so eligible questions cost no extra live fetch."""
+    del constraints  # voc_calls' own build_corpus takes no extra constraints
+    return build_corpus(enterprise_id, window).calls
+
+
+VOC_CALLS_SPEC = CorpusMapReduceSpec(
+    domain="voc_calls",
+    fetch=_voc_count_fetch,
+    render_item=lambda call: call.render(),
+    item_id=lambda call: call.external_id,
+    rubric_system=_VOC_COUNT_RUBRIC,
+    verdict_schema=_VOC_COUNT_VERDICT_SCHEMA,
+)
+
+
+def _assemble_count_answer(eng, *, window: "Window", source_line: str) -> dict:
+    """The `EngineResult` -> Ask-shaped payload, matching `_answer_query`'s
+    response contract exactly (same field set, same `_skill`/`_skill_action`/
+    `_skill_source` mechanism) so the chat surface renders it identically.
+    The count and the call list are Python values off `eng`, never model
+    prose — reuses the SAME coverage banner (`source_line`) the query/report
+    passes print, so this answer discloses what it read just as loudly."""
+    lines = [source_line, "",
+             f"{eng.count} of {eng.total_items} calls in {window.label} "
+             "matched."]
+    if eng.hit_ids:
+        lines.append("")
+        for item_id in eng.hit_ids:
+            reason = eng.reasons.get(item_id, "")
+            lines.append(f"- {item_id}: {reason}" if reason else f"- {item_id}")
+    unanswered = ""
+    if eng.unclassified_ids:
+        unanswered = (
+            f"{len(eng.unclassified_ids)} call(s) could not be classified "
+            "and are excluded from the count above: "
+            + ", ".join(eng.unclassified_ids)
+        )
+        lines.append("")
+        lines.append(f"Note: {unanswered}")
+    citations = [
+        {"source": item_id, "evidence": eng.reasons.get(item_id, "")}
+        for item_id in eng.hit_ids
+    ]
+    return {
+        "answer": "\n".join(lines),
+        "key_points": [f"{eng.count} of {eng.total_items} calls matched"],
+        "citations": citations,
+        "confidence": 0.95 if not eng.unclassified_ids else 0.7,
+        "unanswered": unanswered,
+        "_skill": _VOC_SKILL,
+        "_skill_action": f"Voice of customer · counted from {window.label}",
+        "_skill_source": "voc-count-engine",
     }
 
 
@@ -1940,6 +2113,34 @@ def answer(
     # rule — so a merge wired only into the report pass would have left the
     # reported bug exactly where it was.
     if query_mode:
+        # Dark-ship concurrent count engine (`settings.voc_count_engine_enabled`,
+        # default OFF): a narrow subclass of query-mode — "how many/which
+        # <calls|customers> that <content filter>" — that the single big
+        # synthesis call below structurally cannot answer as reliably (a
+        # model-narrated aggregate can, and has, disagreed with its own
+        # enumerated citation list). When eligible and enabled, this runs the
+        # SAME already-assembled `corpus.calls` through
+        # `app.corpus_mapreduce.run` (N concurrent small classification
+        # calls + a deterministic Python `len()` reduce) instead. ANY
+        # exception here — model, schema, gate contention, anything — falls
+        # through to the untouched query path below exactly like that path's
+        # own failure falls through to the report: never a dead end.
+        if settings.voc_count_engine_enabled and is_mapreducible_count(question):
+            try:
+                from app import corpus_mapreduce
+
+                eng = corpus_mapreduce.run(
+                    VOC_CALLS_SPEC, enterprise_id=enterprise_id,
+                    question=question, window=window, constraints=constraints,
+                    on_phase=on_phase, items=corpus.calls,
+                )
+                return _assemble_count_answer(
+                    eng, window=window, source_line=source_line,
+                )
+            except Exception:  # noqa: BLE001 — degrade to the query path, never a dead end
+                logger.exception(
+                    "voc count engine failed; falling back to voc-query synthesis"
+                )
         # DELIBERATELY NOT STREAMED, unlike the report path below.
         #
         # This call is followed by `except -> fall through to the report`, so a
