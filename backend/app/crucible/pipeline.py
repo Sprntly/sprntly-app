@@ -54,6 +54,28 @@ NARRATED_DROPS = (
 #: A cluster below this many claims is not a finding, it is an anecdote.
 MIN_CLAIMS_PER_FINDING = 2
 
+#: EXCEPT FOR CLAIM TYPES WHERE ONE MENTION IS THE WHOLE POINT.
+#:
+#: The corroboration rule is right for THEMES — "customers keep asking for X"
+#: means nothing on one mention. It is wrong for CONSTRAINTS. A deal blocker is
+#: specific to one deal by definition, so it is mentioned once by definition,
+#: and requiring a second independent mention deletes exactly the items a PM
+#: most needs.
+#:
+#: Measured on a real staging corpus of 160 blocker signals: 85 of 101
+#: rejections were `anecdote`, and among them
+#:   "$217,988 in expansion revenue was described as gated for the week of…"
+#:   "336K USD in renewals is at risk as of the Week of Aug 3 brief"
+#:   "1 named account is gating a deal, and 3 missing roles were identified…"
+#: A single-source, single-account, named-figure blocker is not an anecdote. It
+#: is the most actionable line in the corpus.
+#:
+#: The claim keeps everything else that makes it honest: it is still capped at
+#: `reported` strength, still sized only if an account is named (I3), and its
+#: confidence still falls with the thinner evidence — a reader sees ONE claim
+#: beside it and can weigh that. What changes is that they get to see it.
+CORROBORATION_EXEMPT_TYPES = frozenset({"constraint"})
+
 #: Refutation: a "pattern over time" backed by evidence that all lands inside
 #: this window is one conversation echoing, not a pattern. This is the exact
 #: shape that fooled the Phase 0 spike.
@@ -181,7 +203,13 @@ def _refute(
     shipped as a finding and a fourth killed it — more evidence for the same
     thing made the verdict stricter, which is backwards, and it let through the
     exact shape the spike was fooled by at the sizes where it is most likely.
-    A cluster is two or more claims by construction, so the gates are gone.
+    A cluster USED TO BE two or more claims by construction, which is why the
+    gates went. That is no longer true: `CORROBORATION_EXEMPT_TYPES` lets a
+    single constraint through, so the echo rule now states its own precondition
+    rather than borrowing one from the caller. A group of one cannot be "one
+    conversation echoing" — there is nothing repeating. It fired anyway, and
+    the reason it printed read "all 1 supporting claims come from one source
+    document within 0 days", which is not a sentence about evidence.
 
     `accounts` here is the RAW set, before the goal's population filter. The
     single-account rule is about how diverse the EVIDENCE is; narrowing to the
@@ -219,7 +247,9 @@ def _refute(
     sources = {c.artifact_id for c in claims if c.artifact_id}
     fully_attributed = len(sources) > 0 and all(c.artifact_id for c in claims)
     one_conversation = fully_attributed and len(sources) == 1
-    if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
+    if (len(claims) >= MIN_CLAIMS_PER_FINDING
+            and span < ECHO_WINDOW and one_conversation
+            and not dates_are_ingest_clock):
         return Refutation("echo", (
             f"all {len(claims)} supporting claims come from one source "
             f"document within {span.days} days — this is one conversation "
@@ -227,7 +257,16 @@ def _refute(
         ))
     # Exactly one, not "at most one": ZERO named accounts is unsizeable, which
     # is a finding we keep and mark (I3), not one we drop.
-    if len(accounts) == 1:
+    # THE SAME CATEGORY ERROR, ONE RULE OVER. "This is that account's situation
+    # rather than a pattern across the book" is right about a PREFERENCE — one
+    # account wanting a feature is that account's opinion. It is wrong about a
+    # CONSTRAINT, where being about one account is the entire content:
+    # "Northwind has only a $5,000 budget approved for a POC" is not a failed
+    # pattern, it is the finding. Exempting the anecdote rule without this one
+    # left 34 named-account blockers still dropped on the measured corpus, so
+    # the change would have looked landed and delivered nothing.
+    exempt_single = all(c.type in CORROBORATION_EXEMPT_TYPES for c in claims)
+    if len(accounts) == 1 and not exempt_single:
         return Refutation("single_account", (
             "every supporting claim comes from a single account, so this is "
             "that account's situation rather than a pattern across the book"
@@ -304,7 +343,10 @@ def build_findings(
             ungroupable_groups += 1
             continue
 
-        if len(group) < MIN_CLAIMS_PER_FINDING:
+        # ALL of them, not any: a mixed group still contains claim types that
+        # do need corroboration, and one exempt member must not carry them.
+        exempt = all(c.type in CORROBORATION_EXEMPT_TYPES for c in group)
+        if len(group) < MIN_CLAIMS_PER_FINDING and not exempt:
             drops["anecdote"] += 1
             rejected.append(Rejection(
                 _label(group, key),

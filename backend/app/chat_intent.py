@@ -930,6 +930,7 @@ def _resolve_via_planner(
     prd_id: Optional[int],
     prd_title: Optional[str] = None,
     open_artifact: Optional[dict] = None,
+    thread_artifact: Optional[dict] = None,
 ) -> Optional[dict]:
     """The planner's verdict as an envelope, or None to use the call below.
 
@@ -948,11 +949,26 @@ def _resolve_via_planner(
         # report from this prd" with "no PRD is open or identified in the thread".
         prd_id=prd_id,
         prd_title=prd_title,
+        # THE LINE THE EDIT PRECONDITION READS. `plan_for_answer` has always
+        # taken this and this call has never passed it, so the planner's prompt
+        # was rendered without any "Active tab: report #45 … is open beside
+        # this chat" line — and `edit_artifact`'s own rule says "Choose this
+        # only when that line names a report or a document". With the line
+        # never present the action was unreachable: every "add a risks section
+        # to that report" planned as `answer` and came back as the rewritten
+        # section printed into the chat, with the report untouched. Reported as
+        # "it cannot edit a report based on a prompt".
+        #
+        # `thread_artifact` is the same referent when the panel is showing
+        # nothing — a report this conversation produced is still what "that
+        # report" means to the person who asked for it here.
+        open_artifact=open_artifact or thread_artifact,
     )
     if plan is None:
         return None
     envelope = _plan_to_envelope(
-        plan, prd_id=prd_id, open_artifact=open_artifact, question=message,
+        plan, prd_id=prd_id, open_artifact=open_artifact or thread_artifact,
+        question=message,
     )
     # The full gated plan rides along under `plan`, for the browser console.
     # Everything on it was already decided server-side and is already visible in
@@ -979,6 +995,11 @@ def resolve_chat_intent(
     prd_title: Optional[str] = None,
     has_attachments: bool = False,
     open_artifact: Optional[dict] = None,
+    #: The report/document THIS THREAD produced, when the panel is showing
+    #: none. Resolved by the route (`_thread_edit_target`), and used for the
+    #: same two jobs `open_artifact` is: the referent in the planner's prompt,
+    #: and the target an `edit_artifact` verdict acts on.
+    thread_artifact: Optional[dict] = None,
 ) -> dict:
     """Decide the action envelope for one chat message, in context.
 
@@ -1026,7 +1047,11 @@ def resolve_chat_intent(
     # send path, and a planner import or flag read must never break a send.
     try:
         planned = _resolve_via_planner(
-            enterprise_id, message, history, prd_id=prd_id, prd_title=prd_title
+            enterprise_id, message, history, prd_id=prd_id, prd_title=prd_title,
+            # Both referents an edit can act on: what the panel is showing, and
+            # failing that what this thread produced. Neither reached the
+            # planner before, which is why `edit_artifact` never fired.
+            open_artifact=open_artifact, thread_artifact=thread_artifact,
         )
         if planned is not None:
             return planned

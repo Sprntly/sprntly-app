@@ -61,7 +61,8 @@ def _capture_resolver(monkeypatch, envelope=None):
     seen: dict = {}
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False, open_artifact=None):
+                 prd_title=None, has_attachments=False, open_artifact=None,
+                 thread_artifact=None):
         seen.update(
             enterprise_id=enterprise_id, message=message, history=history,
             prd_id=prd_id, prd_title=prd_title, has_attachments=has_attachments,
