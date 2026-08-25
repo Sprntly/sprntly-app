@@ -46,21 +46,51 @@ import { GoalReportDocument } from "./GoalReportDocument"
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
 const POLL_MS = 3000
 
+//: A run parked at a human gate is polled SLOWLY, not at the working rate.
+//:
+//: Gates are no longer terminal for this panel — the click that releases them
+//: happens in the chat, so the only way the panel learns is by asking. But
+//: asking every 3s means 1,200 requests an hour against the shared database
+//: for a run that is, by definition, waiting on a person who may be at lunch.
+//: A gate is released in seconds or in hours; 15s is invisible to the first
+//: case and 240x cheaper in the second.
+const GATE_POLL_MS = 15_000
+
+//: And it does not wait forever. A run left at a gate overnight has an open
+//: tab asking about it all night; after this the panel stops and says so,
+//: which is honest about the fact that nothing is watching any more.
+const GATE_POLL_CEILING_MS = 30 * 60 * 1000
+
+//: Statuses where the run is waiting on a PERSON, not on work.
+const HUMAN_GATES = new Set(["awaiting_confirmation", "awaiting_approval"])
+
 /** Consecutive failed polls before the panel stops trying. Three, because a
  *  deploy restart drops one or two ticks and the run itself survives it. */
 const MAX_CONSECUTIVE_FAILURES = 3
 
-/** Statuses that will never change on their own. `awaiting_confirmation` is
- *  here because only a click moves it — but the click has to RE-ARM the poll,
- *  which is what `pollKey` below is for. Getting that wrong meant every user
- *  confirmed and then watched "Reading 0 claims…" forever while the run
- *  finished on the server. */
+//: What a poll returns when it did not reach the server. NOT a status: it is
+//: the absence of one, and the difference matters to anything that decides
+//: cadence from what the run is doing. Deliberately not a value the backend
+//: can ever produce, so it cannot collide with a real status.
+const POLL_UNREACHABLE = "__unreachable__"
+
+/** Statuses that will never change on their own, so polling one is load with
+ *  no possible new information.
+ *
+ *  This used to name `awaiting_confirmation` and explain why it belonged. It
+ *  no longer does — see the comment inside the set — and a docstring still
+ *  describing the membership it lost is the same defect as a report claiming
+ *  a ranking it does not have: the next reader trusts the prose over the
+ *  three words below it. */
 const TERMINAL = new Set([
+  // A GATE IS NO LONGER TERMINAL FOR THIS PANEL. Both gates moved to the chat
+  // thread, so the click that releases them happens somewhere this component
+  // cannot see — and `pollKey`, the re-arm this set was written around, has no
+  // caller left here. Treating a gate as terminal meant a panel opened on one
+  // stopped polling and never advanced to the report, however long the reader
+  // waited. It keeps watching instead, which is the only way it can now learn
+  // that the thread released the run.
   "ready", "failed", "cancelled",
-  // BOTH human gates. A run waiting on a person will wait forever, and polling
-  // it is load with no possible new information; the click that releases it
-  // re-arms the poll itself.
-  "awaiting_confirmation", "awaiting_approval",
 ])
 
 /** Error codes the backend may return, in the user's language. Anything not
@@ -104,10 +134,22 @@ function _detailOf(e: unknown): string {
 export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
-  // has not changed, so without this the effect never re-runs and the panel
-  // stays on the last status it saw.
+  // Re-arms the poll: `load` is keyed on `runId`, which has not changed, so
+  // without a changing dependency the effect never re-runs and the panel stays
+  // on the last status it saw.
+  //
+  // `pollKey` used to be bumped by this panel's own confirm/approve buttons to
+  // re-arm a poll that a gate had stopped. Those buttons are gone with the
+  // gates — but the ceiling below STOPS the poll, and something has to be able
+  // to start it again. Whether leaving the panel remounts this component is a
+  // question about `ContentPanel`'s keying that the reader cannot see from
+  // here, and the last two times an edge in this feature was priced by
+  // reasoning about a remount rather than reproducing it, it was priced wrong
+  // in both directions. A button removes the question.
   const [pollKey, setPollKey] = useState(0)
+  //: The gate poll hit its ceiling and stopped. Separate from `error` because
+  //: it is not an error — it is a deliberate stop with a way back.
+  const [gateStopped, setGateStopped] = useState(false)
   // How many consecutive polls failed. One 502 on one tick of a multi-minute
   // run must not brick the panel — a transient error is a retry, not a state.
   const failures = useRef(0)
@@ -152,19 +194,50 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       // warning" was untestable by construction, and the user watched a stale
       // panel with no hint that anything was wrong.
       setError("Lost contact — retrying…")
-      // Keep polling. Returning a non-terminal status is the point: a single
-      // blip during a run that takes minutes is not a reason to give up on it.
-      return "running"
+      // Keep polling, but say WHAT this tick learned, which is nothing.
+      //
+      // This used to return "running", and a run parked at a gate then read as
+      // "not at a gate" on every transient 502 — which reset the ceiling clock
+      // to zero AND dropped the next tick back to the 3s working rate. One
+      // flaky endpoint therefore defeated both halves of this PR: the 30-minute
+      // bound could never accumulate, and the 15s gate cadence it exists to
+      // buy went with it. A failed poll is an absence of information, and the
+      // caller has to be able to tell that from a status.
+      return POLL_UNREACHABLE
     }
   }, [runId])
 
   useEffect(() => {
     let live = true
     let timer: ReturnType<typeof setTimeout> | undefined
+    let gateWaitedMs = 0
+    // A re-arm starts the clock over, and the stopped state goes with it —
+    // otherwise the button stays on screen next to a poll that is running.
+    setGateStopped(false)
+    // STICKY ACROSS UNREACHABLE POLLS. A tick that learned nothing must not
+    // silently reclassify a gated run as an ungated one; it keeps the cadence
+    // and the clock the last KNOWN status established.
+    let atGate = false
     const tick = async () => {
       const status = await load()
       if (!live || TERMINAL.has(String(status))) return
-      timer = setTimeout(tick, POLL_MS)
+      if (status !== POLL_UNREACHABLE) atGate = HUMAN_GATES.has(String(status))
+      if (atGate) {
+        gateWaitedMs += GATE_POLL_MS
+        if (gateWaitedMs >= GATE_POLL_CEILING_MS) {
+          // Stops, and SAYS it stopped. A panel that silently gave up looks
+          // identical to one that is still watching.
+          setError(
+            "Still waiting on the gate in the chat. This panel stopped "
+            + "checking after 30 minutes.",
+          )
+          setGateStopped(true)
+          return
+        }
+      } else {
+        gateWaitedMs = 0
+      }
+      timer = setTimeout(tick, atGate ? GATE_POLL_MS : POLL_MS)
     }
     void tick()
     return () => {
@@ -275,7 +348,25 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // existed was the opposite mistake and left the user with a frozen panel and
   // no explanation. It sits above whatever the run last showed.
   const banner = error ? (
-    <p className="ga-error" role="status" data-testid="goal-error">{error}</p>
+    <p className="ga-error" role="status" data-testid="goal-error">
+      {error}
+      {gateStopped ? (
+        <>
+          {" "}
+          <button
+            type="button"
+            className="ga-error-retry"
+            data-testid="goal-gate-recheck"
+            onClick={() => {
+              setError(null)
+              setPollKey((k) => k + 1)
+            }}
+          >
+            Check again
+          </button>
+        </>
+      ) : null}
+    </p>
   ) : null
 
   // ── The gates live in the CHAT THREAD now ────────────────────────────────

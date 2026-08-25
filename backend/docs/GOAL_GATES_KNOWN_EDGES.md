@@ -14,25 +14,56 @@ Sorted by what I would fix first.
 
 ---
 
-## 1. A reloaded turn briefly reads "No response was generated"
+## 1. Reloading before the first question leaves a stranded turn until you switch tabs
 
-**What happens.** A `pending` gate is stripped from the thread on save and on
-load (`_thawThread`), because the poll that would replace it died with the page.
-That leaves the reader's own message with no card under it until the restore
-appends a rebuilt one, and in that window the ordinary no-reply ladder renders
-"No response was generated for this message."
+**Corrected three times. Read the history, it is the point of the entry.**
 
-**How to reach it.** Reload while a run is still `resolving_goal` — the second
-or so between sending a goal and the definition question appearing.
+1. "A flash, not a dead end." Review reproduced it and the turn kept "No
+   response was generated for this message". Too light.
+2. **"PERMANENT / unreachable / must start again."** Too heavy, in the other
+   direction: review did the one thing that version called impossible —
+   switched tabs and came back — and the gate rebuilt. There is a green test
+   named "switching away and back restores again" that says so.
+3. The severity in (2) was fixed but the MECHANISM was still wrong. It said
+   "the restore does not fire on that mount", which review then falsified by
+   reading the effect: it fires, and the entry's own next clause — the panel
+   points at a live run — is only true BECAUSE it fires.
 
-**Why deferred.** It is a flash, not a dead end: the gate appears immediately
-after. Two attempts to suppress it (a marker on the turn, then a synthetic
-"interrupted" record) each produced worse bugs than the flash — see §7.
+Three passes, and the first two corrections each left something wrong. The
+lesson stays in the file rather than being tidied out of it: a claim about
+behaviour needs reproducing whether it is about severity or about mechanism,
+and "I reasoned about the code" is how all three versions got here.
 
-**Fix direction.** Do not add a field to the turn. Derive the whole gate from
-the server row (§8) and the window disappears with the shadow state.
+**What actually happens.** Reload during `resolving_goal` — the second or so
+between sending a goal and the question appearing. The `pending` gate is
+stripped on save and on load. The restore effect in `ChatScreen` DOES run: it
+calls `goalAnalysisApi.list()`, finds this thread's run, and does
+`setContent({ goalRunId: mine.id })`, which is why the panel opens on a live
+run at all. It then stops one step short, at
 
----
+```
+if (mine.status !== "awaiting_confirmation"
+    && mine.status !== "awaiting_approval") return
+```
+
+because a run still resolving its goal is at neither gate yet. So the panel
+points at the run, and the turn keeps the no-reply line with no card to answer.
+
+**Recovery.** Switching to another chat tab and back re-runs the effect — and
+by then the run has reached `awaiting_confirmation`, so the status check passes
+and the gate is rebuilt and appended. The recovery works because the RUN moved,
+not because the effect started running. The run is NOT lost. The appended card
+lands below the stale no-reply line, which is not replaced.
+
+**Severity.** Confusing and undiscoverable, not terminal. A reader who does not
+happen to switch tabs will believe the run failed.
+
+**Why deferred.** It needs a reload inside a one-second window on an
+allowlist-only feature, and the recovery — though nobody would guess it — costs
+one click.
+
+**Fix direction.** §8. Two attempts to paper over this window (§7) each
+produced worse bugs than the window itself.
 
 ## 2. The rebuilt gate appends instead of returning to its own turn
 
@@ -81,13 +112,17 @@ the user retypes one sentence. Explicitly accepted rather than fixed.
 
 ---
 
-## 6. `goalGateResolved: undefined` in the re-arm path
+## 6. (retired) — the re-arm path this described no longer exists
 
-**What happens.** The restore clears a settled record when it attaches a rebuilt
-gate. Review could not construct a path where that destroys a real record, but
-nothing prevents it either — it is an undocumented invariant, not a live bug.
+Kept as a numbered heading so the section numbers in commit messages and review
+comments still line up. `goalGateResolved: undefined` was deleted along with
+the whole re-arm marker; there is no such write anywhere now.
 
----
+**Not to be confused with the panel's `pollKey`.** `GoalAnalysisTab` does have
+a re-arm again — the gate poll stops itself at a ceiling, and the "Check again"
+button in the error banner restarts it. That is a poll restarting inside one
+component, not a marker written onto a thread turn and persisted, which is what
+this section retired and what §8 is about.
 
 ## 7. Two fixes that were tried and reverted — do not retry as written
 
@@ -106,6 +141,68 @@ Both were attempts to hide §1. Neither is worth repeating against the current
 shape; both disappear under §8.
 
 ---
+
+## 7b. A goal as the FIRST message of a brand-new chat — FIXED, with a residual
+
+Listed because this file missed it and review found it: the run was started
+before the conversation row existed, so it carried no `conversation_id` and was
+orphaned from its own chat forever — the restore matches runs by conversation,
+so it could never return to the thread it came from. Now the start waits
+briefly for the tab's `dbConvId`. Recorded rather than quietly fixed, because
+"the doc listed every known edge" was itself one of the claims that was wrong.
+
+**RESIDUAL, stated because "FIXED" on its own was another over-claim.** The
+wait can fail: if the conversation row never arrives — create failed, offline —
+the run would have started with no `conversation_id` anyway, orphaned exactly
+as before. It refuses and says so instead. The goal is not started, which is
+the honest outcome: a run that cannot be brought back to its own chat is worth
+less than a retry.
+
+**The window was two seconds, and that was a bet rather than a bound.** Two
+seconds is a guess about how fast a conversation insert lands; a cold backend
+or a slow link loses that bet and the reader is refused for a save that was
+about to arrive. It is ten seconds now, the loop still exits the instant the
+row appears, and both the refusal and the widening have tests
+(`ChatScreen.goal-restore.dom.test.tsx`, "a chat that never saves") — the
+second one lands the row at three seconds specifically so that reverting the
+window to two goes red. The copy was wrong too: it told the reader to "send a
+message first", which is what they had just done.
+
+**Still not right structurally.** The wait polls `tabsRef` for a value another
+code path is producing, rather than awaiting the conversation-create promise
+itself. Ten seconds is a better guess than two; it is still a guess. §8 removes
+the need for it.
+
+## 7c. A second run's gate is silently dead while the first one resolves
+
+**What happens.** `goalGateBusyTurnRef` is one ref for the whole screen, so a
+confirm or approve anywhere blocks every other gate card. The busy INDICATOR is
+per-turn, though, so the second card looks live: the button is enabled and
+clicking it does nothing at all.
+
+**How to reach it.** Two chats, each with a run parked at a gate, and answer
+one while the other is on screen.
+
+**Severity.** Rare and self-clearing — the lock releases as soon as the first
+call returns, and the second click works. It leaves no bad state; it just
+ignores a click without saying why.
+
+**Why deferred.** The honest fix is to scope the lock to the turn it belongs
+to, which means the busy state stops being a screen-level ref — the same
+refactor §8 describes. Papering over it by disabling the second button would
+trade a silent no-op for a control that is dead with no reason given.
+
+## 7d. Unmounting inside the conversation wait discards the goal
+
+**What happens.** If the panel unmounts during the wait in §7b — the reader
+closes the tab or navigates — `startGoalAnalysis` returns before starting
+anything, and the goal text is gone.
+
+**Before this, the run already existed** and could be restored, so this is a
+narrow regression. It is deliberate: the alternative is starting a run that
+cannot find its way back to a chat nobody is looking at any more. Nothing is
+stranded server-side, which is the trade — a lost sentence rather than an
+unreachable run.
 
 ## 8. The structural fix, when this is worth doing properly
 

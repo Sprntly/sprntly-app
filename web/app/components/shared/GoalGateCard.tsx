@@ -60,12 +60,30 @@ export type GoalGate =
  *  bare "done" — the whole point of moving these into the conversation. */
 export type GoalGateResolved =
   | { kind: "definition"; definition: string }
-  | { kind: "plan"; excludedSources: string[]; hypotheses: string[] }
+  | {
+      kind: "plan"
+      excludedSources: string[]
+      hypotheses: string[]
+      /** The plan as approved. CARRIED, not dropped: the settled card used to
+       *  collapse to "Reading every connected source", so scrolling back showed
+       *  that a plan was approved and not WHAT was approved — which is the
+       *  whole reason the gate is in the thread. A PM defending the decision
+       *  needs the sources and counts they agreed to, not a receipt. */
+      plan?: SettledPlan
+    }
   /** The gate could not be answered — the server refused, or the run died.
    *  Carries the REASON: the generic "there was an interruption" the thread
    *  shows for an ordinary failed turn throws that away, and "why can I not
    *  confirm this?" is exactly what the reader needs. */
   | { kind: "failed"; reason: string }
+
+/** What the SETTLED card needs from the plan — the sources and their counts.
+ *  Deliberately narrower than `GoalRunPlan`: a record does not need the gaps,
+ *  the currency or the will-produce list, and naming only what it reads keeps
+ *  a record renderable from a thread persisted by an older build. */
+export type SettledPlan = {
+  sources?: { source_type: string; label?: string; signal_count: number }[]
+}
 
 export function GoalGateCard({
   gate,
@@ -207,19 +225,76 @@ function GoalGateSettled({
       </div>
     )
   }
-  const { excludedSources, hypotheses } = resolved
+  const { excludedSources, hypotheses, plan } = resolved
+  const dropped = new Set(excludedSources)
+  const kept = (plan?.sources ?? []).filter((x) => !dropped.has(x.source_type))
+  const keptSignals = kept.reduce((n, x) => n + (x.signal_count || 0), 0)
+  // AN EXCLUSION THE LIST CANNOT SHOW. The list below can only strike through
+  // a source it actually renders, so an excluded slug that is not in
+  // `plan.sources` would be stated nowhere — and "stated nowhere" is the one
+  // outcome this card exists to prevent. Normally the two agree (the
+  // checkboxes are rendered FROM those sources), so this is empty; it is not
+  // empty for a record persisted before the plan was carried, which is exactly
+  // when the fallback line below is the only thing left.
+  const listed = new Set((plan?.sources ?? []).map((x) => x.source_type))
+  const unlisted = excludedSources.filter((x) => !listed.has(x))
   return (
     <div className="ggc ggc-settled" data-testid="goal-gate-plan-done">
       <p className="ggc-settled-label">Plan approved</p>
       {/* An excluded source is STATED, never merely omitted — a quietly
           narrower run is what the coverage notes exist to prevent. */}
-      {excludedSources.length ? (
-        <p className="ggc-settled-body">
-          Not reading: {excludedSources.join(", ")}
-        </p>
-      ) : (
+      {/* The list below names the dropped sources with their human labels and
+          counts, so repeating them here in raw `source_type` slugs said the
+          same fact twice — "Not reading: project_mgmt" directly above "the
+          tracker — dropped by you".
+          BUT ONLY WHEN THERE IS A LIST. A record persisted before the plan was
+          carried has no sources to render, and dropping this line outright
+          then left an exclusion stated NOWHERE — which is the one thing this
+          card exists to prevent. Slugs are worse than labels; they are much
+          better than silence. */}
+      {!excludedSources.length ? (
         <p className="ggc-settled-body">Reading every connected source.</p>
-      )}
+      ) : unlisted.length ? (
+        <p className="ggc-settled-body">
+          Not reading: {unlisted.join(", ")}
+        </p>
+      ) : null}
+      {/* WHAT WAS ACTUALLY APPROVED, kept on screen. Read-only — the decision
+          is made — but present, so the reader can check the run against it
+          later without reopening anything. */}
+      {plan?.sources?.length ? (
+        <ul className="ggc-settled-sources" data-testid="goal-gate-plan-done-sources">
+          {plan.sources.map((src) => {
+            const out = dropped.has(src.source_type)
+            return (
+              <li key={src.source_type} className={out ? "ggc-src-out" : undefined}>
+                <span className={out ? "ggc-src-struck" : undefined}>
+                  <strong>{src.signal_count}</strong>{" "}
+                  {src.label || src.source_type}
+                </span>
+                {out ? (
+                  <span className="ggc-src-note"> — dropped by you</span>
+                ) : null}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+      {/* WHAT THIS NUMBER IS. `signal_count` is an INVENTORY taken by the plan
+          step, which reads no content — it is why that step returns in about a
+          second rather than minutes. "were read against this goal" was two
+          claims the run had not made: that the reading had happened (this card
+          renders the moment the plan is approved, before any of it has) and
+          that it was done against the goal (claim selection never sees the
+          definition — the report's closing section says so in as many words).
+          Stated as scope, which is what was actually agreed here. */}
+      {plan?.sources?.length ? (
+        <p className="ggc-settled-body">
+          In scope: {keptSignals} signals across {kept.length} source
+          {kept.length === 1 ? "" : "s"} — counted when the plan was made, not a
+          record of what has been read.
+        </p>
+      ) : null}
       {hypotheses.length ? (
         <p className="ggc-settled-body">
           {hypotheses.length === 1 ? "Your expectation" : "Your expectations"}:{" "}

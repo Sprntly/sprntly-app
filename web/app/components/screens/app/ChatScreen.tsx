@@ -27,7 +27,9 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import type { GoalGate, GoalGateResolved } from "../../shared/GoalGateCard"
+import type {
+  GoalGate, GoalGateResolved, SettledPlan,
+} from "../../shared/GoalGateCard"
 import type { PlanDecision } from "../../shared/GoalAnalysisPlan"
 import { type PopupAnswer } from "../../shared/QuestionPopup"
 import {
@@ -5096,7 +5098,8 @@ export function ChatScreen() {
   // Gate 2 → the run. Only here does anything get read, and only here does the
   // panel earn its place: what follows is a document.
   const approveGoalPlan = useCallback(
-    async (tabId: string, turnId: string, runId: number, decision: PlanDecision) => {
+    async (tabId: string, turnId: string, runId: number, decision: PlanDecision,
+           plan?: SettledPlan) => {
       if (goalGateBusyTurnRef.current) return
       goalGateBusyTurnRef.current = turnId
       setGoalGateBusyTurnId(turnId)
@@ -5111,6 +5114,7 @@ export function ChatScreen() {
             kind: "plan",
             excludedSources: decision.excluded_sources,
             hypotheses: decision.hypotheses,
+            plan,
           },
         })
         goalRunRef.current = runId
@@ -5147,6 +5151,7 @@ export function ChatScreen() {
             kind: "plan",
             excludedSources: decision.excluded_sources,
             hypotheses: decision.hypotheses,
+            plan,
           },
         })
         goalRunRef.current = runId
@@ -5189,8 +5194,46 @@ export function ChatScreen() {
     const tabId = activeTabIdRef.current
     if (!tabId) return
     try {
+      // WAIT FOR THE CONVERSATION ROW, briefly. On the first message of a brand
+      // new chat there is no `dbConvId` yet — `emitCommandTurn` has only just
+      // queued its creation — so the run was started with no `conversation_id`
+      // and stayed orphaned from its own chat forever: the restore matches runs
+      // by conversation, so that run could never come back to the thread it was
+      // started in. Reading it from the tab after the emit costs a moment on a
+      // path that is already a second from its first question, and only on a
+      // first message.
+      let convId = activeConvId
+      // TEN SECONDS, NOT TWO. Two was chosen as "a moment" and is really a bet
+      // on how fast the conversation insert lands; a cold backend or a slow
+      // link loses that bet and the reader is refused for a save that was
+      // seconds from arriving. Waiting longer costs nothing on the ordinary
+      // path — the loop exits the instant the row appears — and the turn is
+      // already on screen in its pending state while it runs.
+      for (let i = 0; convId == null && i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        if (!mountedRef.current) return
+        convId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      }
+      if (convId == null) {
+        // THE WAIT CAN FAIL, and failing quietly is how the original bug
+        // looked. If the conversation row never arrives — create failed, or we
+        // are offline — starting anyway produces a run bound to no chat, which
+        // the restore (which matches BY conversation) can never bring back.
+        // The reader has just waited two seconds for that outcome, so they are
+        // told it rather than left with a run that silently cannot return.
+        // AND IT SAYS THE TRUE THING. "Send a message first" was advice the
+        // reader had already taken — the goal they just sent IS the message —
+        // and "has not been saved yet" reads as a permanent state rather than
+        // a save that did not finish in time. What they can actually do is
+        // ask again.
+        endGoalTurn(tabId, turnId,
+          "This chat had not finished saving, so the analysis could not be "
+          + "attached to it — starting it anyway would have left it unable to "
+          + "find its way back here. Ask again in a moment.")
+        return
+      }
       const run = await goalAnalysisApi.start(goalText, {
-        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+        ...(convId != null ? { conversation_id: convId } : {}),
       })
       goalRunRef.current = run.id
       // A run is born `resolving_goal` and reaches the gate a moment later.
