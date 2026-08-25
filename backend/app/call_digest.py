@@ -1421,6 +1421,7 @@ def _answer_query(
     window: Window, compare_boundary: str | None,
     history: list[dict] | None, kg: KgContext | None = None,
     voc: "slack_voc.VocRead | None" = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Answer a query-shaped ask directly from the merged corpus text.
 
@@ -1428,9 +1429,17 @@ def _answer_query(
     because the text handed to the model is now calls + uploaded docs + stored
     KG signal and no single dataclass owns all three. `source_line` is the same
     coverage banner the report pass prints — carried here so a pointed answer
-    discloses what it read just as loudly as a report does."""
+    discloses what it read just as loudly as a report does.
+
+    `on_phase`, when supplied, announces ANALYZING here — the query branch's
+    one real leg once GATHERING (in `answer`, above) has finished. Without
+    this the query path narrated nothing after GATHERING and a slow pointed
+    answer (see `long_output=True` below) looked like a dead spinner even
+    though it was still running."""
     from app.ask_runner import _ASK_RESPONSE_SCHEMA
     from app.graph.gateway import llm_call
+
+    emit_report_phase(on_phase, ReportPhase.ANALYZING)
 
     boundary_note = (
         f"\nThe question compares periods: records dated ON/AFTER "
@@ -1456,6 +1465,17 @@ def _answer_query(
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=_VOC_SKILL,
         max_tokens=_QUERY_MAX_TOKENS,
+        # `long_output=True` selects the gateway's long read timeout (600s vs
+        # the 120s default) and the streaming TRANSPORT — it does NOT publish
+        # any partial text: `on_delta` stays unset below, and the gateway only
+        # forwards deltas to a caller-supplied sink (see app.llm's
+        # `_create_with_retries`). A pointed query answer can still run long
+        # (a wide corpus + a table-shaped ask), and it was dying silently on
+        # the default non-streamed timeout with no caller-visible symptom
+        # other than a dead spinner. No client preview risk: this stays a
+        # single, non-fallback-prone call, unlike the report path's comment
+        # above about a garbled two-attempt preview.
+        long_output=True,
     )
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
@@ -1937,7 +1957,7 @@ def answer(
                 enterprise_id=enterprise_id, question=question,
                 corpus_text=merged_text, source_line=source_line,
                 window=window, compare_boundary=compare_boundary,
-                history=history, kg=kg, voc=voc,
+                history=history, kg=kg, voc=voc, on_phase=on_phase,
             )
         except Exception:  # noqa: BLE001 — degrade to the report, never a dead end
             logger.exception("voc query-mode answer failed; falling back to report")

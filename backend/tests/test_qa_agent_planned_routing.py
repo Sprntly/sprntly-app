@@ -205,6 +205,81 @@ def test_the_digest_is_handed_the_plans_window(loud_ladder, monkeypatch):
     assert seen["constraints"] == {"since": "2026-07-12", "until": "2026-08-16"}
 
 
+def test_the_digest_receives_on_phase(loud_ladder, monkeypatch):
+    """`_m_call_digest` used to swallow `on_phase` in `**_kw` — the digest's own
+    GATHERING/WRITING/ANALYZING narration never reached a planned turn, which
+    is the reported bug: a dead spinner on a genuinely long query-shaped ask."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    seen: dict = {}
+
+    def _answer(**kw):
+        seen["on_phase"] = kw.get("on_phase")
+        return {"answer": "digest", "_skill_source": "call-digest"}
+
+    monkeypatch.setattr(cd, "answer", _answer)
+
+    sink = lambda label: None  # noqa: E731 — identity-compared below
+    out = qa._dispatch_planned_method(
+        _plan("call-digest"), enterprise_id="ent", question="q", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+        on_phase=sink,
+    )
+    assert out["_skill_source"] == "call-digest"
+    assert seen["on_phase"] is sink
+
+
+def test_the_digest_still_runs_with_on_phase_unset(loud_ladder, monkeypatch):
+    """The advisory contract: a caller that omits `on_phase` (tests, scheduled
+    callers) must behave exactly as before — `None` reaches the executor and
+    is a no-op there."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    seen: dict = {}
+
+    def _answer(**kw):
+        seen["on_phase"] = kw.get("on_phase")
+        return {"answer": "digest", "_skill_source": "call-digest"}
+
+    monkeypatch.setattr(cd, "answer", _answer)
+
+    out = qa._dispatch_planned_method(
+        _plan("call-digest"), enterprise_id="ent", question="q", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+    )
+    assert out["_skill_source"] == "call-digest"
+    assert seen["on_phase"] is None
+
+
+def test_a_planned_turn_threads_on_phase_from_the_top_level_answer(
+    loud_ladder, monkeypatch
+):
+    """The call site inside `answer()` that invokes `_dispatch_planned_method`
+    must actually have `on_phase` in scope and pass it — this exercises the
+    real entry point a chat turn uses, not just the dispatcher directly."""
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    seen: dict = {}
+
+    def _answer(**kw):
+        seen["on_phase"] = kw.get("on_phase")
+        return {"answer": "digest", "_skill_source": "call-digest"}
+
+    monkeypatch.setattr(cd, "answer", _answer)
+
+    phases: list[str] = []
+    sink = phases.append  # bound once — `phases.append is phases.append` is False
+    out = qa.answer(
+        enterprise_id="ent", question="anything at all", dataset="acme",
+        plan=_plan("call-digest"), on_phase=sink,
+    )
+    assert out["_skill_source"] == "call-digest"
+    assert seen["on_phase"] is sink
+
+
 def test_tracker_lookup_declines_when_no_tracker_is_connected(
     loud_ladder, monkeypatch
 ):
