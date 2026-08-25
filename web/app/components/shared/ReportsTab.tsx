@@ -193,13 +193,10 @@ export function ReportsTab({
   // ── Detail: one report, in place ──────────────────────────────────────────
   if (selectedId != null) {
     const summary = reports.find((r) => r.id === selectedId) ?? null
+    // Still needed for the legacy self-contained document's iframe title (its
+    // accessible name); the panel itself no longer prints a heading — see the
+    // removed header block below the toolbar.
     const title = doc?.title || summary?.title || "Report"
-    // The eyebrow names the KIND of report. With neither document nor summary
-    // there is no kind to name, and reportKindLabel(null) answers "Report" — which
-    // this line then suffixed into the uppercased "REPORT REPORT" that sat over a
-    // blank body. No kind → say "Report" once.
-    const kind = doc?.skill ?? summary?.skill ?? null
-    const eyebrow = kind ? `${reportKindLabel(kind)} report` : "Report"
     // The load for THIS selection has settled and produced neither a document nor
     // an error: the pointer names a report this tab cannot show (deleted, or a
     // pointer that outlived its thread). Say so, instead of the titled, empty
@@ -275,18 +272,13 @@ export function ReportsTab({
           </div>
         </div>
 
-        <div style={{ margin: "10px 0 14px" }}>
-          <div style={{
-            fontSize: 10, fontWeight: 700, textTransform: "uppercase",
-            letterSpacing: "0.06em", color: "var(--ink-3, #8C8A84)", marginBottom: 3,
-          }}>
-            {eyebrow}
-          </div>
-          <div data-testid="reports-detail-title" style={{ fontSize: 17, fontWeight: 700 }}>
-            {docLoading && !doc ? "Loading…" : title}
-          </div>
-        </div>
-
+        {/* NO HEADING HERE. The document opens with its own title (an <h1> the
+            report was captured with), so a panel-drawn eyebrow + title printed
+            it a second time — "VOICE OF CUSTOMER REPORT / Sprntly Customer
+            Report" sitting directly above "Sprntly Customer Report". The
+            document is the title; the panel frames it. The report's KIND still
+            reads on its row in the list, where it distinguishes one report from
+            another. */}
         {docLoading && !doc && <ReportSkeleton />}
         {docError && (
           <div className="tkt-push-status tkt-push-status--err" data-testid="reports-detail-error">

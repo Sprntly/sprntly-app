@@ -104,7 +104,7 @@ describe("ReportsTab — several reports in one thread", () => {
 
     expect(reportGet).toHaveBeenCalledWith(8)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("Competitors · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("Competitors · Q2"),
     )
     const frame = document.querySelector("iframe") as HTMLIFrameElement
     expect(frame.getAttribute("srcdoc")).toContain("<h1>Competitors · Q2</h1>")
@@ -130,7 +130,7 @@ describe("ReportsTab — several reports in one thread", () => {
       fireEvent.click(document.querySelector('[data-report-id="9"]') as HTMLElement)
     })
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
   })
 })
@@ -144,7 +144,7 @@ describe("ReportsTab — arriving on one specific report", () => {
 
     expect(reportGet).toHaveBeenCalledWith(9)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
   })
 
@@ -192,7 +192,7 @@ describe("ReportsTab — arriving on one specific report", () => {
 
     expect(reportGet).toHaveBeenCalledWith(9)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     expect(screen.queryByTestId("reports-back")).toBeNull()
   })
@@ -223,7 +223,7 @@ describe("ReportsTab — a thread with one report", () => {
     await renderTab([ROWS[0]])
 
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     // A "All reports" button leading to a one-item list shows the reader nothing.
     expect(screen.queryByTestId("reports-back")).toBeNull()
@@ -361,7 +361,7 @@ describe("ReportsTab — nothing to show", () => {
 
     await act(async () => { release(doc(9, "VoC · Q2")) })
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     expect(screen.queryByTestId("reports-detail-empty")).toBeNull()
   })
