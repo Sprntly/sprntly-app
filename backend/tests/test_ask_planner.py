@@ -1740,3 +1740,49 @@ def test_two_threads_with_different_prds_open_do_not_share_a_plan(monkeypatch):
         enterprise_id=COMPANY, question="build a report from this prd", prd_id=40
     )
     assert len(calls) == 2, "same question, same open PRD — planned once"
+
+
+# ── call-digest vs call-listing — a content-filtered count is call-digest ───
+# A live browser re-verify found the planner classifying a content-filtered
+# count question ("how many customer calls asked for X") as `call-listing`
+# — the index engine, which cannot classify by content at all — because the
+# call-listing bullet said "list or count" with no distinction from
+# call-digest's own content-match job. The planner is an LLM; there is no
+# CI-runnable way to prove it now classifies correctly short of a live call
+# (see `test_delegation_no_fabrication.py`'s identical reasoning for its own
+# prompt-property tests) — this pins that the INSTRUCTION says the right
+# thing, which is what `qa_agent`'s deterministic dispatch-guard test suite
+# (`test_qa_agent_planned_routing.py`) backstops regardless of what the model
+# actually does with it.
+
+
+def _normalized_planner_system() -> str:
+    """`_PLANNER_SYSTEM` is hand-wrapped prose — a phrase this test cares
+    about can legitimately fall across a line break. Collapsed to single
+    spaces so a substring check reads it the way a model does, not the way
+    the source file's 80-column wrapping happens to lay it out."""
+    return " ".join(ap._PLANNER_SYSTEM.lower().split())
+
+
+def test_planner_prompt_sends_a_content_filtered_count_to_call_digest():
+    system = _normalized_planner_system()
+    assert "content filter" in system
+    assert "how many calls asked for sso" in system
+    # The rule is stated as belonging to call-digest, not as a standalone
+    # aside — a model reading only the call-listing bullet must still see
+    # the redirect.
+    assert "call-digest above" in system
+
+
+def test_planner_prompt_keeps_a_bare_count_on_call_listing():
+    """Negative-space companion: the fix narrows call-listing, it must not
+    remove its own job — "which calls did we have last week" and "how many
+    calls did I have this month" (no content predicate) still read as
+    call-listing."""
+    system = _normalized_planner_system()
+    assert "which calls did we have last week" in system
+    assert "how many calls did i have this month" in system
+    assert "structural properties only" in system
+
+    weak = system.replace("structural properties only", "any structure at all")
+    assert "structural properties only" not in weak

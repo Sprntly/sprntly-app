@@ -178,6 +178,129 @@ def test_call_digest_runs_when_a_call_source_is_connected(loud_ladder, monkeypat
     assert out["_skill_source"] == "call-digest"
 
 
+# ── the count-engine redirect — a real-UI gap, not just an interception bug ──
+# A live browser re-verify caught that the planner classifies a content-
+# filtered count question ("how many customer calls...") as `call-listing`,
+# never `call-digest` — so `call_digest.answer`'s own `is_mapreducible_count`
+# interception never runs. These pin ROUTING (which executor function actually
+# ran), not just that an answer came back, because a wrong-executor bug this
+# shape hides behind a plausible-looking wrong answer.
+
+
+def test_a_mapreducible_count_question_planned_as_call_listing_redirects_to_the_engine(
+    loud_ladder, monkeypatch
+):
+    import app.call_digest as cd
+    from app import call_index
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(cd, "has_call_source", lambda eid: True)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: {"answer": "digest", "_skill_source": "voc-count-engine"},
+    )
+    monkeypatch.setattr(
+        call_index, "answer_listing",
+        lambda *a, **k: pytest.fail("call-listing ran instead of the count engine"),
+    )
+
+    out = qa._dispatch_planned_method(
+        _plan("call-listing"), enterprise_id="ent",
+        question="how many calls asked for SSO support", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+    )
+    assert out["_skill_source"] == "voc-count-engine"
+
+
+def test_a_bare_count_question_planned_as_call_listing_is_not_redirected(
+    loud_ladder, monkeypatch
+):
+    """The negative: a bare, content-free count ("how many calls did I have")
+    is NOT mapreducible — `is_mapreducible_count` requires a content
+    predicate — so it keeps running the index, never the expensive engine."""
+    import app.call_digest as cd
+    from app import call_index
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: pytest.fail("the count engine ran for a bare count question"),
+    )
+    monkeypatch.setattr(
+        call_index, "answer_listing",
+        lambda eid, q, fresh=None: {"answer": "12 calls", "_skill_source": "call-index"},
+    )
+    monkeypatch.setattr(call_index, "ensure_fresh", lambda eid: True)
+
+    out = qa._dispatch_planned_method(
+        _plan("call-listing"), enterprise_id="ent",
+        question="how many calls did I have this month", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+    )
+    assert out["_skill_source"] == "call-index"
+
+
+def test_the_redirect_never_fires_when_the_engine_flag_is_off(
+    loud_ladder, monkeypatch
+):
+    """Dark-ship discipline: even a genuinely mapreducible question keeps
+    running the index while the count engine itself is still off."""
+    import app.call_digest as cd
+    from app import call_index
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", False)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: pytest.fail("the count engine ran while the flag is off"),
+    )
+    monkeypatch.setattr(
+        call_index, "answer_listing",
+        lambda eid, q, fresh=None: {"answer": "12 calls", "_skill_source": "call-index"},
+    )
+    monkeypatch.setattr(call_index, "ensure_fresh", lambda eid: True)
+
+    out = qa._dispatch_planned_method(
+        _plan("call-listing"), enterprise_id="ent",
+        question="how many calls asked for SSO support", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+    )
+    assert out["_skill_source"] == "call-index"
+
+
+def test_the_redirect_is_scoped_to_call_listing_never_single_call_read(
+    loud_ladder, monkeypatch
+):
+    """`single-call-read` is deliberately excluded from the redirect set —
+    `is_mapreducible_count`'s plural/aggregate shape requirement cannot
+    co-occur with a single named-call reference, so a plan naming
+    single-call-read must never redirect, whatever the question says."""
+    import app.call_digest as cd
+    from app import call_index
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **k: pytest.fail("single-call-read redirected to the count engine"),
+    )
+    monkeypatch.setattr(
+        call_index, "answer_single_call",
+        lambda eid, q, history=None, fresh=None: {
+            "answer": "call summary", "_skill_source": "single-call-read",
+        },
+    )
+
+    out = qa._dispatch_planned_method(
+        _plan("single-call-read"), enterprise_id="ent",
+        question="how many calls asked for SSO support", history=None,
+        prd_id=None, dataset="acme", fresh=lambda: True, is_cancelled=None,
+    )
+    assert out["_skill_source"] == "single-call-read"
+
+
 def test_the_digest_is_handed_the_plans_window(loud_ladder, monkeypatch):
     """The 2026-08-16 failure: the planner extracted a five-week window
     (`since: 2026-07-12`) and the dispatcher dropped it, so the digest

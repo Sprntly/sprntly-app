@@ -1040,11 +1040,18 @@ question that merely touches their topic belongs to sources or to a plain
 answer instead.
 
 - call-digest: summarize or recap the customer calls in a time window ("recap
-  last week's customer calls"). Fetches EVERY call in the window live, then
-  synthesizes — minutes of work.
-- call-listing: list or count recorded calls/transcripts ("the 5 latest
-  transcripts", "which calls did we have last week"). The index answers this
-  instantly; do not send a listing question anywhere else.
+  last week's customer calls"), OR count/list calls that match a CONTENT
+  filter — an ask, issue, or topic the call must actually contain ("how many
+  calls asked for SSO", "which calls raised a billing complaint"). The count
+  itself is not the point; the content match is, and only a live read of
+  each call can judge that. Fetches EVERY call in the window live, then
+  synthesizes/classifies — minutes of work.
+- call-listing: list or count recorded calls/transcripts by STRUCTURAL
+  properties only, with no content filter ("the 5 latest transcripts",
+  "which calls did we have last week", "how many calls did I have this
+  month"). The index answers this instantly; do not send a listing question
+  anywhere else, and never send a content-filtered count here — that is
+  call-digest above, even though both start with "how many calls".
 - single-call-read: read ONE named call, whatever the verb. "Summarize the
   Vandelay Industries call", "more details on the Maverik meeting", "what happened on
   the Acme call", "who was on the Litware briefing" are all this. The
