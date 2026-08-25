@@ -602,7 +602,10 @@ def _findings_section(
             "<strong>Every finding below has the same weakest link</strong>, so "
             "it is stated here once rather than repeated on each of them: "
             + _esc(shared_weakest)
-            + (f". {_esc(shared_cap)}" if shared_cap else ".")
+            # A CLAUSE, NOT A NEW SENTENCE. `cap_reason` arrives uncapitalised
+            # ("capped at medium: …"), so a full stop before it rendered
+            # "…the diagnosis are not. capped at medium".
+            + (f"; {_esc(shared_cap)}." if shared_cap else ".")
         ))
     elif shared_cap:
         out.append(_p(
@@ -690,54 +693,67 @@ def _ledger_section(ledger: list[dict]) -> str:
     # section, because it sheds findings only. 102 rows at 4,000-char labels
     # rendered 828,071 characters, over the limit at every rung.
     shown = ledger[:MAX_LEDGER_ROWS]
-    # ALWAYS EXPANDED HERE, unlike the panel. The panel folds a long ledger
-    # behind a `<details>` so it cannot push the limits section off the screen;
-    # `<details>` is not on the artifact allowlist and would be unwrapped into
-    # a permanently-open list anyway, so rather than pretend, this states the
-    # count and prints the list. In a document a reader scrolls, that is the
-    # honest shape.
-    # THE SAME QUESTION AS THE WEAKEST LINK, one section down. On a corpus
-    # whose sources are all outside their claim types' authority, all 102
-    # rejections carry the identical `no_authority` sentence — so "each one
-    # died for a stated reason" is true and reads as 102 reasons. Stated once,
-    # the reader learns the real shape: one rule killed everything, and the
-    # thing to fix is that rule's input, not 102 separate candidates.
-    reasons = {(r.get("reason") or "").strip() for r in ledger}
-    shared_reason = reasons.pop() if len(reasons) == 1 and len(ledger) > 1 else ""
-    lede = (
+    # ALWAYS EXPANDED HERE, unlike the panel, which folds a long ledger behind
+    # a `<details>`. `<details>` is not on the artifact allowlist and would be
+    # unwrapped into a permanently-open list anyway.
+    #
+    # GROUPED BY REASON, because that is the shape of the answer. A real run
+    # rejected 102 candidates for FIVE distinct reasons — 49 with no
+    # authoritative source, 47 backed by a single claim, 4 from one account —
+    # and the flat list printed each reason beside each label, so the same
+    # sentence appeared 49 times and the reader could not see that half the
+    # ledger died one way and half another without counting by hand.
+    #
+    # An earlier version of this hoisted a reason only when ALL of them
+    # matched, which is the degenerate case of exactly this and fired on
+    # almost no real run. Grouping subsumes it: one group is the same thing as
+    # "they all died for one reason", said in the same words.
+    groups: dict[str, list[dict]] = {}
+    for r in shown:
+        groups.setdefault((r.get("reason") or "").strip(), []).append(r)
+    # Biggest cause first, ties broken on the reason text so a re-run of the
+    # same data renders the same document (the whole engine is deterministic;
+    # a section that reordered itself would undermine that everywhere else).
+    ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+
+    out = [f"<h2>Considered and ruled out ({len(ledger)})</h2>"]
+    out.append(_p(
         "A ranking whose rejections are invisible is a ranking you have to "
-        "take on faith. "
+        "take on faith. Each of these was a candidate and each one died for a "
+        "stated reason"
         + (
-            # CLIPPED, like the per-row version it replaces. `reason` is
-            # tenant-derived text of any length and this section is the one
-            # with a hard body-size budget — hoisting it must not quietly drop
-            # the bound that every row it replaced was carrying.
-            f"All {len(ledger)} died for the same reason, so it is stated here "
-            f"once rather than repeated on each: "
-            f"{_esc_clipped(shared_reason, MAX_LEDGER_REASON_CHARS)}."
-            if shared_reason else
-            "Each of these was a candidate and each one died for a stated "
-            "reason."
+            f", grouped below by that reason — {len(ordered)} of them across "
+            f"{len(shown)} candidates."
+            if len(ordered) > 1 else
+            ", and every one of them died for the same one."
         )
-    )
-    return "".join([
-        f"<h2>Considered and ruled out ({len(ledger)})</h2>",
-        _p(lede),
-        _ul(
+    ))
+    for reason, rows in ordered:
+        head = (
+            f"<strong>{len(rows)}</strong> "
+            + ("died" if len(rows) != 1 else "died")
+            + (
+                f" because {_esc_clipped(reason, MAX_LEDGER_REASON_CHARS)}"
+                if reason else " with no reason recorded"
+            )
+        )
+        out.append(_p(head))
+        out.append(_ul(
             f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
             f"</strong>"
-            + ("" if shared_reason else
-               f" — {_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}")
             + (
                 f" <em>(stopped at "
                 f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
-            for r in shown
-        ),
-        _p(f"{len(ledger) - len(shown)} further rejections are on the run and "
-           f"are not listed here.") if len(ledger) > len(shown) else "",
-    ])
+            for r in rows
+        ))
+    if len(ledger) > len(shown):
+        out.append(_p(
+            f"{len(ledger) - len(shown)} further rejections are on the run and "
+            f"are not listed here."
+        ))
+    return "".join(out)
 
 
 def _limits_section(plan: dict) -> str:

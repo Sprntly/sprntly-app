@@ -201,11 +201,28 @@ export function GoalAnalysisReport({
   }
   // Same rule for the ledger: one distinct reason across MORE THAN ONE
   // rejection is a statement about the corpus, not about each candidate.
-  const ruledOutReason = ((): string => {
+  // GROUPED BY REASON, because that is the shape of the answer. A real run
+  // rejected 102 candidates for FIVE distinct reasons — 49 with no
+  // authoritative source, 47 backed by a single claim, 4 from one account —
+  // and the flat list printed each reason beside each label, so the same
+  // sentence appeared 49 times and a reader could not see that half the ledger
+  // died one way and half another without counting by hand.
+  //
+  // Biggest cause first, ties broken on the reason text, so a re-render of the
+  // same run produces the same document — the engine is deterministic
+  // everywhere else and a section that reordered itself would undercut that.
+  const ruledOutGroups = (() => {
     const rows = run.considered ?? []
-    if (rows.length < 2) return ""
-    const vals = new Set(rows.map((r) => (r.reason ?? "").trim()))
-    return vals.size === 1 ? [...vals][0] : ""
+    const by = new Map<string, typeof rows>()
+    for (const r of rows) {
+      const key = (r.reason ?? "").trim()
+      const bucket = by.get(key)
+      if (bucket) bucket.push(r)
+      else by.set(key, [r])
+    }
+    return [...by.entries()].sort(
+      (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
+    )
   })()
   const sharedWeakest = sharedReason("weakest_leg_reason")
   const sharedCap = sharedReason("cap_reason")
@@ -454,7 +471,11 @@ export function GoalAnalysisReport({
               <strong>Every finding below has the same weakest link</strong>, so
               it is stated here once rather than repeated on each of them:{" "}
               {sharedWeakest}
-              {sharedCap ? `. ${sharedCap}` : "."}
+              {/* The cap is its own sentence and arrives uncapitalised
+                  ("capped at medium: …"), so joining it after a full stop
+                  rendered "…are not. capped at medium". Joined with a
+                  semicolon it reads as the clause it is. */}
+              {sharedCap ? `; ${sharedCap}.` : "."}
             </p>
           ) : sharedCap ? (
             <p className="ga-doc-note" data-testid="goal-shared-cap">
@@ -509,39 +530,43 @@ export function GoalAnalysisReport({
             <summary className="ga-doc-h2 ga-doc-summary">
               Considered and ruled out ({run.considered.length})
             </summary>
-            {/* THE SAME QUESTION AS THE WEAKEST LINK, one section down. On a
-                corpus whose sources all sit outside their claim types'
-                authority, all 102 rejections carry the identical sentence — so
-                "each one died for a stated reason" is true and reads as 102
-                reasons. Said once, the reader sees the real shape: ONE rule
-                killed everything, and what to fix is that rule's input. */}
+            {/* WHAT KILLED THEM, not just that something did. "Each one died
+                for a stated reason" is true and, printed beside every label,
+                reads as 102 reasons — a real run had 102 rejections and FIVE
+                causes, half of them one rule and half another, which the flat
+                list made invisible without counting by hand. The counts are
+                the actionable part: one cause at 49 is one thing to fix. */}
             <p className="ga-doc-lede">
               A ranking whose rejections are invisible is a ranking you have to
-              take on faith.{" "}
-              {ruledOutReason ? (
+              take on faith. Each of these was a candidate and each one died for
+              a stated reason
+              {ruledOutGroups.length > 1 ? (
                 <>
-                  All {run.considered.length} died for the same reason, so it is
-                  stated here once rather than repeated on each:{" "}
-                  {ruledOutReason}.
+                  , grouped below by that reason — {ruledOutGroups.length} of
+                  them across {run.considered.length} candidates.
                 </>
               ) : (
-                <>
-                  Each of these was a candidate and each one died for a stated
-                  reason.
-                </>
+                <>, and every one of them died for the same one.</>
               )}
             </p>
-            <ul className="ga-doc-ruled-out">
-              {run.considered.map((r) => (
-                <li key={r.id}>
-                  <b>{r.label}</b>
-                  {ruledOutReason ? null : <> — {r.reason}</>}
-                  {r.stopped_at_stage ? (
-                    <em> (stopped at {r.stopped_at_stage})</em>
-                  ) : null}
-                </li>
-              ))}
-            </ul>
+            {ruledOutGroups.map(([reason, rows]) => (
+              <div key={reason} data-testid="goal-ruled-out-group">
+                <p className="ga-doc-note">
+                  <b>{rows.length}</b>{" "}
+                  {reason ? <>died because {reason}</> : <>died with no reason recorded</>}
+                </p>
+                <ul className="ga-doc-ruled-out">
+                  {rows.map((r) => (
+                    <li key={r.id}>
+                      <b>{r.label}</b>
+                      {r.stopped_at_stage ? (
+                        <em> (stopped at {r.stopped_at_stage})</em>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </details>
         </section>
       ) : null}
