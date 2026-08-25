@@ -5,6 +5,7 @@ import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
 import Underline from "@tiptap/extension-underline"
 import Link from "@tiptap/extension-link"
+import { TableKit } from "@tiptap/extension-table"
 import {
   BackgroundColor,
   Color,
@@ -138,6 +139,28 @@ export function DocumentEditor({
       FontSize,
       Color,
       BackgroundColor,
+      // A TABLE IS CONTENT, AND A SCHEMA THAT LACKS IT DELETES IT SILENTLY.
+      // ProseMirror parses `initialHtml` against this extension list and drops
+      // every node it cannot place, KEEPING THE TEXT. Without the table nodes a
+      // report's summary grid came back as one run-on paragraph — the cells of
+      // "Theme | Accounts | Nature of signal" concatenated into
+      // "ThemeAccountsNature of signal" with no separator, which reads as a
+      // rendering bug and is really a parse loss. The report engines write
+      // these grids constantly (RICE, prevalence counts, theme summaries), and
+      // `report_markdown` converts them with markdown's `tables` extension, so
+      // the HTML arriving here has always had real <table> markup in it.
+      //
+      // Worse than the display: `onUpdate` serializes what the schema kept, so
+      // the first genuine keystroke anywhere in the document saved the
+      // flattened body back over the stored one. The table was not just
+      // invisible, it was one edit away from being gone.
+      //
+      // `resizable: false` because column widths are the one part of this the
+      // server does NOT keep: the sanitizer allows `colspan`, `rowspan` and
+      // `style` on cells and nothing else, so a dragged width would vanish on
+      // save with no error — the same trap the heading levels avoid. Structure
+      // survives the round trip; geometry was never ours to store.
+      TableKit.configure({ table: { resizable: false } }),
       Link.configure({
         openOnClick: false,
         autolink: true,
@@ -224,6 +247,36 @@ export function DocumentEditor({
           padding: 12px 14px; overflow-x: auto;
         }
         [data-doc-editor] .tiptap a { color: var(--accent, #179463); }
+        /* Tables. The browser's default is a borderless grid that reads as
+           columns of loose text, so the rules that matter are the separators
+           and the header weight — the same treatment the docs site gives a
+           table, scoped here rather than shared because that stylesheet is the
+           marketing site's. The default auto layout is left alone: a report
+           grid has one long prose column and several short ones, and a fixed
+           layout would give them equal widths. */
+        [data-doc-editor] .tiptap table {
+          border-collapse: collapse;
+          width: 100%;
+          margin: 0 0 0.85em;
+          font-size: 0.95em;
+        }
+        [data-doc-editor] .tiptap th,
+        [data-doc-editor] .tiptap td {
+          border: 1px solid var(--line, #E8E6E0);
+          padding: 8px 10px;
+          text-align: left;
+          vertical-align: top;
+        }
+        [data-doc-editor] .tiptap th {
+          background: var(--surface-2, #F4F1EA);
+          font-weight: 600;
+        }
+        /* The cell the caret is in, while editing. TipTap marks a multi-cell
+           selection with this class; without a rule the selection is invisible
+           and a cell-wide delete looks like it did nothing. */
+        [data-doc-editor] .tiptap .selectedCell {
+          background: var(--accent-alpha-10, rgba(23, 148, 99, 0.10));
+        }
         /* NO placeholder rule here on purpose. The obvious one styles
            p.is-editor-empty::before with attr(data-placeholder), which only
            works with @tiptap/extension-placeholder — not installed, so the
