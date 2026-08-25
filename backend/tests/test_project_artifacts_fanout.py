@@ -89,7 +89,13 @@ def _seed_prd(
 ) -> int:
     from app.db.client import require_client
 
-    payload = {"brief_id": brief_id, "insight_index": insight_index, "title": title, "status": status}
+    payload = {
+        "brief_id": brief_id, "insight_index": insight_index, "title": title,
+        "status": status,
+        # READ, so the auto-archive rule does not empty these listings — these
+        # tests are about the project fan-out, not about PRD origin.
+        "first_read_at": "2026-08-25T00:00:00Z",
+    }
     # Only set when the caller cares about ORDER within a family (regenerate
     # scenarios below) — sqlite's `datetime('now')` default is second-precision,
     # so two same-second inserts would otherwise tie on "newest".

@@ -285,6 +285,13 @@ def resolve_open_artifact(
             # never surfaces. That restart is a documented recurring event,
             # not a hypothetical, and the resulting "I couldn't find it"
             # points at an Artifacts tab where it IS listed.
+            # `openable_only` also carries the auto-PRD rule, and this is the
+            # side of it that must keep seeing everything: an auto-generated
+            # PRD nobody has read is kept off the Artifacts screen
+            # (`db.prds.is_hidden_from_library`), but "open the checkout PRD"
+            # must still find it. Hidden from the shelf, still on it — and
+            # since opening one is what claims it back into the library, a
+            # lookup that could not see it would make that unreachable too.
             items = list_document_artifacts(dataset=dataset, openable_only=True)
     except Exception:  # noqa: BLE001 — an open must never break the send
         logger.exception("artifact open lookup failed; reporting not_found")

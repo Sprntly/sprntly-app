@@ -57,6 +57,12 @@ def _seed_prd(db_mod, dataset: str, *, title: str = "Checkout PRD") -> int:
     prd_id = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title=title,
         template_version=1, variant="v2",
+        # `source="chat"` — a PRD THE USER ASKED FOR. This file is about the
+        # chat listing's own behaviour (kind filter, count trim, thread
+        # binding), and the default (`brief`) is now held out of the library
+        # until someone reads it (db.prds.is_hidden_from_library), which would
+        # empty every assertion here for an unrelated reason.
+        source="chat",
     )
     db_mod.complete_prd(prd_id, title=title, md="<h1>Doc</h1>")
     return prd_id
