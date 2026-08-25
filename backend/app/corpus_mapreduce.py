@@ -162,6 +162,13 @@ def _map_batch(
             model=llm.FAST_MODEL,
             json_schema=spec.verdict_schema,
             max_tokens=_MAP_MAX_TOKENS,
+            # Pinned deterministic: an unpinned map call showed run-to-run
+            # verdict churn on an identical corpus (same items, same rubric,
+            # different hit rosters) — a per-item classification bar should
+            # not vary by sampling noise. See existing precedent for the same
+            # pin at other per-item classification call sites (e.g.
+            # app.design_agent.codebase_map.locate, app.stories.generate).
+            temperature=0,
         )
     finally:
         sem.release()

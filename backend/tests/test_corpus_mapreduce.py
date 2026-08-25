@@ -251,6 +251,24 @@ def test_map_routes_through_gateway_llm_call_with_expected_kwargs(monkeypatch):
         assert f'<item id="{it.id}">' in kw["input"]
 
 
+def test_map_call_pins_temperature_zero_for_deterministic_verdicts(monkeypatch):
+    """A per-item classification bar should not vary run-to-run on identical
+    input — pin `temperature=0` on every map call (see corpus_mapreduce.py's
+    `_map_batch`), never left to the model's default sampling."""
+    captured: list[dict] = []
+
+    def _capture(**kw):
+        captured.append(kw)
+        return SimpleNamespace(output={"verdicts": {}}, stop_reason="end_turn")
+
+    items = _items(4)
+    spec = _spec(batch_size=2)  # two batches -> two map calls
+    _run(spec, items, monkeypatch, _capture)
+
+    assert len(captured) == 2
+    assert all(kw["temperature"] == 0 for kw in captured)
+
+
 def test_map_never_calls_the_bare_call_json(monkeypatch):
     """Telemetry lands via `gateway.llm_call`, never the raw `app.llm.call_json`
     the spike used (which bypassed `llm_usage_events`)."""

@@ -2137,3 +2137,228 @@ def test_voc_prompts_do_not_invite_splitting_content_across_fields():
 def test_voc_prompt_lengths_within_bounds():
     assert 1200 <= len(cd._QUERY_SYSTEM) <= 3000
     assert 2500 <= len(cd._REPORT_SYSTEM) <= 5000
+
+
+# ── count-engine rubric — scope guard (vendor-buyer / internal / demo-only) ──
+# Real-corpus accuracy verification (a real staging run compared against a
+# strong-model oracle) found the count engine flagging calls where the
+# reviewed company asked its OWN vendor for a feature, and calls with no real
+# customer ask (internal-only, or a rep pitch/demo the customer only
+# watched), as if they were customer feature requests/issues. These property
+# tests pin the wording fix by content, the same way the query/report prompts
+# above are pinned — a rewrite that silently drops a guard clause fails here
+# even though it can't fail a live-model accuracy check in CI.
+
+def test_rubric_states_the_vendor_buyer_scope_guard():
+    s = cd._VOC_COUNT_RUBRIC
+    assert "OWN vendor" in s or "own vendor" in s.lower()
+    assert "buying party" in s or "buying" in s.lower()
+
+
+def test_rubric_states_the_internal_only_exclusion():
+    s = cd._VOC_COUNT_RUBRIC
+    assert "internal-only" in s.lower()
+    assert "external customer" in s.lower() or "external" in s.lower()
+
+
+def test_rubric_states_the_demo_pitch_exclusion():
+    s = cd._VOC_COUNT_RUBRIC
+    low = s.lower()
+    assert "pitch" in low or "demo" in low
+    assert "watched" in low or "acknowledged" in low
+
+
+def test_rubric_still_states_the_original_content_rules():
+    """The scope guard is additive — the pre-existing feature/issue
+    definitions and the routine-scheduling exclusion must survive."""
+    s = cd._VOC_COUNT_RUBRIC
+    assert "explicit ask for new functionality" in s
+    assert "bug, a crash" in s
+    assert "Routine scheduling" in s
+    assert "never invent an id" in s
+
+
+def test_rubric_length_within_bounds():
+    # Guards against both an accidental truncation and an unbounded rewrite.
+    assert 900 <= len(cd._VOC_COUNT_RUBRIC) <= 2600
+
+
+# ── count-engine rubric — fixture-driven wiring pins ─────────────────────────
+# These run the REAL `VOC_CALLS_SPEC` (real rubric_system + verdict_schema)
+# through the REAL `app.corpus_mapreduce.run`, with `app.graph.gateway.llm_call`
+# faked. The fake's verdict per fixture encodes the INTENDED behavior of the
+# new rubric (what a model correctly applying the scope guard above should
+# return) — this pins the engine's wiring end-to-end for each named failure
+# class and gives the ship-gate's real-corpus/real-LLM check concrete,
+# named cases to reproduce. It is NOT a live-model accuracy proof: a fake
+# always returns exactly what it is told to, so it cannot catch the model
+# itself misapplying the rubric text. That gate is the separate real-corpus
+# re-validation against the oracle, not this test.
+
+def _fixture_call(external_id: str, **kw) -> CallTranscript:
+    return CallTranscript(
+        external_id=external_id, title=kw.pop("title", "Call"),
+        date="2026-06-20", **kw,
+    )
+
+
+def _vendor_buyer_call() -> CallTranscript:
+    # The reviewed company (rep) asking its OWN vendor for a feature — not a
+    # customer asking the reviewed company for anything.
+    return _fixture_call(
+        "vendor-buyer-1", title="Vendor sync",
+        participants=["ourrep@reviewedco.com", "sales@vendorco.com"],
+        overview="Our team asked our vendor to add bulk-export to their tool.",
+        quotes=[{"speaker": "Our Rep",
+                 "text": "Could you add a bulk-export API to your platform?"}],
+    )
+
+
+def _internal_only_call() -> CallTranscript:
+    # No external customer/prospect participant at all.
+    return _fixture_call(
+        "internal-only-1", title="Internal sync",
+        participants=["eng1@reviewedco.com", "eng2@reviewedco.com"],
+        overview="Internal discussion about a UI bug in our own dashboard.",
+        quotes=[{"speaker": "Eng1",
+                 "text": "We should fix the broken filter before next sprint."}],
+    )
+
+
+def _demo_only_call() -> CallTranscript:
+    # The rep pitched/demoed a feature; the customer only watched/acknowledged.
+    return _fixture_call(
+        "demo-only-1", title="Product demo",
+        participants=["rep@reviewedco.com", "prospect@buyerco.com"],
+        overview="Rep demoed the new reporting dashboard; prospect watched.",
+        quotes=[{"speaker": "Rep",
+                 "text": "Here's our new reporting dashboard — let me show you."},
+                {"speaker": "Prospect", "text": "Nice, looks good."}],
+    )
+
+
+def _genuine_feature_request_call() -> CallTranscript:
+    return _fixture_call(
+        "feature-request-1", title="Customer check-in",
+        participants=["rep@reviewedco.com", "buyer@customerco.com"],
+        overview="Customer asked for CSV export of their reports.",
+        quotes=[{"speaker": "Buyer",
+                 "text": "Can you add a CSV export option for our reports?"}],
+    )
+
+
+def _genuine_issue_call() -> CallTranscript:
+    return _fixture_call(
+        "issue-1", title="Support call",
+        participants=["rep@reviewedco.com", "buyer@customerco.com"],
+        overview="Customer reported the dashboard crashes on load.",
+        quotes=[{"speaker": "Buyer",
+                 "text": "The dashboard crashes every time I try to load it."}],
+    )
+
+
+def _intended_verdicts_llm(**kw):
+    """Fake `gateway.llm_call` for the VOC_CALLS_SPEC map call: returns the
+    verdict the new rubric is SUPPOSED to produce for each named fixture id,
+    keyed by whatever ids the real engine actually tagged into this batch's
+    rendered input (never hand-listing ids independent of what was sent)."""
+    import re
+    intended_hit = {
+        "vendor-buyer-1": False,
+        "internal-only-1": False,
+        "demo-only-1": False,
+        "feature-request-1": True,
+        "issue-1": True,
+    }
+    ids = re.findall(r'<item id="([^"]+)">', kw["input"])
+    verdicts = {
+        i: {"hit": intended_hit.get(i, False), "reason": f"reason-{i}"}
+        for i in ids
+    }
+    from types import SimpleNamespace
+    return SimpleNamespace(output={"verdicts": verdicts}, stop_reason="end_turn")
+
+
+def test_vendor_buyer_inversion_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_vendor_buyer_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_internal_only_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_internal_only_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_demo_pitch_only_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_demo_only_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_genuine_customer_feature_request_fixture_is_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW),
+        items=[_genuine_feature_request_call()],
+    )
+    assert eng.hit_ids == ["feature-request-1"]
+    assert eng.count == 1
+
+
+def test_genuine_customer_issue_fixture_is_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_genuine_issue_call()],
+    )
+    assert eng.hit_ids == ["issue-1"]
+    assert eng.count == 1
+
+
+def test_mixed_batch_only_the_two_genuine_fixtures_hit(monkeypatch):
+    """All five fixtures in one batch — the count/roster the engine assembles
+    matches exactly the two genuine customer-raised cases."""
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW),
+        items=[
+            _vendor_buyer_call(), _internal_only_call(), _demo_only_call(),
+            _genuine_feature_request_call(), _genuine_issue_call(),
+        ],
+    )
+    assert eng.count == 2
+    assert set(eng.hit_ids) == {"feature-request-1", "issue-1"}
