@@ -685,6 +685,20 @@ def test_one_weakest_link_shared_by_all_is_stated_once():
     assert "Weakest link." not in html
 
 
+def test_the_cap_joins_the_weakest_link_as_a_clause():
+    """`cap_reason` arrives uncapitalised, so a full stop before it rendered
+    "…the diagnosis are not. capped at medium" — shipped once and caught only
+    by reading the rendered panel."""
+    same = {"band": "medium", "weakest_leg_reason": "no outcome evidence exists",
+            "cap_reason": "capped at medium: no outcome evidence in the corpus"}
+    html = render_report_html(_run(), [
+        _finding(confidence=same, claim_ids=["c1"]),
+        _finding(confidence=same, claim_ids=["c2"]),
+    ])
+    assert "exists; capped at medium" in html
+    assert not re.search(r"\.\s*capped at medium", html)
+
+
 def test_two_different_weakest_links_stay_on_their_own_rows():
     """The control, and the reason this is detected rather than assumed: the
     moment two findings differ, the sentence is about the finding again and
@@ -716,9 +730,8 @@ def test_a_single_finding_keeps_its_weakest_link_on_the_row():
 
 
 def test_a_ledger_that_died_for_one_reason_says_so_once():
-    """All 102 rejections carrying the identical `no_authority` sentence is one
-    rule killing everything, not 102 independent verdicts. Repeated per row it
-    reads as the latter, and the reader looks for 102 fixes instead of one."""
+    """One group is the degenerate case of grouping: the reason belongs to the
+    group heading, not to each of the four rows under it."""
     ledger = [
         {"id": i, "label": f"candidate {i}",
          "reason": "no source that may speak to this claim type reported it",
@@ -726,29 +739,52 @@ def test_a_ledger_that_died_for_one_reason_says_so_once():
         for i in range(4)
     ]
     html = render_report_html(_run(), [_finding()], ledger)
-    assert "All 4 died for the same reason" in html
+    assert "every one of them died for the same one" in html
     assert html.count(
         "no source that may speak to this claim type reported it") == 1
-    # The candidates are still every one of them, by name.
+    assert "<strong>4</strong> died because" in html
     for i in range(4):
         assert f"candidate {i}" in html
 
 
-def test_the_hoisted_rejection_reason_is_still_clipped():
-    """Hoisting must not drop a bound the rows it replaced were carrying.
-    `reason` is tenant text of any length, and this is the section with the
-    hard body budget — the per-row render clips it, so the one-line version
-    has to as well."""
+def test_a_ledger_groups_by_reason_biggest_cause_first():
+    """THE SHAPE OF THE ANSWER. A real run rejected 102 candidates for five
+    different reasons — 49 one way, 47 another — and the flat list repeated
+    each reason beside each label, so a reader could not see that half the
+    ledger died one way and half another without counting by hand."""
+    ledger = (
+        [{"id": i, "label": f"a{i}", "reason": "no authoritative source",
+          "stopped_at_stage": "verification"} for i in range(3)]
+        + [{"id": 90 + i, "label": f"b{i}", "reason": "only 1 supporting claim",
+            "stopped_at_stage": "clustering"} for i in range(5)]
+    )
+    html = render_report_html(_run(), [_finding()], ledger)
+    # Each reason appears ONCE, as a heading over its own group.
+    assert html.count("no authoritative source") == 1
+    assert html.count("only 1 supporting claim") == 1
+    assert "<strong>5</strong> died because only 1 supporting claim" in html
+    assert "<strong>3</strong> died because no authoritative source" in html
+    # Biggest cause first: the 5 come before the 3.
+    assert html.index("only 1 supporting claim") < html.index("no authoritative source")
+    # And every candidate is still named, under its own cause.
+    for lbl in ["a0", "a1", "a2", "b0", "b4"]:
+        assert lbl in html
+
+
+def test_the_grouped_rejection_reason_is_still_clipped():
+    """Grouping must not drop a bound the per-row render was carrying.
+    `reason` is tenant text of any length and this is the section with the
+    hard body budget."""
     huge = "z" * 5_000
     ledger = [
         {"id": i, "label": f"c{i}", "reason": huge, "stopped_at_stage": "verification"}
         for i in range(3)
     ]
     html = render_report_html(_run(), [_finding()], ledger)
-    assert "died for the same reason" in html
-    longest = max((len(run_) for run_ in re.findall(r"z+", html)), default=0)
+    assert "died because" in html
+    longest = max((len(m) for m in re.findall(r"z+", html)), default=0)
     assert longest <= MAX_LEDGER_REASON_CHARS, (
-        f"hoisted reason rendered {longest} chars, cap is {MAX_LEDGER_REASON_CHARS}"
+        f"grouped reason rendered {longest} chars, cap is {MAX_LEDGER_REASON_CHARS}"
     )
 
 
@@ -760,7 +796,8 @@ def test_a_ledger_with_different_reasons_keeps_them_per_row():
          "stopped_at_stage": "verification"},
     ]
     html = render_report_html(_run(), [_finding()], ledger)
-    assert "died for the same reason" not in html
+    assert "every one of them died for the same one" not in html
+    assert "grouped below by that reason" in html
     assert "one account only" in html
     assert "one conversation echoing" in html
 

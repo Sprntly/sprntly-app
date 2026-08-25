@@ -22,6 +22,7 @@ vi.hoisted(() => {
 })
 
 import { GoalAnalysisReport } from "../GoalAnalysisReport"
+import type { GoalFinding } from "../../../lib/api"
 
 const PLAN = {
   goal_text: "raise net revenue retention",
@@ -216,10 +217,19 @@ describe("one fact about the corpus is not many about the findings", () => {
   // about 32 different themes, and a reader who meets an identical sentence
   // three times stops reading the section — which is how a genuine
   // per-finding difference would later go unnoticed.
-  const SAME = { band: "medium", weakest_leg_reason: "no outcome evidence exists" }
-  const withConf = (id: number, confidence: unknown) => ({
-    ...SIZED, id, confidence, claim_ids: [`c${id}`],
+  // TYPED, not `unknown`. An `unknown` here is not assignable to
+  // `GoalFinding` and added 11 tsc errors — a fixture that does not typecheck
+  // is the same silent-drift problem as the untyped `Record<string, unknown>`
+  // fixtures that let unknown keys vanish elsewhere in this suite.
+  type Conf = GoalFinding["confidence"]
+  const conf = (over: Partial<Conf>): Conf => ({
+    band: "medium", weakest_leg: null, weakest_leg_reason: null,
+    cap_reason: null, ...over,
   })
+  const withConf = (id: number, confidence: Conf): GoalFinding => ({
+    ...SIZED, id, confidence, claim_ids: [`c${id}`],
+  } as GoalFinding)
+  const SAME = conf({ weakest_leg_reason: "no outcome evidence exists" })
 
   it("states a weakest link shared by every finding exactly once", () => {
     render(
@@ -234,6 +244,25 @@ describe("one fact about the corpus is not many about the findings", () => {
     expect(report).not.toMatch(/Weakest link\./)
   })
 
+  it("joins the cap onto the weakest link as a clause, not a new sentence", () => {
+    // `cap_reason` arrives uncapitalised ("capped at medium: …"), so joining
+    // it after a full stop rendered "…the diagnosis are not. capped at
+    // medium". Shipped once and only caught by reading the rendered panel —
+    // hence this test, since nothing else in the suite reads the join.
+    const withCap = conf({
+      weakest_leg_reason: "no outcome evidence exists",
+      cap_reason: "capped at medium: no outcome evidence in the corpus",
+    })
+    render(
+      <GoalAnalysisReport
+        run={{ ...RUN, findings: [withConf(1, withCap), withConf(2, withCap)] }}
+      />,
+    )
+    const said = screen.getByTestId("goal-shared-weakest").textContent ?? ""
+    expect(said).toContain("exists; capped at medium")
+    expect(said).not.toMatch(/\.\s+capped at medium/)
+  })
+
   it("puts two different weakest links back on their own rows", () => {
     // The control. Detected, not assumed: the moment they differ, the sentence
     // is about the finding again and belongs beside it.
@@ -243,7 +272,7 @@ describe("one fact about the corpus is not many about the findings", () => {
           ...RUN,
           findings: [
             withConf(1, SAME),
-            withConf(2, { band: "low", weakest_leg_reason: "one account carries it" }),
+            withConf(2, conf({ band: "low", weakest_leg_reason: "one account carries it" })),
           ],
         }}
       />,
@@ -264,27 +293,56 @@ describe("one fact about the corpus is not many about the findings", () => {
   })
 
   it("says once that every rejection died for the same reason", () => {
-    // 102 identical verdicts is ONE rule killing everything. Repeated per row
-    // the reader goes looking for 102 fixes instead of one.
+    // One group is the degenerate case of grouping: the reason belongs to the
+    // group heading, not to each of the four rows beneath it.
     const considered = [0, 1, 2, 3].map((i) => ({
       id: i, label: `candidate ${i}`,
       reason: "no source that may speak to this claim type reported it",
-      stopped_at_stage: "verification",
+      stopped_at_stage: "verification", claim_ids: [],
     }))
     render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
     const said = screen.getByTestId("goal-considered").textContent ?? ""
-    expect(said).toMatch(/All 4 died for the same reason/i)
+    expect(said).toMatch(/every one of them died for the same one/i)
     expect(
       said.split("no source that may speak to this claim type reported it").length - 1,
     ).toBe(1)
-    // Every candidate is still named.
+    expect(screen.getAllByTestId("goal-ruled-out-group")).toHaveLength(1)
     for (const i of [0, 1, 2, 3]) expect(said).toContain(`candidate ${i}`)
+  })
+
+  it("groups rejections by reason, biggest cause first", () => {
+    // THE SHAPE OF THE ANSWER. A real run rejected 102 candidates for five
+    // reasons — 49 one way, 47 another — and the flat list repeated each
+    // reason beside each label, so a reader could not see that half the ledger
+    // died one way and half another without counting by hand.
+    const considered = [
+      ...[0, 1, 2].map((i) => ({
+        id: i, label: `a${i}`, reason: "no authoritative source",
+        stopped_at_stage: "verification", claim_ids: [],
+      })),
+      ...[0, 1, 2, 3, 4].map((i) => ({
+        id: 90 + i, label: `b${i}`, reason: "only 1 supporting claim",
+        stopped_at_stage: "clustering", claim_ids: [],
+      })),
+    ]
+    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
+    const said = screen.getByTestId("goal-considered").textContent ?? ""
+    expect(screen.getAllByTestId("goal-ruled-out-group")).toHaveLength(2)
+    // Each reason once, as a heading over its own group.
+    expect(said.split("no authoritative source").length - 1).toBe(1)
+    expect(said.split("only 1 supporting claim").length - 1).toBe(1)
+    // Biggest cause first.
+    expect(said.indexOf("only 1 supporting claim"))
+      .toBeLessThan(said.indexOf("no authoritative source"))
+    for (const l of ["a0", "a2", "b0", "b4"]) expect(said).toContain(l)
   })
 
   it("keeps differing rejection reasons on their own rows", () => {
     const considered = [
-      { id: 1, label: "alpha", reason: "one account only", stopped_at_stage: "verification" },
-      { id: 2, label: "beta", reason: "one conversation echoing", stopped_at_stage: "verification" },
+      { id: 1, label: "alpha", reason: "one account only",
+        stopped_at_stage: "verification", claim_ids: [] },
+      { id: 2, label: "beta", reason: "one conversation echoing",
+        stopped_at_stage: "verification", claim_ids: [] },
     ]
     render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
     const said = screen.getByTestId("goal-considered").textContent ?? ""
