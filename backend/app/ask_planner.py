@@ -401,6 +401,17 @@ _TASK_CHARS = 4000
 # user-derived string in a prompt/log gets.
 _ENTITY_CHARS = 200
 
+# A `constraints.criterion` is free text naming the classification bar a
+# corpus count/analytical question should run against (see
+# `app.corpus_mapreduce`'s base_discipline+criterion composition). Not yet
+# emitted by the planner's own JSON schema (no `_PLAN_SCHEMA` property calls
+# for it) — this only carries a criterion through when a caller (a future
+# clarify-then-recut turn, or a direct API caller) already supplied one on the
+# raw plan; longer than `_ENTITY_CHARS` because it is a definitional clause,
+# not a name, but still capped the same way every other user-derived string in
+# a prompt/log is.
+_CRITERION_CHARS = 500
+
 # A `share_note` becomes the top line of a real Slack message, so it is capped
 # where a note stops being a note. Slack's own block limit is 3000 characters
 # and the composer leaves room for the document's title, summary and link
@@ -1859,7 +1870,15 @@ def _gate_constraints(raw: Any) -> dict:
     parse is dropped rather than guessed at.
 
     `bool` is an `int` subclass in Python, so `top_n: true` would otherwise
-    survive as `1`."""
+    survive as `1`.
+
+    `criterion` (see `_CRITERION_CHARS`) is gated the same way as `entity` —
+    trimmed, collapsed to one line, length-capped — and passed through
+    unchanged when present so a corpus count/analytical question's
+    classification bar (see `app.corpus_mapreduce`) can be caller-supplied
+    per query instead of hardcoded; the planner's own JSON schema does not
+    yet solicit this field (see `_CRITERION_CHARS`'s docstring), so today it
+    only survives when a caller already put one on the raw plan."""
     if not isinstance(raw, dict):
         return {}
     out: dict = {}
@@ -1877,6 +1896,9 @@ def _gate_constraints(raw: Any) -> dict:
     entity = raw.get("entity")
     if isinstance(entity, str) and entity.strip():
         out["entity"] = " ".join(entity.split())[:_ENTITY_CHARS]
+    criterion = raw.get("criterion")
+    if isinstance(criterion, str) and criterion.strip():
+        out["criterion"] = " ".join(criterion.split())[:_CRITERION_CHARS]
     return out
 
 

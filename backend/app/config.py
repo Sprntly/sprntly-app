@@ -503,6 +503,16 @@ class Settings(BaseSettings):
     # one, so "disabled" left half the feature running.
     slack_voc_channels: bool = True
 
+    # Dark-ship flag for the concurrent map-reduce count engine
+    # (app/corpus_mapreduce.py + call_digest's `is_mapreducible_count`
+    # interception). Default OFF: the engine, when eligible, replaces the
+    # single big synthesis call for "how many calls that <content filter>"
+    # questions with N concurrent small classification calls + a
+    # deterministic Python reduce. Lands dark until its own real-tenant
+    # precision/recall gate passes — flip is a separate decision from
+    # merging the code.
+    voc_count_engine_enabled: bool = False
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via

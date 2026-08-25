@@ -955,6 +955,253 @@ def test_apurva_acceptance_phrases_mode_selection():
     assert is_voc_query(complaint_ask)
 
 
+# ── Map-reduce count engine — eligibility ────────────────────────────────────
+# `is_mapreducible_count` is a strict subset of `is_voc_query`: an
+# aggregate/enumeration shape AND a per-item content predicate to classify
+# against. Comparative/over-time, single-subject, and report-shaped asks stay
+# on the existing query/report paths.
+
+def test_is_mapreducible_count_davids_phrasing():
+    from app.call_digest import is_mapreducible_count
+
+    assert is_mapreducible_count(
+        "how many customer calls did I have in the last 30 days that had "
+        "asked for product features or raised product issues."
+    )
+
+
+def test_is_mapreducible_count_which_customers_and_count_shapes():
+    from app.call_digest import is_mapreducible_count
+
+    positives = [
+        "which customers complained about pricing this month",
+        "how many customers raised billing issues this month",
+        "which accounts complained about latency",
+        "how many customers asked about the mobile app",
+    ]
+    for q in positives:
+        assert is_mapreducible_count(q), f"expected eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_comparative_over_time():
+    from app.call_digest import is_mapreducible_count
+
+    negatives = [
+        "did complaints about exports increase this week",
+        "are export complaints getting worse compared to last week",
+        "how many customers raised billing issues this week vs last week",
+    ]
+    for q in negatives:
+        assert not is_mapreducible_count(q), f"expected NOT eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_single_subject():
+    from app.call_digest import is_mapreducible_count
+
+    assert not is_mapreducible_count(
+        "what did Cascade Health say about the dashboard"
+    )
+
+
+def test_is_mapreducible_count_excludes_report_shaped():
+    from app.call_digest import is_mapreducible_count
+
+    negatives = [
+        "give me the summary of customer feedback from today",
+        "summarize the customer calls from last week",
+        "voice of customer report for last month",
+        "what are the themes from this week's calls",
+        "recap yesterday's customer meetings",
+    ]
+    for q in negatives:
+        assert not is_mapreducible_count(q), f"expected NOT eligible: {q!r}"
+
+
+def test_is_mapreducible_count_excludes_bare_headcount_with_no_predicate():
+    from app.call_digest import is_mapreducible_count
+
+    # A pure entity count with no per-item content filter has nothing for the
+    # map step to classify against.
+    assert not is_mapreducible_count("how many customers do we have")
+
+
+# ── Map-reduce count engine — interception in `answer()` ─────────────────────
+# Gated by `settings.voc_count_engine_enabled` (default OFF) AND
+# `is_mapreducible_count`. Any engine exception falls through to the existing,
+# unchanged `_answer_query` path — never a dead end.
+
+def test_count_engine_off_never_runs_query_path_taken(monkeypatch):
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", False)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("the count engine must not run when the flag is off")
+
+    monkeypatch.setattr(cmr, "run", _must_not_run)
+    monkeypatch.setattr(
+        cd, "_answer_query",
+        lambda **kw: {"answer": "from query path", "_skill_source": "voc-query"})
+
+    out = cd.answer(enterprise_id="co",
+                    question="how many customers raised billing issues this month")
+    assert out["_skill_source"] == "voc-query"
+    assert out["answer"] == "from query path"
+
+
+def test_count_engine_on_and_eligible_runs_engine_and_returns_assembled_answer(monkeypatch):
+    import app.corpus_mapreduce as cmr
+
+    calls_list = [_call(1), _call(2)]
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=calls_list, text="=== CALLS ==="))
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=2, unclassified_ids=[])
+    captured: dict = {}
+
+    def _fake_run(spec, **kw):
+        captured["spec"] = spec
+        captured.update(kw)
+        return eng
+
+    monkeypatch.setattr(cmr, "run", _fake_run)
+
+    def _query_must_not_run(**kw):
+        raise AssertionError("the query path must not run when the engine succeeds")
+
+    monkeypatch.setattr(cd, "_answer_query", _query_must_not_run)
+
+    out = cd.answer(enterprise_id="co",
+                    question="how many customers raised billing issues this month")
+    assert out["_skill_source"] == "voc-count-engine"
+    assert "1 of 2 calls" in out["answer"]
+    assert captured["spec"] is cd.VOC_CALLS_SPEC
+    assert captured["items"] is calls_list
+    assert captured["enterprise_id"] == "co"
+
+
+def test_count_engine_exception_falls_through_to_query_path(monkeypatch, caplog):
+    import logging
+
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+
+    def _boom(*a, **k):
+        raise RuntimeError("engine blew up")
+
+    monkeypatch.setattr(cmr, "run", _boom)
+    monkeypatch.setattr(
+        cd, "_answer_query",
+        lambda **kw: {"answer": "fell through to query path",
+                      "_skill_source": "voc-query"})
+
+    with caplog.at_level(logging.ERROR, logger="app.call_digest"):
+        out = cd.answer(enterprise_id="co",
+                        question="how many customers raised billing issues this month")
+    # No user-facing error — the fallback answer, not an exception, comes back.
+    assert out["_skill_source"] == "voc-query"
+    assert out["answer"] == "fell through to query path"
+    assert "voc count engine failed" in caplog.text
+
+
+def test_assemble_count_answer_matches_query_path_response_contract():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=2, hit_ids=["c1", "c2"],
+                           reasons={"c1": "asked for X", "c2": "raised bug Y"},
+                           total_items=5, unclassified_ids=["c3"])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    for key in ("answer", "key_points", "citations", "confidence", "unanswered",
+               "_skill", "_skill_action", "_skill_source"):
+        assert key in out
+    assert isinstance(out["answer"], str) and out["answer"]
+    assert isinstance(out["key_points"], list)
+    assert isinstance(out["citations"], list)
+    assert all(set(c) == {"source", "evidence"} for c in out["citations"])
+    assert isinstance(out["confidence"], float)
+    assert isinstance(out["unanswered"], str) and "c3" in out["unanswered"]
+    assert out["_skill"] == cd._VOC_SKILL
+    assert out["_skill_source"] == "voc-count-engine"
+
+
+# ── map_model — VOC_CALLS_SPEC uses the Sonnet constant ──────────────────────
+
+def test_voc_calls_spec_map_model_is_the_sonnet_constant():
+    """Real-corpus accuracy verification found Haiku plateaus at precision
+    0.71-0.78 / recall 0.42-0.58 even on the patched rubric — Sonnet cleared
+    it (0.90-1.00 / 0.75-0.83). `VOC_CALLS_SPEC.map_model` must be the SAME
+    Sonnet constant this module's own synthesis calls use, never a
+    second, independently-drifting copy of the model string."""
+    assert cd.VOC_CALLS_SPEC.map_model == cd.ANSWER_MODEL
+    assert cd.VOC_CALLS_SPEC.map_model == "claude-sonnet-4-6"
+
+
+# ── stated assumption — never a silent unilateral reading ───────────────────
+
+def test_assemble_count_answer_states_the_default_assumption_when_no_criterion():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=3, hit_ids=[], reasons={}, total_items=10,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE in out["answer"]
+    assert "actively asked for a feature or raised" in out["answer"]
+    assert "compliance/hosting requirements not counted" in out["answer"]
+
+
+def test_assemble_count_answer_states_a_supplied_criterion_instead_of_the_default():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=3, hit_ids=[], reasons={}, total_items=10,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(
+        eng, window=window, source_line="=== CALLS ===",
+        criterion="asked about pricing changes",
+    )
+    assert "asked about pricing changes" in out["answer"]
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE not in out["answer"]
+
+
+def test_count_engine_call_site_passes_constraints_criterion_to_assemble(monkeypatch):
+    """The `answer()` call site must resolve `constraints["criterion"]` and
+    hand it to `_assemble_count_answer` — not just to the engine — so the
+    stated-assumption sentence reflects what was actually classified against."""
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "x"},
+                           total_items=1, unclassified_ids=[])
+    monkeypatch.setattr(cmr, "run", lambda spec, **kw: eng)
+
+    out = cd.answer(
+        enterprise_id="co",
+        question="how many customers raised billing issues this month",
+        constraints={"criterion": "raised a billing complaint"},
+    )
+    assert "raised a billing complaint" in out["answer"]
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE not in out["answer"]
+
+
 # ── Zoom as a second live source ─────────────────────────────────────────────
 #
 # The digest fires on generic call/VoC-shaped questions with NO connector name
@@ -1954,3 +2201,274 @@ def test_voc_prompts_do_not_invite_splitting_content_across_fields():
 def test_voc_prompt_lengths_within_bounds():
     assert 1200 <= len(cd._QUERY_SYSTEM) <= 3000
     assert 2500 <= len(cd._REPORT_SYSTEM) <= 5000
+
+
+# ── count-engine rubric — scope guard (vendor-buyer / internal / demo-only) ──
+# Real-corpus accuracy verification (a real staging run compared against a
+# strong-model oracle) found the count engine flagging calls where the
+# reviewed company asked its OWN vendor for a feature, and calls with no real
+# customer ask (internal-only, or a rep pitch/demo the customer only
+# watched), as if they were customer feature requests/issues. These property
+# tests pin the wording fix by content, the same way the query/report prompts
+# above are pinned — a rewrite that silently drops a guard clause fails here
+# even though it can't fail a live-model accuracy check in CI.
+
+def test_base_discipline_states_the_vendor_buyer_scope_guard():
+    s = cd._VOC_BASE_DISCIPLINE
+    assert "OWN vendor" in s or "own vendor" in s.lower()
+    assert "buying party" in s or "buying" in s.lower()
+
+
+def test_base_discipline_states_the_internal_only_exclusion():
+    s = cd._VOC_BASE_DISCIPLINE
+    assert "internal-only" in s.lower()
+    assert "external customer" in s.lower() or "external" in s.lower()
+
+
+def test_base_discipline_states_the_demo_pitch_exclusion():
+    s = cd._VOC_BASE_DISCIPLINE
+    low = s.lower()
+    assert "pitch" in low or "demo" in low
+    assert "watched" in low or "acknowledged" in low
+
+
+def test_default_criterion_still_states_the_original_content_rules():
+    """The scope guard split is additive — the pre-existing feature/issue
+    definitions and the routine-scheduling exclusion must survive, now on
+    `_VOC_DEFAULT_CRITERION` rather than the old single-string rubric."""
+    s = cd._VOC_DEFAULT_CRITERION
+    assert "explicit ask for new functionality" in s
+    assert "bug, a crash" in s
+    assert "Routine scheduling" in s
+
+
+def test_base_discipline_still_states_the_output_format_instructions():
+    s = cd._VOC_BASE_DISCIPLINE
+    assert "never invent an id" in s
+
+
+def test_base_discipline_and_default_criterion_length_within_bounds():
+    # Guards against both an accidental truncation and an unbounded rewrite —
+    # same combined-length bound the old single-string rubric had.
+    combined = len(cd._VOC_BASE_DISCIPLINE) + len(cd._VOC_DEFAULT_CRITERION)
+    assert 900 <= combined <= 2600
+
+
+def test_voc_calls_spec_composes_base_discipline_and_default_criterion():
+    """`VOC_CALLS_SPEC` carries the two pieces the engine composes together —
+    pins the wiring between call_digest's constants and the spec, independent
+    of the engine's own composition-order test in test_corpus_mapreduce.py."""
+    assert cd.VOC_CALLS_SPEC.base_discipline == cd._VOC_BASE_DISCIPLINE
+    assert cd.VOC_CALLS_SPEC.criterion == cd._VOC_DEFAULT_CRITERION
+
+
+# ── engine-local caching finding — the composed rubric is below the floor ───
+# `app.llm._build_base_kwargs` already attaches `cache_control` to `system`
+# automatically WHENEVER it clears the acting model's own cacheable floor
+# (`app.llm._is_cacheable` / `_MIN_CACHEABLE_TOKENS`, pinned by
+# `tests/test_llm_cache_tiers.py`) — no per-call plumbing is needed for that
+# mechanism to fire. What this test proves is the honest, measured state for
+# VOC_CALLS_SPEC specifically: its composed base_discipline+criterion, even on
+# the Sonnet map model, sits BELOW that floor — so attaching cache_control to
+# it would be exactly the "dead breakpoint" `_is_cacheable`'s own docstring
+# warns against (an ephemeral write that Anthropic's API will not actually
+# fill, silently misreporting "we cache here" in the telemetry). There is also
+# no caller-facing lever on `app.graph.gateway.llm_call` to force the `ttl:1h`
+# tier at all (`_cache_ttl_for` derives it solely from a `skill` allowlist
+# built for the top-insights case, not a general override) — using it here
+# would mean either faking an unrelated "skill" id or bypassing the gateway
+# (both explicitly out of bounds). See the build report for the full
+# reasoning; this is a mutation-provable pin, not a wiring gap: if the rubric
+# ever grows past the floor (e.g. a future domain reuses this engine with a
+# longer method block), this test goes RED and the caching lever becomes live
+# with zero further plumbing.
+
+def test_composed_voc_rubric_is_below_the_cacheable_floor_on_sonnet():
+    from app import llm
+
+    composed = f"{cd._VOC_BASE_DISCIPLINE}\n\n{cd._VOC_DEFAULT_CRITERION}"
+    assert not llm._is_cacheable(composed, cd.VOC_CALLS_SPEC.map_model)
+    floor_chars = llm._MIN_CACHEABLE_TOKENS[cd.VOC_CALLS_SPEC.map_model] * llm._CHARS_PER_TOKEN
+    assert len(composed) < floor_chars
+
+
+# ── count-engine rubric — fixture-driven wiring pins ─────────────────────────
+# These run the REAL `VOC_CALLS_SPEC` (real base_discipline+criterion +
+# verdict_schema)
+# through the REAL `app.corpus_mapreduce.run`, with `app.graph.gateway.llm_call`
+# faked. The fake's verdict per fixture encodes the INTENDED behavior of the
+# new rubric (what a model correctly applying the scope guard above should
+# return) — this pins the engine's wiring end-to-end for each named failure
+# class and gives the ship-gate's real-corpus/real-LLM check concrete,
+# named cases to reproduce. It is NOT a live-model accuracy proof: a fake
+# always returns exactly what it is told to, so it cannot catch the model
+# itself misapplying the rubric text. That gate is the separate real-corpus
+# re-validation against the oracle, not this test.
+
+def _fixture_call(external_id: str, **kw) -> CallTranscript:
+    return CallTranscript(
+        external_id=external_id, title=kw.pop("title", "Call"),
+        date="2026-06-20", **kw,
+    )
+
+
+def _vendor_buyer_call() -> CallTranscript:
+    # The reviewed company (rep) asking its OWN vendor for a feature — not a
+    # customer asking the reviewed company for anything.
+    return _fixture_call(
+        "vendor-buyer-1", title="Vendor sync",
+        participants=["ourrep@reviewedco.com", "sales@vendorco.com"],
+        overview="Our team asked our vendor to add bulk-export to their tool.",
+        quotes=[{"speaker": "Our Rep",
+                 "text": "Could you add a bulk-export API to your platform?"}],
+    )
+
+
+def _internal_only_call() -> CallTranscript:
+    # No external customer/prospect participant at all.
+    return _fixture_call(
+        "internal-only-1", title="Internal sync",
+        participants=["eng1@reviewedco.com", "eng2@reviewedco.com"],
+        overview="Internal discussion about a UI bug in our own dashboard.",
+        quotes=[{"speaker": "Eng1",
+                 "text": "We should fix the broken filter before next sprint."}],
+    )
+
+
+def _demo_only_call() -> CallTranscript:
+    # The rep pitched/demoed a feature; the customer only watched/acknowledged.
+    return _fixture_call(
+        "demo-only-1", title="Product demo",
+        participants=["rep@reviewedco.com", "prospect@buyerco.com"],
+        overview="Rep demoed the new reporting dashboard; prospect watched.",
+        quotes=[{"speaker": "Rep",
+                 "text": "Here's our new reporting dashboard — let me show you."},
+                {"speaker": "Prospect", "text": "Nice, looks good."}],
+    )
+
+
+def _genuine_feature_request_call() -> CallTranscript:
+    return _fixture_call(
+        "feature-request-1", title="Customer check-in",
+        participants=["rep@reviewedco.com", "buyer@customerco.com"],
+        overview="Customer asked for CSV export of their reports.",
+        quotes=[{"speaker": "Buyer",
+                 "text": "Can you add a CSV export option for our reports?"}],
+    )
+
+
+def _genuine_issue_call() -> CallTranscript:
+    return _fixture_call(
+        "issue-1", title="Support call",
+        participants=["rep@reviewedco.com", "buyer@customerco.com"],
+        overview="Customer reported the dashboard crashes on load.",
+        quotes=[{"speaker": "Buyer",
+                 "text": "The dashboard crashes every time I try to load it."}],
+    )
+
+
+def _intended_verdicts_llm(**kw):
+    """Fake `gateway.llm_call` for the VOC_CALLS_SPEC map call: returns the
+    verdict the new rubric is SUPPOSED to produce for each named fixture id,
+    keyed by whatever ids the real engine actually tagged into this batch's
+    rendered input (never hand-listing ids independent of what was sent)."""
+    import re
+    intended_hit = {
+        "vendor-buyer-1": False,
+        "internal-only-1": False,
+        "demo-only-1": False,
+        "feature-request-1": True,
+        "issue-1": True,
+    }
+    ids = re.findall(r'<item id="([^"]+)">', kw["input"])
+    verdicts = {
+        i: {"hit": intended_hit.get(i, False), "reason": f"reason-{i}"}
+        for i in ids
+    }
+    from types import SimpleNamespace
+    return SimpleNamespace(output={"verdicts": verdicts}, stop_reason="end_turn")
+
+
+def test_vendor_buyer_inversion_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_vendor_buyer_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_internal_only_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_internal_only_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_demo_pitch_only_fixture_is_not_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_demo_only_call()],
+    )
+    assert eng.hit_ids == []
+    assert eng.count == 0
+
+
+def test_genuine_customer_feature_request_fixture_is_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW),
+        items=[_genuine_feature_request_call()],
+    )
+    assert eng.hit_ids == ["feature-request-1"]
+    assert eng.count == 1
+
+
+def test_genuine_customer_issue_fixture_is_a_hit(monkeypatch):
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW), items=[_genuine_issue_call()],
+    )
+    assert eng.hit_ids == ["issue-1"]
+    assert eng.count == 1
+
+
+def test_mixed_batch_only_the_two_genuine_fixtures_hit(monkeypatch):
+    """All five fixtures in one batch — the count/roster the engine assembles
+    matches exactly the two genuine customer-raised cases."""
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _intended_verdicts_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many raised X",
+        window=cd.parse_window("calls", now=NOW),
+        items=[
+            _vendor_buyer_call(), _internal_only_call(), _demo_only_call(),
+            _genuine_feature_request_call(), _genuine_issue_call(),
+        ],
+    )
+    assert eng.count == 2
+    assert set(eng.hit_ids) == {"feature-request-1", "issue-1"}

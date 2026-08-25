@@ -422,6 +422,41 @@ def test_a_multiline_entity_is_collapsed_to_one_line():
     assert plan.constraints["entity"] == "Acme Corp Ltd"
 
 
+def test_a_supplied_criterion_survives_the_gate():
+    """`constraints.criterion` — the corpus map-reduce classification bar —
+    flows through `_gate_constraints` unchanged when present, the same way
+    `entity` does (see app.corpus_mapreduce)."""
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "raised a billing complaint"}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert plan.constraints["criterion"] == "raised a billing complaint"
+
+
+def test_a_blank_or_missing_criterion_is_dropped():
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "   "}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert "criterion" not in plan.constraints
+    plan = ap.apply_gates(_plan_out(constraints={}), enterprise_id=COMPANY, connected=[])
+    assert "criterion" not in plan.constraints
+
+
+def test_a_multiline_criterion_is_collapsed_and_length_capped():
+    long_criterion = "x" * 900
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "raised a\nbilling  complaint"}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert plan.constraints["criterion"] == "raised a billing complaint"
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": long_criterion}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert len(plan.constraints["criterion"]) == ap._CRITERION_CHARS
+
+
 # ── the route-like projection (what the comparison line compares) ────────────
 
 def test_route_like_puts_the_company_skill_first(monkeypatch):
