@@ -28,10 +28,11 @@ NOW = datetime(2026, 8, 19, tzinfo=timezone.utc)
 def claim(
     cid: str, *, subject="export latency", days_ago=1, accounts=("Northwind",),
     authoritative=True, strength="reported", ctype="mechanism",
-    source="customer_voice", direction="neutral",
+    source="customer_voice", direction="neutral", assertion=None,
 ) -> Claim:
     return Claim(
-        id=cid, assertion=f"claim {cid}", type=ctype, subject=subject,
+        id=cid, assertion=(f"claim {cid}" if assertion is None else assertion),
+        type=ctype, subject=subject,
         source_id=source, artifact_id="a", artifact_type="t",
         strength=strength, observed_at=NOW - timedelta(days=days_ago),
         authoritative=authoritative,
@@ -490,3 +491,77 @@ def test_two_claims_sharing_one_ungroupable_cluster_do_not_break_the_theme_count
     assert themes == len(out.findings) + group_drops
     # And the old, derived arithmetic would have been wrong here.
     assert out.stats["clusters"] - out.stats["dropped"]["ungroupable"] != themes
+
+# ── The statement a reader actually has to judge ─────────────────────────────
+
+def test_a_finding_quotes_one_of_its_claims():
+    """`N claims concern "X"` is a table-of-contents entry: it names a topic and
+    says how often it came up, and a reader cannot judge it, argue with it, or
+    take it to anyone. Against the same corpus the chat surface answers with
+    quotes and account counts; the report answered with a label. So the
+    strongest claim comes with it, as reported speech."""
+    claims = [
+        claim("c1", assertion="PDF export fails on decks over 200 slides"),
+        claim("c2", days_ago=40),
+        claim("c3", days_ago=80, accounts=("Vandelay Industries",)),
+    ]
+    out = run(claims)
+    said = out.findings[0].statement
+    assert "for example" in said
+    assert "PDF export fails on decks over 200 slides" in said
+
+
+def test_the_quoted_example_is_cut_at_a_causal_connective():
+    """The example is reported speech, not our analysis. It goes through the
+    same cut the label gets, so a source's own "because" cannot arrive in a
+    sentence the reader will read as ours."""
+    claims = [
+        claim("c1", assertion="Keystrokes drop in the editor because sync stalls"),
+        claim("c2", days_ago=40),
+        claim("c3", days_ago=80, accounts=("Initech",)),
+    ]
+    said = run(claims).findings[0].statement
+    assert "because sync stalls" not in said
+    assert "Keystrokes drop in the editor" in said
+
+
+def test_an_example_contained_in_the_topic_is_left_out():
+    """A quote the topic already contains teaches nothing and costs a line.
+    NOT just an identical one: the equality check alone left "export latency"
+    quoted under the topic "export latency issues", which is the same
+    redundancy one word short of being caught."""
+    from app.crucible.pipeline import _statement
+    exact = _statement("export latency", [claim("c1", assertion="export latency"),
+                                          claim("c2", assertion="export latency")], ())
+    assert "for example" not in exact
+    inside = _statement("export latency issues",
+                        [claim("c1", assertion="export latency"),
+                         claim("c2", assertion="export latency")], ())
+    assert "for example" not in inside
+
+
+def test_an_assertion_that_reduces_to_nothing_is_not_quoted():
+    """`label_for` returns the literal "unlabelled" for anything that strips to
+    nothing, so quoting its output put quotation marks around a word no source
+    ever said. NOT just the empty string: a claim of pure punctuation is
+    non-empty, passes the emptiness guard, and comes back "unlabelled"."""
+    from app.crucible.pipeline import _statement
+    empty = _statement("export latency", [claim("c1", assertion=""),
+                                          claim("c2", assertion="")], ())
+    assert "unlabelled" not in empty
+    punctuation = _statement("export latency", [claim("c1", assertion=" ,;: "),
+                                                claim("c2", assertion=" ,;: ")], ())
+    assert "unlabelled" not in punctuation
+
+
+def test_the_count_agrees_with_itself():
+    """"1 claims concern" shipped in every report this engine ever produced. A
+    count that cannot get its own plural right is the first thing a reader
+    stops trusting, and everything after it is numbers."""
+    from app.crucible.pipeline import _statement
+    one = _statement("export latency", [claim("c1")], ())
+    many = _statement("export latency", [claim("c1"), claim("c2")], ())
+    assert one.startswith("1 claim concerns")
+    assert many.startswith("2 claims concern ")
+    acct = _statement("export latency", [claim("c1")], ("Northwind",))
+    assert "1 claim across 1 account concerns" in acct
