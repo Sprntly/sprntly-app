@@ -22,7 +22,7 @@ import asyncio
 import pytest
 
 from app import prd_runner
-from app.prd_runner import _top_insight_indices, warm_prds_for_brief
+from app.prd_runner import top_insight_indices, warm_prds_for_brief
 
 
 def _insight(title: str, confidence: float, headline: bool = False) -> dict:
@@ -36,18 +36,18 @@ def _brief(insights: list[dict], brief_id: int = 7) -> dict:
     return {"id": brief_id, "insights": insights}
 
 
-def test_top_insight_indices_hero_first_then_confidence():
+def testtop_insight_indices_hero_first_then_confidence():
     insights = [
         _insight("low", 0.3),
         _insight("hero", 0.1, headline=True),  # lowest confidence but flagged
         _insight("high", 0.9),
         _insight("mid", 0.5),
     ]
-    assert _top_insight_indices(insights, 2) == [1, 2]
-    assert _top_insight_indices(insights, 3) == [1, 2, 3]
+    assert top_insight_indices(insights, 2) == [1, 2]
+    assert top_insight_indices(insights, 3) == [1, 2, 3]
     # No headline flag → pure confidence order.
     no_hero = [_insight("a", 0.2), _insight("b", 0.8), _insight("c", 0.5)]
-    assert _top_insight_indices(no_hero, 2) == [1, 2]
+    assert top_insight_indices(no_hero, 2) == [1, 2]
 
 
 @pytest.fixture()
@@ -94,18 +94,35 @@ def test_warm_generates_top_n_in_background(warm_spy, monkeypatch):
     assert all(s[4] for s in warm_spy["started"])  # run_id present on every warm
 
 
-def test_default_warm_count_covers_all_three_brief_insights(warm_spy):
-    """With the default prd_warm_count (3 = the brief's MAX_INSIGHTS), every one
-    of the brief's 3 points gets its PRD auto-generated — no monkeypatch, so
-    this also pins the default-on behavior."""
-    assert prd_runner.settings.prd_warm_count >= 3
+def test_default_warm_count_covers_the_hero_insight_only(warm_spy):
+    """The default `prd_warm_count` warms the HERO insight and nothing else.
+
+    It used to be 3 — every point the brief surfaces. Over the 30 days to
+    2026-08-24 that produced 1,955 PRDs of which 72 were ever ticketed, edited
+    or re-saved, so the tail was paid for and never opened. No monkeypatch here,
+    so this pins the shipped default, not a fixture's idea of it.
+    """
+    assert prd_runner.settings.prd_warm_count == 1
     insights = [_insight("a", 0.4), _insight("hero", 0.2, headline=True), _insight("c", 0.9)]
 
     asyncio.run(warm_prds_for_brief(_brief(insights)))
 
-    # All 3 insight indices warmed (order: hero first, then by confidence).
-    assert sorted(g[1] for g in warm_spy["generated"]) == [0, 1, 2]
+    # Index 1 is the headline insight — chosen over index 2 despite index 2
+    # having the higher confidence, because headline wins first in the ranking.
+    assert [g[1] for g in warm_spy["generated"]] == [1]
     assert all(g[2] is True for g in warm_spy["generated"])
+
+
+def test_warm_count_is_the_only_thing_bounding_depth(warm_spy, monkeypatch):
+    """Raising `prd_warm_count` still widens the fan-out — the new default is a
+    default, not a hard cap. Guards against a later change that hard-codes the
+    hero and leaves the setting inert."""
+    monkeypatch.setattr(prd_runner.settings, "prd_warm_count", 3)
+    insights = [_insight("a", 0.4), _insight("hero", 0.2, headline=True), _insight("c", 0.9)]
+
+    asyncio.run(warm_prds_for_brief(_brief(insights)))
+
+    assert sorted(g[1] for g in warm_spy["generated"]) == [0, 1, 2]
 
 
 def test_warm_skips_existing_prds(warm_spy, monkeypatch):

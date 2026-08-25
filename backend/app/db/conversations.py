@@ -699,3 +699,31 @@ def post_owned_individual_assistant_turn(
     ).execute()
     _advance_own_cursor(conversation_id, user_id, row["id"])
     return row
+
+
+@retry_on_disconnect
+def latest_conversation_at(company_id: str) -> str | None:
+    """When this company last held a conversation, or None if it never has.
+
+    Every `conversations` row is created by a human sending a message — the
+    scheduler, the warm fan-out and the startup pass never write one — so the
+    newest row is the cheapest honest answer to "has anybody actually opened
+    this workspace lately?". Used by `app.warm_gate` to decide whether
+    pre-generating a brief's drill-downs is worth paying for.
+
+    `llm_usage_events.user_id` is the obvious alternative and is NOT usable:
+    no caller currently populates `usage_scope(user_id=...)`, so the column is
+    NULL on every row — including unambiguously interactive ones like
+    `apply_prd_chat_edit`. Worth fixing on its own, but it cannot back this.
+    """
+    rows = (
+        require_client().table("conversations")
+        .select("created_at")
+        .eq("company_id", company_id)
+        .order("created_at", desc=True)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return (rows[0].get("created_at") if rows else None) or None
