@@ -1997,6 +1997,21 @@ def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
     )
 
 
+def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
+    """The specific subject this question is about, when the planner named one.
+
+    The planner already extracts it (`constraints.entity` — "the specific
+    company, customer, account, person, project or repo the question is
+    about"), so the report branches below can ask whether a saved report
+    actually covers what was asked rather than only whether one exists.
+
+    `None` for an unplanned turn, which leaves those branches deciding on
+    freshness alone exactly as they did before."""
+    if plan is None:
+        return None
+    return ((plan.constraints or {}).get("entity") or "").strip() or None
+
+
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
     """Render prior turns + the new question into the sixth branch's tool-loop
     user message — relocated VERBATIM from
@@ -3399,7 +3414,8 @@ def answer(
     if (
         decision.skill_id == "public-feedback-report"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.PF_SPEC)
+            enterprise_id, monthly_reports.PF_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import public_feedback
 
@@ -3410,6 +3426,10 @@ def answer(
             on_delta=on_delta,
             # Narrates its capture→synthesis legs (competitive_intel parity).
             on_phase=on_phase,
+            # Whether the last capture can answer this at all: a follow-up
+            # about an app or company it never saw needs the sweep, not a
+            # filter over records that never mention it (CIR parity).
+            entity=_plan_entity(plan),
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3456,7 +3476,8 @@ def answer(
     if (
         decision.skill_id == "competitive-intelligence-review"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.CIR_SPEC)
+            enterprise_id, monthly_reports.CIR_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import competitive_intel
 
@@ -3469,6 +3490,11 @@ def answer(
             # The sweep is the longest wait in the product; its own legs
             # (capture, then synthesis) publish from inside that module.
             on_phase=on_phase,
+            # WHO to research, when the question named someone the "vs Acme"
+            # regex cannot see ("a competitive review on Figma"). Without it
+            # the sweep falls back to the stored roster and researches a set
+            # the question never asked about.
+            entity=_plan_entity(plan),
         )
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
@@ -3482,7 +3508,8 @@ def answer(
     if (
         decision.skill_id == "market-intelligence-report"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.MI_SPEC)
+            enterprise_id, monthly_reports.MI_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import market_intel
 

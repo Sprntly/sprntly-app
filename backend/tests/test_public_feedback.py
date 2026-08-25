@@ -355,6 +355,37 @@ def test_followup_answers_from_stored_run(monkeypatch):
     assert calls["llm"]["max_tokens"] == 4000
 
 
+def test_a_followup_about_a_subject_the_capture_never_saw_goes_to_the_web(monkeypatch):
+    """Query mode filters the records already on file and is held to them, so
+    a question about an app the last sweep never collected was answered "I
+    don't have that" by the one pipeline whose job is to go and get it."""
+    _patch_profile(monkeypatch)
+    _patch_latest_run(monkeypatch, dict(RUN))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+
+    def _never(**kw):  # pragma: no cover — query mode must not be entered
+        raise AssertionError("query mode answered off a run that never saw it")
+
+    monkeypatch.setattr(pf, "_answer_from_run", _never)
+    out = pf.answer(enterprise_id="e1",
+                    question="what are people saying about Umbrella?",
+                    entity="Umbrella")
+    assert "couldn't find enough feedback" in out["answer"]   # the sweep ran
+
+
+def test_a_followup_about_a_collected_subject_still_answers_from_the_run(monkeypatch):
+    """The cheap path is not lost — a subject the records mention is still
+    answered off them, and no sweep is bought."""
+    _patch_latest_run(monkeypatch, dict(RUN))
+    monkeypatch.setattr(pf, "llm_call", lambda **kw: SimpleNamespace(output={
+        "answer": "Riders flagged it.", "key_points": [], "citations": [],
+        "confidence": 0.7, "unanswered": "",
+    }))
+    out = pf.answer(enterprise_id="e1", question="what did the App Store say?",
+                    entity="Trustpilot")
+    assert out["_skill_source"] == "public-feedback-query"
+
+
 def test_followup_without_run_falls_to_full_pipeline(monkeypatch):
     _patch_profile(monkeypatch)
     _patch_latest_run(monkeypatch, None)
