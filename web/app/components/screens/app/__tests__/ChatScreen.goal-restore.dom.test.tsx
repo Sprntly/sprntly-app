@@ -39,6 +39,10 @@ const listTurns = vi.fn()
 // when that row never arrives is the difference between refusing and creating
 // a run bound to no chat.
 const createConv = vi.fn()
+// The chat-typed path: the composer sends, `chatIntentApi.resolve` classifies,
+// and the dispatcher routes. The `+` menu bypasses all of it, which is why the
+// menu-driven tests could not see the forwarder dropping its second argument.
+const resolveIntent = vi.fn()
 
 /** A plan thin enough to render and real enough to approve. */
 const PLAN = {
@@ -70,6 +74,7 @@ vi.mock("../../../../lib/api", () => {
       // restore has to wait for this and then RUN.
       listTurns: (...a: unknown[]) => listTurns(...a),
     },
+    chatIntentApi: { resolve: (...a: unknown[]) => resolveIntent(...a) },
     goalAnalysisApi: {
       list: (...a: unknown[]) => listRuns(...a),
       start: (...a: unknown[]) => startRun(...a),
@@ -218,6 +223,13 @@ async function answerBothGatesInThread(runId: number) {
   })
 }
 
+/** The composer, as a reader uses it — no `+` menu. */
+async function typeAndSend(text: string) {
+  const box = screen.getAllByPlaceholderText(/Ask Sprntly anything/)[0]
+  await act(async () => { fireEvent.change(box, { target: { value: text } }) })
+  await act(async () => { fireEvent.click(screen.getAllByLabelText("Send")[0]) })
+}
+
 async function startAGoal(text: string) {
   await act(async () => {
     fireEvent.click(screen.getAllByLabelText("Add attachment or skill")[0])
@@ -242,6 +254,8 @@ beforeEach(() => {
   listTurns.mockResolvedValue({ turns: [] })
   createConv.mockReset()
   createConv.mockResolvedValue({ id: 1 })
+  resolveIntent.mockReset()
+  resolveIntent.mockResolvedValue({ intent: "answer" })
   getRun.mockReset()
   confirmRun.mockReset()
   approveRun.mockReset()
@@ -364,6 +378,40 @@ describe("restoring a run after a reload", () => {
     expect(goalProbe()).toBe("none")
     expect(screen.getByTestId("chat-tab-bar")).toBeTruthy()
   })
+})
+
+describe("the thread shows what the reader said", () => {
+  it("keeps the typed sentence, not the planner's extraction", async () => {
+    // The planner hands back an EXTRACTED goal — "increase revenue by 5%" out
+    // of "How can I increase revenue by 5%?" — and the run should work from
+    // that. Emitting it as the user's MESSAGE rewrote their own words in their
+    // own transcript, so scrolling back showed them asking something they
+    // never asked. The run gets the extraction; the thread gets the sentence.
+    seedPersistedTab(
+      { id: "t1", title: "chat", dbConvId: 7, thread: [], messages: [] }, "t1")
+    startRun.mockResolvedValue({ id: 5, conversation_id: 7, status: "resolving_goal" })
+    getRun.mockResolvedValue({ id: 5, status: "awaiting_confirmation", prioritisation: {} })
+    // THE PLANNER EXTRACTS. This is the whole point: what the run works from
+    // and what the reader said are different strings, and only this path
+    // produces both.
+    resolveIntent.mockResolvedValue({
+      intent: "analyse_goal", task: "increase revenue by 5%",
+    })
+    mountApp()
+    await typeAndSend("How can I increase revenue by 5%?")
+    await waitFor(() => expect(startRun).toHaveBeenCalled())
+    // THE USER'S OWN BUBBLE, not `document.body`. The first version of this
+    // asserted on the whole document and passed against the very mutation it
+    // was written to catch — the typed sentence is still in the composer and
+    // in the tab title, so "it is somewhere on the page" proves nothing about
+    // what the transcript says.
+    const bubble = document.querySelector(".bc-user-bubble")
+    expect(bubble?.textContent).toBe("How can I increase revenue by 5%?")
+    // And the RUN still works from the goal the planner extracted.
+    expect(startRun).toHaveBeenCalledWith(
+      "increase revenue by 5%", expect.anything(),
+    )
+  }, 20_000)
 })
 
 describe("a chat that never saves", () => {
