@@ -89,7 +89,7 @@ MONTHLY = [s.skill for s in mr.MONTHLY_REPORT_SPECS
            if s.cadence == mr.CADENCE_MONTHLY]
 
 
-def _save_report_at(spec, when: datetime, *, question=None):
+def _save_report_at(spec, when: datetime, *, question=None, html="## body"):
     """Seed a scheduled report row with an EXPLICIT created_at.
 
     `db.save_report` stamps the wall clock, which would make every cadence
@@ -102,7 +102,7 @@ def _save_report_at(spec, when: datetime, *, question=None):
         "company_id": COMPANY["id"],
         "skill": spec.skill,
         "title": "t",
-        "html": "## body",
+        "html": html,
         "question": question or spec.question,
         "created_at": when.isoformat(),
     }).execute()
@@ -246,6 +246,43 @@ def test_has_current_report_is_per_spec():
     assert mr.has_current_report(COMPANY["id"], mr.MI_SPEC, q3) is False
 
 
+def test_a_current_report_does_not_cover_a_subject_it_never_mentions():
+    """The saved report makes the graph authoritative about WHAT IT COVERED.
+
+    A quarterly competitive review of Globex and Initech says nothing about a
+    fourth company the customer has never tracked — but it used to suppress
+    the sweep all the same, so "give me a competitive review on Umbrella" was
+    answered out of a knowledge graph that had never heard of Umbrella. A
+    subject the document does not mention is not covered, and the engine goes
+    to the web for it.
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 7, 1, 9, 0, tzinfo=UTC),
+                    html="<h2>Review</h2><p>Globex shipped X. Initech raised.</p>")
+
+    # No subject named -> freshness alone decides, exactly as before.
+    assert mr.has_current_report(COMPANY["id"], mr.CIR_SPEC, now) is True
+    # A subject the report covers -> still answered from the graph.
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="Globex") is True
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="globex") is True
+    # A subject it never mentions -> sweep.
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="Umbrella") is False
+
+
+def test_a_covered_subject_still_obeys_the_period():
+    """Coverage is an ADDITIONAL condition, never a replacement for freshness:
+    last quarter's report mentioning Globex must not answer this quarter's
+    question about Globex."""
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 5, 2, 9, 0, tzinfo=UTC),
+                    html="<p>Globex shipped X.</p>")
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        entity="Globex") is False
+
+
 def test_has_current_report_ignores_a_human_chat_report():
     """Only a SCHEDULED row counts. A human running the same skill in chat
     saves a row carrying their own words, and that report was never ingested
@@ -258,6 +295,35 @@ def test_has_current_report_ignores_a_human_chat_report():
     assert mr.has_current_report(
         COMPANY["id"], mr.CIR_SPEC, datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
     ) is False
+
+
+def test_every_report_engine_is_told_which_subject_was_asked_about():
+    """The three reports are ONE behaviour to a user asking a question, so the
+    subject has to reach all three engines, not just the one whose bug was
+    reported.
+
+    Each does something different with it — CIR turns it into the competitor
+    set to research, PF uses it to decide whether its stored capture can
+    answer at all, MI carries the question straight into its sweep — but a
+    branch that drops it puts that engine back to answering about a subject
+    from a graph that holds nothing about it.
+
+    A source scan for the same reason the spec guard above is one:
+    `qa_agent.answer` is a thousand-line function and the engines are tested
+    directly in their own files.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "qa_agent.py").read_text(
+        encoding="utf-8")
+    for module in ("competitive_intel", "public_feedback"):
+        call = re.search(rf"{module}\.answer\((.*?)\n        \)", src, re.S)
+        assert call, f"no {module}.answer dispatch found"
+        assert "entity=_plan_entity(plan)" in call.group(1), (
+            f"{module}.answer is not told which subject was asked about — a "
+            "question about one it has never covered would be answered off "
+            "stale stored work instead of going to the web")
 
 
 def test_qa_agent_guards_each_report_branch_with_its_own_spec():
@@ -297,6 +363,14 @@ def test_qa_agent_guards_each_report_branch_with_its_own_spec():
             "this period is already in the KG and answers in seconds")
         assert f"monthly_reports.{spec_name}" in guard, (
             f"{skill_id} is guarded by the wrong spec (expected {spec_name})")
+        # ...and the guard must ask about the SUBJECT, not just the period. A
+        # branch that drops `entity` suppresses the sweep for a company the
+        # saved report never looked at, which is the whole failure this
+        # threading closes — and it is invisible in every other test.
+        assert "entity=_plan_entity(plan)" in guard, (
+            f"{skill_id} decides on freshness alone — a question about a "
+            "subject the saved report never covered would be answered from a "
+            "graph that holds nothing about it")
 
 
 def test_the_report_hours_are_distinct():

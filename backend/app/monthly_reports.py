@@ -305,8 +305,11 @@ def has_current_report(
     spec: ReportSpec,
     now: datetime | None = None,
     tz: ZoneInfo | None = None,
+    *,
+    entity: str | None = None,
 ) -> bool:
-    """Does a scheduled report for THIS period already exist?
+    """Does a scheduled report for THIS period already exist AND cover the
+    subject the question named?
 
     Read by `qa_agent` before it hands a routed question to a report engine.
     The engines answer by buying a multi-minute web sweep, which was the only
@@ -321,6 +324,21 @@ def has_current_report(
     notion of recency would be one more thing to keep in step with the
     cadence.
 
+    `entity` is the subject the planner extracted from the question
+    (`plan.constraints["entity"]` — a specific company, product or account).
+    Freshness alone was never the whole condition: a current report makes the
+    graph authoritative about WHAT THAT REPORT COVERED, and nothing else. A
+    company whose quarterly competitive review covers Acme and Globex, asked
+    for a review of a fourth company they have never tracked, was answered
+    from a graph that holds nothing about it — the sweep that would have gone
+    and looked was suppressed by a report that had never heard of the subject.
+    So a named subject the saved document does not mention does not count as
+    covered, and the engine goes to the web for it.
+
+    The coverage test is a substring scan of the saved report's own body,
+    which is the only record of what it looked at that every spec shares —
+    CIR has a competitor set, MI and PF have nothing comparable.
+
     UTC by default. A period boundary is a date, and shifting it by a
     company's timezone changes the answer only for a few hours either side of
     a quarter opening — during which the worst case is buying the sweep the
@@ -334,10 +352,25 @@ def has_current_report(
     """
     from app import db
 
+    subject = " ".join((entity or "").split())
     try:
-        saved = _parse_created_at(db.latest_report_at(
-            company_id, skill=spec.skill, question=spec.question,
-        ))
+        if subject:
+            # The row, not just its timestamp — coverage needs the body. Read
+            # only when a subject was named, so the common no-entity question
+            # still pays for one `created_at` rather than a whole document.
+            row = db.latest_scheduled_report(
+                company_id, skill=spec.skill, question=spec.question,
+            ) or {}
+            # ponytail: substring scan, so a mention in passing reads as
+            # covered. Enough while the failure being fixed is a subject that
+            # appears nowhere in the document at all.
+            if subject.lower() not in (row.get("html") or "").lower():
+                return False
+            saved = _parse_created_at(row.get("created_at"))
+        else:
+            saved = _parse_created_at(db.latest_report_at(
+                company_id, skill=spec.skill, question=spec.question,
+            ))
     except Exception:  # noqa: BLE001 — never break the answer path
         logger.exception(
             "monthly-reports: freshness read failed for %s / %s — sweeping",
