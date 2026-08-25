@@ -201,6 +201,34 @@ def list_artifacts_for_conversation(
 
 
 @retry_on_disconnect
+def documents_with_bodies_for_conversation(
+    company_id: str, conversation_id: int, limit: int = 3
+) -> list[dict[str, Any]]:
+    """The newest documents born in one chat, WITH their bodies.
+
+    `list_artifacts_for_conversation` above is the panel's listing and omits
+    the body for the usual reason — N rows must not carry N documents. This is
+    the grounding read (`app.thread_context`): a question about a document the
+    thread wrote can only be answered from the document, and the body is what
+    was missing from the prompt.
+
+    Same company-and-conversation scoping as the listing, so a guessed
+    conversation id returns nothing rather than a foreign tenant's document.
+    """
+    return (
+        require_client().table("custom_artifacts")
+        .select("*")
+        .eq("company_id", company_id)
+        .eq("conversation_id", conversation_id)
+        .order("id", desc=True)
+        .limit(max(1, limit))
+        .execute()
+        .data
+        or []
+    )
+
+
+@retry_on_disconnect
 def _current_version(company_id: str, artifact_id: int) -> int | None:
     """Just the version (None when absent/foreign).
 

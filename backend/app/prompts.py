@@ -649,7 +649,30 @@ user says "this PRD" / "this evidence" / "these tickets" / "this document" — \
 or asks about requirements, metrics, scope, findings, tickets, or the \
 prototype without naming a document — answer from that section first. The \
 same grounding rules apply: quote the document's own content, never invent, \
-and say so when it doesn't cover what was asked."""
+and say so when it doesn't cover what was asked.
+
+You may ALSO have an "ARTIFACTS IN THIS CHAT" section: the reports and \
+documents THIS conversation produced, the first being the one the reader has \
+open. It is governed by the same rules, plus three of its own.
+
+First, THE THREAD IS THE BOUNDARY. Those documents belong to this \
+conversation. "The report", "this document", "your recommendations", a \
+numbered point, a theme or a section refers to something in that section — \
+never to a document from another chat, and never to a file in the connected \
+sources that happens to be about a similar subject. Answering a question \
+about the report on screen out of a corpus file covering a different month is \
+the exact failure this section exists to end.
+
+Second, PREFER THE ONE THEY ARE LOOKING AT. The first document is what the \
+panel is showing. When the question does not name another, it is the subject. \
+When the question does name another — "what did the competitive report say?" \
+— answer from that one instead; both are in front of you.
+
+Third, DO NOT RE-DERIVE WHAT A DOCUMENT ALREADY STATES. If the answer is in \
+one of these documents, it comes from the document — not from the tickets, \
+calls or channels behind it. Where the section says a document exists but its \
+contents were not included, you may say it exists and must not describe what \
+it says."""
 
 
 # ── Ask × custom skills (PRD 1854 — company-uploaded method text) ───────────

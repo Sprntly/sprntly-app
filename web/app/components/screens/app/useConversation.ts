@@ -392,6 +392,18 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             && targetTab?.ticketSetId != null
             ? { ticket_set_id: targetTab.ticketSetId }
             : {}),
+          // WHICH of this thread's own reports/documents is on screen. Not
+          // exclusive with the three ids above, unlike they are with each
+          // other: those name the tab's primary artifact, this names what the
+          // side panel is showing, and a PRD tab whose thread also produced a
+          // report can be asked about either. The backend grounds on the whole
+          // thread and uses this only to order it, so sending it alongside a
+          // prd_id costs nothing and answers "summarize the report" correctly.
+          // Same helper the classify call already uses.
+          ...(() => {
+            const open = openArtifactForPanel(content, convId ?? null)
+            return open ? { open_artifact: open } : {}
+          })(),
         },
       }
     },

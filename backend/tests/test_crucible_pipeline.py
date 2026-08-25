@@ -565,3 +565,81 @@ def test_the_count_agrees_with_itself():
     assert many.startswith("2 claims concern ")
     acct = _statement("export latency", [claim("c1")], ("Northwind",))
     assert "1 claim across 1 account concerns" in acct
+
+# ── A blocker is not an anecdote ─────────────────────────────────────────────
+
+def test_a_lone_constraint_is_a_finding_not_an_anecdote():
+    """The corroboration rule is right for THEMES — "customers keep asking for
+    X" means nothing on one mention — and wrong for CONSTRAINTS. A deal blocker
+    is specific to one deal by definition, so it is mentioned once by
+    definition, and requiring a second mention deletes exactly the items a PM
+    most needs. Measured on a real corpus of 160 blocker signals: 85 of 101
+    rejections were `anecdote`, including "336K USD in renewals is at risk"."""
+    out = run([claim("c1", ctype="constraint",
+                     assertion="Their budget freeze blocks the renewal")])
+    assert len(out.findings) == 1
+    assert out.stats["dropped"]["anecdote"] == 0
+
+
+def test_a_lone_claim_of_any_other_type_is_still_an_anecdote():
+    """The control. One person saying a thing once is still not a pattern, and
+    the exemption must not have quietly turned the rule off."""
+    out = run([claim("c1", ctype="mechanism")])
+    assert out.findings == ()
+    assert out.stats["dropped"]["anecdote"] == 1
+
+
+def test_a_constraint_about_one_account_is_that_account_being_blocked():
+    """"That account's situation rather than a pattern across the book" is right
+    about a preference and wrong about a constraint, where being about one
+    account IS the content. Exempting the anecdote rule alone left 34
+    named-account blockers still dropped on the measured corpus."""
+    out = run([
+        claim("c1", ctype="constraint", accounts=("Northwind",), days_ago=1,
+              assertion="Their security review has not started"),
+        claim("c2", ctype="constraint", accounts=("Northwind",), days_ago=40,
+              assertion="Procurement has still not approved the vendor form"),
+    ])
+    assert len(out.findings) == 1
+    assert out.stats["dropped"]["single_account"] == 0
+
+
+def test_a_preference_from_one_account_is_still_that_accounts_opinion():
+    """The control for the other half."""
+    out = run([
+        claim("c1", ctype="preference", accounts=("Northwind",), days_ago=1),
+        claim("c2", ctype="preference", accounts=("Northwind",), days_ago=40),
+    ])
+    assert out.findings == ()
+    assert out.stats["dropped"]["single_account"] == 1
+
+
+def test_a_mixed_group_is_not_exempted_by_one_constraint_member():
+    """ALL of them, not any: a mixed group still contains claim types that need
+    corroboration, and one exempt member must not carry them."""
+    out = run([
+        claim("c1", ctype="constraint", accounts=("Northwind",), days_ago=1),
+        claim("c2", ctype="preference", accounts=("Northwind",), days_ago=40),
+    ])
+    assert out.findings == ()
+    assert out.stats["dropped"]["single_account"] == 1
+
+
+def test_one_claim_cannot_be_one_conversation_echoing():
+    """A group of one has nothing to echo. The rule fired anyway once singletons
+    could reach it, and printed "all 1 supporting claims come from one source
+    document within 0 days" — not a sentence about evidence. It cost 93 of the
+    103 echo drops on the measured corpus."""
+    out = run([claim("c1", ctype="constraint")])
+    assert len(out.findings) == 1
+    assert out.stats["dropped"]["echo"] == 0
+
+
+def test_two_claims_from_one_document_in_one_window_still_echo():
+    """The control: the rule the spike was fooled by is untouched."""
+    out = run([
+        claim("c1", ctype="constraint", days_ago=1, accounts=("Northwind",)),
+        claim("c2", ctype="constraint", days_ago=2, accounts=("Vandelay Industries",)),
+    ])
+    assert out.findings == ()
+    assert out.stats["dropped"]["echo"] == 1

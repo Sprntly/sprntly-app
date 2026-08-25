@@ -308,6 +308,11 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
+    #: What the side panel is showing — `{"kind": "report"|"document", "id":
+    #: int}`. Unlike the three ids above it addresses nothing on its own: it
+    #: only says which of THIS THREAD's artifacts to put first
+    #: (`app.thread_context`), so an id from elsewhere reorders nothing.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
@@ -474,6 +479,12 @@ def _run_sync(
             prd_id=prd_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            # The thread, and what the panel is showing in it — the two inputs
+            # `app.thread_context` needs to ground a question on the report or
+            # document THIS chat produced. Both optional: a Slack ask or a warm
+            # has no thread, and the block simply isn't built.
+            conversation_id=conversation_id,
+            open_artifact=open_artifact,
             # Cooperative cancellation: the user's Stop flips the job row to
             # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
             # steps and raises AskCancelled to abort before the expensive answer call.
@@ -567,6 +578,10 @@ async def run_ask_job(
     user_id: str | None = None,
     workspace_id: str | None = None,
     project_id: int | None = None,
+    #: The report/document the panel is showing — passed straight down to
+    #: `_run_sync` for `app.thread_context`'s ordering. Defaulted so every
+    #: existing caller and test double is unaffected.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
@@ -601,6 +616,7 @@ async def run_ask_job(
             project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            open_artifact=open_artifact,
             context_source=context_source,
         )
 
