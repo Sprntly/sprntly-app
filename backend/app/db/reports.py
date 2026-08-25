@@ -224,6 +224,39 @@ def list_reports_for_conversation(conversation_id: int, company_id: str) -> list
 
 
 @retry_on_disconnect
+def reports_with_bodies_for_conversation(
+    conversation_id: int, company_id: str, limit: int = 4
+) -> list[dict]:
+    """The newest reports in one thread, WITH their bodies.
+
+    The listing above omits `html` on purpose — a panel showing N rows must not
+    carry N documents. This read is the opposite case and the body IS the
+    point: it grounds a question about a report the thread produced
+    (`app.thread_context`). Reported: asked to summarize the report open in the
+    panel, the chat answered from a corpus file covering a different month
+    entirely, because the report itself was never in the prompt.
+
+    `limit` is small and deliberate. A follow-up is almost always about the
+    newest one or two, and every extra body is prompt budget taken from the
+    answer; the block that consumes this caps the text again on top.
+
+    Company-filtered like every other read here, so a conversation id guessed
+    from another tenant returns nothing rather than their reports.
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select(_READ_COLUMNS)
+        .eq("conversation_id", conversation_id)
+        .eq("company_id", company_id)
+        .order("id", desc=True)
+        .limit(max(1, limit))
+        .execute()
+    )
+    return resp.data or []
+
+
+@retry_on_disconnect
 def set_report_share_config(
     *,
     report_id: int,

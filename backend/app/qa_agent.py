@@ -2409,6 +2409,16 @@ def answer(
     prd_id: Optional[int] = None,
     evidence_id: Optional[int] = None,
     ticket_set_id: Optional[int] = None,
+    #: The chat thread this ask belongs to. Everything `app.thread_context`
+    #: grounds on is keyed off it — the thread is the boundary, so an artifact
+    #: from another conversation can never be read as "the report". Absent (a
+    #: Slack ask, a warm) simply means no thread grounding.
+    conversation_id: Optional[int] = None,
+    #: What the side panel is SHOWING — `{"kind": "report"|"document", "id":
+    #: int}`, the same shape the classify call already receives. It only
+    #: reorders what the thread already owns, so a stale pointer from the
+    #: thread the reader just left is ignored rather than fetched.
+    open_artifact: Optional[dict] = None,
     on_delta: Optional[Callable[[str], None]] = None,
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
@@ -3212,6 +3222,31 @@ def answer(
         from app.artifact_context import build_ticket_set_context
 
         prd_context = build_ticket_set_context(enterprise_id, ticket_set_id)
+
+    # THE REST OF WHAT THIS THREAD MADE. The three builders above are addressed
+    # BY ID, and only a PRD, an evidence page and a ticket set have one to
+    # send — so a report or a document produced in this chat reached no builder
+    # at all and was never in the prompt. Reported: with a report open in the
+    # panel, "summarize the report" was answered out of a corpus file covering
+    # a different month, then a follow-up counted that file's themes as the
+    # report's. See app/thread_context.py.
+    #
+    # It APPENDS rather than replaces. A PRD tab whose thread also produced a
+    # report can be asked about either, and the id-addressed block stays first
+    # because the tab is the strongest statement of what the reader is looking
+    # at. With no id at all this is the whole grounding, which is the reported
+    # case.
+    #
+    # Scoped to `conversation_id` throughout: the thread is the boundary, and a
+    # report from another chat is not what "the report" means to someone typing
+    # in this one.
+    from app.thread_context import build_thread_artifact_context
+
+    thread_context = build_thread_artifact_context(
+        enterprise_id, conversation_id, focus=open_artifact
+    )
+    if thread_context:
+        prd_context = f"{prd_context}\n\n{thread_context}" if prd_context else thread_context
 
     if not decision.skill_id:
         # Direct path — corpus + KG, plus a bounded live read of every connected

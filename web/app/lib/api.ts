@@ -882,6 +882,12 @@ export const askApi = {
       project_id?: number
       evidence_id?: number
       ticket_set_id?: number
+      /** The report or document the side panel is SHOWING — the same
+       *  `{kind, id}` the classify call already gets from
+       *  `openArtifactForPanel`. It does not fetch anything: the backend
+       *  grounds on every artifact of `conversation_id` and uses this only to
+       *  put the one on screen FIRST. Omit and the thread's newest leads. */
+      open_artifact?: { kind: "report" | "document"; id: number } | null
       /** Individual-project-chat send identity (project branch only): the
        *  idempotency key the server persists the user turn under, and links
        *  the answer to via ask_job_id. Ignored server-side on every other
@@ -916,6 +922,9 @@ export const askApi = {
       // open ticket set instead — one primary artifact per tab.
       ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
       ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
+      // Which of this thread's own reports/documents the reader is looking at,
+      // so "summarize the report" answers from the one on screen.
+      ...(opts?.open_artifact != null ? { open_artifact: opts.open_artifact } : {}),
       ...(opts?.client_message_id != null ? { client_message_id: opts.client_message_id } : {}),
       // Structured attachments (project branch): the server persists them onto
       // the user turn and folds their text into the answer's question.

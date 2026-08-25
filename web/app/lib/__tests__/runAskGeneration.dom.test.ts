@@ -329,3 +329,41 @@ describe("PRD-tab grounding opts", () => {
     )
   })
 })
+
+// The report/document the side panel is SHOWING rides the ask, so the answer
+// can be grounded on the artifact THIS THREAD produced.
+//
+// The reported failure: with a report open, "summarize the report in just one
+// paragraph" was answered from a corpus file covering a different month —
+// /v1/ask had no way to be told a report existed, so the backend had nothing
+// to ground on (see backend/app/thread_context.py). This pins the wire half:
+// the pointer reaches the request, and an ask without one is unchanged.
+describe("runAskGeneration — the open artifact rides the request", () => {
+  it("sends open_artifact when the panel is showing a report", async () => {
+    const start = vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 1 } as never)
+    vi.spyOn(askApi, "get").mockResolvedValue(READY as never)
+
+    const run = runAskGeneration("summarize the report", "acme", "tab-1", {
+      conversation_id: 7,
+      open_artifact: { kind: "report", id: 42 },
+    })
+    await vi.runOnlyPendingTimersAsync()
+    await run
+
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(start.mock.calls[0][2]).toMatchObject({
+      open_artifact: { kind: "report", id: 42 },
+    })
+  })
+
+  it("omits it entirely when nothing is open", async () => {
+    const start = vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 2 } as never)
+    vi.spyOn(askApi, "get").mockResolvedValue(READY as never)
+
+    const run = runAskGeneration("why is churn up", "acme", "tab-1", { conversation_id: 7 })
+    await vi.runOnlyPendingTimersAsync()
+    await run
+
+    expect(start.mock.calls[0][2]).not.toHaveProperty("open_artifact")
+  })
+})
