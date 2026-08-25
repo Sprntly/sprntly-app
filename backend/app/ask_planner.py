@@ -798,10 +798,14 @@ or wants an answer.
   chat CHANGED: "convert the RICE section into a table", "cut the appendix",
   "rewrite the summary for an exec", "add a risks section to that report",
   "make the report shorter". Set `instruction` to the change, self-contained.
-  THE "Open beside this chat" LINE ABOVE IS THE PRECONDITION. Choose this only
-  when that line names a report or a document; with nothing open there is
-  nothing to edit and the request is `answer`. A PRD open instead is edit_prd —
-  the two are different documents behind different editors.
+  A LINE ABOVE NAMING A REPORT OR A DOCUMENT IS THE PRECONDITION, and there
+  are two of them. "Active tab: report #45 … is open beside this chat" is the
+  reader looking at it. "In this chat: report #45 … was produced in this
+  conversation" is a document this thread made that is not on screen — still a
+  referent, because "that report" in the chat that wrote it means that report.
+  Either one is enough to choose this action; with NEITHER line present there
+  is nothing to edit and the request is `answer`. A PRD open instead is
+  edit_prd — the two are different documents behind different editors.
   A QUESTION ABOUT the open document is `answer`, not this: "what does the
   report say about pricing?" and "is the RICE section right?" want prose in the
   chat. Only an instruction to CHANGE it is this action.
@@ -1628,9 +1632,23 @@ def _open_artifact_block(
             # and a newline inside it could forge a section header here.
             clean = " ".join(raw.split())[:120]
             name = f' — "{clean}"' if clean else ""
-            lines.append(
-                f"Active tab: {kind} #{oid}{name} is open beside this chat."
-            )
+            # SAY WHICH IT IS. A document the reader has open and a document
+            # this thread produced are both referents an edit can act on, but
+            # they are not the same claim, and the prompt must not make the
+            # stronger one on the weaker evidence: "is open beside this chat"
+            # about a closed panel is a fact the model would reason from and
+            # the reader would not recognise. `origin` is set by whichever
+            # resolver found it (routes/chat.py).
+            if str(open_artifact.get("origin") or "").strip().lower() == "thread":
+                lines.append(
+                    f"In this chat: {kind} #{oid}{name} was produced in this "
+                    "conversation. It is not open on screen, but it is what "
+                    f'"that {kind}" / "the {kind}" refers to here.'
+                )
+            else:
+                lines.append(
+                    f"Active tab: {kind} #{oid}{name} is open beside this chat."
+                )
     return "\n".join(lines) + "\n\n" if lines else ""
 
 
