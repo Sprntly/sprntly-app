@@ -944,3 +944,54 @@ def test_a_run_with_nothing_superseded_says_nothing_about_it():
     notes = _coverage_notes(
         {"seen": 49, "retired": 0, "no_timestamp": 5, "projected": 44}, {})
     assert [n["reason"] for n in notes] == ["undated evidence"]
+
+# ── A tenant with nothing but calls ──────────────────────────────────────────
+
+def test_a_call_only_tenant_still_surfaces_its_blocked_deals():
+    """THE WHOLE POINT, end to end. A tenant with no analytics and no revenue —
+    only call recordings — asks about revenue. Three blocked deals, three named
+    accounts, weeks apart. Before `customer_voice` could witness a constraint,
+    this produced ZERO findings and three lines in the ruled-out ledger."""
+    # AUTHORITY IS DERIVED, not asserted. The `claim` helper defaults
+    # `authoritative=True`, so a fixture that takes the default never touches
+    # the registry — the first version of this test passed identically with
+    # `constraint` removed from `customer_voice`, which is the exact behaviour
+    # it is named for.
+    from app.crucible.claims import AUTHORITATIVE_FOR
+    auth = "constraint" in AUTHORITATIVE_FOR["customer_voice"]
+    claims = [
+        claim("b1", subject="deal blockers", ctype="constraint",
+              source="customer_voice", accounts=("Northwind",), days_ago=5,
+              authoritative=auth,
+              assertion="The rollout is blocked on their security review"),
+        claim("b2", subject="deal blockers", ctype="constraint",
+              source="customer_voice", accounts=("Vandelay Industries",),
+              days_ago=30, authoritative=auth,
+              assertion="They cannot sign until procurement approves the form"),
+        claim("b3", subject="deal blockers", ctype="constraint",
+              source="customer_voice", accounts=("Initech",), days_ago=60,
+              authoritative=auth,
+              assertion="Expansion is on hold pending their budget freeze"),
+    ]
+    doc = _document(claims)
+    assert doc.result.findings, (
+        "a call-only tenant got nothing back; blocked deals were ruled out"
+    )
+    assert "deal blockers" in doc.html
+    # Sized in accounts, because the accounts were named on the calls.
+    assert "3 accounts" in doc.html
+    # And the quote is the reader's own evidence, not our paraphrase.
+    assert "blocked on their security review" in doc.html
+
+
+def test_a_call_only_tenant_is_told_it_cannot_be_given_a_number():
+    """And the honesty half: with no numeric source connected, the run says so
+    up front and says what would close it."""
+    from app.crucible.plan import SourceInventory, derive_gaps_and_promises
+    calls_only = (SourceInventory("customer_voice", 40, "calls and customer "
+                                  "tickets", "what customers asked for"),)
+    gaps, produce = derive_gaps_and_promises(calls_only)
+    becauses = " ".join(g.because for g in gaps)
+    assert "nothing connected here carries numbers" in becauses
+    assert any("Amplitude" in g.remedy for g in gaps)
+    assert not any("connected and will be read" in p for p in produce)
