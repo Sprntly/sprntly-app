@@ -426,12 +426,30 @@ def test_the_signal_read_is_ordered_because_it_is_paged(ctx):
     """Postgres may return an unordered query in any order, so `range()` without
     `order()` can repeat one row across pages and drop another — the corpus
     would differ run to run and reproducibility is the whole claim."""
-    import inspect
+    # ASSERTED ON BEHAVIOUR, NOT ON SOURCE TEXT. This used to
+    # `inspect.getsource(_load_signals)` and grep for ".order(", which broke the
+    # moment the paging moved into a helper — while the ordering itself was
+    # untouched. A test that reads the source passes or fails on where the code
+    # lives rather than on what it does; the same shape let a ContentPanel test
+    # "cover" a component it never rendered.
+    from app.routes.crucible import _signal_page
 
-    import app.routes.crucible as mod
+    ordered = []
 
-    src = inspect.getsource(mod._load_signals)
-    assert '.order(' in src, "a paged read must be ordered"
+    class _Probe:
+        def select(self, *_a, **_k): return self
+        def eq(self, *_a, **_k): return self
+        def order(self, col, *_a, **_k):
+            ordered.append(col)
+            return self
+        def range(self, *_a, **_k): return self
+        def execute(self): return type("R", (), {"data": []})()
+
+    class _Client:
+        def table(self, _n): return _Probe()
+
+    _signal_page(_Client(), "co", 0)
+    assert ordered == ["id"], "a paged read must be ordered, and by the key"
 
 
 def test_the_ranking_survives_the_round_trip(ctx):
@@ -1680,3 +1698,75 @@ def test_the_convention_never_reaches_a_definition_on_its_own(ctx):
     for r in rows:
         assert "I will read" not in (r.get("definition_text") or ""), (
             "the convention leaked into a stored definition")
+
+# ── A slow page must not kill the run ────────────────────────────────────────
+
+class _FakePage:
+    """Stands in for the PostgREST builder chain, counting what was asked for."""
+    def __init__(self, outer, size, offset):
+        self.outer, self.size, self.offset = outer, size, offset
+    def select(self, *_a, **_k): return self
+    def eq(self, *_a, **_k): return self
+    def order(self, *_a, **_k): return self
+    def range(self, lo, hi):
+        self.offset, self.size = lo, hi - lo + 1
+        return self
+    def execute(self):
+        return self.outer._serve(self.offset, self.size)
+
+
+class _FakeClient:
+    def __init__(self, total, fail_sizes=()):
+        self.total, self.fail_sizes = total, set(fail_sizes)
+        self.asked = []
+    def table(self, _name): return _FakePage(self, 0, 0)
+    def _serve(self, offset, size):
+        self.asked.append((offset, size))
+        if size in self.fail_sizes:
+            raise RuntimeError("canceling statement due to statement timeout")
+        rows = [{"id": f"s{i:05d}"} for i in range(offset, min(offset + size, self.total))]
+        return type("R", (), {"data": rows})()
+
+
+def test_a_timed_out_page_is_retried_in_smaller_slices():
+    """MEASURED, NOT GUESSED: on a 3,364-signal staging tenant three runs went
+    ready, failed, failed — all Postgres 57014, "canceling statement due to
+    statement timeout". One slow page killed the whole run, and the reader got
+    "Something went wrong on our side partway through this run" for a corpus
+    that was merely large."""
+    from app.routes.crucible import _PAGE, _PAGE_RETRY, _signal_page
+    client = _FakeClient(total=10_000, fail_sizes={_PAGE})
+    rows = _signal_page(client, "co", 0)
+    assert len(rows) == _PAGE, "the page came back short after the retry"
+    assert {sz for _, sz in client.asked} == {_PAGE, _PAGE_RETRY}
+
+
+def test_the_retry_returns_exactly_the_page_it_was_asked_for():
+    """No gaps, no overlaps: the slices must reconstruct the page byte for
+    byte, or the run reads a different corpus than it thinks it did."""
+    from app.routes.crucible import _PAGE, _signal_page
+    direct = _signal_page(_FakeClient(total=10_000), "co", 2)
+    retried = _signal_page(_FakeClient(total=10_000, fail_sizes={_PAGE}), "co", 2)
+    assert [r["id"] for r in direct] == [r["id"] for r in retried]
+
+
+def test_a_page_that_fails_even_when_small_raises_rather_than_shrinking():
+    """IT MUST NOT SILENTLY SHRINK THE CORPUS. Swallowing this the way the
+    embedding loader does would hand back a partial book with nothing saying
+    so — the one thing every coverage note exists to prevent. A run that cannot
+    read its evidence has to fail loudly, not quietly read less."""
+    import pytest as _pytest
+    from app.routes.crucible import _PAGE, _PAGE_RETRY, _signal_page
+    client = _FakeClient(total=10_000, fail_sizes={_PAGE, _PAGE_RETRY})
+    with _pytest.raises(Exception):
+        _signal_page(client, "co", 0)
+
+
+def test_the_last_page_still_ends_the_outer_loop_after_a_retry():
+    """A short page is how `_load_signals` knows to stop. If the retry path
+    padded or repeated, the loader would spin or duplicate rows."""
+    from app.routes.crucible import _PAGE, _signal_page
+    client = _FakeClient(total=_PAGE + 30, fail_sizes={_PAGE})
+    rows = _signal_page(client, "co", 1)
+    assert len(rows) == 30
+    assert len(rows) < _PAGE
