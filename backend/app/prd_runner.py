@@ -1582,10 +1582,15 @@ def _ensure_impl_spec_locked(
     return {"llm_part": llm_part, "cached": False}
 
 
-def _top_insight_indices(insights: list, count: int) -> list[int]:
+def top_insight_indices(insights: list, count: int) -> list[int]:
     """Original indices of the `count` insights a user is likeliest to open:
     the LLM-flagged headline insight first, then by confidence descending —
-    the same hero-selection order the brief UI renders."""
+    the same hero-selection order the brief UI renders.
+
+    Public because the evidence warm in `app.brief_runner` picks its insights
+    the same way. Both warms are the same bet on the same click, so they must
+    agree on WHICH insight that click lands on — warming insight 0's PRD and
+    insight 2's evidence would leave every reader half-cold."""
     ranked = sorted(
         range(len(insights)),
         key=lambda i: (
@@ -1657,7 +1662,7 @@ async def warm_prds_for_brief(brief: dict) -> None:
     if not brief_id or not insights:
         return
 
-    indices = _top_insight_indices(insights, count)
+    indices = top_insight_indices(insights, count)
     started = time.perf_counter()
     await asyncio.gather(
         *(

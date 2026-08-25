@@ -213,3 +213,53 @@ def test_active_conversation_attachment_names_ownership_check(monkeypatch):
     finally:
         ask_runner.reset_active_conversation(tokens)
     assert names == []
+
+
+# ---- warm_brief_dynamic_asks scoping ---------------------------------------
+
+
+def _dynamic_prompts(brief, indices, monkeypatch) -> list[str]:
+    """Run warm_brief_dynamic_asks with _warm_one stubbed; return the prompts."""
+    seen: list[str] = []
+
+    async def fake_warm_one(dataset, prompt, sema):
+        seen.append(prompt)
+
+    monkeypatch.setattr(ask_runner, "_warm_one", fake_warm_one)
+
+    async def _drive():
+        ask_runner.warm_brief_dynamic_asks(
+            "acme", brief, asyncio.Semaphore(3), indices
+        )
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(_drive())
+    return seen
+
+
+_BRIEF = {"insights": [{"title": "A"}, {"title": "B"}, {"title": "C"}]}
+
+
+def test_dynamic_asks_limited_to_given_indices(monkeypatch):
+    """Only the insights the caller warmed evidence/PRDs for get an Ask."""
+    assert _dynamic_prompts(_BRIEF, [1], monkeypatch) == ["Tell me more about: B"]
+
+
+def test_dynamic_asks_none_means_every_insight(monkeypatch):
+    """The pre-cap behaviour is still reachable, for callers with no ranking."""
+    assert len(_dynamic_prompts(_BRIEF, None, monkeypatch)) == 3
+
+
+def test_dynamic_asks_ignores_out_of_range_indices(monkeypatch):
+    """A stale index must not raise out of the warm fan-out — warming is
+    best-effort, and an IndexError here would abort the whole pass."""
+    assert _dynamic_prompts(_BRIEF, [0, 99, -5], monkeypatch) == [
+        "Tell me more about: A"
+    ]
+
+
+def test_dynamic_asks_empty_indices_warms_nothing(monkeypatch):
+    """evidence_warm_count=0 must switch this off too, not fall through to all."""
+    assert _dynamic_prompts(_BRIEF, [], monkeypatch) == []

@@ -153,11 +153,31 @@ class Settings(BaseSettings):
     # DESIGN_AGENT_INVALIDATE_PROTOTYPES_ON_TEMPLATE_BUMP.
     design_agent_invalidate_prototypes_on_template_bump: bool = False
     # How many of a fresh brief's top insights get their PRD auto-generated
-    # after brief generation (hero first, then confidence). Default 3 = every
-    # insight in the brief (the brief surfaces MAX_INSIGHTS=3), so all three
-    # points get a PRD automatically. Warm calls run in the LLM gate's
-    # background lane so they never delay a user's click. 0 disables.
-    prd_warm_count: int = 3
+    # after brief generation (hero first, then confidence). Warm calls run in
+    # the LLM gate's background lane so they never delay a user's click.
+    # 0 disables.
+    #
+    # Was 3 (every insight the brief surfaces). Measured over the 30 days to
+    # 2026-08-24: 1,955 PRDs generated, of which 72 were ever ticketed, edited
+    # or re-saved, at ~$172/mo for Part A alone. Nothing logs a PRD being READ,
+    # so 72 is a floor on engagement rather than a count of readers — but the
+    # warm fires before anyone could have clicked, so the fan-out is speculative
+    # by construction. 1 keeps the instant first click on the HERO insight and
+    # stops paying for the tail. Raise via PRD_WARM_COUNT if the click-through
+    # on insights 2-3 ever justifies it.
+    prd_warm_count: int = 1
+    # Warm a brief's drill-downs only when the workspace has shown a sign of
+    # life within this many days (see app.warm_gate). Pre-generation is a bet
+    # that somebody clicks; a workspace nobody has opened in two weeks is a bet
+    # that keeps losing. 0 disables the gate (always warm, the old behaviour).
+    # Env-overridable via WARM_ACTIVE_WITHIN_DAYS.
+    warm_active_within_days: int = 14
+    # How many of a brief's insights get their evidence page pre-generated.
+    # Evidence warming used to be unbounded (every insight, no cap) while PRDs
+    # were capped at `prd_warm_count` — an asymmetry with no rationale behind
+    # it: both are the same bet on the same click. Capped here for the same
+    # reason and, by default, to the same depth. 0 disables.
+    evidence_warm_count: int = 1
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 

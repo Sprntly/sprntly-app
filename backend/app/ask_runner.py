@@ -2432,7 +2432,8 @@ def warm_predefined_asks(dataset: str, sema: asyncio.Semaphore) -> None:
 
 
 def warm_brief_dynamic_asks(
-    dataset: str, brief: dict, sema: asyncio.Semaphore
+    dataset: str, brief: dict, sema: asyncio.Semaphore,
+    insight_indices: list[int] | None = None,
 ) -> None:
     """Warm the per-insight Ask prompts that the BriefScreen fires when the
     user clicks "Ask Sprntly" on a finding card.
@@ -2440,10 +2441,21 @@ def warm_brief_dynamic_asks(
     Frontend pattern (web/app/lib/brief-adapter.ts):
         askQuestion: `Tell me more about: ${insight.title}`
 
-    For each insight in the brief, we precompute the same text and warm a
-    cache row so the click renders instantly.
+    For each insight in scope, we precompute the same text and warm a cache row
+    so the click renders instantly.
+
+    `insight_indices` limits the warm to those insights (the caller's
+    `settings.evidence_warm_count` ranking). None means every insight, which is
+    what this did unconditionally before — the evidence and PRD warms are both
+    capped, and warming an Ask for an insight whose evidence and PRD were judged
+    not worth pre-generating is the same speculation wearing a different hat.
     """
-    for insight in brief.get("insights") or []:
+    insights = brief.get("insights") or []
+    if insight_indices is not None:
+        chosen = [insights[i] for i in insight_indices if 0 <= i < len(insights)]
+    else:
+        chosen = insights
+    for insight in chosen:
         title = (insight or {}).get("title")
         if not title:
             continue

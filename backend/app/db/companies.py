@@ -651,3 +651,23 @@ def memberships_for_user(user_id: str) -> list[dict]:
     if rows:
         memberships_cache.set(user_id, rows)
     return rows
+
+
+@retry_on_disconnect
+def company_created_at(company_id: str) -> str | None:
+    """When this company was created, or None if it does not exist.
+
+    Read by `app.warm_gate` for the onboarding grace period: a workspace whose
+    first brief has just landed has no conversation history yet, and that is
+    the single worst moment to serve a slow first click.
+    """
+    rows = (
+        require_client().table("companies")
+        .select("created_at")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return (rows[0].get("created_at") if rows else None) or None

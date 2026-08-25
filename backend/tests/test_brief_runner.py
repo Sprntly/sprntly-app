@@ -2,8 +2,9 @@
 
 The legacy corpus→Claude brief path (auto_generate_brief / auto_generate_all)
 has been retired — synthesis is the only engine. brief_runner now provides
-status tracking + the drill-down warming fan-out (evidence + Asks; PRDs are
-on-demand). These tests pin that warming behaviour.
+status tracking + the drill-down warming fan-out (evidence, Asks and PRDs —
+all three warm from the same path). These tests pin that warming behaviour,
+including the activity gate that decides whether to warm at all.
 """
 from __future__ import annotations
 
@@ -109,9 +110,17 @@ def test_warm_drilldowns_does_not_create_any_prd_row(isolated_settings):
         assert db.find_existing_prd(brief_id, idx, variant="v1") is None
 
 
-def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypatch):
-    """generate_evidence IS called during warming; generate_prd is NEVER
-    imported/called from the warm path."""
+def test_warm_drilldowns_warms_top_evidence_in_background_lane(isolated_settings, monkeypatch):
+    """Evidence is warmed for the top `evidence_warm_count` insights, in the
+    background lane.
+
+    This test used to be called `..._but_not_prd` and asserted that
+    `generate_prd` was never reached from the warm path. That assertion had
+    been false since `warm_prds_for_brief` landed, and passed only because
+    `_warm_one_prd` swallows every exception — including the AssertionError the
+    test planted. The PRD side is covered properly in test_prd_prewarm.py; what
+    is pinned here is the evidence fan-out's depth and lane.
+    """
     br = _reload_brief_runner()
     db = isolated_settings["db"]
 
@@ -130,13 +139,17 @@ def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypat
 
     monkeypatch.setattr(br, "generate_evidence", fake_generate_evidence)
 
-    # If anything tries to warm a PRD via the runner, blow up loudly.
+    # PRDs warm on this path too. Stub the runner so this test exercises only
+    # the evidence fan-out (and so no PRD work escapes into the test run); a
+    # raise here would be swallowed by _warm_one_prd and prove nothing.
     import app.prd_runner as prd_runner
 
-    async def boom_generate_prd(*a, **k):  # pragma: no cover - must not run
-        raise AssertionError("generate_prd must NOT be called during warming")
+    prd_calls: list[tuple] = []
 
-    monkeypatch.setattr(prd_runner, "generate_prd", boom_generate_prd)
+    async def fake_warm_prds_for_brief(b):
+        prd_calls.append((b.get("id"),))
+
+    monkeypatch.setattr(br, "warm_prds_for_brief", fake_warm_prds_for_brief)
 
     async def _drive():
         br._warm_drilldowns(brief, dataset="acme")
@@ -146,8 +159,11 @@ def test_warm_drilldowns_warms_evidence_but_not_prd(isolated_settings, monkeypat
 
     asyncio.run(_drive())
 
-    # Evidence warmed for both insights; no PRD generation occurred.
-    assert len(ev_calls) == 2, "expected evidence warmed for every insight"
+    # Evidence warmed to the configured depth — the hero insight only by
+    # default, not every insight in the brief.
+    assert len(ev_calls) == br.settings.evidence_warm_count
+    assert [c[2] for c in ev_calls] == [0], "expected the top-ranked insight"
+    assert prd_calls, "the PRD warm still fans out from this path"
     # Warming is background-lane work: it must never queue a user's own
     # generation (tickets / PRD / evidence click) behind it on the LLM gate.
     assert all(c[3] is True for c in ev_calls), "warm storm must pass background=True"
@@ -180,7 +196,7 @@ def test_warm_drilldowns_warms_predefined_and_dynamic_asks(isolated_settings, mo
     )
     monkeypatch.setattr(
         br, "warm_brief_dynamic_asks",
-        lambda ds, b, sema: dynamic.append((ds, b, sema)),
+        lambda ds, b, sema, idx: dynamic.append((ds, b, sema, idx)),
     )
 
     async def _drive():
@@ -193,6 +209,10 @@ def test_warm_drilldowns_warms_predefined_and_dynamic_asks(isolated_settings, mo
 
     assert len(predefined) == 1 and predefined[0][0] == "acme", "predefined Ask warming must still fire"
     assert len(dynamic) == 1 and dynamic[0][0] == "acme", "dynamic Ask warming must still fire"
+    # The dynamic Ask warm is scoped to the same insights the evidence/PRD warms
+    # picked — warming an Ask for an insight whose evidence was judged not worth
+    # pre-generating would just move the speculation somewhere else.
+    assert dynamic[0][3] == [0], "dynamic Asks must be capped to the warmed insights"
     # Both warmers share ONE per-loop semaphore instance (per-loop accessor —
     # replaces the old module-level _WARM_SEMA that broke across asyncio.run loops).
     sema_pre = predefined[0][1]
@@ -301,3 +321,125 @@ def test_on_demand_prd_path_does_not_acquire_warm_sema():
         assert "_WARM_SEMA" not in src, (
             f"{mod.__name__} must not couple to the warm semaphore"
         )
+
+
+def test_idle_workspace_warms_nothing_at_all(isolated_settings, monkeypatch):
+    """The gate skips the WHOLE fan-out, not just part of it.
+
+    This is the change that stops the money: evidence, Ask and PRD warming all
+    hang off `_warm_drilldowns`, and all three are speculation on the same
+    click. Anything still firing here for an idle workspace is spend with no
+    reader, so this asserts three zeroes rather than trusting one.
+    """
+    br = _reload_brief_runner()
+    db = isolated_settings["db"]
+    db.insert_dataset("acme", "Acme")
+    db.save_brief(
+        "acme", "Test Week",
+        {"insights": [{"title": "A"}, {"title": "B"}]},
+        schema_version=BRIEF_SCHEMA_VERSION,
+    )
+    brief = db.get_current_brief("acme")
+
+    calls: list[str] = []
+
+    async def fake_generate_evidence(*a, **k):
+        calls.append("evidence")
+
+    async def fake_warm_prds_for_brief(*a, **k):
+        calls.append("prd")
+
+    monkeypatch.setattr(br, "generate_evidence", fake_generate_evidence)
+    monkeypatch.setattr(br, "warm_prds_for_brief", fake_warm_prds_for_brief)
+    monkeypatch.setattr(
+        br, "warm_predefined_asks", lambda *a, **k: calls.append("ask")
+    )
+    monkeypatch.setattr(
+        br, "warm_brief_dynamic_asks", lambda *a, **k: calls.append("ask_dynamic")
+    )
+    monkeypatch.setattr(br, "should_warm_drilldowns", lambda cid: False)
+
+    async def _drive():
+        br._warm_drilldowns(brief, dataset="acme")
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(_drive())
+
+    assert calls == [], f"idle workspace still warmed: {calls}"
+
+
+def test_active_workspace_still_warms_everything(isolated_settings, monkeypatch):
+    """The mirror of the test above — proves the gate is what makes the
+    difference, not a fixture that happens to warm nothing."""
+    br = _reload_brief_runner()
+    db = isolated_settings["db"]
+    db.insert_dataset("acme", "Acme")
+    db.save_brief(
+        "acme", "Test Week",
+        {"insights": [{"title": "A"}, {"title": "B"}]},
+        schema_version=BRIEF_SCHEMA_VERSION,
+    )
+    brief = db.get_current_brief("acme")
+
+    calls: list[str] = []
+
+    async def fake_generate_evidence(*a, **k):
+        calls.append("evidence")
+
+    async def fake_warm_prds_for_brief(*a, **k):
+        calls.append("prd")
+
+    monkeypatch.setattr(br, "generate_evidence", fake_generate_evidence)
+    monkeypatch.setattr(br, "warm_prds_for_brief", fake_warm_prds_for_brief)
+    monkeypatch.setattr(
+        br, "warm_predefined_asks", lambda *a, **k: calls.append("ask")
+    )
+    monkeypatch.setattr(
+        br, "warm_brief_dynamic_asks", lambda *a, **k: calls.append("ask_dynamic")
+    )
+    monkeypatch.setattr(br, "should_warm_drilldowns", lambda cid: True)
+
+    async def _drive():
+        br._warm_drilldowns(brief, dataset="acme")
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(_drive())
+
+    assert "evidence" in calls and "prd" in calls and "ask" in calls, calls
+
+
+def test_warm_gate_is_asked_about_the_resolved_company(isolated_settings, monkeypatch):
+    """Briefs are keyed by dataset SLUG; the gate judges a COMPANY. A regression
+    that passed the slug through would make every lookup miss and — because the
+    gate fails open on a miss — silently restore always-warm.
+    """
+    br = _reload_brief_runner()
+    db = isolated_settings["db"]
+    db.insert_dataset("acme", "Acme")
+    db.save_brief(
+        "acme", "Test Week", {"insights": [{"title": "A"}]},
+        schema_version=BRIEF_SCHEMA_VERSION,
+    )
+    brief = db.get_current_brief("acme")
+
+    monkeypatch.setattr(
+        "app.synthesis_brief.resolve_company", lambda slug: ("company-uuid", slug)
+    )
+    seen: list = []
+    monkeypatch.setattr(
+        br, "should_warm_drilldowns", lambda cid: (seen.append(cid), False)[1]
+    )
+
+    async def _drive():
+        br._warm_drilldowns(brief, dataset="acme")
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    asyncio.run(_drive())
+
+    assert seen == ["company-uuid"], f"gate asked about {seen}, not the company id"
