@@ -613,18 +613,86 @@ def test_the_report_says_findings_were_not_filtered_to_the_goal():
     assert "not selected for your goal" in html
 
 
+def test_largest_is_not_claimed_while_anything_went_unsized():
+    """"The largest thing this reading found" quantifies over EVERYTHING, and
+    an unsized finding is not a small one — its size is unknown, and an unknown
+    can be bigger. So the superlative is only earned when every row has a size;
+    otherwise the true sentence is the weaker one, about the sized ones."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "largest of the ones that could be sized" in html
+    # And it says HOW MANY it could not size, so "the largest known size" is
+    # something the reader can weigh rather than a hedge they have to trust.
+    assert "One of these could not be sized" in html
+
+
+def test_largest_is_still_claimed_when_everything_was_sized():
+    """The weaker sentence must not swallow the strong one: when every finding
+    has a size, "the largest thing this reading found" is exactly true and
+    saying less than that is its own kind of inaccuracy."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+    assert "largest of the ones that could be sized" not in html
+
+
+def test_the_definition_does_not_claim_to_have_selected_the_findings():
+    """The limits section says findings were NOT filtered or ranked by the
+    definition. This section used to say "everything below is measured against
+    that sentence and nothing else" — the same document asserting both, with
+    the false one three sections higher and in the more prominent position."""
+    html = render_report_html(_run(), [_finding()], plan=_full_plan())
+    assert "measured against that sentence" not in html
+    assert "did not decide which findings appear below" in html
+    # Both halves in one document, and they must not contradict.
+    assert "not selected for your goal" in html
+
+
+def test_the_overflow_line_does_not_invent_a_reach_ranking():
+    """The overflow paragraph called the remainder "ranked lower by reach"
+    unconditionally — directly under a lede that, on an all-unsized run, had
+    just said nothing here could be sized at all."""
+    findings = [
+        _finding(impact_value=None, claim_ids=[f"c{i}"]) for i in range(200)
+    ]
+    html = render_report_html(_run(), findings)
+    assert "The next" in html, "expected the overflow paragraph to render"
+    assert "rank lower by reach" not in html
+    assert "not by size, which nothing here had" in html
+
+
+def test_two_conflicts_are_not_described_as_ordered_regardless_of_size():
+    """The rule is "a conflict outranks everything that is not one", NOT "this
+    row is first regardless of size". With two conflicts `_rank` orders them
+    against EACH OTHER by size, so the row that surfaces is the largest
+    conflict and size did decide which — and the old wording told the reader
+    the ordering carried less information than it actually does."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=900, claim_ids=["c1"]),
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "regardless of size" not in html
+    assert "placed above every finding that is not one" in html
+
+
 def test_a_conflict_placed_first_is_not_called_the_largest_either():
     """`_rank`'s DOMINANT term is `0 if conflict else 1` — an authoritative
-    disagreement is placed first regardless of size. The first version of this
-    fix knew only about the size term, so a conflict-led run announced its top
-    row as the largest thing found with a bigger finding directly beneath it."""
+    disagreement outranks every finding that is not one. The first version of
+    this fix knew only about the size term, so a conflict-led run announced its
+    top row as the largest thing found with a bigger finding directly beneath
+    it."""
     html = render_report_html(_run(), [
         _finding(adjudication="conflict", impact_value=3, claim_ids=["c1"]),
         _finding(adjudication="corroborated", impact_value=900, claim_ids=["c2"]),
     ])
     assert "largest thing this reading found" not in html
     assert "placed first because two sources" in html
-    assert "regardless of size" in html
+    assert "placed above every finding that is not one" in html
 
 
 def test_an_unsized_top_above_sized_findings_does_not_deny_the_sizes():

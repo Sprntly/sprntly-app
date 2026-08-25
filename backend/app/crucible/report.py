@@ -157,10 +157,20 @@ def _definition_section(run: dict, plan: dict) -> str:
     if definition:
         out.append(_p("You confirmed this goal means, in your own words:"))
         out.append(f"<blockquote>{_esc(definition)}</blockquote>")
+        # WHAT THIS SENTENCE ACTUALLY GOVERNS. The previous text — "everything
+        # below is measured against that sentence and nothing else" — is the
+        # exact claim the limits section now denies: claim selection never sees
+        # the definition (`build_findings` takes a `goal_accounts` filter that
+        # production does not pass). Leaving it here would have put the
+        # falsehood three sections ABOVE its own correction, in the more
+        # prominent position, which is worse than never having written the
+        # disclosure.
         out.append(_p(
-            "Everything below is measured against that sentence and nothing "
-            "else. If it is not what you meant, the ranking will be wrong in a "
-            "way no amount of evidence can correct."
+            "This is the sentence the run was given to work from, and it is "
+            "recorded here so a decision can be defended against it. It did "
+            "not decide which findings appear below — nothing here was "
+            "filtered or ranked by it. If it is not what you meant, say so "
+            "before you rely on any of this."
         ))
     else:
         # STATED, NOT SKIPPED. A report with no recorded definition is a report
@@ -255,6 +265,7 @@ def _headline_section(findings: list[dict]) -> str:
     # Same rule as I3 one level up: I3 stops a missing SIZE rendering as zero,
     # this stops a missing ORDERING rendering as a ranking.
     anything_sized = any(f.get("impact_value") is not None for f in findings)
+    unsized = sum(1 for f in findings if f.get("impact_value") is None)
     top_is_conflict = (top.get("adjudication") or "") == "conflict"
     lead = (
         f", at {_esc(band)} confidence" if band else ""
@@ -265,19 +276,40 @@ def _headline_section(findings: list[dict]) -> str:
 
     if top_is_conflict:
         # Placed first BY RULE, so size never entered into it either way.
+        #
+        # NOT "first regardless of size": with two or more conflicts `_rank`
+        # orders them among THEMSELVES by size, so the one that surfaces here
+        # is the largest conflict and size did decide which. What is true in
+        # every case is the weaker, exact claim — a conflict outranks
+        # everything that is not one.
         tail = (
             "It is placed first because two sources that may both speak "
             "contradict each other" + lead
-            + ". That placement is a rule, not a measurement — it is first "
-              "regardless of size, so read it as the disagreement most worth "
-              "resolving rather than as the biggest thing here."
+            + ". That placement is a rule, not a measurement — a disagreement "
+              "is placed above every finding that is not one, so read it as "
+              "the disagreement most worth resolving rather than as the "
+              "biggest thing here."
         )
-    elif top.get("impact_value") is not None:
+    elif top.get("impact_value") is not None and not unsized:
         tail = (
             f"It is the largest thing this reading found: {_esc(_reach(top))}"
             + lead
             + ". Largest by how much of your book it touches — not by how much "
               "it would move the metric, which this reading cannot compute."
+        )
+    elif top.get("impact_value") is not None:
+        # SIZED, BUT NOT AGAINST EVERYTHING. Unsized findings sort last, so
+        # this row is the largest of those that HAVE a size — which is not the
+        # same sentence as "the largest thing this reading found", and the
+        # difference is the whole of I3. An unsized finding is not a small one;
+        # it is one whose size is unknown, and an unknown can be bigger.
+        tail = (
+            "It is the largest of the ones that could be sized: "
+            f"{_esc(_reach(top))}" + lead
+            + ". " + ("One of these" if unsized == 1 else f"{unsized} of these")
+            + " could not be sized at all, and a missing size is not a small "
+              "one — so this is the largest known size, not necessarily the "
+              "largest thing here."
         )
     elif anything_sized:
         # Unsized itself, but sized findings exist below it — so the order is a
@@ -510,19 +542,34 @@ def _findings_section(
     # THE HEADING HAS TO AGREE WITH THE HEADLINE. Fixing only the summary left
     # one document reading "not ordered by size at all" and, two lines later,
     # "Ranked by reach" — a fix that stopped at its own boundary.
-    if any(f.get("impact_value") is not None for f in findings):
+    #
+    # Computed ONCE and read by both the lede and the overflow paragraph below,
+    # because those two are the pair that drifted: the overflow line called the
+    # remainder "ranked lower by reach" while the lede three paragraphs up had
+    # just said nothing here had a reach at all.
+    anything_sized = any(f.get("impact_value") is not None for f in findings)
+    unsized = sum(1 for f in findings if f.get("impact_value") is None)
+    if anything_sized:
         out.append(_p(
-            "Ranked by reach — how many accounts each theme touches. An "
-            "authoritative disagreement is placed first regardless of size, "
-            "because two sources that may both speak contradicting each other "
-            "is worth more than either of them alone."
+            "Ranked by reach — how many accounts each theme touches"
+            + (
+                f", and {'one' if unsized == 1 else str(unsized)} of them could "
+                f"not be sized at all. An unsized theme sorts last without "
+                f"being small: its size is unknown, not zero"
+                if unsized else ""
+            )
+            + ". An authoritative disagreement is placed above everything that "
+              "is not one, because two sources that may both speak "
+              "contradicting each other is worth more than either of them "
+              "alone."
         ))
     else:
         out.append(_p(
             "Not ranked by reach: nothing here could be sized, so these are "
             "ordered by confidence. An authoritative disagreement is still "
-            "placed first regardless, because two sources that may both speak "
-            "contradicting each other is worth more than either of them alone."
+            "placed above everything that is not one, because two sources that "
+            "may both speak contradicting each other is worth more than either "
+            "of them alone."
         ))
 
     full = findings[:full_cap]
@@ -541,9 +588,13 @@ def _findings_section(
         # paragraphs, on the very run cited as evidence that it was fine.
         out.append(_p(
             f"The next {len(listed)} findings are listed below in rank order "
-            f"rather than in full. They are ranked lower by reach and the "
-            f"document has a size limit; every one of them is still on the "
-            f"run itself."
+            f"rather than in full, because the document has a size limit"
+            + (
+                " and they rank lower by reach" if anything_sized
+                else " — they rank lower by confidence, not by size, which "
+                     "nothing here had"
+            )
+            + ". Every one of them is still on the run itself."
         ))
         rows = []
         for offset, f in enumerate(listed, start=len(full) + 1):

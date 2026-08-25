@@ -169,6 +169,27 @@ export function GoalAnalysisReport({
   const plan: GoalRunPlan | undefined = run.prioritisation?.plan
   const findings = run.findings ?? []
   const headline = findings[0]
+  // THE PANEL IS A SECOND RENDERER OF THE SAME REPORT, and it is the one a
+  // reader actually looks at — `report.py` renders the exported/editable
+  // document, this renders the right panel. Fixing only the server left the
+  // panel printing "It is the largest thing this reading found: Could not be
+  // sized", which is both halves of the same sentence contradicting each
+  // other. Every honesty rule in `_headline_section` therefore has to exist
+  // here too, keyed on the same two facts.
+  const unsized = findings.filter((f) => f.impact_value == null).length
+  const anythingSized = unsized < findings.length
+  const topIsConflict = headline?.adjudication === "conflict"
+  // Confidence and claim count read the same in every branch, so they are
+  // built once rather than repeated four times and drifting.
+  const lead = `${
+    headline?.confidence_band ? `, at ${headline.confidence_band} confidence` : ""
+  }${
+    headline?.claim_ids?.length
+      ? `, resting on ${headline.claim_ids.length} claim${
+          headline.claim_ids.length === 1 ? "" : "s"
+        }`
+      : ""
+  }`
   const definition =
     plan?.definition_text || run.prioritisation?.proposed_definition || ""
   const excluded = plan?.excluded_sources ?? []
@@ -222,10 +243,17 @@ export function GoalAnalysisReport({
               You confirmed this goal means, in your own words:
             </p>
             <blockquote className="ga-doc-quote">{definition}</blockquote>
-            <p className="ga-doc-note">
-              Everything below is measured against that sentence and nothing
-              else. If it is not what you meant, the ranking will be wrong in a
-              way no amount of evidence can correct.
+            {/* WHAT THIS SENTENCE ACTUALLY GOVERNS. "Everything below is
+                measured against that sentence and nothing else" is the exact
+                claim the closing section denies — claim selection never sees
+                the definition. Leaving it put the falsehood five sections
+                above its own correction, in the more prominent position. */}
+            <p className="ga-doc-note" data-testid="goal-definition-note">
+              This is the sentence the run was given to work from, and it is
+              recorded here so a decision can be defended against it. It did not
+              decide which findings appear below — nothing here was filtered or
+              ranked by it. If it is not what you meant, say so before you rely
+              on any of this.
             </p>
           </>
         ) : (
@@ -301,19 +329,46 @@ export function GoalAnalysisReport({
         {headline ? (
           <>
             <p className="ga-doc-headline">{headline.statement}</p>
-            <p className="ga-doc-note">
-              It is the largest thing this reading found:{" "}
-              <Sized f={headline} idPrefix="goal-headline" />
-              {headline.confidence_band
-                ? `, at ${headline.confidence_band} confidence`
-                : ""}
-              {headline.claim_ids?.length
-                ? `, resting on ${headline.claim_ids.length} claim${
-                    headline.claim_ids.length === 1 ? "" : "s"
-                  }`
-                : ""}
-              . Largest by how much of your book it touches — not by how much it
-              would move the metric, which this reading cannot compute.
+            <p className="ga-doc-note" data-testid="goal-headline-note">
+              {topIsConflict ? (
+                <>
+                  It is placed first because two sources that may both speak
+                  contradict each other{lead}. That placement is a rule, not a
+                  measurement — a disagreement is placed above every finding
+                  that is not one, so read it as the disagreement most worth
+                  resolving rather than as the biggest thing here.
+                </>
+              ) : headline.impact_value != null && unsized === 0 ? (
+                <>
+                  It is the largest thing this reading found:{" "}
+                  <Sized f={headline} idPrefix="goal-headline" />
+                  {lead}. Largest by how much of your book it touches — not by
+                  how much it would move the metric, which this reading cannot
+                  compute.
+                </>
+              ) : headline.impact_value != null ? (
+                <>
+                  It is the largest of the ones that could be sized:{" "}
+                  <Sized f={headline} idPrefix="goal-headline" />
+                  {lead}.{" "}
+                  {unsized === 1 ? "One of these" : `${unsized} of these`} could
+                  not be sized at all, and a missing size is not a small one —
+                  so this is the largest known size, not necessarily the largest
+                  thing here.
+                </>
+              ) : anythingSized ? (
+                <>
+                  It is listed first{lead}. It could not be sized, though others
+                  below it could — a missing size is not a small one, so do not
+                  read its position as a measurement of it.
+                </>
+              ) : (
+                <>
+                  It is listed first{lead}. Nothing in this reading could be
+                  sized, so these are ordered by confidence rather than by size
+                  — the order says how sure each one is, not how big.
+                </>
+              )}
             </p>
           </>
         ) : (
@@ -331,11 +386,35 @@ export function GoalAnalysisReport({
           <h2 className="ga-doc-h2">
             What the evidence says ({findings.length})
           </h2>
-          <p className="ga-doc-lede">
-            Ranked by reach — how many accounts each theme touches. An
-            authoritative disagreement is placed first regardless of size,
-            because two sources that may both speak contradicting each other is
-            worth more than either of them alone.
+          <p className="ga-doc-lede" data-testid="goal-findings-lede">
+            {anythingSized ? (
+              unsized ? (
+                <>
+                  Ranked by reach — how many accounts each theme touches, and{" "}
+                  {unsized === 1 ? "one" : unsized} of them could not be sized at
+                  all. An unsized theme sorts last without being small: its size
+                  is unknown, not zero. An authoritative disagreement is placed
+                  above everything that is not one, because two sources that may
+                  both speak contradicting each other is worth more than either
+                  of them alone.
+                </>
+              ) : (
+                <>
+                  Ranked by reach — how many accounts each theme touches. An
+                  authoritative disagreement is placed above everything that is
+                  not one, because two sources that may both speak contradicting
+                  each other is worth more than either of them alone.
+                </>
+              )
+            ) : (
+              <>
+                Not ranked by reach: nothing here could be sized, so these are
+                ordered by confidence. An authoritative disagreement is still
+                placed above everything that is not one, because two sources
+                that may both speak contradicting each other is worth more than
+                either of them alone.
+              </>
+            )}
           </p>
           <ol className="ga-doc-findings">
             {findings.map((f, i) => (
@@ -406,6 +485,20 @@ export function GoalAnalysisReport({
           effort figure, a prioritisation score or a significance test, because
           nothing it read carries the numbers those need. Where you expected one
           of those, this is why it is absent.
+        </p>
+        {/* WHICH FINDINGS APPEAR IS NOT DECIDED BY THE GOAL, and nothing on
+            screen tells the reader that. The definition gate establishes what
+            the goal means with some care and then claim selection never sees
+            it, so a run about enterprise churn returns export reliability
+            alongside anything that does bear on churn, with nothing marking
+            which is which. Stated, because the alternative is a panel that
+            LOOKS like it answered the question it was asked. */}
+        <p className="ga-doc-note" data-testid="goal-not-selected">
+          <strong>These findings were not selected for your goal.</strong>{" "}
+          Nothing here was filtered or ranked by relevance to your definition —
+          a theme appears because it is in the evidence you approved, not
+          because it bears on what you asked about. Its presence is not a claim
+          that it matters to this goal; judge that yourself.
         </p>
         {gaps.length ? (
           <ul className="ga-doc-gaps">
