@@ -189,7 +189,13 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     routing-accuracy query over the pair measures nothing. `edit_artifact`
 #     landed in #1316 without a bump and `analyse_goal` in #1321 without one
 #     either; both are covered by this bump rather than left uncounted.
-_PROMPT_VERSION = "ask-planner-v12"
+#   v13: the where/what line inside `list_artifacts`. "Where on Sprntly do I
+#     find my created PRDs" is a request to be shown around the app, and it
+#     used to compete with the library listing; the answer path now holds the
+#     product's screen map (app/app_map.py), so a v13 row sends those to
+#     `answer` where a v12 row could reasonably have listed. Same menu, but a
+#     different question is being asked of it, so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v13"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -887,6 +893,13 @@ or wants an answer.
   a knowledge question sweeps connected sources for a tally no source keeps.
   `list_mode` is "items" for everything else. No task, no instruction, no
   sources, no pipeline.
+  WHAT, NOT WHERE. "What are my PRDs" is this action; "WHERE on Sprntly do I
+  find my PRDs", "where do I upload a template", "how do I connect Jira",
+  "where do I change my password" are asking to be shown around the app, and
+  those are plain `answer` — the answer path holds the map of this product's
+  screens and their links, and hands back the one they need. A question that
+  wants both ("where are my PRDs — show me the last three") is the LIST: the
+  items are clickable and land them there anyway.
 - share_to_slack — post a document the user ALREADY HAS into their Slack:
   "share this PRD on my slack channel and ask the team for feedback", "send
   the checkout tickets to #product", "post the weekly brief in slack", "share

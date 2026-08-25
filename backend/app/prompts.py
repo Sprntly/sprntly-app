@@ -1,5 +1,9 @@
 """Prompts for the three LLM tasks. Edit here, redeploy, regenerate."""
 
+# The product's own screen map (app/app_map.py), appended to ASK_SYSTEM below.
+# A plain data module with no imports of its own — no cycle, nothing to fail.
+from app.app_map import NAV_ADDENDUM
+
 # Bumped whenever the BRIEF prompt's expected output changes meaningfully.
 # Stamped into every saved brief; on startup, cached briefs with a different
 # version are invalidated so the auto-generator re-runs them under the
@@ -431,7 +435,7 @@ include the separator row right under the header (`| --- | --- | ... |`).
 
 Always include a `citations` array in the JSON, in addition to inline \
 attribution in the answer markdown. Return STRICT JSON only — no prose \
-outside the JSON, no markdown fences around the JSON itself.""" + VOICE_GUARD
+outside the JSON, no markdown fences around the JSON itself.""" + VOICE_GUARD + NAV_ADDENDUM
 
 
 ASK_USER_TEMPLATE = """\

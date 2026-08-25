@@ -1,6 +1,7 @@
 "use client"
 
 import { isValidElement, type ReactNode } from "react"
+import Link from "next/link"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
@@ -44,6 +45,28 @@ const REPORT_TITLES: Record<string, string> = {
 }
 
 const askMarkdownComponents: Components = {
+  // An answer that says where something lives in Sprntly links to it —
+  // [Artifacts](/artifacts), [Settings -> Connectors](/settings?section=connectors)
+  // — and the whole point of the link is that clicking it lands you there
+  // (see backend/app/app_map.py). An in-app path goes through next/link so it
+  // is a client-side nav rather than a full reload of the SPA the reader is
+  // already sitting in, and so it keeps working if the app is ever hosted
+  // under a base path. Anything else — an http(s) link to a customer's Jira
+  // issue or Confluence page — keeps the plain anchor it has always had.
+  a({ node, href, children, ...rest }) {
+    if (typeof href === "string" && href.startsWith("/") && !href.startsWith("//")) {
+      return (
+        <Link href={href} {...rest}>
+          {children}
+        </Link>
+      )
+    }
+    return (
+      <a href={href} {...rest}>
+        {children}
+      </a>
+    )
+  },
   // Fenced ```chart blocks render as inline SVG infographics. Other fenced
   // blocks fall through to the default <code><pre> rendering.
   code({ className, children, ...rest }) {

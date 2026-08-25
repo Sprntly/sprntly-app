@@ -180,3 +180,32 @@ describe("AskReplyBody — a report answer", () => {
     expect(container.textContent).toContain("Invite-flow friction")
   })
 })
+
+// A navigation answer ("your PRDs are in Artifacts") is only an answer if the
+// link it carries is clickable — see backend/app/app_map.py, which is what
+// teaches the model these paths. An in-app path routes through next/link (a
+// client-side nav, and base-path aware); an external URL keeps the plain
+// anchor it has always had.
+describe("AskReplyBody links", () => {
+  const linked = (answer: string) =>
+    render(<AskReplyBody reply={{ ...REPLY, answer }} />).container
+
+  it("renders an in-app path as a real, navigable link", () => {
+    const a = linked("Your PRDs are in [Artifacts](/artifacts).").querySelector("a")
+    expect(a?.getAttribute("href")).toBe("/artifacts")
+    expect(a?.textContent).toBe("Artifacts")
+  })
+
+  it("keeps the query param on a settings deep link", () => {
+    const a = linked(
+      "Connect it in [Settings -> Connectors](/settings?section=connectors).",
+    ).querySelector("a")
+    expect(a?.getAttribute("href")).toBe("/settings?section=connectors")
+  })
+
+  it("leaves an external link as a plain anchor", () => {
+    const a = linked("See [the issue](https://acme.atlassian.net/browse/AB-12).")
+      .querySelector("a")
+    expect(a?.getAttribute("href")).toBe("https://acme.atlassian.net/browse/AB-12")
+  })
+})
