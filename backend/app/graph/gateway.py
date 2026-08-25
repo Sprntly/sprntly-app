@@ -54,19 +54,42 @@ def _is_long_output(skill: Optional[str]) -> bool:
 # Skills whose METHOD block is worth caching at the 1-hour tier rather than the
 # 5-minute default. The tiers are priced differently on the WRITE (1.25x input
 # for 5m, 2x for 1h) and identically on the read (0.1x), so 1h wins only when
-# entries survive long enough to be read — roughly a >55% within-the-hour
-# hit rate. It is not a strictly-better setting to apply everywhere.
+# entries survive long enough to be read. Break-even is a read/write ratio of
+# 0.28 at the 5m tier and 1.11 at 1h. It is not a strictly-better setting.
 #
-# `top-insights` is the measured case. Its cacheable prefix is the method block
-# alone (the caller passes no prefix of its own) and the block is byte-stable
-# across tenants, so one entry serves every company. Over 21 days of production
-# calls, only 14.8% landed within 5 minutes of the previous one — but 86.3%
-# landed within an hour, and the resulting ~0.16 read/write ratio meant the
-# 32.5k-token block was re-written on nearly every call and almost never read
-# back. Before adding a skill here, measure its own gap distribution rather
-# than assuming; a skill whose prefix carries per-company content has to be
-# measured per company, not system-wide.
-_LONG_CACHE_SKILLS = frozenset({"top-insights"})
+# EMPTY, deliberately. `top-insights` lived here and was removed on 2026-08-25
+# because the tier was billing 2x and delivering 5-minute behaviour.
+#
+# The measurement that put it here was sound and still reproduces: over 617
+# platform-key calls in the 30 days to 2026-08-24, 13.5% landed within 5 minutes
+# of the previous call and 83.0% within an hour (the original study said 14.8%
+# and 86.3%). What that study could not see is whether the 1-hour entries
+# actually survive. They do not. Hit rate against the gap since the previous
+# call FINISHED:
+#
+#     <5 min      67%
+#     5-15 min    11%     <- the cliff sits on the 5-minute boundary
+#     15-60 min    7%
+#
+# 69.5% of calls arrive in the 5-60 minute band — precisely the window the
+# 1-hour tier was bought for, and precisely where it does not pay out. The
+# result was a 0.20 read/write ratio against a 1.11 break-even: $242/month of
+# cache writes returning $2 of reads, 62% of the single most expensive
+# operation in the product.
+#
+# Ruled out first, so nobody re-derives them: the prefix is stable
+# (`_BRIEF_SCHEMA` and `_SYSTEM` are module constants, and the method block is
+# byte-identical across tenants); concurrency is not the cause (only 5% of calls
+# start while another is still running, and the median burst is a single call);
+# and `ttl: "1h"` needs no beta header. The 2x write IS being billed — metered
+# spend matches the 1h rate to 0.6%, and does not match the 5m rate at all.
+#
+# So this is not "1h is the wrong tier for top-insights"; it is "1h did not
+# behave as documented for this prefix". Worth re-testing with a controlled
+# experiment before anything is added back. Until then, if you are considering
+# putting a skill here: measure its OWN hit rate against gap-since-previous-call
+# — not just its gap distribution, which is what led us here.
+_LONG_CACHE_SKILLS: frozenset[str] = frozenset()
 
 
 def _cache_ttl_for(skill: Optional[str]) -> Optional[str]:

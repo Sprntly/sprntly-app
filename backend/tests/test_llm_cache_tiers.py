@@ -13,6 +13,8 @@ Three behaviours are pinned here, each of which was a real defect:
 """
 from __future__ import annotations
 
+from unittest import mock
+
 import pytest
 
 from app import llm
@@ -158,13 +160,34 @@ def test_uncached_user_turn_never_gets_a_breakpoint():
 # ─── Which skills earn the 1-hour tier ──────────────────────────────────────
 
 
-def test_top_insights_is_the_long_cache_skill():
-    """1h is not strictly better — it doubles the write. top-insights earns it
-    on measured gaps (14.8% of calls within 5 minutes, 86.3% within an hour);
-    everything else stays on the 5-minute default until measured."""
-    assert gateway._cache_ttl_for("top-insights") == CACHE_TTL_1H
+def test_no_skill_is_on_the_one_hour_tier():
+    """Every skill sits on the 5-minute default, top-insights included.
+
+    It used to be the one exception, on the strength of its gap distribution
+    (86.3% of calls within an hour). That distribution still reproduces — but
+    the 1-hour entries did not survive the hour: measured hit rate was 67% under
+    a 5-minute gap and 11% between 5 and 15 minutes, a cliff exactly on the
+    5-minute boundary, while 69.5% of calls arrive in the 5-60 minute band. The
+    tier billed 2x and behaved like 5m. See gateway._LONG_CACHE_SKILLS for what
+    was ruled out before removing it.
+
+    A gap distribution is NOT sufficient evidence for this tier — hit rate
+    against gap-since-previous-call is. Anything added back needs the latter.
+    """
+    assert gateway._LONG_CACHE_SKILLS == frozenset()
+    assert gateway._cache_ttl_for("top-insights") is None
     assert gateway._cache_ttl_for("prd-author") is None
     assert gateway._cache_ttl_for(None) is None
+
+
+def test_the_one_hour_tier_still_works_if_a_skill_is_added_back():
+    """Emptying the set must not quietly break the mechanism — the plumbing is
+    still exercised so a future re-add gets a working 1h tier, not a silent
+    no-op."""
+    tier = frozenset({"some-skill"})
+    with mock.patch.object(gateway, "_LONG_CACHE_SKILLS", tier):
+        assert gateway._cache_ttl_for("some-skill") == CACHE_TTL_1H
+        assert gateway._cache_ttl_for("other-skill") is None
 
 
 # ─── Metering reads the tier off the request ────────────────────────────────
