@@ -59,6 +59,11 @@ vi.mock("../../../connectors/SlackChannelPicker", () => ({
 }))
 
 import { PersonalizeStep } from "../PersonalizeStep"
+import {
+  DEFAULT_INSIGHT_TYPES,
+  INSIGHT_TYPE_SLUGS,
+  insightTypeLabel,
+} from "../../../../lib/insight-types"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 /** A live Analytics connection — what keeps the define-metrics hand-off alive. */
@@ -135,6 +140,96 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     ])
     // The free-text override is gone with them.
     expect(container.querySelector("textarea")).toBeNull()
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
+  it("seeds the SAME default as Settings when nobody has picked yet", async () => {
+    // Paired with the matching assertion in NotificationsSettings.dom.test.
+    // Both screens write notification_settings.brief_insight_types, so they
+    // must open in one state; they used to disagree (two chips here, none
+    // there) and [] means "surface everything", so the two seeds were opposite.
+    analyticsConnected()
+    const { container } = mount()
+    const pressed = Array.from(
+      container.querySelectorAll('[data-field="surfaces"] button'),
+    )
+      .filter((b) => b.getAttribute("aria-pressed") === "true")
+      .map((b) => (b.textContent ?? "").trim())
+    expect(pressed).toEqual(DEFAULT_INSIGHT_TYPES.map(insightTypeLabel))
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
+  it("shows a legacy stored [] as EVERY type, never as an empty picker", async () => {
+    // [] was how "surface everything" used to be written. It still means that,
+    // so it renders as every chip on — the preference is never shown cleared.
+    // No backfill needed for rows already holding [].
+    analyticsConnected()
+    const { container } = mount(
+      makeWorkspace({ onboarding_step: 9, notification_settings: { brief_insight_types: [] } }),
+    )
+    await waitFor(() => {
+      const pressed = Array.from(
+        container.querySelectorAll('[data-field="surfaces"] button'),
+      ).filter((b) => b.getAttribute("aria-pressed") === "true")
+      expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
+    })
+  })
+
+  it("turning off the LAST chip re-arms every type instead of emptying", async () => {
+    // Clearing is a request to stop filtering, not for an empty brief. The
+    // picker refills, and Continue writes the full set — never [].
+    analyticsConnected()
+    mount(
+      makeWorkspace({
+        onboarding_step: 9,
+        notification_settings: { brief_insight_types: ["competitor_moves"] },
+      }),
+    )
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+    await waitFor(() =>
+      expect(chip("Competitor & market moves").getAttribute("aria-pressed")).toBe("true"),
+    )
+
+    fireEvent.click(chip("Competitor & market moves")) // the only one on
+
+    const pressed = Array.from(
+      document.querySelectorAll('[data-field="surfaces"] button'),
+    ).filter((b) => b.getAttribute("aria-pressed") === "true")
+    expect(pressed).toHaveLength(INSIGHT_TYPE_SLUGS.length)
+
+    await act(async () => {
+      continueBtn().click()
+    })
+    const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
+    expect(ns.brief_insight_types).toEqual([...INSIGHT_TYPE_SLUGS])
+  })
+
+  it("shows a selection saved in Settings, not the default", async () => {
+    analyticsConnected()
+    const { container } = mount(
+      makeWorkspace({
+        onboarding_step: 9,
+        notification_settings: { brief_insight_types: ["competitor_moves"] },
+      }),
+    )
+    await waitFor(() => {
+      const pressed = Array.from(
+        container.querySelectorAll('[data-field="surfaces"] button'),
+      )
+        .filter((b) => b.getAttribute("aria-pressed") === "true")
+        .map((b) => (b.textContent ?? "").trim())
+      expect(pressed).toEqual(["Competitor & market moves"])
+    })
+  })
+
+  it("states the clear-for-everything rule in the same words as Settings", async () => {
+    // Onboarding and Settings → Comms & Brief write the SAME key
+    // (notification_settings.brief_insight_types), so they must present the
+    // same rule. The copy says what actually happens now: clearing every chip
+    // means everything, and the picker refills rather than sitting empty.
+    analyticsConnected()
+    const { container } = mount()
+    expect(container.textContent).toContain("pick any; clear them all for everything")
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 

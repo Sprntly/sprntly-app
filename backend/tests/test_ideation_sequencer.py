@@ -1208,7 +1208,7 @@ def test_reader_preferences_reach_ideation_prioritization(
     _seed_company(db, "ent-A")
     db.table("companies").update({
         "notification_settings": {
-            "brief_insight_types": ["reliability_signals"],
+            "brief_insight_types": ["competitor_moves"],
             "brief_insight_note": "Latency above all",
         }
     }).eq("id", "ent-A").execute()
@@ -1226,5 +1226,5 @@ def test_reader_preferences_reach_ideation_prioritization(
         idn.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
 
     assert "READER PREFERENCES" in captured["input"]
-    assert "Reliability & incident signals" in captured["input"]
+    assert "Competitor & market moves" in captured["input"]
     assert "Latency above all" in captured["input"]

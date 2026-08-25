@@ -36,7 +36,10 @@ from app.synthesis.convergence import (
 from app.synthesis.ideation import sequence_ideation
 from app.synthesis.delivery import deliver_brief
 from app.synthesis.dedup import classify_candidates
-from app.synthesis.reader_prefs import reader_preferences_block
+from app.synthesis.reader_prefs import (
+    reader_preferences_block,
+    selected_insight_types,
+)
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 from app.brief_sources import allowed_source_types, display_source_types
 from app.synthesis.top_insights_skill import (
@@ -47,6 +50,7 @@ from app.synthesis.top_insights_skill import (
 from app.insight_types import (
     INSIGHT_TYPE_SLUGS,
     clean_insight_types,
+    order_pool_for_types,
     prompt_block as insight_types_prompt_block,
 )
 
@@ -695,6 +699,26 @@ def run_synthesis(
     # specific filter and only shows in the unfiltered/default view.
     for ins in pool:
         ins["insight_types"] = clean_insight_types(ins.get("insight_types"))
+    # PREFERENCE ORDER (deterministic). The workspace's onboarding / Settings →
+    # Comms & Brief selection has steered the compose prompt above, but a prompt
+    # nudge cannot guarantee the LEAD finding matches it. Stable-partition the
+    # classified pool so preferred findings lead in their existing best-first
+    # order — which makes `insights[0]` below a preferred finding whenever the
+    # pool holds one, for EVERY consumer of the canonical brief (the weekly
+    # email, the Slack post, brief nudges, PRD warming, the KG ledger, MCP), not
+    # just the browser. Reorder-only: nothing is dropped, and no selection / no
+    # match leaves the model's own ranking untouched.
+    pref_types = selected_insight_types(enterprise_id)
+    pool, pref_matches = order_pool_for_types(pool, pref_types)
+    if pref_matches and pool:
+        # Re-point the model's `is_headline` at the new lead. The flag means
+        # "the hero finding" to every consumer that reads it — the brief v2
+        # render, workspace-brief's headline pick, prd_runner's ordering — so
+        # leaving it on a now-demoted card would put those surfaces back out of
+        # step with the preference the reorder just applied. Only rewritten when
+        # a preference actually steered; otherwise the model's own pick stands.
+        for i, ins in enumerate(pool):
+            ins["is_headline"] = (i == 0)
     insights = pool[:MAX_INSIGHTS]
 
     # GUARD: we passed the evidence gate and had ranked candidates, so an empty
@@ -760,6 +784,10 @@ def run_synthesis(
             ],
             "goal_factor_enabled": goal_enabled,
             "goal_weight": goal_weight,
+            # The reader's stated selection and how much of the pool it moved
+            # — the ranking decision isn't fully explained without it.
+            "reader_insight_types": pref_types,
+            "reader_insight_matches": pref_matches,
             # Pin the gateway's RETURNED prompt_version (carries the
             # `+prioritize@<hash>` skill suffix), not the bare module constant —
             # otherwise the bound method version is lost from the §4d audit row.
@@ -797,6 +825,16 @@ def run_synthesis(
             {k: v for k, v in ins.items() if k not in ("reasoning",)}
             for ins in pool
         ],
+        # Preference audit — "why is this my top insight". `selected` is the
+        # workspace's stored insight types at generation time and `matched` how
+        # many pooled findings carried one, so a brief that led with an
+        # unpreferred finding is legible as "nothing matched this week" rather
+        # than looking like the selection was ignored. Absent on briefs
+        # generated before the deterministic reorder.
+        "_insight_prefs": {
+            "selected": pref_types,
+            "matched": pref_matches,
+        },
         "_generated_by": "synthesis_agent",
         "_schema_version": BRIEF_SCHEMA_VERSION,
         # The top-insights skill's native output, persisted ADDITIVELY alongside
