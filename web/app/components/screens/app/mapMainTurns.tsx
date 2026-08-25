@@ -310,7 +310,8 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       },
       onApproveGoalPlan: (decision: PlanDecision) => {
         if (activeTab && turn.goalGate?.kind === "plan") {
-          approveGoalPlan?.(activeTab.id, turn.id, turn.goalGate.runId, decision)
+          approveGoalPlan?.(activeTab.id, turn.id, turn.goalGate.runId, decision,
+            turn.goalGate.plan)
         }
       },
       clarify: turn.clarify,

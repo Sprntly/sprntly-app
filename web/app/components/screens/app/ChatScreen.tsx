@@ -27,7 +27,9 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import type { GoalGate, GoalGateResolved } from "../../shared/GoalGateCard"
+import type {
+  GoalGate, GoalGateResolved, SettledPlan,
+} from "../../shared/GoalGateCard"
 import type { PlanDecision } from "../../shared/GoalAnalysisPlan"
 import { type PopupAnswer } from "../../shared/QuestionPopup"
 import {
@@ -5068,7 +5070,8 @@ export function ChatScreen() {
   // Gate 2 → the run. Only here does anything get read, and only here does the
   // panel earn its place: what follows is a document.
   const approveGoalPlan = useCallback(
-    async (tabId: string, turnId: string, runId: number, decision: PlanDecision) => {
+    async (tabId: string, turnId: string, runId: number, decision: PlanDecision,
+           plan?: SettledPlan) => {
       if (goalGateBusyTurnRef.current) return
       goalGateBusyTurnRef.current = turnId
       setGoalGateBusyTurnId(turnId)
@@ -5083,6 +5086,7 @@ export function ChatScreen() {
             kind: "plan",
             excludedSources: decision.excluded_sources,
             hypotheses: decision.hypotheses,
+            plan,
           },
         })
         goalRunRef.current = runId
@@ -5119,6 +5123,7 @@ export function ChatScreen() {
             kind: "plan",
             excludedSources: decision.excluded_sources,
             hypotheses: decision.hypotheses,
+            plan,
           },
         })
         goalRunRef.current = runId

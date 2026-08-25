@@ -60,12 +60,30 @@ export type GoalGate =
  *  bare "done" — the whole point of moving these into the conversation. */
 export type GoalGateResolved =
   | { kind: "definition"; definition: string }
-  | { kind: "plan"; excludedSources: string[]; hypotheses: string[] }
+  | {
+      kind: "plan"
+      excludedSources: string[]
+      hypotheses: string[]
+      /** The plan as approved. CARRIED, not dropped: the settled card used to
+       *  collapse to "Reading every connected source", so scrolling back showed
+       *  that a plan was approved and not WHAT was approved — which is the
+       *  whole reason the gate is in the thread. A PM defending the decision
+       *  needs the sources and counts they agreed to, not a receipt. */
+      plan?: SettledPlan
+    }
   /** The gate could not be answered — the server refused, or the run died.
    *  Carries the REASON: the generic "there was an interruption" the thread
    *  shows for an ordinary failed turn throws that away, and "why can I not
    *  confirm this?" is exactly what the reader needs. */
   | { kind: "failed"; reason: string }
+
+/** What the SETTLED card needs from the plan — the sources and their counts.
+ *  Deliberately narrower than `GoalRunPlan`: a record does not need the gaps,
+ *  the currency or the will-produce list, and naming only what it reads keeps
+ *  a record renderable from a thread persisted by an older build. */
+export type SettledPlan = {
+  sources?: { source_type: string; label?: string; signal_count: number }[]
+}
 
 export function GoalGateCard({
   gate,
@@ -207,7 +225,10 @@ function GoalGateSettled({
       </div>
     )
   }
-  const { excludedSources, hypotheses } = resolved
+  const { excludedSources, hypotheses, plan } = resolved
+  const dropped = new Set(excludedSources)
+  const kept = (plan?.sources ?? []).filter((x) => !dropped.has(x.source_type))
+  const keptSignals = kept.reduce((n, x) => n + (x.signal_count || 0), 0)
   return (
     <div className="ggc ggc-settled" data-testid="goal-gate-plan-done">
       <p className="ggc-settled-label">Plan approved</p>
@@ -220,6 +241,29 @@ function GoalGateSettled({
       ) : (
         <p className="ggc-settled-body">Reading every connected source.</p>
       )}
+      {/* WHAT WAS ACTUALLY APPROVED, kept on screen. Read-only — the decision
+          is made — but present, so the reader can check the run against it
+          later without reopening anything. */}
+      {plan?.sources?.length ? (
+        <ul className="ggc-settled-sources" data-testid="goal-gate-plan-done-sources">
+          {plan.sources.map((src) => {
+            const out = dropped.has(src.source_type)
+            return (
+              <li key={src.source_type} className={out ? "ggc-src-out" : undefined}>
+                <strong>{src.signal_count}</strong>{" "}
+                {src.label || src.source_type}
+                {out ? " — dropped by you" : ""}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+      {plan?.sources?.length ? (
+        <p className="ggc-settled-body">
+          {keptSignals} signals across {kept.length} source
+          {kept.length === 1 ? "" : "s"} were read against this goal.
+        </p>
+      ) : null}
       {hypotheses.length ? (
         <p className="ggc-settled-body">
           {hypotheses.length === 1 ? "Your expectation" : "Your expectations"}:{" "}
