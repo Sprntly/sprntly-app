@@ -1247,6 +1247,68 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
     return notes
 
 
+#: A page that times out is retried at this size before the run gives up. A
+#: statement timeout is about how much work ONE query does, so the answer to
+#: one is a smaller query, not a failed run.
+_PAGE_RETRY = 100
+
+
+def _signal_page(client, company_id: str, page: int) -> list[dict]:
+    """One page of signal metadata, retried smaller if the statement times out.
+
+    MEASURED, NOT GUESSED: on a 3,364-signal staging tenant three consecutive
+    runs went `ready`, `failed`, `failed`, all with Postgres 57014 "canceling
+    statement due to statement timeout". `_load_embeddings` already survives
+    this — it catches per page and degrades the run to ungrouped, and says so
+    in a coverage note. This loader had no such guard, so one slow page killed
+    the whole run and the reader got "Something went wrong on our side partway
+    through this run" for a corpus that was merely large.
+
+    IT MUST NOT SILENTLY SHRINK THE CORPUS. Swallowing the failure the way the
+    embedding loader does would hand back a partial book with nothing saying
+    so — the one thing every coverage note exists to prevent. So a timeout is
+    retried in smaller slices and, if those fail too, it RAISES: a run that
+    cannot read its evidence has to fail loudly, not quietly read less.
+    """
+    cols = (
+        "id,kind,source_type,content,properties,provenance,"
+        "valid_at,created_at,source_id"
+    )
+
+    def _fetch(size: int, offset: int) -> list[dict]:
+        return (
+            client.table("kg_signal")
+            .select(cols)
+            .eq("enterprise_id", company_id)
+            # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
+            # unordered query's rows in any order, so paging without one can
+            # repeat a row on page 2 and never return another — a run would
+            # read a slightly different corpus each time and stop being
+            # reproducible, which is the whole claim this engine makes.
+            .order("id")
+            .range(offset, offset + size - 1)
+            .execute()
+        ).data or []
+
+    try:
+        return _fetch(_PAGE, page * _PAGE)
+    except Exception:  # noqa: BLE001 — retried below, re-raised if that fails
+        logger.warning(
+            "crucible: signal page %d timed out for %s; retrying in slices "
+            "of %d", page, company_id, _PAGE_RETRY,
+        )
+
+    out: list[dict] = []
+    for offset in range(page * _PAGE, (page + 1) * _PAGE, _PAGE_RETRY):
+        slice_ = _fetch(_PAGE_RETRY, offset)
+        out.extend(slice_)
+        # A short slice means the table ended inside this page; the outer loop
+        # reads that as "stop", which is correct.
+        if len(slice_) < _PAGE_RETRY:
+            break
+    return out
+
+
 def _load_signals(company_id: str) -> list[dict]:
     """Read the company's signals, paged, metadata only.
 
@@ -1262,28 +1324,7 @@ def _load_signals(company_id: str) -> list[dict]:
     client = require_client()
     rows: list[dict] = []
     for page in range(160):
-        chunk = (
-            client.table("kg_signal")
-            .select(
-                # `provenance` carries the source DOCUMENT id, which the
-                # refutation step needs. It was missing here while
-                # `_artifact_id` read it, so every claim came out unattributed
-                # and every run shipped a coverage note saying so — false, and
-                # invisible to the unit suite because the fake Supabase used to
-                # ignore column projection entirely.
-                "id,kind,source_type,content,properties,provenance,"
-                "valid_at,created_at,source_id"
-            )
-            .eq("enterprise_id", company_id)
-            # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
-            # unordered query's rows in any order, so paging without one can
-            # repeat a row on page 2 and never return another — a run would
-            # read a slightly different corpus each time and stop being
-            # reproducible, which is the whole claim this engine makes.
-            .order("id")
-            .range(page * _PAGE, page * _PAGE + _PAGE - 1)
-            .execute()
-        ).data or []
+        chunk = _signal_page(client, company_id, page)
         rows.extend(chunk)
         if len(chunk) < _PAGE:
             break
