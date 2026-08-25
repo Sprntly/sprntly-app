@@ -1026,6 +1026,15 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False,
         skill=_SKILL,
         background=background,
         on_delta=on_delta,
+        # `background=True` means pre-generation with nobody waiting — exactly
+        # the precondition for the half-price Batches path — so the two travel
+        # together rather than adding a second flag that could drift from it.
+        # Audited: the only caller that reaches HERE with background=True is
+        # `_warm_one_prd`. Every user-facing entry point (routes/prd.py,
+        # routes/brief.py, the multi-agent orchestrator) leaves it False and so
+        # still runs live. A future caller wanting the low-priority lane WHILE
+        # someone waits needs its own flag.
+        batch=background,
     )
 
 

@@ -1647,6 +1647,11 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
             background=True,
+            # Warm-only path: `_warm_one` is the sole caller (the predefined and
+            # per-insight Ask prompts pre-generated after a brief), so nothing is
+            # ever waiting on this and it always takes the half-price path.
+            batch=True,
+            batch_label="ask.warm",
         )
 
 
