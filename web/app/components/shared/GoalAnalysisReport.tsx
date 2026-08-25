@@ -211,8 +211,18 @@ export function GoalAnalysisReport({
   // Biggest cause first, ties broken on the reason text, so a re-render of the
   // same run produces the same document — the engine is deterministic
   // everywhere else and a section that reordered itself would undercut that.
+  // BOOKKEEPING IS NOT A CANDIDATE. Two ledger rows stand for everything the
+  // list could NOT hold — the "N further candidates" overflow summary and the
+  // one for signals with no usable embedding. Counted as rejections they made
+  // a run that considered 1,576 candidates report "(102)"; grouped as reasons
+  // they turned a one-cause ledger into three. Kept, but as their own facts.
+  const AGGREGATE_STAGES = new Set(["overflow", "ungrouped"])
+  const ruledOutAggregates = (run.considered ?? []).filter((r) =>
+    AGGREGATE_STAGES.has((r.stopped_at_stage ?? "").trim()))
+  const ruledOutCandidates = (run.considered ?? []).filter((r) =>
+    !AGGREGATE_STAGES.has((r.stopped_at_stage ?? "").trim()))
   const ruledOutGroups = (() => {
-    const rows = run.considered ?? []
+    const rows = ruledOutCandidates
     const by = new Map<string, typeof rows>()
     for (const r of rows) {
       const key = (r.reason ?? "").trim()
@@ -428,9 +438,11 @@ export function GoalAnalysisReport({
           </>
         ) : (
           <p className="ga-empty">
-            Nothing survived verification. Everything that was considered is
-            listed below with the reason it was dropped — that list, not this
-            silence, is the result of this run.
+            Nothing survived verification. What was considered is listed below
+            with the reason it was dropped — that list, not this silence, is the
+            result of this run. Where more was considered than the list can
+            hold, the remainder is counted with it rather than folded in as
+            though it were one more candidate.
           </p>
         )}
       </section>
@@ -547,7 +559,7 @@ export function GoalAnalysisReport({
               of the document, which is the one section a reader must reach. */}
           <details open={run.considered.length <= RULED_OUT_OPEN_MAX}>
             <summary className="ga-doc-h2 ga-doc-summary">
-              Considered and ruled out ({run.considered.length})
+              Considered and ruled out ({ruledOutCandidates.length})
             </summary>
             {/* WHAT KILLED THEM, not just that something did. "Each one died
                 for a stated reason" is true and, printed beside every label,
@@ -562,7 +574,7 @@ export function GoalAnalysisReport({
               {ruledOutGroups.length > 1 ? (
                 <>
                   , grouped below by that reason — {ruledOutGroups.length} of
-                  them across {run.considered.length} candidates.
+                  them across {ruledOutCandidates.length} candidates.
                 </>
               ) : (
                 <>, and every one of them died for the same one.</>
@@ -585,6 +597,11 @@ export function GoalAnalysisReport({
                   ))}
                 </ul>
               </div>
+            ))}
+            {ruledOutAggregates.map((r) => (
+              <p className="ga-doc-note" key={r.id} data-testid="goal-ruled-out-aggregate">
+                <b>{r.label}</b> — {r.reason}
+              </p>
             ))}
           </details>
         </section>

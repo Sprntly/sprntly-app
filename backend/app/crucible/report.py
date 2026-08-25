@@ -231,9 +231,11 @@ def _headline_section(findings: list[dict]) -> str:
     out = ["<h2>The short version</h2>"]
     if not findings:
         out.append(_p(
-            "Nothing survived verification. Everything that was considered is "
-            "listed below with the reason it was dropped — that list, not this "
-            "silence, is the result of this run."
+            "Nothing survived verification. What was considered is listed "
+            "below with the reason it was dropped — that list, not this "
+            "silence, is the result of this run. Where more was considered "
+            "than the list can hold, the remainder is counted with it rather "
+            "than folded in as though it were one more candidate."
         ))
         return "".join(out)
 
@@ -726,6 +728,18 @@ def _ledger_section(ledger: list[dict]) -> str:
     # matched, which is the degenerate case of exactly this and fired on
     # almost no real run. Grouping subsumes it: one group is the same thing as
     # "they all died for one reason", said in the same words.
+    # BOOKKEEPING IS NOT A CANDIDATE. Two of these rows stand for everything
+    # the list could NOT hold — the "N further candidates" overflow summary and
+    # the one for signals with no usable embedding. Counted as rejections they
+    # made a run that considered 1,576 candidates report "Considered and ruled
+    # out (102)", directly under a promise that everything considered was
+    # listed; grouped as reasons they turned a one-cause ledger into three.
+    from app.crucible.pipeline import AGGREGATE_STAGES
+    aggregates = [r for r in shown
+                  if (r.get("stopped_at_stage") or "") in AGGREGATE_STAGES]
+    shown = [r for r in shown
+             if (r.get("stopped_at_stage") or "") not in AGGREGATE_STAGES]
+
     groups: dict[str, list[dict]] = {}
     for r in shown:
         groups.setdefault((r.get("reason") or "").strip(), []).append(r)
@@ -734,7 +748,7 @@ def _ledger_section(ledger: list[dict]) -> str:
     # a section that reordered itself would undermine that everywhere else).
     ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
-    out = [f"<h2>Considered and ruled out ({len(ledger)})</h2>"]
+    out = [f"<h2>Considered and ruled out ({len(shown)})</h2>"]
     out.append(_p(
         "A ranking whose rejections are invisible is a ranking you have to "
         "take on faith. Each of these was a candidate and each one died for a "
@@ -766,10 +780,21 @@ def _ledger_section(ledger: list[dict]) -> str:
             )
             for r in rows
         ))
-    if len(ledger) > len(shown):
+    # THE BOOKKEEPING, SAID AS BOOKKEEPING. These rows carry numbers the reader
+    # needs — how many candidates the list could not hold, how many signals
+    # could not be grouped at all — and burying them among the candidates is
+    # what made the count wrong. Stated after the list, as their own facts.
+    for r in aggregates:
         out.append(_p(
-            f"{len(ledger) - len(shown)} further rejections are on the run and "
-            f"are not listed here."
+            f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
+            f"</strong> \u2014 "
+            f"{_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}"
+        ))
+    remainder = len(ledger) - len(shown) - len(aggregates)
+    if remainder > 0:
+        out.append(_p(
+            f"{remainder} further rejections are on the run and are not "
+            f"listed here."
         ))
     return "".join(out)
 
