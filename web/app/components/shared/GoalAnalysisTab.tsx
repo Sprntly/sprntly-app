@@ -46,6 +46,24 @@ import { GoalReportDocument } from "./GoalReportDocument"
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
 const POLL_MS = 3000
 
+//: A run parked at a human gate is polled SLOWLY, not at the working rate.
+//:
+//: Gates are no longer terminal for this panel — the click that releases them
+//: happens in the chat, so the only way the panel learns is by asking. But
+//: asking every 3s means 1,200 requests an hour against the shared database
+//: for a run that is, by definition, waiting on a person who may be at lunch.
+//: A gate is released in seconds or in hours; 15s is invisible to the first
+//: case and 240x cheaper in the second.
+const GATE_POLL_MS = 15_000
+
+//: And it does not wait forever. A run left at a gate overnight has an open
+//: tab asking about it all night; after this the panel stops and says so,
+//: which is honest about the fact that nothing is watching any more.
+const GATE_POLL_CEILING_MS = 30 * 60 * 1000
+
+//: Statuses where the run is waiting on a PERSON, not on work.
+const HUMAN_GATES = new Set(["awaiting_confirmation", "awaiting_approval"])
+
 /** Consecutive failed polls before the panel stops trying. Three, because a
  *  deploy restart drops one or two ticks and the run itself survives it. */
 const MAX_CONSECUTIVE_FAILURES = 3
@@ -56,11 +74,14 @@ const MAX_CONSECUTIVE_FAILURES = 3
  *  confirmed and then watched "Reading 0 claims…" forever while the run
  *  finished on the server. */
 const TERMINAL = new Set([
+  // A GATE IS NO LONGER TERMINAL FOR THIS PANEL. Both gates moved to the chat
+  // thread, so the click that releases them happens somewhere this component
+  // cannot see — and `pollKey`, the re-arm this set was written around, has no
+  // caller left here. Treating a gate as terminal meant a panel opened on one
+  // stopped polling and never advanced to the report, however long the reader
+  // waited. It keeps watching instead, which is the only way it can now learn
+  // that the thread released the run.
   "ready", "failed", "cancelled",
-  // BOTH human gates. A run waiting on a person will wait forever, and polling
-  // it is load with no possible new information; the click that releases it
-  // re-arms the poll itself.
-  "awaiting_confirmation", "awaiting_approval",
 ])
 
 /** Error codes the backend may return, in the user's language. Anything not
@@ -107,7 +128,11 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // Bumped by confirm to restart the poll. `load` is keyed on `runId`, which
   // has not changed, so without this the effect never re-runs and the panel
   // stays on the last status it saw.
-  const [pollKey, setPollKey] = useState(0)
+  // `pollKey` used to be bumped by this panel's own confirm/approve buttons to
+  // re-arm a poll that a gate had stopped. Both are gone with the gates; the
+  // state stays only as the effect's dependency, and nothing re-arms because
+  // nothing stops.
+  const [pollKey] = useState(0)
   // How many consecutive polls failed. One 502 on one tick of a multi-minute
   // run must not brick the panel — a transient error is a retry, not a state.
   const failures = useRef(0)
@@ -161,10 +186,26 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   useEffect(() => {
     let live = true
     let timer: ReturnType<typeof setTimeout> | undefined
+    let gateWaitedMs = 0
     const tick = async () => {
       const status = await load()
       if (!live || TERMINAL.has(String(status))) return
-      timer = setTimeout(tick, POLL_MS)
+      const atGate = HUMAN_GATES.has(String(status))
+      if (atGate) {
+        gateWaitedMs += GATE_POLL_MS
+        if (gateWaitedMs >= GATE_POLL_CEILING_MS) {
+          // Stops, and SAYS it stopped. A panel that silently gave up looks
+          // identical to one that is still watching.
+          setError(
+            "Still waiting on the gate in the chat. This panel has stopped "
+            + "checking — reopen it when you have answered.",
+          )
+          return
+        }
+      } else {
+        gateWaitedMs = 0
+      }
+      timer = setTimeout(tick, atGate ? GATE_POLL_MS : POLL_MS)
     }
     void tick()
     return () => {

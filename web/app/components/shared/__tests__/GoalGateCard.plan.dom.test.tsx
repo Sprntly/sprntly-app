@@ -210,3 +210,60 @@ describe("the window before the first question", () => {
     expect(document.body.textContent).not.toContain("No response was generated")
   })
 })
+
+
+describe("the settled plan is a record, not a receipt", () => {
+  // Apurva, looking at an approved run: "I cannot see the plan here." The
+  // settled card collapsed to "Reading every connected source", so scrolling
+  // back showed THAT a plan was approved and not WHAT was — which is the whole
+  // reason the gate is in the thread rather than a panel.
+  const settled = (excluded: string[] = []) =>
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 7, plan: PLAN }}
+        resolved={{
+          kind: "plan", excludedSources: excluded, hypotheses: [],
+          plan: { sources: PLAN.sources },
+        }}
+      />,
+    )
+
+  it("still names every source and its count after approval", () => {
+    settled()
+    const card = screen.getByTestId("goal-gate-plan-done-sources")
+    expect(card.textContent).toContain("calls and customer tickets")
+    expect(card.textContent).toContain("260")
+    expect(card.textContent).toContain("the tracker")
+    expect(card.textContent).toContain("152")
+  })
+
+  it("keeps a dropped source VISIBLE, named, and marked as dropped", () => {
+    // Removing it would make the record agree with a narrower run instead of
+    // showing that the run was narrowed — the exact thing this gate exists to
+    // make impossible.
+    //
+    // The first version of this test asserted only that SOME source was still
+    // listed, which stayed green when the render was changed to delete dropped
+    // ones outright — the precise defect its name claims to guard. It now
+    // names the dropped source and requires the marking that distinguishes it
+    // from one that was read.
+    settled(["customer_voice"])
+    const list = screen.getByTestId("goal-gate-plan-done-sources")
+    expect(list.textContent).toContain("calls and customer tickets")
+    expect(list.textContent).toContain("dropped by you")
+    const struck = list.querySelector(".ggc-src-out")
+    expect(struck).not.toBeNull()
+    expect(struck?.textContent).toContain("calls and customer tickets")
+    // And the source that was KEPT carries no such marking.
+    const kept = Array.from(list.querySelectorAll("li"))
+      .find((li) => li.textContent?.includes("the tracker"))
+    expect(kept?.className || "").not.toContain("ggc-src-out")
+  })
+
+  it("says how much was actually read, net of what was dropped", () => {
+    settled(["customer_voice"])
+    // 412 total, 260 dropped -> 152 across 1 source.
+    expect(screen.getByTestId("goal-gate-plan-done").textContent)
+      .toContain("152 signals across 1 source")
+  })
+})

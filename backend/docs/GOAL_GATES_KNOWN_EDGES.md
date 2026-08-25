@@ -14,25 +14,43 @@ Sorted by what I would fix first.
 
 ---
 
-## 1. A reloaded turn briefly reads "No response was generated"
+## 1. Reloading before the first question leaves a stranded turn until you switch tabs
 
-**What happens.** A `pending` gate is stripped from the thread on save and on
-load (`_thawThread`), because the poll that would replace it died with the page.
-That leaves the reader's own message with no card under it until the restore
-appends a rebuilt one, and in that window the ordinary no-reply ladder renders
-"No response was generated for this message."
+**Corrected twice. Read the history, it is the point of the entry.**
 
-**How to reach it.** Reload while a run is still `resolving_goal` — the second
-or so between sending a goal and the definition question appearing.
+The first version called this "a flash, not a dead end". Review reproduced it:
+the restore does not run on that path, `goalAnalysisApi.get` is called zero
+times, and the turn keeps "No response was generated for this message." That
+was wrong, so it was rewritten as **"PERMANENT / unreachable / must start
+again"**.
 
-**Why deferred.** It is a flash, not a dead end: the gate appears immediately
-after. Two attempts to suppress it (a marker on the turn, then a synthetic
-"interrupted" record) each produced worse bugs than the flash — see §7.
+That was wrong too, in the other direction. Review did the one thing the entry
+called impossible — switched tabs and came back — and the gate rebuilt. There
+is a green test named "switching away and back restores again" that says so.
 
-**Fix direction.** Do not add a field to the turn. Derive the whole gate from
-the server row (§8) and the window disappears with the shadow state.
+An entry written to stop an edge being mispriced managed to misprice it twice,
+in both directions. The lesson is in the file rather than tidied out of it: a
+severity claim is a claim, and it needs the same reproduction as a code claim.
 
----
+**What actually happens.** Reload during `resolving_goal` — the second or so
+between sending a goal and the question appearing. The `pending` gate is
+stripped on save and load, and the restore does not fire on that mount, so the
+turn sits with the no-reply line and the panel points at a live run with no
+card to answer it.
+
+**Recovery.** Switching to another chat tab and back re-runs the restore
+effect, which rebuilds the gate and appends it. The run is NOT lost. The
+appended card lands below the stale no-reply line, which is not replaced.
+
+**Severity.** Confusing and undiscoverable, not terminal. A reader who does not
+happen to switch tabs will believe the run failed.
+
+**Why deferred.** It needs a reload inside a one-second window on an
+allowlist-only feature, and the recovery — though nobody would guess it — costs
+one click.
+
+**Fix direction.** §8. Two attempts to paper over this window (§7) each
+produced worse bugs than the window itself.
 
 ## 2. The rebuilt gate appends instead of returning to its own turn
 
@@ -81,13 +99,11 @@ the user retypes one sentence. Explicitly accepted rather than fixed.
 
 ---
 
-## 6. `goalGateResolved: undefined` in the re-arm path
+## 6. (retired) — the re-arm path this described no longer exists
 
-**What happens.** The restore clears a settled record when it attaches a rebuilt
-gate. Review could not construct a path where that destroys a real record, but
-nothing prevents it either — it is an undocumented invariant, not a live bug.
-
----
+Kept as a numbered heading so the section numbers in commit messages and review
+comments still line up. `goalGateResolved: undefined` was deleted along with
+the whole re-arm marker; there is no such write anywhere now.
 
 ## 7. Two fixes that were tried and reverted — do not retry as written
 
@@ -106,6 +122,22 @@ Both were attempts to hide §1. Neither is worth repeating against the current
 shape; both disappear under §8.
 
 ---
+
+## 7b. A goal as the FIRST message of a brand-new chat — FIXED, with a residual
+
+Listed because this file missed it and review found it: the run was started
+before the conversation row existed, so it carried no `conversation_id` and was
+orphaned from its own chat forever — the restore matches runs by conversation,
+so it could never return to the thread it came from. Now the start waits
+briefly for the tab's `dbConvId`. Recorded rather than quietly fixed, because
+"the doc listed every known edge" was itself one of the claims that was wrong.
+
+**RESIDUAL, stated because "FIXED" on its own was another over-claim.** The
+wait can fail: if the conversation row never arrives — create failed, offline —
+the run would have started with no `conversation_id` anyway, orphaned exactly
+as before, after a two-second stall nobody could explain. It now refuses and
+says so instead. The goal is not started, which is the honest outcome: a run
+that cannot be brought back to its own chat is worth less than a retry.
 
 ## 8. The structural fix, when this is worth doing properly
 

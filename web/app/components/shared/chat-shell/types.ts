@@ -498,7 +498,12 @@ export interface MapMainTurnsDeps {
     | undefined
   approveGoalPlan:
     | ((tabId: string, turnId: string, runId: number,
-        decision: GoalPlanDecision) => void | Promise<void>)
+        decision: GoalPlanDecision,
+        // The plan as approved, so the settled record can keep showing WHAT was
+        // agreed. Structurally typed for the reason at the top of this file:
+        // this module names its host's shapes, it does not import them.
+        plan?: { sources?: { source_type: string; label?: string;
+                             signal_count: number }[] }) => void | Promise<void>)
     | undefined
   setViewerAttachment: (a: {
     name: string

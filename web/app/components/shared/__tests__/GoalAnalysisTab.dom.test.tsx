@@ -172,10 +172,38 @@ describe("polling", () => {
     expect(get.mock.calls.length).toBeGreaterThan(calls)
   })
 
-  // MOVED: `awaiting_confirmation` and `awaiting_approval` are gates answered in
-  // the chat thread, so the panel no longer renders — or polls through — either
-  // of them. What the panel still owns is `running -> ready`, covered by the two
-  // tests above.
+  it("KEEPS polling through a gate, because only the chat can release it", async () => {
+    // The gates are answered in the thread now, so the click that releases one
+    // happens somewhere this panel cannot see. Treating a gate as terminal —
+    // which the code did, on reasoning that stopped being true when the gates
+    // moved — meant a panel opened on a gate never advanced to the report,
+    // however long the reader waited.
+    //
+    // This had NO test: putting both gate statuses back into `TERMINAL` left
+    // 2322 web tests across 221 files green.
+    get.mockResolvedValue({ ...RUN, status: "awaiting_approval" })
+    render(<GoalAnalysisTab runId={7} />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    const calls = get.mock.calls.length
+    // Gate polling is deliberately SLOW (15s), not the 3s working rate: a run
+    // waiting on a person should not cost 1,200 requests an hour.
+    await vi.advanceTimersByTimeAsync(16_000)
+    expect(get.mock.calls.length).toBeGreaterThan(calls)
+  })
+
+  it("stops polling a gate eventually, and says that it has", async () => {
+    // A run left at a gate overnight would otherwise have an open tab asking
+    // about it all night. Stopping silently would look identical to still
+    // watching, so it stops and says so.
+    get.mockResolvedValue({ ...RUN, status: "awaiting_confirmation" })
+    render(<GoalAnalysisTab runId={7} />)
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    await vi.advanceTimersByTimeAsync(31 * 60 * 1000)
+    const settled = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
+    expect(get.mock.calls.length).toBe(settled)
+    expect(document.body.textContent).toContain("stopped checking")
+  })
 
   // MOVED with the gate: confirming happens in the thread now, and re-arming
   // after it is `confirmGoalDefinition`'s job in ChatScreen.
