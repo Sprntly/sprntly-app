@@ -210,6 +210,90 @@ describe("what the ordering is allowed to claim", () => {
   })
 })
 
+describe("one fact about the corpus is not many about the findings", () => {
+  // A corpus with no outcome evidence anywhere gives EVERY finding the same
+  // weakest link. Printed on all 32 rows it reads as 32 separate judgements
+  // about 32 different themes, and a reader who meets an identical sentence
+  // three times stops reading the section — which is how a genuine
+  // per-finding difference would later go unnoticed.
+  const SAME = { band: "medium", weakest_leg_reason: "no outcome evidence exists" }
+  const withConf = (id: number, confidence: unknown) => ({
+    ...SIZED, id, confidence, claim_ids: [`c${id}`],
+  })
+
+  it("states a weakest link shared by every finding exactly once", () => {
+    render(
+      <GoalAnalysisReport
+        run={{ ...RUN, findings: [withConf(1, SAME), withConf(2, SAME), withConf(3, SAME)] }}
+      />,
+    )
+    expect(screen.getByTestId("goal-shared-weakest").textContent ?? "")
+      .toMatch(/every finding below has the same weakest link/i)
+    const report = screen.getByTestId("goal-report").textContent ?? ""
+    expect(report.split("no outcome evidence exists").length - 1).toBe(1)
+    expect(report).not.toMatch(/Weakest link\./)
+  })
+
+  it("puts two different weakest links back on their own rows", () => {
+    // The control. Detected, not assumed: the moment they differ, the sentence
+    // is about the finding again and belongs beside it.
+    render(
+      <GoalAnalysisReport
+        run={{
+          ...RUN,
+          findings: [
+            withConf(1, SAME),
+            withConf(2, { band: "low", weakest_leg_reason: "one account carries it" }),
+          ],
+        }}
+      />,
+    )
+    expect(screen.queryByTestId("goal-shared-weakest")).toBeNull()
+    const report = screen.getByTestId("goal-report").textContent ?? ""
+    expect(report).toContain("no outcome evidence exists")
+    expect(report).toContain("one account carries it")
+  })
+
+  it("leaves a lone finding's weakest link where it is", () => {
+    // One finding is not a corpus-wide pattern; "every finding below" would be
+    // a claim about a set of one.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [withConf(1, SAME)] }} />)
+    expect(screen.queryByTestId("goal-shared-weakest")).toBeNull()
+    expect(screen.getByTestId("goal-report").textContent ?? "")
+      .toMatch(/Weakest link\./)
+  })
+
+  it("says once that every rejection died for the same reason", () => {
+    // 102 identical verdicts is ONE rule killing everything. Repeated per row
+    // the reader goes looking for 102 fixes instead of one.
+    const considered = [0, 1, 2, 3].map((i) => ({
+      id: i, label: `candidate ${i}`,
+      reason: "no source that may speak to this claim type reported it",
+      stopped_at_stage: "verification",
+    }))
+    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
+    const said = screen.getByTestId("goal-considered").textContent ?? ""
+    expect(said).toMatch(/All 4 died for the same reason/i)
+    expect(
+      said.split("no source that may speak to this claim type reported it").length - 1,
+    ).toBe(1)
+    // Every candidate is still named.
+    for (const i of [0, 1, 2, 3]) expect(said).toContain(`candidate ${i}`)
+  })
+
+  it("keeps differing rejection reasons on their own rows", () => {
+    const considered = [
+      { id: 1, label: "alpha", reason: "one account only", stopped_at_stage: "verification" },
+      { id: 2, label: "beta", reason: "one conversation echoing", stopped_at_stage: "verification" },
+    ]
+    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
+    const said = screen.getByTestId("goal-considered").textContent ?? ""
+    expect(said).not.toMatch(/died for the same reason/i)
+    expect(said).toContain("one account only")
+    expect(said).toContain("one conversation echoing")
+  })
+})
+
 describe("what the report admits it did not do", () => {
   it("says the findings were not selected for the goal", () => {
     // Claim selection never sees the definition: `build_findings` takes a

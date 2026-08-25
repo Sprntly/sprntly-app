@@ -387,7 +387,10 @@ def _esc_statement(finding: dict) -> str:
 
 
 
-def _finding_block(finding: dict, rank: int) -> str:
+def _finding_block(
+    finding: dict, rank: int, *,
+    shared_weakest: bool = False, shared_cap: bool = False,
+) -> str:
     out = [f"<h3>{rank}. {_esc_statement(finding)}</h3>"]
 
     meta = [_esc(_reach(finding))]
@@ -407,11 +410,19 @@ def _finding_block(finding: dict, rank: int) -> str:
     confidence = _as_dict(finding.get("confidence"))
     # The weakest leg is the ACTIONABLE half of a confidence score: it says
     # what to go and find out, which a band on its own never does.
-    if confidence.get("weakest_leg_reason"):
+    # SUPPRESSED WHEN IT IS THE SAME SENTENCE ON EVERY ROW. A corpus with no
+    # outcome evidence anywhere gives every finding an identical weakest link
+    # and an identical cap. Printing it on all 32 reads as 32 separate
+    # judgements about 32 different themes when it is ONE fact about the
+    # corpus — so the section states it once and the rows carry what actually
+    # differs between them. Repetition is not thoroughness: a reader skims an
+    # identical sentence after the third row and stops seeing it, which is how
+    # a genuine per-finding difference would go unnoticed later.
+    if confidence.get("weakest_leg_reason") and not shared_weakest:
         out.append(_p(
             f"<strong>Weakest link.</strong> {_esc(confidence['weakest_leg_reason'])}"
         ))
-    if confidence.get("cap_reason"):
+    if confidence.get("cap_reason") and not shared_cap:
         out.append(_p(_esc(confidence["cap_reason"])))
 
     # WHERE IT CAME FROM, beside the claim it supports. Without this a reader
@@ -549,6 +560,20 @@ def _findings_section(
     # just said nothing here had a reach at all.
     anything_sized = any(f.get("impact_value") is not None for f in findings)
     unsized = sum(1 for f in findings if f.get("impact_value") is None)
+    # ONE FACT ABOUT THE CORPUS, OR MANY ABOUT THE FINDINGS? Detected, never
+    # assumed: the moment a run produces two different weakest links they both
+    # go back on their own rows, where they belong. Only a single distinct
+    # value across MORE THAN ONE finding is a corpus-wide statement.
+    def _shared(key: str) -> str:
+        if len(findings) < 2:
+            return ""
+        vals = {
+            (_as_dict(f.get("confidence")).get(key) or "").strip()
+            for f in findings
+        }
+        return vals.pop() if len(vals) == 1 else ""
+    shared_weakest = _shared("weakest_leg_reason")
+    shared_cap = _shared("cap_reason")
     if anything_sized:
         out.append(_p(
             "Ranked by reach — how many accounts each theme touches"
@@ -572,9 +597,29 @@ def _findings_section(
             "of them alone."
         ))
 
+    if shared_weakest:
+        out.append(_p(
+            "<strong>Every finding below has the same weakest link</strong>, so "
+            "it is stated here once rather than repeated on each of them: "
+            + _esc(shared_weakest)
+            + (f". {_esc(shared_cap)}" if shared_cap else ".")
+        ))
+    elif shared_cap:
+        out.append(_p(
+            "<strong>Every finding below is capped the same way</strong>, so it "
+            "is stated here once rather than on each of them: "
+            + _esc(shared_cap) + "."
+        ))
+
     full = findings[:full_cap]
     rest = findings[full_cap:]
-    out.extend(_finding_block(f, i + 1) for i, f in enumerate(full))
+    out.extend(
+        _finding_block(
+            f, i + 1,
+            shared_weakest=bool(shared_weakest), shared_cap=bool(shared_cap),
+        )
+        for i, f in enumerate(full)
+    )
 
     if rest:
         # SAID PLAINLY, where the reader is. A document that stopped at 150
@@ -651,16 +696,38 @@ def _ledger_section(ledger: list[dict]) -> str:
     # a permanently-open list anyway, so rather than pretend, this states the
     # count and prints the list. In a document a reader scrolls, that is the
     # honest shape.
+    # THE SAME QUESTION AS THE WEAKEST LINK, one section down. On a corpus
+    # whose sources are all outside their claim types' authority, all 102
+    # rejections carry the identical `no_authority` sentence — so "each one
+    # died for a stated reason" is true and reads as 102 reasons. Stated once,
+    # the reader learns the real shape: one rule killed everything, and the
+    # thing to fix is that rule's input, not 102 separate candidates.
+    reasons = {(r.get("reason") or "").strip() for r in ledger}
+    shared_reason = reasons.pop() if len(reasons) == 1 and len(ledger) > 1 else ""
+    lede = (
+        "A ranking whose rejections are invisible is a ranking you have to "
+        "take on faith. "
+        + (
+            # CLIPPED, like the per-row version it replaces. `reason` is
+            # tenant-derived text of any length and this section is the one
+            # with a hard body-size budget — hoisting it must not quietly drop
+            # the bound that every row it replaced was carrying.
+            f"All {len(ledger)} died for the same reason, so it is stated here "
+            f"once rather than repeated on each: "
+            f"{_esc_clipped(shared_reason, MAX_LEDGER_REASON_CHARS)}."
+            if shared_reason else
+            "Each of these was a candidate and each one died for a stated "
+            "reason."
+        )
+    )
     return "".join([
         f"<h2>Considered and ruled out ({len(ledger)})</h2>",
-        _p(
-            "A ranking whose rejections are invisible is a ranking you have to "
-            "take on faith. Each of these was a candidate and each one died "
-            "for a stated reason."
-        ),
+        _p(lede),
         _ul(
             f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
-            f"</strong> — {_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}"
+            f"</strong>"
+            + ("" if shared_reason else
+               f" — {_esc_clipped(r.get('reason'), MAX_LEDGER_REASON_CHARS)}")
             + (
                 f" <em>(stopped at "
                 f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
