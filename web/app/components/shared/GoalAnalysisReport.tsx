@@ -84,7 +84,16 @@ function Sized({ f, idPrefix = "goal" }: { f: GoalFinding; idPrefix?: string }) 
 
 /** One ranked finding, written out: what it says, how big it is, how much of
  *  it we trust, what it rests on, and what had to be assumed to state it. */
-function ReportFinding({ f, rank }: { f: GoalFinding; rank: number }) {
+function ReportFinding({
+  f, rank, sharedWeakest = false, sharedCap = false,
+}: {
+  f: GoalFinding
+  rank: number
+  /** The section already stated this sentence once, because every finding
+   *  carries the identical one. See `sharedReason` below. */
+  sharedWeakest?: boolean
+  sharedCap?: boolean
+}) {
   return (
     <li className="ga-doc-finding" data-testid="goal-finding">
       <div className="ga-doc-finding-head">
@@ -112,12 +121,12 @@ function ReportFinding({ f, rank }: { f: GoalFinding; rank: number }) {
       </div>
       {/* The weakest leg is the actionable half of a confidence score: it says
           what to go and find out, which a band on its own never does. */}
-      {f.confidence?.weakest_leg_reason ? (
+      {f.confidence?.weakest_leg_reason && !sharedWeakest ? (
         <p className="ga-weakest">
           <b>Weakest link.</b> {f.confidence.weakest_leg_reason}
         </p>
       ) : null}
-      {f.confidence?.cap_reason ? (
+      {f.confidence?.cap_reason && !sharedCap ? (
         <p className="ga-cap">{f.confidence.cap_reason}</p>
       ) : null}
       {/* WHERE IT CAME FROM, beside the claim it supports. Without this the
@@ -176,6 +185,30 @@ export function GoalAnalysisReport({
   // sized", which is both halves of the same sentence contradicting each
   // other. Every honesty rule in `_headline_section` therefore has to exist
   // here too, keyed on the same two facts.
+  // ONE FACT ABOUT THE CORPUS, OR MANY ABOUT THE FINDINGS? When every row
+  // carries the SAME weakest link or cap, it is the former — a corpus with no
+  // outcome evidence anywhere gives all 32 findings an identical sentence, and
+  // printing it 32 times reads as 32 separate judgements. Detected, never
+  // assumed: two different values and both go back on their own rows.
+  const sharedReason = (key: "weakest_leg_reason" | "cap_reason"): string => {
+    if (findings.length < 2) return ""
+    const vals = new Set(
+      findings.map((f) => (f.confidence?.[key] ?? "").trim()),
+    )
+    if (vals.size !== 1) return ""
+    const only = [...vals][0]
+    return only
+  }
+  // Same rule for the ledger: one distinct reason across MORE THAN ONE
+  // rejection is a statement about the corpus, not about each candidate.
+  const ruledOutReason = ((): string => {
+    const rows = run.considered ?? []
+    if (rows.length < 2) return ""
+    const vals = new Set(rows.map((r) => (r.reason ?? "").trim()))
+    return vals.size === 1 ? [...vals][0] : ""
+  })()
+  const sharedWeakest = sharedReason("weakest_leg_reason")
+  const sharedCap = sharedReason("cap_reason")
   const unsized = findings.filter((f) => f.impact_value == null).length
   const anythingSized = unsized < findings.length
   const topIsConflict = headline?.adjudication === "conflict"
@@ -416,9 +449,28 @@ export function GoalAnalysisReport({
               </>
             )}
           </p>
+          {sharedWeakest ? (
+            <p className="ga-doc-note" data-testid="goal-shared-weakest">
+              <strong>Every finding below has the same weakest link</strong>, so
+              it is stated here once rather than repeated on each of them:{" "}
+              {sharedWeakest}
+              {sharedCap ? `. ${sharedCap}` : "."}
+            </p>
+          ) : sharedCap ? (
+            <p className="ga-doc-note" data-testid="goal-shared-cap">
+              <strong>Every finding below is capped the same way</strong>, so it
+              is stated here once rather than on each of them: {sharedCap}.
+            </p>
+          ) : null}
           <ol className="ga-doc-findings">
             {findings.map((f, i) => (
-              <ReportFinding key={f.id} f={f} rank={i + 1} />
+              <ReportFinding
+                key={f.id}
+                f={f}
+                rank={i + 1}
+                sharedWeakest={!!sharedWeakest}
+                sharedCap={!!sharedCap}
+              />
             ))}
           </ol>
         </section>
@@ -457,15 +509,33 @@ export function GoalAnalysisReport({
             <summary className="ga-doc-h2 ga-doc-summary">
               Considered and ruled out ({run.considered.length})
             </summary>
+            {/* THE SAME QUESTION AS THE WEAKEST LINK, one section down. On a
+                corpus whose sources all sit outside their claim types'
+                authority, all 102 rejections carry the identical sentence — so
+                "each one died for a stated reason" is true and reads as 102
+                reasons. Said once, the reader sees the real shape: ONE rule
+                killed everything, and what to fix is that rule's input. */}
             <p className="ga-doc-lede">
               A ranking whose rejections are invisible is a ranking you have to
-              take on faith. Each of these was a candidate and each one died for
-              a stated reason.
+              take on faith.{" "}
+              {ruledOutReason ? (
+                <>
+                  All {run.considered.length} died for the same reason, so it is
+                  stated here once rather than repeated on each:{" "}
+                  {ruledOutReason}.
+                </>
+              ) : (
+                <>
+                  Each of these was a candidate and each one died for a stated
+                  reason.
+                </>
+              )}
             </p>
             <ul className="ga-doc-ruled-out">
               {run.considered.map((r) => (
                 <li key={r.id}>
-                  <b>{r.label}</b> — {r.reason}
+                  <b>{r.label}</b>
+                  {ruledOutReason ? null : <> — {r.reason}</>}
                   {r.stopped_at_stage ? (
                     <em> (stopped at {r.stopped_at_stage})</em>
                   ) : null}

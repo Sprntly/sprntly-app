@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from app.crucible.report import (
+    MAX_LEDGER_REASON_CHARS,
     body_fingerprint,
     render_report_html,
     report_title,
@@ -664,6 +665,104 @@ def test_the_overflow_line_does_not_invent_a_reach_ranking():
     assert "The next" in html, "expected the overflow paragraph to render"
     assert "rank lower by reach" not in html
     assert "not by size, which nothing here had" in html
+
+
+def test_one_weakest_link_shared_by_all_is_stated_once():
+    """A corpus with no outcome evidence anywhere gives EVERY finding the same
+    weakest link. Printing it on all 32 rows reads as 32 separate judgements
+    about 32 different themes when it is one fact about the corpus — and a
+    reader who skims an identical sentence three times stops seeing the section
+    at all, which is how a genuine per-finding difference goes unnoticed."""
+    same = {"band": "medium", "weakest_leg_reason": "no outcome evidence exists"}
+    html = render_report_html(_run(), [
+        _finding(confidence=same, claim_ids=["c1"]),
+        _finding(confidence=same, claim_ids=["c2"]),
+        _finding(confidence=same, claim_ids=["c3"]),
+    ])
+    assert "Every finding below has the same weakest link" in html
+    # Once in the lede, and NOT again on any row.
+    assert html.count("no outcome evidence exists") == 1
+    assert "Weakest link." not in html
+
+
+def test_two_different_weakest_links_stay_on_their_own_rows():
+    """The control, and the reason this is detected rather than assumed: the
+    moment two findings differ, the sentence is about the finding again and
+    belongs beside it."""
+    html = render_report_html(_run(), [
+        _finding(confidence={"band": "medium",
+                             "weakest_leg_reason": "no outcome evidence"},
+                 claim_ids=["c1"]),
+        _finding(confidence={"band": "low",
+                             "weakest_leg_reason": "one account carries it"},
+                 claim_ids=["c2"]),
+    ])
+    assert "Every finding below has the same weakest link" not in html
+    assert html.count("Weakest link.") == 2
+    assert "no outcome evidence" in html
+    assert "one account carries it" in html
+
+
+def test_a_single_finding_keeps_its_weakest_link_on_the_row():
+    """One finding is not a corpus-wide pattern. Hoisting a lone sentence into
+    a "every finding below" lede would be a claim about a set of one."""
+    html = render_report_html(_run(), [
+        _finding(confidence={"band": "medium",
+                             "weakest_leg_reason": "no outcome evidence"},
+                 claim_ids=["c1"]),
+    ])
+    assert "Every finding below" not in html
+    assert "Weakest link." in html
+
+
+def test_a_ledger_that_died_for_one_reason_says_so_once():
+    """All 102 rejections carrying the identical `no_authority` sentence is one
+    rule killing everything, not 102 independent verdicts. Repeated per row it
+    reads as the latter, and the reader looks for 102 fixes instead of one."""
+    ledger = [
+        {"id": i, "label": f"candidate {i}",
+         "reason": "no source that may speak to this claim type reported it",
+         "stopped_at_stage": "verification"}
+        for i in range(4)
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "All 4 died for the same reason" in html
+    assert html.count(
+        "no source that may speak to this claim type reported it") == 1
+    # The candidates are still every one of them, by name.
+    for i in range(4):
+        assert f"candidate {i}" in html
+
+
+def test_the_hoisted_rejection_reason_is_still_clipped():
+    """Hoisting must not drop a bound the rows it replaced were carrying.
+    `reason` is tenant text of any length, and this is the section with the
+    hard body budget — the per-row render clips it, so the one-line version
+    has to as well."""
+    huge = "z" * 5_000
+    ledger = [
+        {"id": i, "label": f"c{i}", "reason": huge, "stopped_at_stage": "verification"}
+        for i in range(3)
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "died for the same reason" in html
+    longest = max((len(run_) for run_ in re.findall(r"z+", html)), default=0)
+    assert longest <= MAX_LEDGER_REASON_CHARS, (
+        f"hoisted reason rendered {longest} chars, cap is {MAX_LEDGER_REASON_CHARS}"
+    )
+
+
+def test_a_ledger_with_different_reasons_keeps_them_per_row():
+    ledger = [
+        {"id": 1, "label": "alpha", "reason": "one account only",
+         "stopped_at_stage": "verification"},
+        {"id": 2, "label": "beta", "reason": "one conversation echoing",
+         "stopped_at_stage": "verification"},
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "died for the same reason" not in html
+    assert "one account only" in html
+    assert "one conversation echoing" in html
 
 
 def test_two_conflicts_are_not_described_as_ordered_regardless_of_size():
