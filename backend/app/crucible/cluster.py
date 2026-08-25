@@ -25,6 +25,8 @@ every time — and the caller orders by id precisely so that holds.
 """
 from __future__ import annotations
 
+import re
+
 import logging
 from dataclasses import replace
 from typing import Iterable, Mapping, Optional, Sequence
@@ -55,6 +57,42 @@ UNGROUPABLE_PREFIX = "\x00ungroupable:"
 _CUTS = (" because ", " due to ", " so that ", " which caused ", " leading to ",
          " resulting in ", " as a result", " therefore ", " drives ", " causes ")
 
+#: THE SAME CONNECTIVES, ANCHORED ON A WORD BOUNDARY RATHER THAN A SPACE.
+#:
+#: Every entry above opens with a space, and both cutters guarded on `i > 0` —
+#: so a connective at position 0 was never cut, by either of them. "Because the
+#: nightly export job times out, three renewals slipped" survived intact, and
+#: the lint did not catch it either (`BANNED_CAUSAL_VERBS` holds "because of",
+#: not bare "because"), so it shipped as a finding's statement: a mechanism
+#: asserted at `reported` strength, in the one sentence a PM quotes. That is
+#: precisely what I5 forbids.
+_LEADING_CAUSAL = re.compile(
+    r"^\s*(?:because|due to|so that|which caused|leading to|resulting in|"
+    r"as a result|therefore)\b",
+    re.IGNORECASE,
+)
+
+
+def _drop_leading_cause(text: str) -> str:
+    """Remove a causal clause the source opened with.
+
+    "Because X, Y" is an assertion about WHY. The observation inside it is Y,
+    so the clause is dropped and the main clause kept — that is a statement we
+    can stand behind. When there is no main clause the sentence is causal all
+    the way down and there is nothing honest left to keep, so it returns "".
+
+    Deliberately NOT extended to "since". It is causal in "Since the migration,
+    exports fail" and purely temporal in "Since June, exports fail", and this
+    function cannot tell them apart — cutting both would silently delete real
+    observations, which is a worse trade than the ambiguity it would fix. The
+    lint is not a backstop for it either; that gap is stated rather than
+    quietly assumed away.
+    """
+    if not _LEADING_CAUSAL.match(text or ""):
+        return text
+    comma = text.find(",")
+    return text[comma + 1:].strip() if comma > 0 else ""
+
 #: Long enough to identify the theme, short enough to read in a list.
 _LABEL_MAX = 90
 
@@ -82,7 +120,7 @@ def example_for(text: str) -> str:
     Returns "" rather than a placeholder for text that reduces to nothing —
     `label_for`'s "unlabelled" is a fine label and a terrible quotation.
     """
-    s = " ".join((text or "").split())
+    s = _drop_leading_cause(" ".join((text or "").split()))
     low = s.lower()
     for cut in _CUTS:
         i = low.find(cut)
@@ -90,6 +128,8 @@ def example_for(text: str) -> str:
             s = s[:i]
             low = s.lower()
     s = s.strip()
+    if not s:
+        return ""
     if len(s) <= _EXAMPLE_MAX:
         return s.rstrip(" ,;:")
     window = s[:_EXAMPLE_MAX]
@@ -108,7 +148,7 @@ def label_for(text: str) -> str:
     describes WHAT the claims are about, and the moment it starts explaining
     WHY it has stopped being a label and started being an unsupported finding.
     """
-    s = " ".join((text or "").split())
+    s = _drop_leading_cause(" ".join((text or "").split()))
     low = s.lower()
     for cut in _CUTS:
         i = low.find(cut)
