@@ -1035,7 +1035,6 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False,
         # still runs live. A future caller wanting the low-priority lane WHILE
         # someone waits needs its own flag.
         batch=background,
-        batch_label="prd.generate_prd_part_a",
     )
 
 

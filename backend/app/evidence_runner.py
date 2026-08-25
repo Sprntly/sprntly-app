@@ -90,7 +90,6 @@ def _run_sync(
         # `background` at all and so still runs live. A future caller wanting
         # the low-priority lane WHILE someone waits needs its own flag.
         batch=background,
-        batch_label="evidence.generate_evidence",
     )
     # Same normalisation as the KG path, so a corpus-grounded brief is stored
     # under exactly the same contract (see app.evidence_html).
