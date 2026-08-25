@@ -88,6 +88,57 @@ describe("the editor renders the document it is given", () => {
     expect(out).toContain("<li>")
   })
 
+  it("keeps a table a table, rather than flattening it into a paragraph", async () => {
+    // THE DEFECT: a report's summary grid arrived as one run-on paragraph —
+    // "ThemeAccounts Raising ItNature of Signal…", every cell concatenated with
+    // no separator. Nothing was wrong with the data: the row held real <table>
+    // markup, and `report_markdown` converts the engines' markdown grids with
+    // markdown's `tables` extension. The schema had no table node, and
+    // ProseMirror drops a node it cannot place while KEEPING ITS TEXT.
+    //
+    // Asserted on the cells rather than on the tag alone, because the failure
+    // was never a missing <table> at the reader — it was two cells becoming
+    // one string, which is what makes the grid unreadable.
+    const html =
+      "<table><thead><tr><th>Theme</th><th>Accounts</th></tr></thead>" +
+      "<tbody><tr><td>Async exercises</td><td>11</td></tr></tbody></table>"
+    const { container } = await mount({ initialHtml: html })
+    const pm = container.querySelector(".tiptap")!
+    expect(pm.querySelectorAll("table")).toHaveLength(1)
+    expect([...pm.querySelectorAll("th")].map((c) => c.textContent)).toEqual([
+      "Theme", "Accounts",
+    ])
+    expect([...pm.querySelectorAll("td")].map((c) => c.textContent)).toEqual([
+      "Async exercises", "11",
+    ])
+    // And no paragraph is carrying the cells instead — the flattened shape.
+    // (`textContent` is not the instrument for this: it concatenates cell text
+    // with no separator for a REAL table too, so it reads the same either way.)
+    expect([...pm.querySelectorAll("p")].map((n) => n.textContent)).not.toContain(
+      "ThemeAccountsAsync exercises11",
+    )
+  })
+
+  it("keeps the table when a real edit is saved back", async () => {
+    // The display bug was the visible half. The other half is destructive: an
+    // update serializes what the SCHEMA kept, so with no table node the first
+    // genuine keystroke anywhere in the document wrote the flattened body over
+    // the stored one — one edit from losing the grid for good.
+    const { onChange, container, getEditor } = await mount({
+      initialHtml:
+        "<p>intro</p><table><tbody><tr><td>cell a</td><td>cell b</td></tr></tbody></table>",
+    })
+    const wrapper = container.querySelector("[data-doc-editor]") as HTMLElement
+    wrapper.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }))
+    getEditor().commands.insertContentAt(1, "x")
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    const saved = onChange.mock.calls.at(-1)![0] as string
+    expect(saved).toContain("<table")
+    expect(saved).toContain("cell a")
+    expect(saved).toContain("cell b")
+    expect(saved).not.toContain("cell acell b")
+  })
+
   it("renders a font/colour span from stored styles", async () => {
     const { container } = await mount({
       initialHtml: '<p><span style="font-family: Georgia; color: #B42318">styled</span></p>',
