@@ -907,3 +907,40 @@ def test_the_promise_and_the_gap_come_from_one_function():
     from app.crucible.plan import SourceInventory, derive_gaps_and_promises
     kept = (SourceInventory("customer_voice", 1, "calls", "what customers said"),)
     assert derive_gaps_and_promises(kept) == derive_gaps_and_promises(kept)
+
+# ── Degradation the report was not disclosing ────────────────────────────────
+
+def test_superseded_signals_are_disclosed_like_undated_ones():
+    """`project_signals` counts TWO independent drop reasons — `retired` and
+    `no_timestamp` — and only the second was ever rendered. A corpus that is
+    mostly superseded therefore read as fully read: "What was read: 49 signals
+    across 1 source" over a run whose findings rested on 4, with the section
+    whose whole purpose is disclosing degradation silent about the largest one.
+    The narration in the same panel knew and printed it, so the panel
+    contradicted itself."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 49, "retired": 40, "no_timestamp": 5, "projected": 4}, {})
+    reasons = [n["reason"] for n in notes]
+    assert "superseded evidence" in reasons
+    said = next(n["actual"] for n in notes if n["reason"] == "superseded evidence")
+    assert "40 of 49" in said
+
+
+def test_the_two_degradations_are_denominated_the_same_way():
+    """Both are stated out of `seen`, so a reader can add them up against the
+    same base. Denominating them differently is how "44 of 49 were read" gets
+    inferred from a run that read 4."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 49, "retired": 40, "no_timestamp": 5, "projected": 4}, {})
+    assert all("of 49" in n["actual"] for n in notes)
+
+
+def test_a_run_with_nothing_superseded_says_nothing_about_it():
+    """The control: a note that fires when there is no degradation trains the
+    reader to skip the section that matters."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 49, "retired": 0, "no_timestamp": 5, "projected": 44}, {})
+    assert [n["reason"] for n in notes] == ["undated evidence"]
