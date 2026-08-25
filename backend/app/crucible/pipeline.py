@@ -260,12 +260,11 @@ def _refute(
     # THE SAME CATEGORY ERROR, ONE RULE OVER. "This is that account's situation
     # rather than a pattern across the book" is right about a PREFERENCE — one
     # account wanting a feature is that account's opinion. It is wrong about a
-    # CONSTRAINT, where being about one account is the entire content: "Extended
-    # Stay America has only a $5,000 budget approved for a POC" is not a failed
+    # CONSTRAINT, where being about one account is the entire content:
+    # "Northwind has only a $5,000 budget approved for a POC" is not a failed
     # pattern, it is the finding. Exempting the anecdote rule without this one
-    # left 34 named-account blockers still dropped on the measured corpus —
-    # every ChaosTrack, Flipkart and EVERSANA line among them — so the change
-    # would have looked landed and delivered nothing.
+    # left 34 named-account blockers still dropped on the measured corpus, so
+    # the change would have looked landed and delivered nothing.
     exempt_single = all(c.type in CORROBORATION_EXEMPT_TYPES for c in claims)
     if len(accounts) == 1 and not exempt_single:
         return Refutation("single_account", (
