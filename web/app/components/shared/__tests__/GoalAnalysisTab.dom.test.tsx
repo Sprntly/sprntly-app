@@ -195,14 +195,27 @@ describe("polling", () => {
     // A run left at a gate overnight would otherwise have an open tab asking
     // about it all night. Stopping silently would look identical to still
     // watching, so it stops and says so.
+    // ADVANCED IN CHUNKS, not in one 31-minute jump.
+    //
+    // Each tick awaits `load()`, so 120 of them is 120 promise resolutions
+    // that `advanceTimersByTimeAsync` has to drain. Asking for all of it in
+    // one call was fine alone and went red once inside the full suite, on a
+    // machine where collection alone took 170s — the queue simply did not
+    // finish, fewer ticks ran, and the ceiling was never reached. That is a
+    // flaky test, not a flaky ceiling: it fails on how loaded the box is.
+    // Chunking gives the queue a boundary to drain at, and the loop stops as
+    // soon as the state under test arrives rather than betting on a number.
     get.mockResolvedValue({ ...RUN, status: "awaiting_confirmation" })
     render(<GoalAnalysisTab runId={7} />)
     await waitFor(() => expect(get).toHaveBeenCalled())
-    await vi.advanceTimersByTimeAsync(31 * 60 * 1000)
+    for (let minute = 0; minute < 35; minute++) {
+      if ((document.body.textContent ?? "").includes("stopped checking")) break
+      await vi.advanceTimersByTimeAsync(60 * 1000)
+    }
+    expect(document.body.textContent).toContain("stopped checking")
     const settled = get.mock.calls.length
     await vi.advanceTimersByTimeAsync(5 * 60 * 1000)
     expect(get.mock.calls.length).toBe(settled)
-    expect(document.body.textContent).toContain("stopped checking")
   })
 
   it("offers a way back once it has stopped, and that way back works", async () => {

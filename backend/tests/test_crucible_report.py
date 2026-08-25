@@ -654,6 +654,37 @@ def test_the_definition_does_not_claim_to_have_selected_the_findings():
     assert "not selected for your goal" in html
 
 
+def test_an_order_the_reader_cannot_check_says_so():
+    """`_rank`'s last term is a confidence SCORE, which is never rendered — the
+    reader sees bands. On a corpus with no outcome evidence every band comes
+    out the same, so "ordered by confidence" describes an ordering they cannot
+    check against anything on the page, and a list that LOOKS ranked is read as
+    ranked. Position is the most persuasive thing in a document."""
+    same = {"band": "medium"}
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, confidence_band="medium", confidence=same,
+                 claim_ids=["c1"]),
+        _finding(impact_value=None, confidence_band="medium", confidence=same,
+                 claim_ids=["c2"]),
+    ])
+    assert "Not ranked by reach" in html
+    assert "same confidence band" in html
+    assert "not as a verdict on which matters more" in html
+
+
+def test_a_real_confidence_spread_is_not_disclaimed():
+    """The control. When the bands actually differ the order IS checkable from
+    the page, and telling the reader to discount it would be its own inaccuracy."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, confidence_band="high",
+                 confidence={"band": "high"}, claim_ids=["c1"]),
+        _finding(impact_value=None, confidence_band="low",
+                 confidence={"band": "low"}, claim_ids=["c2"]),
+    ])
+    assert "Not ranked by reach" in html
+    assert "same confidence band" not in html
+
+
 def test_the_overflow_line_does_not_invent_a_reach_ranking():
     """The overflow paragraph called the remainder "ranked lower by reach"
     unconditionally — directly under a lede that, on an all-unsized run, had
