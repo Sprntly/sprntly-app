@@ -585,9 +585,12 @@ def test_an_unsized_top_finding_is_not_called_the_largest():
         _finding(impact_value=None, claim_ids=["c2", "c3", "c4"]),
     ])
     assert "largest thing this reading found" not in html
-    assert "nothing here could be sized" in html
-    # And it says what IS true of the order, rather than going quiet about it.
-    assert "not ordered by size" in html
+    # And it says what IS true of the order. NOT "arbitrary": with every value
+    # None the sort key is (1, 1, -confidence), so the order is strictly
+    # confidence-descending — a real ordering, just not the one the heading
+    # used to imply.
+    assert "ordered by confidence rather than by size" in html
+    assert "Nothing in this reading could be sized" in html
 
 
 def test_a_sized_top_finding_still_says_largest():
@@ -608,3 +611,48 @@ def test_the_report_says_findings_were_not_filtered_to_the_goal():
     answer. Stated, rather than left to be discovered."""
     html = render_report_html(_run(), [_finding(impact_value=None)])
     assert "not selected for your goal" in html
+
+
+def test_a_conflict_placed_first_is_not_called_the_largest_either():
+    """`_rank`'s DOMINANT term is `0 if conflict else 1` — an authoritative
+    disagreement is placed first regardless of size. The first version of this
+    fix knew only about the size term, so a conflict-led run announced its top
+    row as the largest thing found with a bigger finding directly beneath it."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=900, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "placed first because two sources" in html
+    assert "regardless of size" in html
+
+
+def test_an_unsized_top_above_sized_findings_does_not_deny_the_sizes():
+    """The unsized sentence quantifies over EVERY finding, so gating it on the
+    top row's own value made a document say "nothing here could be sized" with
+    412 accounts rendered on the row below."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=None, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=412, claim_ids=["c2"]),
+    ])
+    assert "Nothing in this reading could be sized" not in html
+    assert "not ordered by size at all" not in html
+
+
+def test_the_findings_heading_agrees_with_the_headline():
+    """One document read "not ordered by size at all" and, two lines later,
+    "Ranked by reach — how many accounts each theme touches"."""
+    unsized = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "Ranked by reach" not in unsized
+    assert "Not ranked by reach" in unsized
+    sized = render_report_html(_run(), [_finding(impact_value=7)])
+    assert "Ranked by reach" in sized
+
+
+def test_the_relevance_disclosure_does_not_also_claim_completeness():
+    """The relevance half is true; "every theme is listed" is not — findings
+    are capped, and anecdote/ungroupable/refuted candidates never reach the
+    list. Bundling them would let the false half discredit the true one."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html
+    assert "Every theme in the sources you approved is listed" not in html

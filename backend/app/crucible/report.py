@@ -234,37 +234,70 @@ def _headline_section(findings: list[dict]) -> str:
 
     # "LARGEST" IS A CLAIM, AND IT HAS TO BE EARNED.
     #
-    # `_rank` orders by size, then confidence — but its size term is constant
-    # when nothing could be sized (`-(value if value is not None else -1)`), so
-    # on a corpus with no account attribution the order collapses onto the
-    # confidence tie-break. Calling the first row "the largest thing this
-    # reading found" then asserts a comparison that was never made, and the
-    # reader can see it is false: the observed report named a 5-claim finding
-    # "largest" with a 27-claim one below it.
+    # `_rank` (pipeline.py) keys on THREE terms, and the first version of this
+    # fix only knew about two of them:
     #
-    # This is the same rule as I3 one level up. I3 stops a missing SIZE being
-    # rendered as zero; this stops a missing ORDERING being rendered as a
-    # ranking. A confident answer to a question the run could not ask is
-    # exactly what the definition gate exists to prevent, and it would be
-    # perverse to spend a gate establishing what the goal means and then open
-    # the report with an unsupported superlative.
-    sized = top.get("impact_value") is not None
-    if sized:
+    #     (0 if conflict else 1, -(value if value is not None else -1),
+    #      -confidence)
+    #
+    # An authoritative CONFLICT is placed first regardless of size — the
+    # dominant term — and the size term is constant when nothing could be
+    # sized, leaving a strict confidence sort. So there are three different
+    # true sentences here, and exactly one of them is "it is the largest".
+    #
+    # Getting this wrong is not cosmetic: the first attempt gated on the TOP
+    # finding's own value while asserting something about ALL of them, so a
+    # conflict-led run said "nothing here could be sized" with 412 accounts
+    # rendered on row two, and an unsized-elsewhere run called a 3-account
+    # finding "the largest" above a 900-account one. Both reproduced from
+    # rendered HTML in review.
+    #
+    # Same rule as I3 one level up: I3 stops a missing SIZE rendering as zero,
+    # this stops a missing ORDERING rendering as a ranking.
+    anything_sized = any(f.get("impact_value") is not None for f in findings)
+    top_is_conflict = (top.get("adjudication") or "") == "conflict"
+    lead = (
+        f", at {_esc(band)} confidence" if band else ""
+    ) + (
+        f", resting on {claims} claim{'' if claims == 1 else 's'}"
+        if claims else ""
+    )
+
+    if top_is_conflict:
+        # Placed first BY RULE, so size never entered into it either way.
+        tail = (
+            "It is placed first because two sources that may both speak "
+            "contradict each other" + lead
+            + ". That placement is a rule, not a measurement — it is first "
+              "regardless of size, so read it as the disagreement most worth "
+              "resolving rather than as the biggest thing here."
+        )
+    elif top.get("impact_value") is not None:
         tail = (
             f"It is the largest thing this reading found: {_esc(_reach(top))}"
-            + (f", at {_esc(band)} confidence" if band else "")
-            + (f", resting on {claims} claim{'' if claims == 1 else 's'}" if claims else "")
+            + lead
             + ". Largest by how much of your book it touches — not by how much "
               "it would move the metric, which this reading cannot compute."
         )
-    else:
+    elif anything_sized:
+        # Unsized itself, but sized findings exist below it — so the order is a
+        # real ordering and this row simply has no size of its own.
         tail = (
-            "It is listed first"
-            + (f", at {_esc(band)} confidence" if band else "")
-            + (f", resting on {claims} claim{'' if claims == 1 else 's'}" if claims else "")
-            + ". NOT because it is the largest: nothing here could be sized, so "
-              "these are not ordered by size at all. Treat the order as "
-              "arbitrary and read the list, not the top of it."
+            "It is listed first" + lead
+            + ". It could not be sized, though others below it could — a "
+              "missing size is not a small one, so do not read its position as "
+              "a measurement of it."
+        )
+    else:
+        # Nothing anywhere could be sized. The size term is then constant and
+        # the sort is strictly confidence-descending — which is a real order,
+        # just not the one the heading implies. Saying "arbitrary" here was
+        # itself false.
+        tail = (
+            "It is listed first" + lead
+            + ". Nothing in this reading could be sized, so these are ordered "
+              "by confidence rather than by size — the order says how sure "
+              "each one is, not how big."
         )
     out.append(_p(tail))
     return "".join(out)
@@ -474,12 +507,23 @@ def _findings_section(
     if not findings:
         return ""
     out = [f"<h2>What the evidence says ({len(findings)})</h2>"]
-    out.append(_p(
-        "Ranked by reach — how many accounts each theme touches. An "
-        "authoritative disagreement is placed first regardless of size, "
-        "because two sources that may both speak contradicting each other is "
-        "worth more than either of them alone."
-    ))
+    # THE HEADING HAS TO AGREE WITH THE HEADLINE. Fixing only the summary left
+    # one document reading "not ordered by size at all" and, two lines later,
+    # "Ranked by reach" — a fix that stopped at its own boundary.
+    if any(f.get("impact_value") is not None for f in findings):
+        out.append(_p(
+            "Ranked by reach — how many accounts each theme touches. An "
+            "authoritative disagreement is placed first regardless of size, "
+            "because two sources that may both speak contradicting each other "
+            "is worth more than either of them alone."
+        ))
+    else:
+        out.append(_p(
+            "Not ranked by reach: nothing here could be sized, so these are "
+            "ordered by confidence. An authoritative disagreement is still "
+            "placed first regardless, because two sources that may both speak "
+            "contradicting each other is worth more than either of them alone."
+        ))
 
     full = findings[:full_cap]
     rest = findings[full_cap:]
@@ -601,13 +645,19 @@ def _limits_section(plan: dict) -> str:
     # asked. This is the same rule as I3 and as the headline's superlative: do
     # not present something the run did not establish. The filter itself is
     # real work and is not pretended at here.
+    # SAYS ONLY THE PART THAT IS TRUE. The first draft added "every theme in
+    # the sources you approved is listed", which the same document contradicts
+    # a section earlier — findings are capped, and anecdote / ungroupable /
+    # refuted candidates never reach this list at all. The relevance claim is
+    # solid on its own (`build_findings` has a `goal_accounts` parameter that
+    # production never passes); the completeness claim was unearned, and
+    # bundling them would have made the true half easy to dismiss.
     out.append(_p(
         "<strong>These findings were not selected for your goal.</strong> "
-        "Every theme in the sources you approved is listed, whether or not it "
-        "bears on what you asked about — nothing here was filtered or ranked "
-        "by relevance to your definition. Read the list as \u201ceverything in "
-        "your evidence\u201d and judge relevance yourself; a theme\u2019s "
-        "presence is not a claim that it matters to this goal."
+        "Nothing here was filtered or ranked by relevance to your definition — "
+        "a theme appears because it is in the evidence you approved, not "
+        "because it bears on what you asked about. Its presence is not a claim "
+        "that it matters to this goal; judge that yourself."
     ))
     gaps = [g for g in _as_list(plan.get("cannot_answer")) if isinstance(g, dict)]
     if gaps:
