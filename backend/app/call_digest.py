@@ -46,7 +46,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from app.config import settings
 from app.corpus_mapreduce import CorpusMapReduceSpec
@@ -1635,11 +1635,10 @@ _VOC_BASE_DISCIPLINE = (
     "A hit requires ALL THREE of the following structural conditions to be "
     "true, checked BEFORE the classification bar is ever considered:\n"
     "1. SCOPE — the ask/issue was raised by the CUSTOMER or PROSPECT side of "
-    "the call, the buying party. It was NOT raised by the reviewed "
-    "company's own employees or team, and it is NOT the reviewed company "
-    "itself asking one of ITS OWN vendors or tools for a feature — a "
-    "company asking a vendor it buys from for a capability is never a hit, "
-    "no matter how much it otherwise reads like a feature request.\n"
+    "the call, the buying party — never the reviewed company's own "
+    "employees or reps, and never the reviewed company itself asking one "
+    "of ITS OWN vendors or tools for a feature (vendor-buyer asks are "
+    "never a hit, no matter how feature-request-shaped they read).\n"
     "2. EXTERNAL PARTICIPANT — the call has a real external customer or "
     "prospect on it. An internal-only call, with no external "
     "customer/prospect participant, is never a hit regardless of its "
@@ -1652,12 +1651,17 @@ _VOC_BASE_DISCIPLINE = (
     "Only once all three hold does the classification bar below apply.\n"
     "Return a verdict for EVERY call id shown to you — never omit one and "
     "never invent an id that was not shown. For a call that meets the bar, "
-    "hit=true and reason is a one-line grounded quote or close paraphrase of "
-    "the specific ask/bug. For a call that does not, hit=false and reason "
-    "may be empty. Do not guess — a call whose content is ambiguous, "
-    "purely relationship/scheduling, internal-only, a vendor-buyer "
-    "inversion, or rep-pitched/demo-only with no customer-raised ask gets "
-    "hit=false."
+    "hit=true and reason is a paraphrase of the specific ask/bug in AT MOST "
+    "12 WORDS — never a verbatim quote, never a speaker or participant "
+    "name. For a call that does not, hit=false and reason may be empty. Do "
+    "not guess — a call whose content is ambiguous, purely "
+    "relationship/scheduling, internal-only, a vendor-buyer inversion, or "
+    "rep-pitched/demo-only with no customer-raised ask gets hit=false.\n"
+    "SELF-CHECK before finalizing: (a) identify WHO raised the ask, by name "
+    "and role — a rep/employee's own ask is scope-excluded even if a "
+    "summary elsewhere calls it a customer ask; (b) hit and reason MUST "
+    "agree — if your reason concludes rep-side, vendor-side, or "
+    "internal-only, hit MUST be false."
 )
 
 #: The domain's SENSIBLE DEFAULT classification bar — used whenever a query
@@ -1713,11 +1717,161 @@ def _voc_count_fetch(enterprise_id: str, window: "Window", constraints):
     return build_corpus(enterprise_id, window).calls
 
 
+@dataclass(frozen=True)
+class _VocAnnotatedCall:
+    """One call once `_voc_count_prefilter` has computed its deterministic
+    external-participant verdict — the original `CallTranscript` plus the
+    corpus-wide `own_domains` set and THIS call's own derived `account`,
+    carried alongside it so `_render_call_item`/`_render_call_label` can read
+    a server-computed FACT instead of recomputing (or, worse, leaving the
+    model to guess) which participants are company-side vs external. Never
+    built for a call `derive_account` could not resolve — see
+    `_voc_count_prefilter`, which is the only place this is constructed."""
+    call: "CallTranscript"
+    own_domains: frozenset
+    account: str
+
+
+def _unwrap_voc_call(it: Any) -> "CallTranscript":
+    """Every `VOC_CALLS_SPEC` per-item callable (`item_id`/`render_item`/
+    `render_label`) may receive either a bare `CallTranscript` — a caller
+    that bypasses `_voc_count_prefilter` (a direct unit test, or a future
+    caller wiring this spec with no prefilter) — or a `_VocAnnotatedCall`
+    (the real engine path, once `corpus_mapreduce.run` has prefiltered).
+    Every callable unwraps through this one helper so both shapes work
+    identically and neither has to duplicate the `isinstance` check."""
+    return it.call if isinstance(it, _VocAnnotatedCall) else it
+
+
+def _participant_side_line(
+    call: "CallTranscript", own_domains: frozenset, account: str,
+) -> str:
+    """One deterministic line naming which of THIS call's participants are
+    company-side (their email is on an `own_domains` domain) vs external
+    customer/prospect — computed from the SAME `call_index.derive_account`
+    verdict `_voc_count_prefilter` already ran, never left for the model to
+    infer from a flat, unattributed participants line. This is what turns
+    SCOPE (condition #1 of `_VOC_BASE_DISCIPLINE`) from a guess into a check
+    against a stated fact: a rep on the company's own domain can no longer
+    be misread as the customer just because a summary elsewhere calls them
+    one (see `_VOC_BASE_DISCIPLINE`'s SELF-CHECK clause)."""
+    company_side: list[str] = []
+    external_side: list[str] = []
+    for raw in call.participants or []:
+        email = (raw or "").strip().lower()
+        if "@" not in email:
+            continue
+        domain = email.rsplit("@", 1)[1]
+        (company_side if domain in own_domains else external_side).append(raw)
+    return (
+        "participant sides (server-computed from email domain — this is a "
+        "fact, not a guess; do not re-derive it from the names above):\n"
+        f"  company-side (never the customer): "
+        f"{', '.join(company_side) if company_side else '(none)'}\n"
+        f"  external customer/prospect (account: {account}): "
+        f"{', '.join(external_side) if external_side else '(none)'}"
+    )
+
+
+def _render_call_item(it: Any) -> str:
+    """`CorpusMapReduceSpec.render_item` for the voc_calls domain. Renders
+    the call's usual content (`CallTranscript.render()`, unchanged) plus —
+    ONLY when `it` is a `_VocAnnotatedCall`, i.e. it survived
+    `_voc_count_prefilter` — the deterministic participant-side line (see
+    `_participant_side_line`). A bare `CallTranscript` (bypassing the
+    prefilter) renders exactly as before this change: no annotation line."""
+    call = _unwrap_voc_call(it)
+    base = call.render()
+    if isinstance(it, _VocAnnotatedCall):
+        base = f"{base}\n{_participant_side_line(call, it.own_domains, it.account)}"
+    return base
+
+
+def _voc_count_prefilter(
+    calls: list["CallTranscript"], enterprise_id: str,
+) -> list["_VocAnnotatedCall"]:
+    """`CorpusMapReduceSpec.prefilter` for the voc_calls domain — the
+    deterministic customer-vs-rep grounding this engine REUSES rather than
+    reinvents: `app.call_index._own_domains` + `app.call_index.derive_account`,
+    the SAME primitive `IndexedCall.account` (the indexed call listing) is
+    already built from. Read-only; no new I/O beyond what `_own_domains`
+    itself already does (member-email lookup, best-effort).
+
+    Two things, both against the SAME corpus already fetched for this run:
+
+    1. DROPS any call with no real external customer/prospect participant
+       (`derive_account` returns None). The map pass never even sees it, so
+       an internal-only call can never become a false hit no matter what the
+       model reads into its content — this is a HARD structural guard,
+       enforced here before the model ever runs, not merely a prompt
+       instruction (condition #2, "EXTERNAL PARTICIPANT", of
+       `_VOC_BASE_DISCIPLINE`).
+    2. WRAPS every surviving call in a `_VocAnnotatedCall` carrying its own
+       derived `account` + the corpus-wide `own_domains` set, so
+       `_render_call_item` can show the model a server-computed
+       participant-side map instead of a flat, unattributed participants
+       line (condition #1, "SCOPE").
+
+    `_own_domains` wants `[{"participants": [...]}, ...]` — the ingestion-side
+    shape `call_index.py`'s own sync rows carry. `CallTranscript` is a
+    dataclass, so adapting the shape here is the ONE piece of glue this
+    function does; no other `call_index` behaviour is touched, duplicated,
+    or reimplemented.
+    """
+    from app.call_index import _own_domains, derive_account
+
+    own = frozenset(_own_domains(
+        enterprise_id, [{"participants": c.participants} for c in calls],
+    ))
+    kept: list[_VocAnnotatedCall] = []
+    for call in calls:
+        account = derive_account(call.participants, own)
+        if account is None:
+            continue  # internal-only — can never be a hit; excluded, not classified
+        kept.append(_VocAnnotatedCall(call=call, own_domains=own, account=account))
+    return kept
+
+
+def _render_call_label(it: Any) -> str:
+    """`CorpusMapReduceSpec.render_label` for the voc_calls domain — the
+    human-friendly reference for one call in a count answer's evidence list,
+    matching `app.call_index.IndexedCall.render()`'s "date · account —
+    title" shape (the SAME listing format a "which calls" answer already
+    shows, reused rather than reinvented) instead of the raw Fireflies/Zoom
+    `external_id` a reader cannot act on.
+
+    `it` is either a `_VocAnnotatedCall` (the real engine path — its already-
+    derived `account`, computed corpus-wide by `_voc_count_prefilter`, is
+    reused here rather than recomputed) or a bare `CallTranscript` (a direct
+    caller bypassing the prefilter — `account` falls back to a per-call
+    derivation with `own_domains=set()`, byte-for-byte the original
+    behaviour of this function before prefiltering existed). A call with no
+    identifiable external domain omits the account segment rather than
+    guessing — same as `IndexedCall.render()` when `account` is None."""
+    call = _unwrap_voc_call(it)
+    when = (call.date or "")[:10]
+    if isinstance(it, _VocAnnotatedCall):
+        account = it.account
+    else:
+        from app.call_index import derive_account
+
+        account = derive_account(call.participants, own_domains=set())
+    who = f" · {account}" if account else ""
+    return f"{when}{who} — {call.title or '(untitled)'}"
+
+
 VOC_CALLS_SPEC = CorpusMapReduceSpec(
     domain="voc_calls",
     fetch=_voc_count_fetch,
-    render_item=lambda call: call.render(),
-    item_id=lambda call: call.external_id,
+    render_item=_render_call_item,
+    item_id=lambda it: _unwrap_voc_call(it).external_id,
+    render_label=_render_call_label,
+    # "Analyzing your calls…" — never `app.report_phases.ReportPhase`: this
+    # engine answers inline in the thread, never a saved report document (see
+    # `app.corpus_mapreduce`'s module docstring), and a `ReportPhase` value is
+    # exactly the signal `app.chat_intent._is_report_pipeline` exists to keep
+    # OFF a count-shaped call-digest question.
+    phase_label="Analyzing your calls…",
     base_discipline=_VOC_BASE_DISCIPLINE,
     criterion=_VOC_DEFAULT_CRITERION,
     verdict_schema=_VOC_COUNT_VERDICT_SCHEMA,
@@ -1732,6 +1886,11 @@ VOC_CALLS_SPEC = CorpusMapReduceSpec(
     # Sonnet constant `ANSWER_MODEL` above (and qa_agent's own identically-
     # valued `ANSWER_MODEL`) already use for this module's synthesis calls.
     map_model=ANSWER_MODEL,
+    # Deterministic customer-vs-rep grounding, reused from `call_index` (see
+    # `_voc_count_prefilter`'s docstring) — never re-invented here: drops
+    # internal-only calls before the map pass and annotates every surviving
+    # call's participant sides as a server-computed fact.
+    prefilter=_voc_count_prefilter,
 )
 
 
@@ -1755,30 +1914,78 @@ def _count_assumption_line(criterion: Optional[str]) -> str:
     return _VOC_DEFAULT_ASSUMPTION_LINE
 
 
+def _count_coverage_caveat(corpus: "DigestCorpus", window: "Window") -> str:
+    """Empty string for a healthy corpus, else a short caveat sentence — the
+    ONLY coverage text `_assemble_count_answer` ever appends. Deliberately NOT
+    `_coverage_line`'s full `=== … ===` banner: that banner discloses what
+    the CLASSIFIER model saw for the query/report synthesis passes (down to
+    "verbatim quotes sampled to ~N per call") — a disclosure about corpus
+    text a count answer never renders, so pasted into a count it reads as
+    misleading filler rather than the honest coverage statement it is
+    elsewhere. `_coverage_line` itself is untouched; the query/report passes
+    still get the full banner.
+
+    Names only the coverage gaps genuinely consequential to a COUNT:
+    truncation (fewer calls read than exist in the window — the count would
+    otherwise silently understate itself with no disclosure) and a source
+    that failed to sync (a real, checkable gap). Never mentions quote
+    sampling, KG, or Slack: the count engine classifies `corpus.calls`
+    alone, so nothing else is "what this answer was built from". A healthy
+    corpus returns "", so the count answer opens straight on the count line
+    with no coverage caveat at all (see `_assemble_count_answer`)."""
+    parts: list[str] = []
+    if corpus.total > corpus.count:
+        parts.append(
+            f"only the most recent {corpus.count} of {corpus.total} calls "
+            f"in {window.label} were read — older calls omitted for space"
+        )
+    if corpus.failed_sources:
+        parts.append(
+            f"{_sources_phrase(corpus.failed_sources)} could not be reached "
+            "for this window, so its calls are missing"
+        )
+    return "; ".join(parts)
+
+
 def _assemble_count_answer(
-    eng, *, window: "Window", source_line: str, criterion: Optional[str] = None,
+    eng, *, window: "Window", corpus: "DigestCorpus", criterion: Optional[str] = None,
 ) -> dict:
     """The `EngineResult` -> Ask-shaped payload, matching `_answer_query`'s
     response contract exactly (same field set, same `_skill`/`_skill_action`/
     `_skill_source` mechanism) so the chat surface renders it identically.
     The count and the call list are Python values off `eng`, never model
-    prose — reuses the SAME coverage banner (`source_line`) the query/report
-    passes print, so this answer discloses what it read just as loudly.
+    prose. Opens directly on the count + stated-assumption line — never the
+    query/report passes' full `=== … ===` banner (see
+    `_count_coverage_caveat`'s docstring for why): that banner would be
+    misleading filler at the top of a count, so this answer only appends a
+    coverage caveat, and only when one is genuinely present.
 
     `criterion` is the resolved `constraints["criterion"]` the engine actually
     classified against (or None when the default was used) — see
     `_count_assumption_line`: the answer always states which bar it counted
     under, so the user can correct it in one turn instead of distrusting an
-    unexplained number."""
-    lines = [source_line, "",
-             f"{eng.count} of {eng.total_items} calls in {window.label} "
+    unexplained number.
+
+    Each hit is named by `eng.labels.get(item_id, item_id)` — `spec.render_
+    label`'s output (date · account · title — see `VOC_CALLS_SPEC.render_
+    label`/`_render_call_label`), computed once by `app.corpus_mapreduce.run`
+    and carried on `EngineResult` (see its docstring) — never the raw
+    `item_id` (a provider ULID a reader cannot act on). Falls back to the raw
+    id only for a hit `run()` did not label (a caller-constructed
+    `EngineResult` in a test, never a real run)."""
+    lines = [f"{eng.count} of {eng.total_items} calls in {window.label} "
              "matched.",
              _count_assumption_line(criterion)]
+    coverage_caveat = _count_coverage_caveat(corpus, window)
+    if coverage_caveat:
+        lines.append("")
+        lines.append(f"Note: {coverage_caveat}.")
     if eng.hit_ids:
         lines.append("")
         for item_id in eng.hit_ids:
+            label = eng.labels.get(item_id, item_id)
             reason = eng.reasons.get(item_id, "")
-            lines.append(f"- {item_id}: {reason}" if reason else f"- {item_id}")
+            lines.append(f"- {label}: {reason}" if reason else f"- {label}")
     unanswered = ""
     if eng.unclassified_ids:
         unanswered = (
@@ -1789,7 +1996,8 @@ def _assemble_count_answer(
         lines.append("")
         lines.append(f"Note: {unanswered}")
     citations = [
-        {"source": item_id, "evidence": eng.reasons.get(item_id, "")}
+        {"source": eng.labels.get(item_id, item_id),
+         "evidence": eng.reasons.get(item_id, "")}
         for item_id in eng.hit_ids
     ]
     return {
@@ -1801,6 +2009,11 @@ def _assemble_count_answer(
         "_skill": _VOC_SKILL,
         "_skill_action": f"Voice of customer · counted from {window.label}",
         "_skill_source": "voc-count-engine",
+        # Explicit, not just absent: this is an inline chat answer, never a
+        # report document — `app.report_capture.is_report_payload` already
+        # reads absence as falsy, but naming it here says so on the payload
+        # itself rather than leaving it to be inferred from a missing key.
+        "_report": False,
     }
 
 
@@ -2214,7 +2427,7 @@ def answer(
                     on_phase=on_phase, items=corpus.calls,
                 )
                 return _assemble_count_answer(
-                    eng, window=window, source_line=source_line,
+                    eng, window=window, corpus=corpus,
                     criterion=(
                         constraints.get("criterion")
                         if isinstance(constraints, dict) else None

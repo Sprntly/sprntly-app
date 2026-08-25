@@ -1407,6 +1407,37 @@ def _dispatch_planned_method(
     if not method or method not in _PLANNED_MACHINERY:
         return None
 
+    # A genuinely mapreducible count question ("how many calls asked for X")
+    # must run the count engine even when the planner named `call-listing` —
+    # its own instructions classify ANY "list or count recorded calls"
+    # question there (see `ask_planner._PLANNER_SYSTEM`'s call-listing
+    # bullet), and the planner is a model reading a sentence, not a
+    # guarantee. `is_mapreducible_count` is the SAME strict eligibility check
+    # `call_digest.answer` itself gates the engine on (excludes comparative/
+    # over-time, single-subject, report-shaped, and a bare aggregate with no
+    # content predicate) — so this redirect fires ONLY for a question that
+    # genuinely belongs to the engine, never for a bare "how many calls did I
+    # have", which the index already answers correctly and instantly. Dark-
+    # shipped identically to the engine itself: off unless the flag is on.
+    if method in _COUNT_ENGINE_REDIRECT_METHODS:
+        try:
+            from app.config import settings
+
+            if settings.voc_count_engine_enabled:
+                from app import call_digest
+
+                if call_digest.is_mapreducible_count(question):
+                    logger.info(
+                        "[planner] redirecting method=%s -> call-digest "
+                        "(mapreducible count) company=%s",
+                        method, enterprise_id,
+                    )
+                    method = "call-digest"
+        except Exception:  # noqa: BLE001 — a redirect check must never block dispatch
+            logger.exception(
+                "[planner] count-engine redirect check failed for %s", enterprise_id
+            )
+
     logger.info(
         "[planner] exec method=%s company=%s", method, enterprise_id
     )
@@ -1571,6 +1602,19 @@ _PLANNED_MACHINERY: dict = {
     "ticket-update": _m_ticket_update,
     "tracker-lookup": _m_tracker_lookup,
 }
+
+
+#: Machinery ids a genuinely mapreducible-count question can land on by
+#: planner misclassification, and must be redirected to `call-digest` — see
+#: `_dispatch_planned_method`'s redirect block. `call-listing` is the one
+#: real case: its own instructions cover ANY "list or count recorded calls"
+#: question, so a content-filtered count ("how many calls asked for X") can
+#: land there instead of `call-digest`. `single-call-read` is deliberately
+#: EXCLUDED — `is_mapreducible_count` requires the plural/aggregate "how
+#: many/which <calls>" shape, which cannot co-occur with a single named-call
+#: reference, so including it would guard against a case that can never
+#: happen. No other `_PLANNED_MACHINERY` key names a calls-listing engine.
+_COUNT_ENGINE_REDIRECT_METHODS: frozenset[str] = frozenset({"call-listing"})
 
 
 #: Providers whose presence in a plan's `sources` means "this question is

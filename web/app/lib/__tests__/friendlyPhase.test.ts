@@ -15,6 +15,7 @@ const ALLOWED_OUTPUTS = new Set<string>([
   "Looking through your connected sources…",
   "Writing your answer…",
   "Putting your answer together…",
+  "Analyzing your calls…",
   "Reviewing your latest report…",
   "Researching your competitors…",
   "Writing your report…",
@@ -50,6 +51,7 @@ const KNOWN_MAPPINGS: ReadonlyArray<[string, string]> = [
   ["Searching your connected sources…", "Looking through your connected sources…"],
   ["Writing the answer…", "Writing your answer…"],
   ["Putting your answer together…", "Putting your answer together…"],
+  ["Analyzing your calls…", "Analyzing your calls…"],
   ["Reading the last competitive review…", "Reviewing your latest report…"],
   ["Researched Acme Corp…", "Researching your competitors…"],
   ["Writing the review from 47 sourced observations…", "Writing your report…"],
@@ -103,6 +105,17 @@ describe("friendlyPhase — egress contract", () => {
       expect(out).toBe(expected)
       expect(out).not.toBe(FRIENDLY_PHASE_GENERIC)
     }
+  })
+
+  it("the count engine's 'analyzing' phase is never swallowed by ReportPhase.ANALYZING's broader match", () => {
+    // Both raw labels start with "analyzing" — the count engine's own,
+    // more-specific pattern must be checked first (see friendlyPhase.ts's
+    // ordering comment) or a count answer would read as report-generation
+    // progress, which is the exact regression this fix exists to prevent.
+    expect(friendlyPhase("Analyzing your calls…")).toBe("Analyzing your calls…")
+    expect(friendlyPhase("Analyzing your calls…")).not.toBe("Analyzing the findings…")
+    // The genuinely report-shaped label is untouched.
+    expect(friendlyPhase("Analyzing the findings…")).toBe("Analyzing the findings…")
   })
 
   it("falls back to the generic line for anything unmapped", () => {
