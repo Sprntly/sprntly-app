@@ -152,6 +152,36 @@ class AskIn(BaseModel):
     # PRD tab's context already carries its evidence and tickets.
     evidence_id: int | None = Field(default=None, ge=1)
     ticket_set_id: int | None = Field(default=None, ge=1)
+    # What the side panel is SHOWING — `{"kind": "report"|"document", "id":
+    # int}`, the same shape the classify call already receives as
+    # `open_artifact`, sent by the same client helper
+    # (`openArtifactForPanel`).
+    #
+    # Unlike the three ids above, this addresses NOTHING on its own and is
+    # therefore not ownership-gated here: `app.thread_context` uses it only to
+    # ORDER the artifacts of `conversation_id`, and every one of those is read
+    # company-scoped. A pointer at another tenant's report matches no row in
+    # this thread and reorders nothing — it cannot pull a document in. That is
+    # deliberate: an id that fetches needs a gate, an id that sorts does not.
+    open_artifact: dict | None = None
+
+    @field_validator("open_artifact")
+    @classmethod
+    def _panel_pointer_shape(cls, v: dict | None) -> dict | None:
+        """Accept only the shape the sorter understands, and drop the rest.
+
+        A malformed pointer must not raise — the panel's state is a hint, and
+        failing an ask because a client sent a stale shape would trade a good
+        answer for an error. Anything unrecognised becomes None, which is
+        exactly "nothing is open".
+        """
+        if not isinstance(v, dict):
+            return None
+        kind = str(v.get("kind") or "").strip().lower()
+        raw_id = v.get("id")
+        if kind not in {"report", "document"} or not isinstance(raw_id, int):
+            return None
+        return {"kind": kind, "id": raw_id}
     # Individual-project-chat send identity: the idempotency key a
     # retry/double-submit carries for the persisted `conversation_turns`
     # user turn (project branch only — ignored on the main/PRD/artifact
@@ -506,6 +536,9 @@ async def ask(
             prd_id=body.prd_id,
             evidence_id=body.evidence_id,
             ticket_set_id=body.ticket_set_id,
+            # What the panel is SHOWING, so `app.thread_context` puts that
+            # document first among the ones this thread produced.
+            open_artifact=body.open_artifact,
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
@@ -541,6 +574,9 @@ async def ask(
             prd_id=body.prd_id,
             evidence_id=body.evidence_id,
             ticket_set_id=body.ticket_set_id,
+            # What the panel is SHOWING, so `app.thread_context` puts that
+            # document first among the ones this thread produced.
+            open_artifact=body.open_artifact,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
             # The caller's own identity — see above.
