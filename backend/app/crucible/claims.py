@@ -106,7 +106,29 @@ DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 #: Authority is not weight: `DEFAULT_STRENGTH` separately caps a self-reporting
 #: source at `reported`.
 AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
-    "customer_voice":   frozenset({"preference", "mechanism"}),
+    # `constraint` BECAUSE A CUSTOMER IS THE WITNESS TO ITS OWN BLOCKER.
+    #
+    # The extractor types a blocked deal as `deal_blocker` -> `constraint`
+    # (KIND_TO_CLAIM_TYPE above). Without this entry, a tenant whose only
+    # connected source is call recordings had every blocked deal REFUTED as
+    # "no source that may speak to this claim type reported it" — three real
+    # blockers across three named accounts, weeks apart, produced zero findings
+    # and three lines in the ruled-out ledger. The identical sentence typed
+    # into Slack surfaced, because `communication` already had `constraint`.
+    #
+    # That asymmetry was not the self-selection rule doing its job. The rule is
+    # about MAGNITUDE — `test_a_self_selected_source_can_never_size_a_population`
+    # asserts exactly that, for `customer_voice` and `communication` together —
+    # and it is untouched here. Authority is not sizing: `score_impact` reads
+    # `impact_inputs` and nothing else, which
+    # `assert_impact_ignores_corroboration` sweeps every field to enforce. What
+    # this entry changes is whether the claim survives Stage 4 and how much
+    # confidence it carries, not how big anything is.
+    #
+    # And on the merits: nobody is better placed than the customer to report
+    # their own procurement queue, security review or budget freeze. That is a
+    # claim about themselves, not about the market.
+    "customer_voice":   frozenset({"preference", "mechanism", "constraint"}),
     "communication":    frozenset({"attempt", "existence", "constraint"}),
     "project_mgmt":     frozenset({"attempt", "existence", "constraint"}),
     "analytics":        frozenset({"magnitude", "direction"}),
