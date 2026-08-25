@@ -566,3 +566,45 @@ def test_clipping_never_emits_a_half_escaped_entity():
         out = r._esc_clipped('"' * 50, n)
         assert len(out) <= n
         assert "&" not in out or out.count("&") == out.count(";")
+
+
+# ── The report must not claim more than the run established ──────────────────
+
+def test_an_unsized_top_finding_is_not_called_the_largest():
+    """THE SUPERLATIVE HAS TO BE EARNED.
+
+    `_rank` orders by size then confidence, and its size term is constant when
+    nothing could be sized — so on a corpus with no account attribution the
+    order collapses onto the confidence tie-break. Calling row one "the largest
+    thing this reading found" then asserts a comparison that was never made,
+    and the reader can see it is false: the observed report named a 5-claim
+    finding largest with a 27-claim one below it.
+    """
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2", "c3", "c4"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "nothing here could be sized" in html
+    # And it says what IS true of the order, rather than going quiet about it.
+    assert "not ordered by size" in html
+
+
+def test_a_sized_top_finding_still_says_largest():
+    """The claim is not banned, it is CONDITIONAL. A run that could size its
+    findings has earned the word and keeps it."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=120, claim_ids=["c1"]),
+        _finding(impact_value=10, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+
+
+def test_the_report_says_findings_were_not_filtered_to_the_goal():
+    """The definition gate establishes what the goal means, and claim selection
+    never sees it — `_load_signals` reads the whole corpus and `build_findings`
+    takes no goal argument. A reader cannot tell that from the output, so a run
+    about churn returns receipt-scanning accuracy looking exactly like an
+    answer. Stated, rather than left to be discovered."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html

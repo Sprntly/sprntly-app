@@ -231,13 +231,41 @@ def _headline_section(findings: list[dict]) -> str:
     out.append(_p(f"<strong>{_esc_statement(top)}</strong>"))
     band = (top.get("confidence_band") or "").strip()
     claims = len(_as_list(top.get("claim_ids")))
-    tail = (
-        f"It is the largest thing this reading found: {_esc(_reach(top))}"
-        + (f", at {_esc(band)} confidence" if band else "")
-        + (f", resting on {claims} claim{'' if claims == 1 else 's'}" if claims else "")
-        + ". Largest by how much of your book it touches — not by how much it "
-          "would move the metric, which this reading cannot compute."
-    )
+
+    # "LARGEST" IS A CLAIM, AND IT HAS TO BE EARNED.
+    #
+    # `_rank` orders by size, then confidence — but its size term is constant
+    # when nothing could be sized (`-(value if value is not None else -1)`), so
+    # on a corpus with no account attribution the order collapses onto the
+    # confidence tie-break. Calling the first row "the largest thing this
+    # reading found" then asserts a comparison that was never made, and the
+    # reader can see it is false: the observed report named a 5-claim finding
+    # "largest" with a 27-claim one below it.
+    #
+    # This is the same rule as I3 one level up. I3 stops a missing SIZE being
+    # rendered as zero; this stops a missing ORDERING being rendered as a
+    # ranking. A confident answer to a question the run could not ask is
+    # exactly what the definition gate exists to prevent, and it would be
+    # perverse to spend a gate establishing what the goal means and then open
+    # the report with an unsupported superlative.
+    sized = top.get("impact_value") is not None
+    if sized:
+        tail = (
+            f"It is the largest thing this reading found: {_esc(_reach(top))}"
+            + (f", at {_esc(band)} confidence" if band else "")
+            + (f", resting on {claims} claim{'' if claims == 1 else 's'}" if claims else "")
+            + ". Largest by how much of your book it touches — not by how much "
+              "it would move the metric, which this reading cannot compute."
+        )
+    else:
+        tail = (
+            "It is listed first"
+            + (f", at {_esc(band)} confidence" if band else "")
+            + (f", resting on {claims} claim{'' if claims == 1 else 's'}" if claims else "")
+            + ". NOT because it is the largest: nothing here could be sized, so "
+              "these are not ordered by size at all. Treat the order as "
+              "arbitrary and read the list, not the top of it."
+        )
     out.append(_p(tail))
     return "".join(out)
 
@@ -558,6 +586,28 @@ def _limits_section(plan: dict) -> str:
         "effort figure, a prioritisation score or a significance test, because "
         "nothing it read carries the numbers those need. Where you expected "
         "one of those, this is why it is absent."
+    ))
+    # WHICH FINDINGS APPEAR IS NOT DECIDED BY THE GOAL, and a reader cannot
+    # tell that from the output — which is the problem. The definition gate
+    # establishes what the goal means with some care, and then claim selection
+    # never sees it: `_load_signals` reads the whole connected corpus and
+    # `build_findings` is called with no goal argument at all. So a run about
+    # enterprise churn returns export reliability and receipt-scanning accuracy
+    # alongside anything that does bear on churn, with nothing marking which is
+    # which.
+    #
+    # Stated rather than quietly left for the reader to notice, because the
+    # alternative is a document that LOOKS like it answered the question it was
+    # asked. This is the same rule as I3 and as the headline's superlative: do
+    # not present something the run did not establish. The filter itself is
+    # real work and is not pretended at here.
+    out.append(_p(
+        "<strong>These findings were not selected for your goal.</strong> "
+        "Every theme in the sources you approved is listed, whether or not it "
+        "bears on what you asked about — nothing here was filtered or ranked "
+        "by relevance to your definition. Read the list as \u201ceverything in "
+        "your evidence\u201d and judge relevance yourself; a theme\u2019s "
+        "presence is not a claim that it matters to this goal."
     ))
     gaps = [g for g in _as_list(plan.get("cannot_answer")) if isinstance(g, dict)]
     if gaps:
