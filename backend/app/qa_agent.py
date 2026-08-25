@@ -1376,6 +1376,7 @@ def _dispatch_planned_method(
     dataset: str,
     fresh: Callable[[], bool],
     is_cancelled: Optional[Callable[[], bool]],
+    on_phase: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Run the machinery the PLANNER named, or return None to keep going.
 
@@ -1419,6 +1420,7 @@ def _dispatch_planned_method(
             fresh=fresh,
             is_cancelled=is_cancelled,
             plan=plan,
+            on_phase=on_phase,
         )
     except AskCancelled:
         raise  # a user Stop is not an engine declining — it must reach the caller
@@ -1444,7 +1446,9 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
+def _m_call_digest(
+    *, enterprise_id, question, history, plan=None, on_phase=None, **_kw
+) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1452,7 +1456,12 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     ladder's digest branch applies, and its comment records why it was added:
     this was the only interceptor claiming its turn unconditionally, so a
     company with no call source at all got the digest's empty-corpus answer
-    instead of falling through to routing that could actually serve them."""
+    instead of falling through to routing that could actually serve them.
+
+    `on_phase`, when supplied, is forwarded to `call_digest.answer` — this is
+    the planned-dispatch entry point, so without this the digest's own
+    GATHERING/WRITING/ANALYZING narration never reached a planned turn (it
+    landed on `**_kw` and was silently dropped)."""
     from app import call_digest
 
     if not call_digest.has_call_source(enterprise_id):
@@ -1472,6 +1481,7 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     return call_digest.answer(
         enterprise_id=enterprise_id, question=question, history=history,
         constraints=(plan.constraints if plan is not None else None),
+        on_phase=on_phase,
     )
 
 
@@ -2631,6 +2641,7 @@ def answer(
             dataset=dataset,
             fresh=_index_fresh,
             is_cancelled=is_cancelled,
+            on_phase=on_phase,
         )
         if planned is not None:
             return planned

@@ -530,6 +530,66 @@ def test_query_path_emits_gathering_but_not_the_writing_leg(monkeypatch):
     assert phases == ["Gathering the latest information…"]
 
 
+def test_voc_query_llm_call_uses_long_output_without_a_delta_sink(monkeypatch):
+    # The query branch used to run on the gateway's default 120s non-streamed
+    # path and die silently on a wide corpus / table-shaped ask. It now asks
+    # for the long-timeout streaming TRANSPORT (`long_output=True`) but never
+    # wires a client-visible preview sink — `on_delta` stays unset, so no
+    # partial text escapes (see app.llm._create_with_retries: a stream with
+    # both callbacks unset drains silently to the final message).
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    captured = _stub_voc_pass(monkeypatch, answer="3 accounts asked for exports")
+    p = cd.answer(
+        enterprise_id="co",
+        question="did complaints about exports increase this week?",
+    )
+    assert p["_skill_source"] == "voc-query"
+    assert captured["purpose"] == "voc_query"
+    assert captured["long_output"] is True
+    assert captured.get("on_delta") is None
+
+
+def test_query_path_emits_analyzing_after_gathering(monkeypatch):
+    # The query branch's one real leg once GATHERING (the live fetch) has
+    # finished — without it a slow pointed answer (now long_output=True and
+    # genuinely allowed to run past 120s) looked like a dead spinner with no
+    # narration at all past the fetch.
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch, answer="3 accounts asked for exports")
+    phases: list[str] = []
+    p = cd.answer(
+        enterprise_id="co",
+        question="did complaints about exports increase this week?",
+        on_phase=phases.append,
+    )
+    assert p["_skill_source"] == "voc-query"
+    assert phases == [
+        "Gathering the latest information…",
+        "Analyzing the findings…",
+    ]
+
+
+def test_query_path_runs_unchanged_without_a_phase_sink(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch, answer="3 accounts asked for exports")
+    with_sink = cd.answer(
+        enterprise_id="co",
+        question="did complaints about exports increase this week?",
+        on_phase=lambda _l: None,
+    )
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    _stub_voc_pass(monkeypatch, answer="3 accounts asked for exports")
+    without = cd.answer(
+        enterprise_id="co",
+        question="did complaints about exports increase this week?",
+    )
+    assert with_sink["answer"] == without["answer"]
+    assert with_sink["_skill_source"] == without["_skill_source"] == "voc-query"
+
+
 def test_report_path_runs_unchanged_without_a_phase_sink(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
