@@ -71,6 +71,18 @@ DEFAULT_DEEP_CAP = 5
 #: claims is the one a reader is most likely to want to reopen.
 MAX_LISTED_REJECTIONS = 100
 
+#: The two ledger rows that are BOOKKEEPING rather than candidates: the
+#: "N further candidates" summary the list overflows into, and the one standing
+#: for every signal that had no usable embedding. Both used to claim
+#: `stopped_at_stage="clustering"`, so every renderer counted them as
+#: rejections in their own right — a run that considered 1,576 candidates
+#: reported "Considered and ruled out (102)" directly under a promise that
+#: everything considered was listed. They also formed their own "reason"
+#: groups, inflating a one-reason ledger to three.
+OVERFLOW_STAGE = "overflow"
+UNGROUPED_STAGE = "ungrouped"
+AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
+
 
 @dataclass(frozen=True)
 class Rejection:
@@ -387,7 +399,13 @@ def build_findings(
             f"{len(overflow)} more groups were considered and dropped, each "
             f"backed by fewer claims than the {MAX_LISTED_REJECTIONS} listed "
             f"above — most of them single-claim anecdotes",
-            "clustering",
+            # NOT "clustering". This row is BOOKKEEPING, not a candidate: it
+            # stands for everything the list could not hold. Renderers counted
+            # it as one more rejection, so a run that considered 1,576
+            # candidates reported "102" while promising it had listed them all.
+            # A distinct stage is how they can tell — no schema change, and the
+            # column is already free text.
+            OVERFLOW_STAGE,
             tuple(cid for r in overflow for cid in r.claim_ids)[:2000],
         ))
 
@@ -397,7 +415,7 @@ def build_findings(
             f"{len(ungroupable)} signals have no usable embedding, so whether "
             f"they corroborate anything is unknown rather than false — they "
             f"were read but could not be grouped",
-            "clustering", tuple(ungroupable)))
+            UNGROUPED_STAGE, tuple(ungroupable)))
 
     order = _rank(findings, impacts, confidences, deep_cap=deep_cap)
     findings = [findings[i] for i in order]
