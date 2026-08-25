@@ -267,3 +267,49 @@ def test_clustering_a_realistic_corpus_finishes_quickly():
     # the worst case: almost every claim becomes its own leader.
     assert stats["clusters"] > n * 0.9
     assert elapsed < 20, f"clustering {n} claims took {elapsed:.1f}s"
+
+# ── The quoted example ───────────────────────────────────────────────────────
+
+def test_an_example_keeps_a_whole_short_claim():
+    """The label budget (90) cut real findings mid-clause on staging — "…a
+    native, clean bidirectional NetSuite sync that eliminates the need for" —
+    which reads as a source who trailed off rather than a sentence we clipped."""
+    from app.crucible.cluster import example_for
+    said = ("Rippling offers a native, clean bidirectional NetSuite sync that "
+            "eliminates the need for manual CSV uploads")
+    assert example_for(said) == said
+
+
+def test_an_example_that_must_be_cut_says_it_was_cut():
+    """Silently stopping mid-clause is the one option that misrepresents the
+    source: the reader cannot see that anything was removed."""
+    from app.crucible.cluster import example_for, _EXAMPLE_MAX
+    said = "word " * 200
+    out = example_for(said)
+    assert len(out) <= _EXAMPLE_MAX + 1
+    assert out.endswith("\u2026")
+
+
+def test_an_example_prefers_the_source_own_sentence_end():
+    """A quote that ends where the source ended a thought reads as a quote."""
+    from app.crucible.cluster import example_for, _EXAMPLE_MAX
+    first = "A" + "a" * (_EXAMPLE_MAX - 60) + " ends here."
+    out = example_for(first + " And then a second sentence runs on well past the budget.")
+    assert out.endswith("ends here.")
+    assert "\u2026" not in out
+
+
+def test_an_example_takes_the_same_causal_cut_as_a_label():
+    """Identical I5 guarantee: a quote that explains WHY would be an
+    unsupported causal claim wearing quotation marks."""
+    from app.crucible.cluster import example_for
+    out = example_for("Keystrokes drop in the mobile editor because the sync loop stalls")
+    assert out == "Keystrokes drop in the mobile editor"
+
+
+def test_an_example_of_nothing_is_empty_not_a_placeholder():
+    """`label_for` answers "unlabelled", which is a fine label and a terrible
+    quotation — it puts quotation marks around a word no source ever said."""
+    from app.crucible.cluster import example_for
+    assert example_for("") == ""
+    assert example_for(" ,;: ") == ""

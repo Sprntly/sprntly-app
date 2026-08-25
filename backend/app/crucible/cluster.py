@@ -58,6 +58,48 @@ _CUTS = (" because ", " due to ", " so that ", " which caused ", " leading to ",
 #: Long enough to identify the theme, short enough to read in a list.
 _LABEL_MAX = 90
 
+#: An EXAMPLE is not a label and cannot share its budget. A label identifies a
+#: theme in a list; a quote has to be judgeable, and 90 characters cut real
+#: findings mid-clause — "…a native, clean bidirectional NetSuite sync that
+#: eliminates the need for", "…and what happens if" — which reads as a source
+#: who trailed off rather than as a sentence we clipped.
+_EXAMPLE_MAX = 200
+
+
+def example_for(text: str) -> str:
+    """One claim in the source's own words, for quoting beside a topic.
+
+    THE SAME CAUSAL CUT as `label_for`, and for the same reason: a quote that
+    explains WHY would be an unsupported causal claim wearing quotation marks
+    (I5). It differs only in how much it may keep, and in what it does when it
+    has to stop.
+
+    ENDS WHERE A READER CAN TELL IT ENDED. Preference order: the source's own
+    sentence boundary inside the budget, then a word boundary with an ellipsis.
+    Silently stopping mid-clause is the one option that misrepresents the
+    source, because the reader cannot see that anything was removed.
+
+    Returns "" rather than a placeholder for text that reduces to nothing —
+    `label_for`'s "unlabelled" is a fine label and a terrible quotation.
+    """
+    s = " ".join((text or "").split())
+    low = s.lower()
+    for cut in _CUTS:
+        i = low.find(cut)
+        if i > 0:
+            s = s[:i]
+            low = s.lower()
+    s = s.strip()
+    if len(s) <= _EXAMPLE_MAX:
+        return s.rstrip(" ,;:")
+    window = s[:_EXAMPLE_MAX]
+    end = max(window.rfind(". "), window.rfind("? "), window.rfind("! "))
+    # Only if it leaves a usable quote — a boundary in the first few words
+    # would clip the claim down to nothing in the name of tidiness.
+    if end >= _EXAMPLE_MAX // 2:
+        return window[: end + 1].strip()
+    return window.rsplit(" ", 1)[0].rstrip(" ,;:.") + "\u2026"
+
 
 def label_for(text: str) -> str:
     """A short, neutral topic label from a signal's own words.

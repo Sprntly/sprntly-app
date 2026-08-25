@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
-from app.crucible.cluster import UNGROUPABLE_PREFIX, label_for
+from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
@@ -551,11 +551,12 @@ def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> 
     # `label_for("")` returns the literal string "unlabelled", so an empty
     # assertion rendered `for example, "unlabelled"` — a quotation mark around
     # a word no source ever said, which is worse than no example at all.
-    example = label_for(said) if said else ""
+    # `example_for`, not `label_for`: same causal cut, its own length budget,
+    # and it ends where a reader can tell it ended.
+    example = example_for(said) if said else ""
     if (
         strongest is not None
         and example
-        and example != "unlabelled"
         and example.lower() != topic.lower()
         # A quote that only repeats the label teaches nothing and costs a line.
         and example.lower() not in topic.lower()
