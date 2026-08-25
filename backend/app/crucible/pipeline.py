@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
-from app.crucible.cluster import UNGROUPABLE_PREFIX
+from app.crucible.cluster import UNGROUPABLE_PREFIX, label_for
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
@@ -520,4 +520,50 @@ def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> 
         if accounts else ""
     )
     topic = (label or "").strip() or "an unlabelled group"
-    return f"{n} claims{where} concern \u201c{topic}\u201d."
+    # "1 claims concern" has been in every report this engine has ever
+    # produced. A count that cannot get its own plural right is the first thing
+    # a reader stops trusting, and everything after it is numbers.
+    # The VERB agrees too. Fixing only the noun produced "1 claim concern",
+    # which is the same defect one word to the right.
+    claims_word = "claim" if n == 1 else "claims"
+    concern = "concerns" if n == 1 else "concern"
+    plain = f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d."
+
+    # AND ONE OF THEM, IN THE SOURCE'S OWN WORDS.
+    #
+    # "4 claims concern 'Mobile editor keystroke loss'" is a table-of-contents
+    # entry, not a finding: it names a topic and says how many times it came
+    # up. A reader cannot judge it, argue with it, or take it to anyone —
+    # which is the whole job. Read against the same corpus, the chat surface
+    # answers with account counts and quotes; the report answered with a label.
+    #
+    # SO: quote the strongest claim beside the count. Reported speech, exactly
+    # like the topic — this asserts nothing we have not been told, and adds no
+    # causation, because the example goes through `label_for`, the same cut at
+    # the first causal connective the label already gets.
+    #
+    # AND IT CAN ONLY EVER ADD. The example is linted before it is used, and a
+    # failure falls back to `plain` rather than dropping the finding — the
+    # caller treats an unlintable statement as a DROP, so a clumsy example
+    # would have silently deleted findings, which is far worse than a dull one.
+    strongest = max(claims, key=lambda c: c.strength_score, default=None)
+    said = (getattr(strongest, "assertion", "") or "").strip()
+    # `label_for("")` returns the literal string "unlabelled", so an empty
+    # assertion rendered `for example, "unlabelled"` — a quotation mark around
+    # a word no source ever said, which is worse than no example at all.
+    example = label_for(said) if said else ""
+    if (
+        strongest is not None
+        and example
+        and example != "unlabelled"
+        and example.lower() != topic.lower()
+        # A quote that only repeats the label teaches nothing and costs a line.
+        and example.lower() not in topic.lower()
+    ):
+        candidate = (
+            f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d "
+            f"\u2014 for example, \u201c{example}\u201d."
+        )
+        if lint_claim(candidate, strongest.strength).ok:
+            return candidate
+    return plain
