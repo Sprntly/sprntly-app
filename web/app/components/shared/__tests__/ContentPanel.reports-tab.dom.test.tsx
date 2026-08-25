@@ -287,7 +287,7 @@ describe("ContentPanel — editing a report", () => {
 })
 
 describe("ContentPanel — where the report's toolbar sits", () => {
-  it("puts the bar ahead of the title, first under the artifact tabs", async () => {
+  it("puts the bar ahead of the document, first under the artifact tabs", async () => {
     reportGet.mockResolvedValue({
       ...ROW,
       html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
@@ -296,12 +296,14 @@ describe("ContentPanel — where the report's toolbar sits", () => {
     await waitFor(() => expect(document.querySelector(".prd-toolbar")).toBeTruthy())
 
     const bar = document.querySelector(".prd-toolbar")
-    const title = screen.getByTestId("reports-detail-title")
+    // The panel prints no heading of its own any more — the document's own <h1>
+    // IS the title — so the bar is measured against the document itself.
+    const body = screen.getByTestId("report-document")
     expect(bar).not.toBeNull()
     // A control you reach for while typing belongs at the top edge, not below
-    // the document's own heading — DOCUMENT_POSITION_FOLLOWING means the title
-    // comes after the bar in document order.
-    expect(bar!.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING)
+    // the document's own heading — DOCUMENT_POSITION_FOLLOWING means the
+    // document comes after the bar in document order.
+    expect(bar!.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy()
   })
 })
