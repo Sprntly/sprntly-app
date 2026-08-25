@@ -148,19 +148,25 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
     return out, total
 
 
-def build_plan(
-    *,
-    company_id: str,
-    goal_text: str,
-    definition_text: str,
-    currency: str = "accounts",
-    excluded_sources: tuple[str, ...] = (),
+def derive_gaps_and_promises(
+    kept: "tuple[SourceInventory, ...] | list[SourceInventory]",
     hypotheses: tuple[str, ...] = (),
-) -> RunPlan:
-    """What this run will try to establish, where it will look, and what it
-    will not be able to tell you."""
-    sources, total = source_inventory(company_id)
-    kept = tuple(s for s in sources if s.source_type not in excluded_sources)
+) -> tuple[tuple["Gap", ...], tuple[str, ...]]:
+    """What this run will NOT be able to answer, and what it WILL produce,
+    derived from the sources it will actually read.
+
+    EXTRACTED SO THE APPROVE PATH CAN RE-DERIVE THEM. `build_plan` computed
+    these from the kept set correctly, but approval narrowed only `sources` and
+    `total_signals` in place — so a reader who unticked analytics and revenue
+    still got a plan promising "your analytics/revenue data is connected and
+    will be read", in the same document that said those sources were excluded.
+    Worse, they lost the gap that had just become TRUE ("nothing connected here
+    carries numbers") along with its actionable remedy, and were handed "no
+    action needed from you" instead.
+
+    Pure: it reads only the kept inventory, so the plan gate and the approve
+    path cannot drift.
+    """
 
     present = {s.source_type for s in kept}
     gaps: list[Gap] = []
@@ -232,6 +238,23 @@ def build_plan(
             f"turned into a point estimate — that is the next thing being built"
         )
 
+    return tuple(gaps), tuple(produce)
+
+
+def build_plan(
+    *,
+    company_id: str,
+    goal_text: str,
+    definition_text: str,
+    currency: str = "accounts",
+    excluded_sources: tuple[str, ...] = (),
+    hypotheses: tuple[str, ...] = (),
+) -> RunPlan:
+    """What this run will try to establish, where it will look, and what it
+    will not be able to tell you."""
+    sources, total = source_inventory(company_id)
+    kept = tuple(s for s in sources if s.source_type not in excluded_sources)
+    gaps, produce = derive_gaps_and_promises(kept, hypotheses)
     return RunPlan(
         goal_text=goal_text,
         definition_text=definition_text,

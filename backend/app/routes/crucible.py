@@ -821,6 +821,38 @@ def execute_run(
                 )
                 plan_json["excluded_sources"] = list(excluded_sources)
                 plan_json["hypotheses"] = list(hypotheses)
+                # AND THE GAPS AND PROMISES, which are DERIVED from the kept
+                # set and were being left at their pre-exclusion values. A
+                # reader who unticked analytics and revenue still got "your
+                # analytics/revenue data is connected and will be read" in the
+                # same document that said those sources were excluded — and
+                # lost the gap that had just become true ("nothing connected
+                # here carries numbers") along with the remedy that would close
+                # it, handed "no action needed from you" instead.
+                #
+                # Re-derived through the same pure function the plan gate uses,
+                # so the two cannot drift.
+                from app.crucible.plan import (
+                    SourceInventory, derive_gaps_and_promises,
+                )
+                gaps, produce = derive_gaps_and_promises(
+                    [
+                        SourceInventory(
+                            source_type=src.get("source_type") or "",
+                            signal_count=int(src.get("signal_count") or 0),
+                            label=src.get("label") or "",
+                            witnesses=src.get("witnesses") or "",
+                        )
+                        for src in kept
+                    ],
+                    tuple(hypotheses),
+                )
+                plan_json["cannot_answer"] = [
+                    {"question": g.question, "because": g.because,
+                     "remedy": g.remedy}
+                    for g in gaps
+                ]
+                plan_json["will_produce"] = list(produce)
                 meta["plan"] = plan_json
                 runs_db.update(run_id, company_id, prioritisation=meta)
 

@@ -868,3 +868,42 @@ def test_the_report_does_not_promise_it_listed_everything():
     html = _aggregate_doc()
     assert "Everything that was considered is listed below" not in html
     assert "the remainder is counted with it" in html
+
+# ── Excluding a source narrows what the run PROMISES, not just what it reads ──
+
+def test_dropping_the_numeric_sources_flips_the_gap_and_its_remedy():
+    """Approval narrowed `sources` and `total_signals` in place and left
+    `cannot_answer` / `will_produce` at their pre-exclusion values. A reader who
+    unticked analytics and revenue still got "your analytics/revenue data is
+    connected and will be read" in the same document that said those sources
+    were excluded — and LOST the gap that had just become true, along with the
+    remedy that would close it, handed "no action needed from you" instead."""
+    from app.crucible.plan import SourceInventory, derive_gaps_and_promises
+    full = (
+        SourceInventory("customer_voice", 132, "calls", "what customers asked"),
+        SourceInventory("analytics", 197, "product analytics", "how much moved"),
+        SourceInventory("revenue", 28, "revenue data", "how much moved"),
+    )
+    with_numbers, produce_with = derive_gaps_and_promises(full)
+    without, produce_without = derive_gaps_and_promises(full[:1])
+
+    # With the numeric sources: the engine cannot size yet, and that is on us.
+    assert "connected and will be read" in with_numbers[0].because
+    assert "no action needed from you" in with_numbers[0].remedy
+    assert any("connected and will be read" in p for p in produce_with)
+
+    # Without them: a different gap, and one the reader can actually close.
+    assert "nothing connected here carries numbers" in without[0].because
+    assert "Amplitude" in without[0].remedy
+    assert not any("connected and will be read" in p for p in produce_without), (
+        "the plan promised to read a source the reader had just dropped"
+    )
+
+
+def test_the_promise_and_the_gap_come_from_one_function():
+    """The plan gate and the approve path derive these separately; if they can
+    drift, the document contradicts the card the reader approved. One pure
+    function, so drift is not representable."""
+    from app.crucible.plan import SourceInventory, derive_gaps_and_promises
+    kept = (SourceInventory("customer_voice", 1, "calls", "what customers said"),)
+    assert derive_gaps_and_promises(kept) == derive_gaps_and_promises(kept)

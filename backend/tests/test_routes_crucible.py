@@ -704,6 +704,58 @@ def test_the_user_can_drop_a_source_and_the_run_honours_it(ctx):
     assert body["status"] == "failed" and body["error_code"] == "no_evidence"
 
 
+def test_excluding_a_numeric_source_flips_the_gap_the_run_states(ctx):
+    """AND THE GAPS AND PROMISES, which are DERIVED from the kept set.
+
+    Approval narrowed `sources` and `total_signals` in place and left
+    `cannot_answer` / `will_produce` alone, so a reader who unticked analytics
+    still got "your numeric sources are connected and will be read" in the same
+    document that said analytics was excluded — and lost the gap that had just
+    become TRUE, with the remedy that would close it, handed "no action needed
+    from you" instead.
+
+    Excludes a NUMERIC source deliberately: those are the only ones the
+    derivation branches on, so excluding anything else cannot show the defect —
+    the first version of this assertion excluded `project_mgmt` and could never
+    have failed."""
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    require_client().table("kg_signal").insert({
+        "id": "sig-9100", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "analytics", "content": "activation rate moved",
+        "properties": {"customer": "Globex"},
+        "provenance": {"doc": "NW-3001"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+
+    offered = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert any("connected and will be read" in p
+               for p in (offered.get("will_produce") or [])), (
+        "fixture is wrong: analytics must be present BEFORE the exclusion"
+    )
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": ["analytics"], "hypotheses": []})
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert not any("connected and will be read" in p
+                   for p in (plan.get("will_produce") or [])), (
+        "the run still promised to read the source the reader dropped"
+    )
+    becauses = " ".join((g.get("because") or "")
+                        for g in (plan.get("cannot_answer") or []))
+    assert "nothing connected here carries numbers" in becauses, (
+        "the reader lost the gap that became true when they dropped analytics"
+    )
+
+
 def test_the_approved_plan_records_what_the_user_decided(ctx):
     """THE REPORT READS THIS. `build_plan` runs BEFORE the user sees it, so the
     stored plan still describes the run they were OFFERED. Left alone, the
@@ -742,6 +794,7 @@ def test_the_approved_plan_records_what_the_user_decided(ctx):
         "the report would list a dropped source among the ones it read"
     )
     assert plan["total_signals"] == sum(s["signal_count"] for s in plan["sources"])
+
 
 
 def test_the_plan_does_not_promise_a_number_the_engine_cannot_produce(ctx):
